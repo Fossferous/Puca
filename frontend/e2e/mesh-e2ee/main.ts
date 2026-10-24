@@ -15,12 +15,13 @@
  */
 import { WebRTCManager } from '../../src/api/rtc/manager';
 import { importMediaKey, isMediaE2eeSupported, mediaTransformApi } from '../../src/api/rtc/mediaCrypto';
+import { refreshFrameCounts, type FrameTransformRecord } from '../../src/api/rtc/scriptTransform';
 import { deriveIdentity, setActiveIdentity } from '../../src/api/e2ee';
 import type { MediaManager } from './stubs/media';
 
 interface PeerView {
     connection: RTCPeerConnection;
-    mediaCrypto: { key: CryptoKey | null; enabled: boolean; requireE2ee: boolean };
+    mediaCrypto: { key: CryptoKey | null; enabled: boolean; requireE2ee: boolean; hold?: boolean; transforms: readonly FrameTransformRecord[] };
 }
 type StatsRow = Record<string, unknown>;
 
@@ -114,6 +115,40 @@ const harness = {
 
     status: (id: number) => mgr?.mediaE2eeStatus(id) ?? null,
     connected: (id: number) => mgr?.isConnectedTo(id) ?? false,
+    hasVoice: (id: number) => voices.has(id),
+
+    /**
+     * What every frame transform for this peer has done so far, by direction
+     * and kind: the worker's latest counts (asked for first) or the page's
+     * own. Frames OPENED is what proves a receiver decrypted — a VP8 decoder
+     * "decodes" a sealed frame, whose header is clear, into garbage, so a
+     * rising framesDecoded proves nothing.
+     */
+    async frameCounts(id: number) {
+        await refreshFrameCounts();
+        return peer(id).mediaCrypto.transforms.map((r) => ({
+            op: r.op, path: r.path, kind: r.target.track?.kind ?? null,
+            seen: r.counts.seen, done: r.counts.done, clear: r.counts.clear, dropped: r.counts.dropped,
+        }));
+    },
+
+    /** Whether each receiver's track may play (the manager's receive gate). */
+    receiving(id: number) {
+        return peer(id).connection.getReceivers().map((r) => ({ kind: r.track.kind, enabled: r.track.enabled }));
+    },
+
+    /** Renegotiate from this side, the way an ICE restart does. */
+    restartIce(id: number): void { peer(id).connection.restartIce(); },
+
+    /**
+     * Wrap receivers in ontrack only, never before negotiation: the case the
+     * early wraps exist for (a receiver first wrapped in the OFFERER's
+     * ontrack, which Chromium ignores), so the audit can be shown catching
+     * what then goes by the transform.
+     */
+    disableEarlyWraps(): void {
+        (WebRTCManager.prototype as unknown as { wireReceiverEarly: () => void }).wireReceiverEarly = () => { /* off */ };
+    },
 
     /** Which transform each sender and receiver carries. */
     wiring(id: number) {
@@ -201,6 +236,10 @@ const harness = {
         const c = peer(id).mediaCrypto;
         if (s.enabled !== undefined) c.enabled = s.enabled;
         if (s.requireE2ee !== undefined) c.requireE2ee = s.requireE2ee;
+    },
+    /** The senders that still carry a track to this peer. */
+    sending(id: number): string[] {
+        return peer(id).connection.getSenders().filter((s) => s.track).map((s) => s.track!.kind);
     },
 
     leave(): void { mgr?.closeAll(); },

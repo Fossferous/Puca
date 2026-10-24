@@ -31,12 +31,13 @@ import { fileURLToPath } from 'node:url';
 import {
     attachReceiverTransform, attachSenderTransform, importMediaKey, mediaTransformApi,
     noteScriptTransformUnavailable, __resetScriptTransformAvailability, preferSealableVideoCodecs, firstVideoCodecByMid,
-    sendSealableVideoCodec, type EncodedFrameLike, type MediaCryptoState,
+    sendSealableVideoCodec, newFrameCounts, type EncodedFrameLike, type FrameCounts, type MediaCryptoState,
 } from '../api/rtc/mediaCrypto';
+import { openIncoming, sealOutgoing } from '../api/rtc/frameCrypto';
 import { serveScriptTransforms, type ScriptTransformScope, type ScriptTransformCommand, type ScriptTransformReport } from '../api/rtc/scriptTransformWorker';
 import {
     PeerMediaCrypto, attachMediaReceiverTransform, attachMediaSenderTransform, onScriptTransformLost,
-    __setScriptTransformWorkerFactory, type TransformWorkerLike,
+    __runFrameAudit, __setScriptTransformWorkerFactory, type TransformWorkerLike,
 } from '../api/rtc/scriptTransform';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -115,16 +116,17 @@ async function sealedControl(key: CryptoKey, plainHex: string): Promise<EncodedF
 }
 
 /** The page path: a sender/receiver whose createEncodedStreams hands out the lane. */
-function onPage(op: 'seal' | 'open', state: MediaCryptoState): Lane {
+function onPage(op: 'seal' | 'open', state: MediaCryptoState, counts?: FrameCounts): Lane {
     const l = lane();
     const target = { createEncodedStreams: () => l.ends };
     const ok = op === 'seal'
-        ? attachSenderTransform(target as unknown as RTCRtpSender, state)
-        : attachReceiverTransform(target as unknown as RTCRtpReceiver, state);
+        ? attachSenderTransform(target as unknown as RTCRtpSender, state, counts)
+        : attachReceiverTransform(target as unknown as RTCRtpReceiver, state, counts);
     expect(ok, 'the page transform attaches').toBe(true);
     return l;
 }
 
+let lanes = 0;
 /** A worker scope serving script transforms, driven the way the engine and the page drive it. */
 function worker() {
     const reports: ScriptTransformReport[] = [];
@@ -134,8 +136,13 @@ function worker() {
         reports,
         scope,
         send(msg: ScriptTransformCommand) { scope.onmessage!({ data: msg }); },
-        state(slot: string, s: MediaCryptoState) { scope.onmessage!({ data: { type: 'state', slot, key: s.key, enabled: s.enabled, requireE2ee: s.requireE2ee } }); },
-        transform(op: 'seal' | 'open', slot: string, options: unknown = { op, slot }): Lane {
+        state(slot: string, s: MediaCryptoState) { scope.onmessage!({ data: { type: 'state', slot, key: s.key, enabled: s.enabled, requireE2ee: s.requireE2ee, hold: !!s.hold } }); },
+        /** The counts it last posted in answer to a `report`. */
+        counts(): Array<{ id: string } & FrameCounts> {
+            const last = [...reports].reverse().find((r) => r.type === 'counts' && r.seq !== null);
+            return last?.type === 'counts' ? last.transforms : [];
+        },
+        transform(op: 'seal' | 'open', slot: string, options: unknown = { op, slot, id: `t-${op}-${slot}-${++lanes}` }): Lane {
             const l = lane();
             scope.onrtctransform!({ transformer: { options, readable: l.ends.readable, writable: l.ends.writable } });
             return l;
@@ -217,6 +224,70 @@ describe('interop: what one path seals the other opens (random IVs, every frame 
         expect((await openW.outputs(samples.length)).map(bytes), 'the worker opens the page\'s frames').toEqual(samples.map(([h]) => h));
         // Sealed, not passed through: each one carries the trailer.
         for (const f of [...fromWorker, ...fromPage]) expect(bytes(f).endsWith('5356524e')).toBe(true);
+    });
+});
+
+describe('what each frame came to (both paths count the same outcomes)', () => {
+    it('sealOutgoing: sealed with a key, passed on without one, dropped when required or held, and a crypto failure is no plaintext under enforcement', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        expect(await sealOutgoing(frame('5a01'), on(key))).toBe('sealed');
+        expect(await sealOutgoing(frame('5a01'), { key: null, enabled: false, requireE2ee: false })).toBe('clear');
+        expect(await sealOutgoing(frame('5a01'), { key: null, enabled: false, requireE2ee: true })).toBe('dropped');
+        expect(await sealOutgoing(frame('5a01'), { ...on(key), hold: true }), 'a held peer was sent a sealed frame').toBe('dropped');
+        expect(await sealOutgoing(frame('5a01'), { key: null, enabled: false, requireE2ee: false, hold: true }), 'a held peer was sent plaintext').toBe('dropped');
+        // A key that cannot encrypt: WebCrypto throws.
+        const signing = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']) as CryptoKey;
+        const f = frame('5a01');
+        expect(await sealOutgoing(f, on(signing))).toBe('clear');
+        expect(bytes(f), 'a frame that failed to seal was changed').toBe('5a01');
+        expect(await sealOutgoing(frame('5a01'), on(signing, true))).toBe('dropped');
+    });
+
+    it('openIncoming: opened under the key; plaintext passed on, or dropped when required; a wrong key or a hold dropped', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        const other = await importMediaKey(unhex(KEY2));
+        const sealed = frame('5a' + '33'.repeat(20));
+        expect(await sealOutgoing(sealed, on(key))).toBe('sealed');
+        const copy = () => ({ data: sealed.data.slice(0) });
+        expect(await openIncoming(copy(), on(key))).toBe('opened');
+        expect(await openIncoming(copy(), on(other)), 'a frame under another key').toBe('dropped');
+        expect(await openIncoming(frame('5a01'), on(key))).toBe('clear');
+        expect(await openIncoming(frame('5a01'), on(key, true))).toBe('dropped');
+        expect(await openIncoming(copy(), { ...on(key), hold: true }), 'a frame played from a held peer').toBe('dropped');
+    });
+
+    it('a hold that lands while a frame is on its way through still stops it (sealing failed; an unmarked frame arriving)', async () => {
+        // `hold` reads false when the frame starts through and true after:
+        // the substitution was found mid-frame, as the page path can see it.
+        const lateHold = (base: MediaCryptoState): MediaCryptoState => {
+            let reads = 0;
+            return { ...base, get hold() { return reads++ > 0; } };
+        };
+        const signing = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']) as CryptoKey;
+        expect(await sealOutgoing(frame('5a01'), lateHold(on(signing))), 'a frame that failed to seal went out in the clear after the hold').toBe('dropped');
+        const key = await importMediaKey(unhex(KEY1));
+        expect(await openIncoming(frame('5a01'), lateHold(on(key))), 'an unmarked frame played after the hold').toBe('dropped');
+        // CONTROL: the same frames with no hold at all pass as transport-only.
+        expect(await sealOutgoing(frame('5a01'), on(signing))).toBe('clear');
+        expect(await openIncoming(frame('5a01'), on(key))).toBe('clear');
+    });
+
+    it('the page path counts them as it goes', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        const counts = newFrameCounts();
+        const state: MediaCryptoState = { key: null, enabled: false, requireE2ee: false };
+        const l = onPage('seal', state, counts);
+        l.put(frame('5a01'));
+        await l.outputs(1);
+        state.key = key;
+        state.enabled = true;
+        l.put(frame('5a02'));
+        await l.outputs(2);
+        state.enabled = false;
+        state.requireE2ee = true;
+        l.put(frame('5a03'));
+        await settle();
+        expect(counts).toEqual({ seen: 3, done: 1, clear: 1, dropped: 1 });
     });
 });
 
@@ -325,10 +396,77 @@ describe('the worker\'s copy of a peer\'s state follows the page\'s, mid-call', 
         const key = await importMediaKey(unhex(KEY1));
         const w = worker();
         w.state('peer-1', on(key));
-        const odd = w.transform('seal', 'peer-1', { op: 'sideways', slot: 'peer-1' });
+        const odd = w.transform('seal', 'peer-1', { op: 'sideways', slot: 'peer-1', id: 't-odd' });
         odd.put(frame('5a00'));
+        const unnamed = w.transform('seal', 'peer-1', { op: 'seal', slot: 'peer-1' });
+        unnamed.put(frame('5a00'));
         await settle();
         expect(odd.out).toHaveLength(0);
+        expect(unnamed.out, 'a transform the page cannot count was used').toHaveLength(0);
+    });
+
+    it('a HOLD stops everything both ways, sealed or not, required or not', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        const control = onPage('seal', on(key));
+        control.put(frame('5a' + '01'.repeat(20)));
+        const sealedFrame = (await control.outputs(1))[0];
+        const w = worker();
+        w.state('peer-1', { key, enabled: true, requireE2ee: false, hold: true });
+        const seal = w.transform('seal', 'peer-1');
+        const open = w.transform('open', 'peer-1');
+        seal.put(frame('5a' + '02'.repeat(20)));
+        open.put({ data: sealedFrame.data });
+        open.put(frame('5a03'));
+        await settle();
+        expect(seal.out, 'a frame went out over a held connection').toHaveLength(0);
+        expect(open.out, 'a frame played from a held connection').toHaveLength(0);
+        w.state('peer-1', on(key));
+        seal.put(frame('5a' + '04'.repeat(20)));
+        expect(await seal.outputs(1), 'control: the same transform seals once the hold is off').toHaveLength(1);
+    });
+
+    it('counts every frame by what became of it, and reports them when asked, by transform', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        const w = worker();
+        w.state('peer-1', on(key, true));
+        const seal = w.transform('seal', 'peer-1', { op: 'seal', slot: 'peer-1', id: 'S' });
+        const open = w.transform('open', 'peer-1', { op: 'open', slot: 'peer-1', id: 'O' });
+        seal.put(frame('5a' + 'aa'.repeat(20)));
+        seal.put(frame('5a' + 'bb'.repeat(20)));
+        const [a] = await seal.outputs(2);
+        const CONTROL = '5a' + 'cc'.repeat(12);
+        const control = await sealedControl(key, CONTROL);
+        open.put({ data: a.data });
+        open.put(frame('5a0102')); // plaintext, under enforcement
+        open.put({ data: control.data });
+        await open.through(CONTROL);
+        w.send({ type: 'report', seq: 7 });
+        expect(w.reports.at(-1)).toEqual({
+            type: 'counts', seq: 7, transforms: [
+                { id: 'S', seen: 2, done: 2, clear: 0, dropped: 0 },
+                { id: 'O', seen: 3, done: 2, clear: 0, dropped: 1 },
+            ],
+        });
+        w.send({ type: 'forget', slot: 'peer-1' });
+        w.send({ type: 'report', seq: 8 });
+        expect(w.counts(), 'a forgotten peer\'s transforms were still reported').toEqual([]);
+    });
+
+    it('says at once, unasked, when a transform first seals or opens a frame (and only then)', async () => {
+        const key = await importMediaKey(unhex(KEY1));
+        const w = worker();
+        w.state('peer-1', { key: null, enabled: false, requireE2ee: true });
+        const seal = w.transform('seal', 'peer-1', { op: 'seal', slot: 'peer-1', id: 'S' });
+        seal.put(frame('5a00'));
+        await settle();
+        expect(w.reports.filter((r) => r.type === 'counts'), 'a dropped frame was reported as the first sealed one').toEqual([]);
+        w.state('peer-1', on(key, true));
+        seal.put(frame('5a01'));
+        seal.put(frame('5a02'));
+        await seal.outputs(2);
+        expect(w.reports.filter((r) => r.type === 'counts')).toEqual([
+            { type: 'counts', seq: null, transforms: [{ id: 'S', seen: 2, done: 1, clear: 0, dropped: 1 }] },
+        ]);
     });
 
     it('says it is running, and reports a message it could not read', () => {
@@ -372,15 +510,18 @@ describe('PeerMediaCrypto: every write reaches the worker', () => {
         s.key = key;
         s.enabled = true;
         s.requireE2ee = false;
+        s.hold = true;
         expect(w.posted).toEqual([
-            { type: 'state', slot: s.slot, key: null, enabled: false, requireE2ee: true },
-            { type: 'state', slot: s.slot, key, enabled: false, requireE2ee: true },
-            { type: 'state', slot: s.slot, key, enabled: true, requireE2ee: true },
-            { type: 'state', slot: s.slot, key, enabled: true, requireE2ee: false },
+            { type: 'state', slot: s.slot, key: null, enabled: false, requireE2ee: true, hold: false },
+            { type: 'state', slot: s.slot, key, enabled: false, requireE2ee: true, hold: false },
+            { type: 'state', slot: s.slot, key, enabled: true, requireE2ee: true, hold: false },
+            { type: 'state', slot: s.slot, key, enabled: true, requireE2ee: false, hold: false },
+            { type: 'state', slot: s.slot, key, enabled: true, requireE2ee: false, hold: true },
         ]);
         expect(s.key).toBe(key);
         expect(s.enabled).toBe(true);
         expect(s.requireE2ee).toBe(false);
+        expect(s.hold).toBe(true);
     });
 
     it('dispose makes the worker forget the peer, and nothing is sent after', () => {
@@ -509,14 +650,17 @@ describe('one path per engine', () => {
         const state = new PeerMediaCrypto(true);
         expect(attachMediaSenderTransform(sender as unknown as RTCRtpSender, state)).toBe(true);
         expect(FakeScriptTransform.built[0]?.sentBefore, 'the copy is queued before the transform exists').toEqual([
-            { type: 'state', slot: state.slot, key: null, enabled: false, requireE2ee: true },
+            { type: 'state', slot: state.slot, key: null, enabled: false, requireE2ee: true, hold: false },
         ]);
         expect(attachMediaReceiverTransform(receiver as unknown as RTCRtpReceiver, state)).toBe(true);
         expect(sender.transform).toBe(FakeScriptTransform.built[0]);
         expect(receiver.transform).toBe(FakeScriptTransform.built[1]);
         expect(FakeScriptTransform.built.map(t => t.options)).toEqual([
-            { op: 'seal', slot: state.slot }, { op: 'open', slot: state.slot },
+            { op: 'seal', slot: state.slot, id: expect.any(String) }, { op: 'open', slot: state.slot, id: expect.any(String) },
         ]);
+        const ids = FakeScriptTransform.built.map(t => (t.options as { id: string }).id);
+        expect(new Set(ids).size, 'two transforms under one name: their counts would mix').toBe(2);
+        expect(state.transforms.map(r => [r.id, r.op, r.path])).toEqual([[ids[0], 'seal', 'script-transform'], [ids[1], 'open', 'script-transform']]);
         expect(FakeScriptTransform.built.every(t => t.worker === fake), 'one worker serves every transform').toBe(true);
         expect(made).toBe(1);
         expect(fake.posted, 'binding the same state twice sends it once').toHaveLength(1);
@@ -548,19 +692,26 @@ describe('one path per engine', () => {
         }
     });
 
-    it('CONTROL: an error after the worker said it is running does not', async () => {
+    it('an error AFTER the worker said it is running takes the path down too (its transforms may be dead)', async () => {
         stubScriptEngine();
         const lost = vi.fn();
         const off = onScriptTransformLost(lost);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
             attachMediaSenderTransform({ transform: null } as unknown as RTCRtpSender, new PeerMediaCrypto(true));
             fake.emit('message', { data: { type: 'ready' } });
+            await settle();
+            expect(lost, 'control: ready alone is no loss').not.toHaveBeenCalled();
+            expect(mediaTransformApi()).toBe('script-transform');
             fake.emit('error', new Event('error'));
             await settle();
-            expect(mediaTransformApi()).toBe('script-transform');
-            expect(lost).not.toHaveBeenCalled();
+            expect(mediaTransformApi(), 'a failed worker was still trusted').toBeNull();
+            expect(fake.terminated).toBe(true);
+            expect(lost).toHaveBeenCalledTimes(1);
+            expect(warn.mock.calls.some((c) => String(c[0]).includes('it failed'))).toBe(true);
         } finally {
             off();
+            warn.mockRestore();
         }
     });
 
@@ -579,6 +730,271 @@ describe('one path per engine', () => {
         __setScriptTransformWorkerFactory(() => { throw new DOMException('blocked', 'SecurityError'); });
         expect(attachMediaSenderTransform({ transform: null } as unknown as RTCRtpSender, new PeerMediaCrypto(true))).toBe(false);
         expect(mediaTransformApi(), 'worker constructor threw').toBeNull();
+    });
+});
+
+/** A worker that answers every `report` with the counts the test sets, as
+ *  the real one does (synchronously: the page is already waiting). */
+class CountingWorker extends FakeWorker {
+    counts = new Map<string, FrameCounts>();
+    answering = true;
+    override postMessage(m: ScriptTransformCommand) {
+        super.postMessage(m);
+        if (m.type === 'report' && this.answering) {
+            this.emit('message', { data: { type: 'counts', seq: m.seq, transforms: [...this.counts].map(([id, c]) => ({ id, ...c })) } });
+        }
+    }
+}
+
+/** A sender or receiver whose connection counters the test moves: audio
+ *  packets, or video frames (encoded for a sender, received for a receiver). */
+function wired(op: 'seal' | 'open', kind: 'audio' | 'video' = 'audio') {
+    const t = {
+        transform: null as unknown,
+        media: 0,
+        getStats: async () => new Map([['rtp', op === 'seal'
+            ? { type: 'outbound-rtp', kind, ...(kind === 'video' ? { framesEncoded: t.media } : { packetsSent: t.media }) }
+            : { type: 'inbound-rtp', kind, ...(kind === 'video' ? { framesReceived: t.media } : { packetsReceived: t.media }) }]]),
+    };
+    return t;
+}
+
+describe('the audit: on the worker path "encrypted" is shown, not assumed', () => {
+    let w: CountingWorker;
+    let lost: ReturnType<typeof vi.fn<() => void>>;
+    let off: () => void;
+    let key: CryptoKey;
+    beforeAll(async () => { key = await importMediaKey(unhex(KEY1)); });
+    beforeEach(() => {
+        w = new CountingWorker();
+        __setScriptTransformWorkerFactory(() => w);
+        stubScriptEngine();
+        FakeScriptTransform.built = [];
+        FakeScriptTransform.failNext = false;
+        lost = vi.fn();
+        off = onScriptTransformLost(lost);
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+        off();
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+        __setScriptTransformWorkerFactory(null);
+    });
+
+    /** One peer with a sealed sender and an opened receiver, counted. */
+    function peer(required = true, kinds: { send?: 'audio' | 'video'; receive?: 'audio' | 'video' } = {}) {
+        const state = new PeerMediaCrypto(required);
+        const sender = wired('seal', kinds.send);
+        const receiver = wired('open', kinds.receive);
+        expect(attachMediaSenderTransform(sender as unknown as RTCRtpSender, state)).toBe(true);
+        expect(attachMediaReceiverTransform(receiver as unknown as RTCRtpReceiver, state)).toBe(true);
+        const [S, O] = FakeScriptTransform.built.slice(-2).map(t => (t.options as { id: string }).id);
+        const c = { S: newFrameCounts(), O: newFrameCounts() };
+        w.counts.set(S, c.S);
+        w.counts.set(O, c.O);
+        return { state, sender, receiver, c, S, O };
+    }
+    type Peer = ReturnType<typeof peer>;
+    /** A window's frames: through each transform, done (sealed/opened) or not, and on the wire. */
+    function frames(p: Peer, n: number, how: { seal?: 'done' | 'dropped' | 'clear' | 'bypass'; open?: 'done' | 'dropped' | 'clear' | 'bypass' } = {}) {
+        for (const [side, c, t] of [['seal', p.c.S, p.sender], ['open', p.c.O, p.receiver]] as const) {
+            const what = how[side] ?? 'done';
+            t.media += n;
+            if (what === 'bypass') continue;
+            c.seen += n;
+            if (what === 'done') c.done += n;
+            else if (what === 'clear') c.clear += n;
+            else c.dropped += n;
+        }
+    }
+    const encrypt = (p: Peer) => { p.state.key = key; p.state.enabled = true; };
+    const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+    it('not proven until a window shows every transform that carried frames sealing or opening them; inbound that stops opening un-proves it', async () => {
+        const p = peer();
+        encrypt(p);
+        const changed = vi.fn();
+        p.state.onChange = changed;
+        await __runFrameAudit(); // the first look: nothing to compare with
+        frames(p, 50);
+        expect(p.state.proven, 'proven before any window was seen').toBe(false);
+        await __runFrameAudit();
+        expect(p.state.proven).toBe(true);
+        expect(changed, 'told of the receiver\'s first opened frame, then of the proof').toHaveBeenCalledTimes(2);
+
+        frames(p, 50, { open: 'dropped' });
+        await __runFrameAudit();
+        expect(p.state.proven, 'still proven while nothing it received opened').toBe(false);
+        expect(lost, 'inbound that does not open is the peer\'s doing, not a reason to stop encrypting with everyone').not.toHaveBeenCalled();
+
+        await __runFrameAudit(); // nothing moved: nothing learned
+        expect(p.state.proven).toBe(false);
+        frames(p, 50);
+        await __runFrameAudit();
+        expect(p.state.proven).toBe(true);
+        expect(changed).toHaveBeenCalledTimes(4);
+    });
+
+    it('a direction that carries nothing is not held against the other (a listen-only peer)', async () => {
+        const p = peer();
+        encrypt(p);
+        await __runFrameAudit();
+        p.c.O.seen += 40; p.c.O.done += 40; p.receiver.media += 40;
+        await __runFrameAudit();
+        expect(p.state.proven).toBe(true);
+    });
+
+    it('frames that keep coming and never open, encryption on: "negotiating" turns into "stuck" after five windows', async () => {
+        const p = peer();
+        encrypt(p);
+        await __runFrameAudit();
+        for (let i = 1; i <= 5; i++) {
+            expect(p.state.stuck, `stuck after ${i - 1} window(s)`).toBe(false);
+            frames(p, 50, { open: 'dropped' });
+            await __runFrameAudit();
+        }
+        expect(p.state.stuck).toBe(true);
+        frames(p, 50);
+        await __runFrameAudit();
+        expect(p.state.stuck, 'still stuck once frames opened').toBe(false);
+        expect(lost).not.toHaveBeenCalled();
+    });
+
+    it('SECURITY: a receiver whose connection took frames its transform never saw gives the path up, two windows running', async () => {
+        const p = peer();
+        await __runFrameAudit();
+        frames(p, 100, { open: 'bypass' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'one window is not yet proof').not.toHaveBeenCalled();
+        frames(p, 100, { open: 'bypass' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+        expect(mediaTransformApi(), 'a transform frames go by was still trusted').toBeNull();
+        expect(w.terminated).toBe(true);
+    });
+
+    it('SECURITY: the same for a sender: video frames encoded that its transform never saw', async () => {
+        const p = peer(true, { send: 'video' });
+        await __runFrameAudit();
+        for (let i = 0; i < 2; i++) {
+            frames(p, 20, { seal: 'bypass' });
+            await __runFrameAudit();
+        }
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+    });
+
+    it('CONTROL: the same packets WITH the transform seeing them, a bypass broken by a window it saw frames, and a trickle below the floor, give nothing up', async () => {
+        const p = peer(false);
+        await __runFrameAudit();
+        for (let i = 0; i < 4; i++) {
+            frames(p, 100, { seal: 'clear', open: 'clear' });
+            await __runFrameAudit();
+        }
+        frames(p, 100, { open: 'bypass' });
+        await __runFrameAudit();
+        frames(p, 100, { seal: 'clear', open: 'clear' });
+        await __runFrameAudit();
+        frames(p, 100, { open: 'bypass' });
+        await __runFrameAudit();
+        for (let i = 0; i < 4; i++) {
+            frames(p, 5, { open: 'bypass' }); // 5 audio packets: a floor of 10
+            await __runFrameAudit();
+        }
+        await flush();
+        expect(lost).not.toHaveBeenCalled();
+        expect(mediaTransformApi()).toBe('script-transform');
+    });
+
+    it('SECURITY: frames passed on as they came while encryption is required, for a whole window, give the path up', async () => {
+        const p = peer(true);
+        await __runFrameAudit();
+        frames(p, 10, { seal: 'clear', open: 'dropped' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+    });
+
+    it('CONTROL: frames passed on in the window the requirement came on are not held against it; the next window is', async () => {
+        const p = peer(false);
+        await __runFrameAudit();
+        p.state.requireE2ee = true; // reaches the worker mid-window
+        frames(p, 10, { seal: 'clear', open: 'clear' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'a frame from before the change reached the worker was counted against it').not.toHaveBeenCalled();
+        frames(p, 10, { seal: 'clear', open: 'dropped' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+    });
+
+    it('SECURITY: a sender whose frames reach its transform unsealed while encryption is on gives the path up; CONTROL: not while encryption is off', async () => {
+        const off2 = peer(false);
+        await __runFrameAudit();
+        frames(off2, 50, { seal: 'clear', open: 'clear' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'transport-only by design was taken for a fault').not.toHaveBeenCalled();
+        encrypt(off2);
+        await __runFrameAudit(); // the window the key arrived in
+        frames(off2, 50, { seal: 'clear' });
+        await __runFrameAudit();
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+    });
+
+    it('a worker that stops answering, the page awake, gives the path up after two missed answers', async () => {
+        vi.useFakeTimers();
+        peer();
+        w.answering = false;
+        const look = async () => { const t = __runFrameAudit(); await vi.advanceTimersByTimeAsync(5000); await t; await flush(); };
+        await look();
+        expect(lost, 'one missed answer').not.toHaveBeenCalled();
+        await look();
+        expect(lost).toHaveBeenCalledTimes(1);
+    });
+
+    it('CONTROL: answers missed while the PAGE was asleep (its timer fired long after it was due) are not held against the worker', async () => {
+        vi.useFakeTimers();
+        peer();
+        w.answering = false;
+        for (let i = 0; i < 4; i++) {
+            const t = __runFrameAudit();
+            vi.setSystemTime(Date.now() + 60_000); // a locked phone, a frozen tab
+            await vi.advanceTimersByTimeAsync(5000);
+            await t;
+            await flush();
+        }
+        expect(lost).not.toHaveBeenCalled();
+        w.answering = true;
+        await __runFrameAudit();
+        expect(mediaTransformApi()).toBe('script-transform');
+    });
+
+    it('the first frame a receiver\'s transform opens is known at once (opened, onChange), not at the next look', async () => {
+        const p = peer();
+        const changed = vi.fn();
+        p.state.onChange = changed;
+        expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(false);
+        w.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: p.O, seen: 1, done: 1, clear: 0, dropped: 0 }] } });
+        expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(true);
+        expect(changed).toHaveBeenCalledTimes(1);
+        expect(p.state.opened({} as RTCRtpReceiver), 'another receiver').toBe(false);
+    });
+
+    it('a peer that goes is no longer looked at, or reported into', async () => {
+        const p = peer();
+        p.state.dispose();
+        const before = w.posted.length;
+        await __runFrameAudit();
+        expect(w.posted.slice(before).filter(m => m.type === 'report'), 'the audit asked about nobody').toEqual([]);
+        w.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: p.O, seen: 9, done: 9, clear: 0, dropped: 0 }] } });
+        expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(false);
     });
 });
 
@@ -609,6 +1025,23 @@ describe('preferSealableVideoCodecs', () => {
         expect(video.setCodecPreferences).toHaveBeenCalledTimes(1);
         expect(video.setCodecPreferences.mock.calls[0][0].map((c: { mimeType: string }) => c.mimeType))
             .toEqual(['video/VP8', 'video/H264', 'video/rtx', 'video/VP9', 'video/red']);
+    });
+
+    it('before an offer: nothing at all where the engine already lists VP8 first (Chromium, Firefox: a polite Firefox under glare breaks on any)', () => {
+        const vp8First = [caps[3], caps[1], caps[2], caps[0], caps[4]];
+        vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: vp8First, headerExtensions: [] }) });
+        const fresh = transceiver('video', null);
+        const pc = { getTransceivers: () => [fresh] } as unknown as RTCPeerConnection;
+        preferSealableVideoCodecs(pc, { offer: true });
+        expect(fresh.setCodecPreferences, 'preferences that change nothing, which Firefox mis-numbers after glare').not.toHaveBeenCalled();
+        // rtx (or red, or FEC) at the head of the list is not a codec choice.
+        vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: [caps[1], caps[3], caps[0]], headerExtensions: [] }) });
+        preferSealableVideoCodecs(pc, { offer: true });
+        expect(fresh.setCodecPreferences).not.toHaveBeenCalled();
+        // CONTROL: on that engine an answer to an H.264-first offer still puts VP8 first.
+        const answering = transceiver('video', '0');
+        preferSealableVideoCodecs({ getTransceivers: () => [answering] } as unknown as RTCPeerConnection, { answerTo: offerSdp([['0', 'H264']]) });
+        expect(answering.setCodecPreferences).toHaveBeenCalledTimes(1);
     });
 
     it('before an offer: leaves a transceiver already negotiated alone (Firefox would write it an offer Chromium refuses)', () => {

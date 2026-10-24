@@ -255,15 +255,86 @@ export class WebRTCManager {
         if (result === 'mismatch') {
             peer.mediaCrypto.enabled = false;
             peer.mediaCrypto.key = null;
+            this.holdMediaWith(userId);
             peer.mediaE2eeReason = 'fingerprint-mismatch';
             this.emitMediaE2ee(userId);
         }
     }
 
+    /**
+     * A substituted connection: nothing more goes to it or comes from it,
+     * whether or not encryption is required. Before this, a mismatch with
+     * enforcement off went on sending — and, since encryption was then off
+     * for the peer, sending PLAINTEXT to whoever had put themselves in the
+     * middle. Our tracks come off every sender (sendsTo is false from now
+     * on, so no path puts one back), every frame either way is dropped where
+     * a transform runs (`hold`), and every receiver is silenced
+     * (applyReceiveGates), which also covers the engines without transforms
+     * that the pin exists for.
+     */
+    private holdMediaWith(userId: UserId): void {
+        const peer = this.peers.get(userId);
+        if (!peer) return;
+        console.warn(`[media-e2ee] holding all media to and from ${userId}: the connection is not the one they authenticated`);
+        peer.mediaCrypto.hold = true;
+        for (const sender of peer.connection.getSenders()) {
+            if (sender.track) void sender.replaceTrack(null).catch(() => { /* peer gone */ });
+        }
+        this.applyReceiveGates(userId);
+    }
+
+    /**
+     * Whether what a receiver of this peer delivers may PLAY. Not on a
+     * substituted connection (holdMediaWith). And, under enforcement on the
+     * RTCRtpScriptTransform path, not until the receiver's transform has
+     * opened a frame (scriptTransform.ts `opened`): there an attached
+     * transform is not proof that frames go through it — Chromium, measured,
+     * decodes what an offerer's receiver gets without handing it to a
+     * transform set in ontrack — and only frames that do are held to
+     * enforcement. Until then the track is silent, so nothing unopened is
+     * ever heard or seen; the audit gives the path up if frames keep going
+     * by it.
+     */
+    private mayPlay(peer: PeerConnection, receiver: RTCRtpReceiver): boolean {
+        if (peer.dtlsPin === 'mismatch') return false;
+        if (this.requireMediaE2ee && mediaTransformApi() === 'script-transform') {
+            return peer.mediaCrypto instanceof PeerMediaCrypto && peer.mediaCrypto.opened(receiver);
+        }
+        return true;
+    }
+
+    /** Silence, or let play, every receiver of this peer, as mayPlay says. */
+    private applyReceiveGates(userId: UserId): void {
+        const peer = this.peers.get(userId);
+        if (!peer) return;
+        for (const receiver of peer.connection.getReceivers()) {
+            const track = receiver.track;
+            if (!track) continue;
+            const allow = this.mayPlay(peer, receiver);
+            if (track.enabled !== allow) track.enabled = allow;
+        }
+    }
+
+    /**
+     * Frames to and from this peer are sealed and opened, as far as this
+     * page can know: encryption is on, and — where they go through a worker,
+     * whose transforms CAN be passed by — the audit has seen them sealed and
+     * opened (scriptTransform.ts `proven`). What every status below reports
+     * as `encrypted`.
+     */
+    private framesEncrypted(peer: PeerConnection): boolean {
+        const c = peer.mediaCrypto;
+        if (!c.enabled || c.hold) return false;
+        const api = mediaTransformApi();
+        if (api === 'encoded-streams') return true;
+        return api === 'script-transform' && c instanceof PeerMediaCrypto && c.proven;
+    }
+
     /** Whether media E2EE is actually active for a peer (exposed so the UI can
      *  show it — a downgrade by a malicious server is then observable). */
     isMediaEncrypted(userId: UserId): boolean {
-        return this.peers.get(userId)?.mediaCrypto.enabled ?? false;
+        const peer = this.peers.get(userId);
+        return !!peer && this.framesEncrypted(peer);
     }
 
     /** Per-peer media-E2EE status + the REASON, so the voice UI can show a
@@ -277,12 +348,20 @@ export class WebRTCManager {
         // EXCEPT a substituted connection: the DTLS pin exists precisely for
         // the engines without frame encryption, so a mismatch must outrank
         // "this device can't encrypt" or it would be invisible where it matters.
+        //
+        // Encryption on but its frames not yet seen sealed and opened (the
+        // worker path's proof) is still being set up — or, once it has stayed
+        // that way for a while, failing (`stuck`).
+        const encrypted = this.framesEncrypted(peer);
+        const c = peer.mediaCrypto;
         const reason: MediaE2eeReason = peer.dtlsPin === 'mismatch'
             ? 'fingerprint-mismatch'
             : !isMediaE2eeSupported()
                 ? 'local-unsupported'
-                : peer.mediaE2eeReason;
-        return { userId, encrypted: peer.mediaCrypto.enabled, reason, enforced: this.requireMediaE2ee, dtls: peer.dtlsPin };
+                : c.enabled && !encrypted
+                    ? (c instanceof PeerMediaCrypto && c.stuck ? 'verification-failed' : 'negotiating')
+                    : peer.mediaE2eeReason;
+        return { userId, encrypted, reason, enforced: this.requireMediaE2ee, dtls: peer.dtlsPin };
     }
 
     /** Fail-closed enforcement: when on, media is exchanged only with peers
@@ -293,6 +372,8 @@ export class WebRTCManager {
         this.requireMediaE2ee = enabled;
         for (const [userId, peer] of this.peers) {
             peer.mediaCrypto.requireE2ee = enabled;
+            // Only the worker path holds receivers on enforcement (mayPlay).
+            if (mediaTransformApi() === 'script-transform') this.applyReceiveGates(userId);
             this.emitMediaE2ee(userId);
         }
         // Where frames can be encrypted, the transforms read requireE2ee on
@@ -344,7 +425,7 @@ export class WebRTCManager {
         let total = 0, encrypted = 0;
         for (const [, peer] of this.peers) {
             total++;
-            if (peer.mediaCrypto.enabled) encrypted++;
+            if (this.framesEncrypted(peer)) encrypted++;
         }
         return { total, encrypted, supported: isMediaE2eeSupported(), enforced: this.requireMediaE2ee };
     }
@@ -470,6 +551,21 @@ export class WebRTCManager {
         if (receiver && mediaTransformApi() === 'script-transform') this.wireReceiver(userId, receiver);
     }
 
+    /**
+     * Every receiver of the connection, early (see wireReceiverEarly): before
+     * each offer, and as soon as a remote offer is applied. ontrack wraps a
+     * receiver an offer creates only if the offer SENDS on it; a transceiver
+     * the other side offered receive-only (a listen-only member, or one
+     * whose offer was rolled back under glare) got no ontrack, and once that
+     * side starts sending on it — in an exchange WE offer — ontrack fires on
+     * the offerer's side, where a transform set then is ignored. Wrapped
+     * here, it never gets that far.
+     */
+    private wireReceiversEarly(userId: UserId, pc: RTCPeerConnection): void {
+        if (mediaTransformApi() !== 'script-transform') return;
+        for (const t of pc.getTransceivers()) this.wireReceiverEarly(userId, t.receiver);
+    }
+
     constructor() {
         this.media = new MediaManager();
         this.setupSignalingHandlers();
@@ -529,6 +625,7 @@ export class WebRTCManager {
             await this.setupMediaKey(userId); // the DTLS pin (and media tag) ride the offer
             // Sealed video frames are VP8's (frameCrypto.ts): offer it first.
             if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { offer: true });
+            this.wireReceiversEarly(userId, pc);
             peer.makingOffer = true;
             await pc.setLocalDescription(); // implicit offer; safe under glare
             // The peer may have been REPLACED while we awaited (connId rebuild,
@@ -679,9 +776,11 @@ export class WebRTCManager {
      *  sent (cooperating peers send it nothing to begin with). */
     private selfNoReceive = false;
 
-    /** Does this client send `userId` media? */
+    /** Does this client send `userId` media? Not when their role says NO
+     *  RECEIVE, and never over a connection that was substituted on the path
+     *  (holdMediaWith). */
     sendsTo(userId: UserId): boolean {
-        return !this.noReceivePeers.has(userId);
+        return !this.noReceivePeers.has(userId) && this.peers.get(userId)?.dtlsPin !== 'mismatch';
     }
 
     /** The server's word on whether `userId` may be sent media. Withholding
@@ -1546,6 +1645,9 @@ export class WebRTCManager {
                 this.emitMediaE2ee(userId);
                 return;
             }
+            // Attached is not yet proof that frames go through it (mayPlay):
+            // silent until it is, set before anything below can play it.
+            if (!this.mayPlay(peer, event.receiver)) event.track.enabled = false;
 
             // Classify by STREAM IDENTITY, not track contents. Mic (and camera)
             // tracks always travel in the sender's localStream; screen-share
@@ -1650,6 +1752,13 @@ export class WebRTCManager {
         };
 
         const mediaCrypto = new PeerMediaCrypto(this.requireMediaE2ee);
+        // The worker path's proof came in, or a receiver opened its first
+        // frame: the receive gates and the status follow it.
+        mediaCrypto.onChange = () => {
+            if (this.peers.get(userId)?.mediaCrypto !== mediaCrypto) return;
+            this.applyReceiveGates(userId);
+            this.emitMediaE2ee(userId);
+        };
         this.peers.set(userId, {
             userId, connection: pc, connId: newConnId(), remoteConnId: null,
             remoteStream: null, makingOffer: false, mediaCrypto,
@@ -1875,6 +1984,7 @@ export class WebRTCManager {
         // A description applied cleanly — this pairing is healthy again, so any
         // stuck-rebuild budget spent on it is forgiven.
         this.stuckRebuilds.delete(fromUser);
+        if (description.type === 'offer') this.wireReceiversEarly(fromUser, pc);
         await this.flushPendingCandidates(fromUser, pc);
         this.scheduleIceStartCheck(fromUser);
 
@@ -1954,6 +2064,7 @@ export class WebRTCManager {
             return;
         }
         this.stuckRebuilds.delete(fromUser); // applied cleanly — healthy again
+        this.wireReceiversEarly(fromUser, pc);
         await this.flushPendingCandidates(fromUser, pc);
         this.scheduleIceStartCheck(fromUser);
         await this.setupMediaKey(fromUser);

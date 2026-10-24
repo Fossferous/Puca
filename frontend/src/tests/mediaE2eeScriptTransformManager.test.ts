@@ -36,8 +36,10 @@ vi.mock('../api/websocket', () => ({
 }));
 
 import { WebRTCManager } from '../api/rtc/manager';
-import { __setScriptTransformWorkerFactory, PeerMediaCrypto, type TransformWorkerLike } from '../api/rtc/scriptTransform';
+import { advertiseDtlsPin, newFrameCounts, type FrameCounts } from '../api/rtc/mediaCrypto';
+import { __runFrameAudit, __setScriptTransformWorkerFactory, PeerMediaCrypto, type TransformWorkerLike } from '../api/rtc/scriptTransform';
 import type { ScriptTransformCommand } from '../api/rtc/scriptTransformWorker';
+import type { MediaE2eeStatus } from '../api/rtc/types';
 
 /** What happened, in order, across every connection: codec preferences, descriptions. */
 const events: string[] = [];
@@ -81,10 +83,12 @@ class FakeRTCPeerConnection {
     config: Record<string, unknown>;
     senders: FakeSender[] = [];
     transceivers: FakeTransceiver[] = [new FakeTransceiver('video')];
+    /** Receivers handed to ontrack by deliver(), beside the transceivers' own. */
+    delivered: Array<{ track: unknown }> = [];
     closed = false;
     constructor(config: Record<string, unknown>) { this.config = config; pcs.push(this); }
     getSenders() { return this.senders; }
-    getReceivers() { return []; }
+    getReceivers() { return [...this.transceivers.map(t => t.receiver), ...this.delivered]; }
     getTransceivers() { return this.transceivers; }
     addTrack(track: unknown) {
         if (this.closed) throw new DOMException('closed', 'InvalidStateError');
@@ -118,33 +122,52 @@ class FakeRTCPeerConnection {
 }
 
 class FakeScriptTransform {
-    options: { op: string; slot: string };
+    options: { op: string; slot: string; id: string };
     static failNext = false;
-    constructor(_worker: unknown, options: { op: string; slot: string }) {
+    constructor(_worker: unknown, options: { op: string; slot: string; id: string }) {
         if (FakeScriptTransform.failNext) { FakeScriptTransform.failNext = false; throw new Error('no transform'); }
         this.options = options;
     }
 }
 
+/** The worker as the page sees it; it answers every `report` with `counts`, as the real one does. */
 class FakeWorker implements TransformWorkerLike {
     posted: ScriptTransformCommand[] = [];
+    counts = new Map<string, FrameCounts>();
     private fns: Record<string, Array<(ev: never) => void>> = { message: [], error: [] };
-    postMessage(m: ScriptTransformCommand) { this.posted.push(m); }
+    postMessage(m: ScriptTransformCommand) {
+        this.posted.push(m);
+        if (m.type === 'report') {
+            this.emit('message', { data: { type: 'counts', seq: m.seq, transforms: [...this.counts].map(([id, c]) => ({ id, ...c })) } });
+        }
+    }
     addEventListener(type: 'message' | 'error', fn: (ev: never) => void) { this.fns[type].push(fn); }
     terminate() {}
     emit(type: 'message' | 'error', ev: unknown) { for (const fn of this.fns[type]) fn(ev as never); }
+    /** The counts the worker keeps for the transform on this sender or receiver. */
+    countsOf(target: { transform: unknown }): FrameCounts {
+        const id = (target.transform as FakeScriptTransform).options.id;
+        if (!this.counts.has(id)) this.counts.set(id, newFrameCounts());
+        return this.counts.get(id)!;
+    }
+    /** The last state copy it was sent for this slot. */
+    stateOf(slot: string) {
+        return this.posted.filter((m): m is Extract<ScriptTransformCommand, { type: 'state' }> => m.type === 'state' && m.slot === slot).at(-1);
+    }
 }
 
 let worker: FakeWorker;
 
-/** An engine with the standard API and nothing else (Firefox, Safari). */
-function scriptEngine() {
+/** An engine with the standard API and nothing else: Safari (H.264 first in
+ *  its own codec order), or with `vp8First` Firefox. */
+function scriptEngine({ vp8First = false } = {}) {
     class Sender {}
     class Receiver {}
     for (const C of [Sender, Receiver]) (C.prototype as unknown as Record<string, unknown>).transform = null;
     vi.stubGlobal('RTCRtpSender', Sender);
+    const codecs = [{ mimeType: 'video/H264', clockRate: 90000 }, { mimeType: 'video/VP8', clockRate: 90000 }];
     vi.stubGlobal('RTCRtpReceiver', Object.assign(Receiver, {
-        getCapabilities: () => ({ codecs: [{ mimeType: 'video/H264', clockRate: 90000 }, { mimeType: 'video/VP8', clockRate: 90000 }], headerExtensions: [] }),
+        getCapabilities: () => ({ codecs: vp8First ? [...codecs].reverse() : codecs, headerExtensions: [] }),
     }));
     vi.stubGlobal('RTCRtpScriptTransform', FakeScriptTransform);
     vi.stubGlobal('Worker', class {});
@@ -189,9 +212,21 @@ async function inCall(required: boolean) {
 const peerOf = (mgr: WebRTCManager, id: number) =>
     (mgr as unknown as { peers: Map<number, { mediaCrypto: PeerMediaCrypto; connection: FakeRTCPeerConnection }> }).peers.get(id);
 
-function deliver(pc: FakeRTCPeerConnection, receiver: { transform: unknown }) {
-    const track = { kind: 'audio', id: 'their-voice' };
+/** Their voice arrives on `receiver`; returns the track, to see whether it may play. */
+function deliver(pc: FakeRTCPeerConnection, receiver: { transform: unknown; track?: unknown }) {
+    const track = { kind: 'audio', id: 'their-voice', enabled: true };
+    receiver.track = track;
+    pc.delivered.push(receiver as { track: unknown });
     pc.ontrack?.({ track, streams: [{ id: 'theirs', getTracks: () => [track] }], receiver });
+    return track;
+}
+
+/** What enableMediaWithRemote leaves once the handshake checked out. */
+async function handshakeDone(mgr: WebRTCManager, id: number) {
+    const peer = peerOf(mgr, id)! as unknown as { mediaCrypto: PeerMediaCrypto; mediaE2eeReason: string };
+    peer.mediaCrypto.key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']) as CryptoKey;
+    peer.mediaCrypto.enabled = true;
+    peer.mediaE2eeReason = 'encrypted';
 }
 
 beforeEach(() => {
@@ -220,7 +255,7 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         const t = pc.senders[0].transform as FakeScriptTransform;
         expect(t, 'a sender went out with no frame transform').toBeInstanceOf(FakeScriptTransform);
         const slot = peerOf(mgr, 2)!.mediaCrypto.slot;
-        expect(t.options).toEqual({ op: 'seal', slot });
+        expect(t.options).toEqual({ op: 'seal', slot, id: expect.any(String) });
         expect(worker.posted[0]).toMatchObject({ type: 'state', slot, requireE2ee: true, enabled: false, key: null });
         expect(pc.config.encodedInsertableStreams, 'the createEncodedStreams flag belongs to the other path').toBeUndefined();
         expect(mgr.mediaE2eeStatus(2)?.reason).not.toBe('local-unsupported');
@@ -232,7 +267,7 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         const slot = peerOf(mgr, 2)!.mediaCrypto.slot;
         const mine = pcs[0].transceivers.find(t => t.sender.track === mic)!;
         expect((mine.receiver.transform as FakeScriptTransform | null)?.options,
-            'the receiver beside the mic had no transform before the answer — Chromium would decode what it gets unopened').toEqual({ op: 'open', slot });
+            'the receiver beside the mic had no transform before the answer — Chromium would decode what it gets unopened').toEqual({ op: 'open', slot, id: expect.any(String) });
 
         // Listen-only: the receive-only transceiver is ours too.
         const quiet = manager();
@@ -245,15 +280,185 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         expect((recvOnly.receiver.transform as FakeScriptTransform | null)?.options?.op, 'the listen-only receiver was left for ontrack').toBe('open');
     });
 
-    it('opens inbound media in the worker and plays it under enforcement', async () => {
+    it('opens inbound media in the worker and plays it under enforcement — silent until its transform has opened a frame', async () => {
         scriptEngine();
         const mgr = await inCall(true);
         let played = false;
         mgr.setOnRemoteStream(() => { played = true; });
         const receiver = { transform: null as unknown };
-        deliver(pcs[0], receiver);
-        expect((receiver.transform as FakeScriptTransform | null)?.options).toEqual({ op: 'open', slot: peerOf(mgr, 2)!.mediaCrypto.slot });
+        const track = deliver(pcs[0], receiver);
+        expect((receiver.transform as FakeScriptTransform | null)?.options).toEqual({ op: 'open', slot: peerOf(mgr, 2)!.mediaCrypto.slot, id: expect.any(String) });
         expect(played, 'an engine that can open frames dropped the track').toBe(true);
+        expect(track.enabled, 'SECURITY: it played before anything showed frames go through its transform').toBe(false);
+        // The worker says, unasked, that this receiver's transform opened its first frame.
+        const id = (receiver.transform as FakeScriptTransform).options.id;
+        worker.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id, seen: 1, done: 1, clear: 0, dropped: 0 }] } });
+        expect(track.enabled, 'still silent once its transform opened a frame').toBe(true);
+    });
+
+    it('CONTROL: without enforcement, and on the createEncodedStreams path, a received track plays at once', async () => {
+        scriptEngine();
+        await inCall(false);
+        expect(deliver(pcs[pcs.length - 1], { transform: null }).enabled, 'held although nothing requires encryption').toBe(true);
+        vi.unstubAllGlobals();
+        vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
+        class Sender {}
+        (Sender.prototype as unknown as Record<string, unknown>).createEncodedStreams = () => ({});
+        vi.stubGlobal('RTCRtpSender', Sender);
+        await inCall(true);
+        const pipes = () => { const t = new TransformStream(); return { readable: t.readable, writable: t.writable }; };
+        expect(deliver(pcs[pcs.length - 1], { transform: null, createEncodedStreams: pipes } as unknown as { transform: unknown }).enabled,
+            'held on the path whose pipe nothing can go by').toBe(true);
+    });
+
+    it('enforcement switched on mid-call silences a receiver whose transform has opened nothing; switched off, it plays again', async () => {
+        scriptEngine();
+        const mgr = await inCall(false);
+        const opened = { transform: null as unknown };
+        const unopened = { transform: null as unknown };
+        const a = deliver(pcs[0], opened);
+        const b = deliver(pcs[0], unopened);
+        worker.countsOf(opened).done = 1;
+        worker.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: (opened.transform as FakeScriptTransform).options.id, seen: 1, done: 1, clear: 0, dropped: 0 }] } });
+        mgr.setRequireMediaE2ee(true);
+        expect(b.enabled, 'a receiver nothing showed opening kept playing once encryption was required').toBe(false);
+        expect(a.enabled, 'control: one that has opened frames plays on').toBe(true);
+        mgr.setRequireMediaE2ee(false);
+        expect(b.enabled).toBe(true);
+    });
+
+    it('says "encrypted" only once the worker has shown this peer\'s frames sealed and opened, and says so when it changes', async () => {
+        scriptEngine();
+        const mgr = await inCall(true);
+        const seen: MediaE2eeStatus[] = [];
+        mgr.setOnMediaE2eeChange((s) => seen.push(s));
+        await handshakeDone(mgr, 2);
+        const receiver = { transform: null as unknown };
+        deliver(pcs[0], receiver);
+        expect(mgr.mediaE2eeStatus(2), 'encrypted on the page\'s word alone').toMatchObject({ encrypted: false, reason: 'negotiating' });
+        expect(mgr.isMediaEncrypted(2)).toBe(false);
+        expect(mgr.mediaEncryptionSummary()).toMatchObject({ total: 1, encrypted: 0 });
+
+        await __runFrameAudit();
+        const sealed = worker.countsOf(pcs[0].senders[0]);
+        const opened = worker.countsOf(receiver);
+        sealed.seen = sealed.done = 50;
+        opened.seen = opened.done = 50;
+        await __runFrameAudit();
+        expect(mgr.mediaE2eeStatus(2)).toMatchObject({ encrypted: true, reason: 'encrypted' });
+        expect(mgr.isMediaEncrypted(2)).toBe(true);
+        expect(mgr.mediaEncryptionSummary()).toMatchObject({ total: 1, encrypted: 1 });
+        expect(seen.at(-1), 'the change was not announced').toMatchObject({ userId: 2, encrypted: true });
+
+        for (let i = 0; i < 5; i++) {
+            opened.seen += 50;
+            opened.dropped += 50;
+            sealed.seen += 50;
+            sealed.done += 50;
+            await __runFrameAudit();
+            if (i === 0) expect(mgr.mediaE2eeStatus(2), 'inbound stopped opening').toMatchObject({ encrypted: false, reason: 'negotiating' });
+        }
+        expect(mgr.mediaE2eeStatus(2), 'five windows of nothing opening is a failure, not a set-up').toMatchObject({ encrypted: false, reason: 'verification-failed' });
+    });
+
+    it('SECURITY: frames a receiver takes without its transform seeing them rebuild every peer as "cannot encrypt" (blocked)', async () => {
+        scriptEngine();
+        const mgr = await inCall(true);
+        let taken = 0;
+        const receiver = { transform: null as unknown, getStats: async () => new Map([['in', { type: 'inbound-rtp', kind: 'audio', packetsReceived: taken }]]) };
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        deliver(pcs[0], receiver);
+        await __runFrameAudit();
+        for (let i = 0; i < 2; i++) {
+            taken += 100; // the connection took them; the worker saw none
+            await __runFrameAudit();
+        }
+        await settle();
+        expect(pcs[0].closed, 'a connection whose frames go by their transform stayed up').toBe(true);
+        expect(mgr.mediaE2eeStatus(2)).toMatchObject({ reason: 'local-unsupported', enforced: true, encrypted: false });
+        expect(pcs[pcs.length - 1].senders, 'the rebuilt connection was sent media nothing can seal').toEqual([]);
+        expect(warn.mock.calls.some((c) => String(c[0]).includes('never went through its transform'))).toBe(true);
+        warn.mockRestore();
+    });
+
+    it('SECURITY: a connection substituted on the path is sent nothing and plays nothing, though encryption is not required', async () => {
+        const KEY = new Uint8Array(32).fill(7);
+        const FP = 'a=fingerprint:sha-256 ' + 'AB:'.repeat(31) + 'AB';
+        const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n' + FP + '\r\na=setup:actpass';
+        for (const engine of ['script', 'none'] as const) {
+            if (engine === 'script') scriptEngine(); else noEngine();
+            const mgr = await inCall(false);
+            const pc = pcs[pcs.length - 1];
+            const peer = peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null; mediaCrypto: PeerMediaCrypto };
+            peer.mediaStaticKeyRaw = KEY;
+            const track = deliver(pc, { transform: null });
+            expect(pc.senders[0]?.track, `${engine}: precondition, sending`).toBe(mic);
+            expect(track.enabled, `${engine}: precondition, playing`).toBe(true);
+            const verify = (s: string) => (mgr as unknown as { verifyRemoteDtls: (u: number, s: string) => void }).verifyRemoteDtls(2, s);
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            verify(advertiseDtlsPin(sdp, new Uint8Array(32).fill(9))); // a pin someone else made
+            warn.mockRestore();
+            expect(pc.senders[0].replaced, `${engine}: our microphone went on to whoever is in the middle`).toEqual([null]);
+            expect(track.enabled, `${engine}: what came over it played`).toBe(false);
+            expect(mgr.sendsTo(2), `${engine}: a later track could be put back on it`).toBe(false);
+            expect(mgr.mediaE2eeStatus(2)).toMatchObject({ reason: 'fingerprint-mismatch', encrypted: false, enforced: false });
+            expect(peer.mediaCrypto.hold).toBe(true);
+            if (engine === 'script') expect(worker.stateOf(peer.mediaCrypto.slot), 'the worker was not told').toMatchObject({ hold: true });
+            verify(advertiseDtlsPin(sdp, KEY)); // a later honest description does not lift it
+            expect(track.enabled).toBe(false);
+            for (const m of managers.splice(0)) m.closeAll();
+            vi.unstubAllGlobals();
+            vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
+        }
+    });
+
+    it('CONTROL: an honest pin holds nothing back', async () => {
+        scriptEngine();
+        const KEY = new Uint8Array(32).fill(7);
+        const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 ' + 'AB:'.repeat(31) + 'AB\r\na=setup:actpass';
+        const mgr = await inCall(false);
+        const peer = peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null };
+        peer.mediaStaticKeyRaw = KEY;
+        const track = deliver(pcs[0], { transform: null });
+        (mgr as unknown as { verifyRemoteDtls: (u: number, s: string) => void }).verifyRemoteDtls(2, advertiseDtlsPin(sdp, KEY));
+        expect(mgr.mediaE2eeStatus(2)?.dtls).toBe('bound');
+        expect(pcs[0].senders[0].replaced).toEqual([]);
+        expect(track.enabled).toBe(true);
+        expect(mgr.sendsTo(2)).toBe(true);
+    });
+
+    it('wraps every receiver a remote offer created as soon as it is applied — one it SENDS nothing on gets no ontrack', async () => {
+        scriptEngine();
+        const mgr = manager();
+        mgr.setLocalUserId(1);
+        mgr.setRequireMediaE2ee(true);
+        const media = (mgr as unknown as { media: { getLocalStreamSync: () => unknown; getScreenShareStreamSync: () => unknown } }).media;
+        media.getLocalStreamSync = () => null;
+        media.getScreenShareStreamSync = () => null;
+        const srd = FakeRTCPeerConnection.prototype.setRemoteDescription;
+        let made: FakeTransceiver | null = null;
+        FakeRTCPeerConnection.prototype.setRemoteDescription = async function (this: FakeRTCPeerConnection, d: { type: string; sdp?: string }) {
+            if (d.type === 'offer' && !made) { made = new FakeTransceiver('audio'); this.transceivers.push(made); } // receive-only on their side: no ontrack
+            return srd.call(this, d);
+        };
+        try {
+            const offer = JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=recvonly\r\n', connId: 'remote-1' });
+            await (mgr as unknown as { handleIncomingDescription: (u: number, s: string) => Promise<void> }).handleIncomingDescription(2, offer);
+        } finally {
+            FakeRTCPeerConnection.prototype.setRemoteDescription = srd;
+        }
+        expect((made!.receiver.transform as FakeScriptTransform | null)?.options?.op,
+            'a receiver the offer made was left to be wrapped in a later offerer\'s ontrack, which Chromium ignores').toBe('open');
+    });
+
+    it('wraps a receiver no one wrapped yet before an offer is made', async () => {
+        scriptEngine();
+        const mgr = await inCall(true);
+        const pc = pcs[0];
+        const stray = new FakeTransceiver('audio');
+        pc.transceivers.push(stray);
+        await (mgr as unknown as { makeOffer: (u: number, p: unknown) => Promise<void> }).makeOffer(2, pc);
+        expect((stray.receiver.transform as FakeScriptTransform | null)?.options?.op).toBe('open');
     });
 
     it('CONTROL: an engine with neither API still publishes nothing and plays nothing under enforcement', async () => {
@@ -315,7 +520,7 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         mgr.setRequireMediaE2ee(false);
         await settle();
         expect(pcs, 'an engine whose transforms enforce every frame was rebuilt').toHaveLength(1);
-        expect(worker.posted.filter(m => m.slot === slot).at(-1)).toMatchObject({ type: 'state', requireE2ee: false });
+        expect(worker.stateOf(slot)).toMatchObject({ type: 'state', requireE2ee: false });
     });
 
     it('a peer that goes is forgotten by the worker, key and all', async () => {
@@ -484,6 +689,14 @@ describe('VP8 first, before every offer and answer, where frames are sealed', ()
         }
         expect(setParameters, 'our camera went out in the offer\'s order (H.264) on a sealed link').toHaveBeenCalledTimes(1);
         expect(setParameters.mock.calls[0][0].encodings[0].codec?.mimeType).toBe('video/VP8');
+    });
+
+    it('an engine whose own order already puts VP8 first (Firefox) is given no preferences before an offer at all', async () => {
+        scriptEngine({ vp8First: true });
+        const mgr = await inCall(true);
+        await (mgr as unknown as { makeOffer: (u: number, p: unknown) => Promise<void> }).makeOffer(2, pcs[0]);
+        expect(events, 'preferences that change nothing, and that Firefox mis-numbers after glare').toEqual(['sld:offer']);
+        expect(sent.filter(s => s.type === 'offer')).toHaveLength(1);
     });
 
     it('CONTROL: an engine that cannot seal frames leaves the codec order to the browser', async () => {
