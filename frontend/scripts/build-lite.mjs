@@ -56,11 +56,10 @@ if (syncIdx !== -1) {
     // Notes is a browser surface: it leaves the shell's assets before the CSP
     // step, or it would ship as a second, unpolicied document.
     run('node', ['scripts/strip-notes-from-native.mjs', '--platform', platform]);
-    // The Android WebView gets its Content-Security-Policy from a <meta> in
-    // the SYNCED index.html (the web dist keeps none; its policy is the server
+    // Both WebViews get their Content-Security-Policy from a <meta> in the
+    // SYNCED index.html (the web dist keeps none; its policy is the server
     // header). Must run after the sync, which overwrites that file. Same step
-    // as `npm run cap:build:android`; see scripts/cap-index-csp.mjs.
-    if (platform === 'android') {
-        run('node', ['scripts/cap-index-csp.mjs', '--platform', 'android']);
-    }
+    // as `npm run cap:build:android` / `cap:build:ios`; see
+    // scripts/cap-index-csp.mjs, which refuses a platform it does not know.
+    run('node', ['scripts/cap-index-csp.mjs', '--platform', platform]);
 }

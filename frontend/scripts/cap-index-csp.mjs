@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * Give the Android WebView a Content-Security-Policy.
+ * Give the Capacitor WebViews (Android and iOS) a Content-Security-Policy.
  *
  * Every other surface has one: the web app gets it from the server's headers
  * (deploy/ops/add-webapp-csp.py), the desktop shell from tauri.conf.json
  * `app.security.csp`. The Capacitor app had none — nothing sends headers for
- * `https://localhost`, and index.html carries no <meta>. This script puts the
- * policy into the index.html that `cap sync` copied into the native project
- * (android/app/src/main/assets/public/, gitignored), and ONLY there: the web
- * `dist/` is never touched, because the server's header is the policy there
- * and two sources for one policy is how they drift apart.
+ * `https://localhost` or `capacitor://localhost`, and index.html carries no
+ * <meta>. This script puts the policy into the index.html that `cap sync`
+ * copied into the native project (android/app/src/main/assets/public/ or
+ * ios/App/App/public/, both gitignored), and ONLY there: the web `dist/` is
+ * never touched, because the server's header is the policy there and two
+ * sources for one policy is how they drift apart.
  *
- * Wired into `npm run cap:build:android` and `build-lite.mjs --sync android`,
- * after the sync — running before it would be overwritten by the copy.
+ * Wired into `npm run cap:build:android`, `npm run cap:build:ios` and
+ * `build-lite.mjs --sync <platform>`, after the sync — running before it
+ * would be overwritten by the copy.
  *
  * NOT covered here, deliberately visible: the OTA bundle. deploy/mobile/
  * README.md zips the plaintext bundle straight from `dist/`, so the FIRST
@@ -31,6 +33,25 @@
  * without a literal `<head>`: Capacitor would then inject before `</head>`,
  * i.e. after the meta, and `script-src 'self'` would kill the bridge and with
  * it every plugin (notifications, OTA, keep-alive) on first launch.
+ *
+ * ON iOS THE SAME META, FOR A DIFFERENT REASON (read from Capacitor iOS
+ * 8.5.1's own source): WebViewAssetHandler serves index.html byte for byte,
+ * nothing is spliced into it, and the bridge is not part of the document at
+ * all. JSExport.swift adds window.Capacitor and native-bridge.js as
+ * WKUserScripts (`.atDocumentStart`, main frame), and CapacitorBridge.swift
+ * answers plugin calls through `evaluateJavaScript`. Neither is a script
+ * element or a fetch the document makes, which is what `script-src` governs,
+ * so where the meta sits does not matter there; native-bridge.js has no eval,
+ * Function or script-element injection, so `'unsafe-eval'` stays out. (Seen
+ * in the source, not yet on a device: a bridge the policy blocked would show
+ * as Capacitor.isNativePlatform() false, i.e. the app acting as a browser.)
+ * `'self'` is the page's origin `capacitor://localhost`, and WebKit matches
+ * it exactly (ContentSecurityPolicySource::schemeMatches: equal scheme, then
+ * host and port), so every directive below means the same in both shells.
+ * That sameness is required, not convenient: deploy/mobile/README.md stamps
+ * ONE policy into the OTA bundle, and every installed app, Android or iPhone,
+ * runs that bundle once it updates. Two policies would mean the OTA silently
+ * hands one shell the other's.
  *
  * THE POLICY mirrors the web app's header, tightened or loosened only where
  * the Android app is provably different:
@@ -57,6 +78,7 @@
  *
  * Usage:
  *   node scripts/cap-index-csp.mjs --platform android      # the synced copy
+ *   node scripts/cap-index-csp.mjs --platform ios          # ios/App/App/public
  *   node scripts/cap-index-csp.mjs --index <path/to/index.html>
  *   add --dry-run to print the policy and the target without writing.
  *
@@ -74,6 +96,14 @@ const FRONTEND = path.resolve(HERE, '..');
 const ENV_FILE = path.join(FRONTEND, '.env.production');
 export const WEB_DIST = path.join(FRONTEND, 'dist');
 export const ANDROID_INDEX = path.join(FRONTEND, 'android', 'app', 'src', 'main', 'assets', 'public', 'index.html');
+export const IOS_INDEX = path.join(FRONTEND, 'ios', 'App', 'App', 'public', 'index.html');
+
+/** The index.html `cap sync <platform>` writes, or null for a platform this does not know. */
+export function indexForPlatform(platform) {
+    if (platform === 'android') return ANDROID_INDEX;
+    if (platform === 'ios') return IOS_INDEX;
+    return null;
+}
 
 const META_RE = /<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi;
 
@@ -215,20 +245,21 @@ function envValue(key) {
 function main(argv) {
     const dryRun = argv.includes('--dry-run');
     let target;
+    let platform = null;
     const idx = argv.indexOf('--index');
     const plat = argv.indexOf('--platform');
     if (idx !== -1) {
         target = argv[idx + 1];
     } else if (plat !== -1) {
-        const platform = argv[plat + 1];
-        if (platform === 'android') target = ANDROID_INDEX;
-        else {
-            console.error(`cap-csp: --platform ${platform ?? '<none>'} is not supported (only android: iOS's WKWebView injects the bridge differently and has not been assessed)`);
+        platform = argv[plat + 1];
+        target = indexForPlatform(platform);
+        if (!target) {
+            console.error(`cap-csp: --platform ${platform ?? '<none>'} is not supported (android | ios)`);
             return 2;
         }
     }
     if (!target) {
-        console.error('usage: cap-index-csp.mjs (--platform android | --index <index.html>) [--dry-run]');
+        console.error('usage: cap-index-csp.mjs (--platform android|ios | --index <index.html>) [--dry-run]');
         return 2;
     }
 
@@ -248,7 +279,7 @@ function main(argv) {
         return 1;
     }
     if (!fs.existsSync(target)) {
-        console.error(`cap-csp: ${target} does not exist — run \`npx cap sync android\` first`);
+        console.error(`cap-csp: ${target} does not exist${platform ? ` — run \`npx cap sync ${platform}\` first` : ''}`);
         return 1;
     }
     try {

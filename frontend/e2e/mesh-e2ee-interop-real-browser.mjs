@@ -38,11 +38,15 @@
 //   - Fail-closed: Firefox with NEITHER API, under enforcement, sends and
 //     plays nothing (the F-1 guards), while its control above does.
 //   - The worker loads under every CSP the app ships (deploy/Caddyfile
-//     example, deploy/ops/add-webapp-csp.py, the Android meta from
-//     scripts/cap-index-csp.mjs, tauri.conf.json, tauri.lite.conf.json); a
-//     policy WITHOUT worker-src 'self' must stop it, and the call must then
-//     fall back to "this browser cannot encrypt" (blocked) rather than to
-//     silence that claims to be encrypted.
+//     example, deploy/ops/add-webapp-csp.py, the Android and iOS shells'
+//     <meta> from scripts/cap-index-csp.mjs — served AS a meta —,
+//     tauri.conf.json, tauri.lite.conf.json); a policy WITHOUT worker-src
+//     'self' must stop it, and the call must then fall back to "this browser
+//     cannot encrypt" (blocked) rather than to silence that claims to be
+//     encrypted.
+//   - The worker chunk on its own in Chromium, Firefox AND WebKit (whose CSP
+//     engine is the iPhone's, WebRTC or not): it starts under the web header
+//     and the shells' <meta>, and worker-src 'none' stops it both ways.
 //   - WebKit: Playwright's Windows build has no WebRTC at all; reported SKIP
 //     with what it lacks. Safari itself is unverified here.
 //
@@ -55,7 +59,7 @@ import { chromium, firefox, webkit } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -88,8 +92,11 @@ function csps() {
     return { caddy, tool, tauri, lite };
 }
 const POLICIES = csps();
-const { buildPolicy } = await import(pathToFileURL(join(HERE, 'scripts', 'cap-index-csp.mjs')).href);
-POLICIES.androidMeta = buildPolicy({ apiUrl: 'http://127.0.0.1:9' });
+const { buildPolicy, injectCsp } = await import(pathToFileURL(join(HERE, 'scripts', 'cap-index-csp.mjs')).href);
+// One policy for BOTH Capacitor shells (Android and iOS), delivered the way
+// they deliver it: a <meta> in index.html, not a header.
+POLICIES.capacitorMeta = buildPolicy({ apiUrl: 'http://127.0.0.1:9' });
+const META_DELIVERED = new Set(['capacitorMeta']);
 for (const [name, p] of Object.entries(POLICIES)) {
     if (!ck(typeof p === 'string' && p.includes('worker-src'), `policy ${name} found in the repo`, p ? '' : '(missing)')) process.exit(1);
 }
@@ -97,16 +104,25 @@ for (const [name, p] of Object.entries(POLICIES)) {
 // ---- Serving the harness, one origin per policy ----
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript' };
 const servers = [];
-async function serve(csp) {
+async function serve(csp, { asMeta = false } = {}) {
     const server = http.createServer(async (req, res) => {
         const rel = normalize(decodeURIComponent((req.url || '/').split('?')[0])).replace(/^([/\\])+/, '');
         if (rel.includes('..')) { res.writeHead(403); return res.end(); }
         for (const candidate of [join(ROOT, rel), join(ROOT, 'index.html')]) {
             try {
-                const body = await readFile(candidate);
+                let body = await readFile(candidate);
+                const type = TYPES[extname(candidate)] || 'application/octet-stream';
+                if (csp && asMeta) {
+                    // The Capacitor shells: the policy is a <meta> that
+                    // cap-index-csp.mjs writes into index.html, and no response
+                    // carries a header.
+                    if (type === 'text/html') body = injectCsp(body.toString('utf8'), csp);
+                    res.writeHead(200, { 'content-type': type });
+                    return res.end(body);
+                }
                 // Caddy sets the header on every response of the vhost — the
                 // worker script's own response carries it too.
-                res.writeHead(200, { 'content-type': TYPES[extname(candidate)] || 'application/octet-stream', ...(csp ? { 'content-security-policy': csp } : {}) });
+                res.writeHead(200, { 'content-type': type, ...(csp ? { 'content-security-policy': csp } : {}) });
                 return res.end(body);
             } catch { /* next */ }
         }
@@ -177,8 +193,8 @@ const TONE = { 1: 600, 2: 900 };
  * with a real identity, signalling relayed through here (and rewritten by
  * `rewriteOffer` on the way, as a server could).
  */
-async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer }) {
-    const origin = await serve(csp);
+async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, initB, rewriteOffer }) {
+    const origin = await serve(csp, { asMeta: cspAsMeta });
     const pages = {};
     const logs = { 1: [], 2: [] };
     for (const [uid, eng, init] of [[1, a, initA], [2, b, initB]]) {
@@ -436,8 +452,8 @@ await run('neither-api', async () => {
 await run('csp', async () => {
     for (const [name, csp] of Object.entries(POLICIES)) {
         if (name === 'caddy') continue; // every scenario above ran under it
-        const tag = `[CSP ${name}]`;
-        const p = await pair({ a: cr, b: ff, csp });
+        const tag = `[CSP ${name}${META_DELIVERED.has(name) ? ' as <meta>' : ''}]`;
+        const p = await pair({ a: cr, b: ff, csp, cspAsMeta: META_DELIVERED.has(name) });
         try {
             await enterCall(p);
             const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
@@ -469,6 +485,71 @@ await run('csp', async () => {
     } finally {
         dumpLogs(p, tag);
         await p.close();
+    }
+});
+
+// The frame-transform worker itself, started straight from the chunk Vite
+// emitted, in all three engines: WebKit has no WebRTC in Playwright's Windows
+// build, but its CSP engine is the iPhone's — the iOS shell's <meta> policy and
+// the header the Home Screen web app gets must both let the worker run, and
+// worker-src 'none' (by <meta> and by header) must stop it, or a pass above
+// could be a policy the engine never applied.
+await run('worker-csp', async () => {
+    const chunk = readdirSync(join(ROOT, 'assets')).find((f) => /^scriptTransform\.worker[-.][\w-]*\.js$/.test(f));
+    if (!ck(!!chunk, '[worker CSP] the harness build emitted the transform worker chunk', chunk ?? readdirSync(join(ROOT, 'assets')).join(' '))) return;
+    const startWorker = (url) => new Promise((resolve) => {
+        let w;
+        const done = (r) => { try { w?.terminate(); } catch { /* gone */ } resolve({ ...r, violations: window.__cspv.slice() }); };
+        try {
+            w = new Worker(url, { type: 'module' });
+        } catch (e) {
+            return done({ thrown: String(e?.name || e) });
+        }
+        w.onmessage = (ev) => done({ message: ev.data?.type ?? null });
+        w.onerror = () => done({ error: true });
+        setTimeout(() => done({ timeout: true }), 8000);
+    });
+    const recordViolations = () => {
+        window.__cspv = [];
+        document.addEventListener('securitypolicyviolation', (e) => window.__cspv.push(`${e.effectiveDirective || e.violatedDirective} ${e.blockedURI}`));
+    };
+    const noWorker = (p) => p.replace("worker-src 'self' blob:", "worker-src 'none'");
+    const cases = [
+        ...['caddy', 'tool', 'capacitorMeta'].map((name) => ({ name, csp: POLICIES[name], asMeta: META_DELIVERED.has(name), want: true })),
+        { name: "worker-src 'none' as <meta>", csp: noWorker(POLICIES.capacitorMeta), asMeta: true, want: false },
+        { name: "worker-src 'none' as header", csp: noWorker(POLICIES.caddy), asMeta: false, want: false },
+    ];
+    for (const c of cases.filter((x) => !x.want)) {
+        if (!ck(c.csp.includes("worker-src 'none'"), `[worker CSP] ${c.name}: precondition, the policy was changed`)) return;
+    }
+    let wk = null;
+    try {
+        wk = await webkit.launch({ headless: true });
+    } catch (e) {
+        sk('[worker CSP WebKit]', `WebKit did not launch: ${e.message.split('\n')[0]}`);
+    }
+    const engines = [['Chromium', cr.browser], ['Firefox', ff.browser], ...(wk ? [['WebKit', wk]] : [])];
+    try {
+        for (const c of cases) {
+            const origin = await serve(c.csp, { asMeta: c.asMeta });
+            for (const [eng, browser] of engines) {
+                const tag = `[worker CSP ${eng}] ${c.name}${c.asMeta && c.want ? ' as <meta>' : ''}`;
+                const ctx = await browser.newContext();
+                try {
+                    const page = await ctx.newPage();
+                    await page.addInitScript(recordViolations);
+                    await page.goto(origin);
+                    const r = await page.evaluate(startWorker, `${origin}assets/${chunk}`);
+                    const workerViolation = r.violations.some((v) => /worker-src|script-src|child-src/.test(v));
+                    if (c.want) ck(r.message === 'ready' && !workerViolation, `${tag}: the worker starts and says ready`, JSON.stringify(r));
+                    else ck(r.message !== 'ready' && (workerViolation || r.thrown || r.error), `${tag}: the worker is refused, not started`, JSON.stringify(r));
+                } finally {
+                    await ctx.close();
+                }
+            }
+        }
+    } finally {
+        await wk?.close();
     }
 });
 
