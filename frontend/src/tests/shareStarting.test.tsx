@@ -112,7 +112,7 @@ describe('VoicePanel wiring (VoicePanel is not mountable under vitest)', () => {
     });
 
     it('ends when the dialog closes (every go-live outcome closes it) and on a cancel after capture', () => {
-        expect(vp).toMatch(/onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); \}\}/);
+        expect(vp).toMatch(/onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); endDialogStart\(\); \}\}/);
         expect(vp).toMatch(/onCancelAfterCapture=\{\(\) => \{[^}]*shareStarting\.end\(\);/);
     });
 

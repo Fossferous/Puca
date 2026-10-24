@@ -84,29 +84,55 @@ const PINS: Pin[] = [
         ],
     },
     {
-        name: "the dialog's Go Live and a host's Share go live through one path",
+        name: "the dialog's Go Live and a host's Share go live through one path, one start at a time",
         src: 'vp',
-        holds: (c) => c.includes('onGoLive={async (audioChoice, apps) => { await goLive(audioChoice, apps); }}')
+        holds: (c) => inOrder(c,
+            "onGoLive={async (audioChoice, apps) => {",
+            "const start = shareStarts.active?.by === 'dialog' ? shareStarts.active : null;",
+            'await goLive(audioChoice, apps, start);',
+            'shareStarts.end(start);')
             && inOrder(body(c, 'const startHostShare = async (): Promise<EmbedResult> => {'),
                 'if (!isInVoiceRef.current) return',
                 'if (isScreenSharingRef.current) return { ok: true };',
+                "const start = shareStarts.begin('host');",
+                "if (!start) return { ok: false, error: 'already starting' };",
                 'await webrtcManager.getScreenShareStream({ width: 1280, height: 800, fps: 30, audio: false });',
-                "return await goLive('none');"),
+                "return await goLive('none', undefined, start);",
+                'shareStarts.end(start);'),
         mutants: [
-            ['the dialog goes its own way', replace('{ await goLive(audioChoice, apps); }}', '{ void audioChoice; void apps; }}')],
-            ['a host share skips Go Live', replace("return await goLive('none');", 'return { ok: true };')],
+            ['the dialog goes its own way', replace('await goLive(audioChoice, apps, start);', 'void audioChoice; void apps;')],
+            ['a host share skips Go Live', replace("return await goLive('none', undefined, start);", 'return { ok: true };')],
             ['a host share asks for sound', replace('fps: 30, audio: false });', 'fps: 30, audio: true });')],
+            ['two host starts at once', replace("if (!start) return { ok: false, error: 'already starting' };", '')],
+            ["a host's start never over", replace("return await goLive('none', undefined, start);\n        } finally {\n            shareStarts.end(start);", "return await goLive('none', undefined, start);\n        } finally {")],
         ],
     },
     {
-        name: "a host's Share and Stop, and the sharing state, reach registerEmbedCall",
+        name: "the dialog's capture is a start of its own, refused while a host's runs, over when the dialog closes",
+        src: 'vp',
+        holds: (c) => inOrder(c,
+            'onCaptureScreen={async ({ resolution, fps, prefetchApps }) => {',
+            "const start = shareStarts.begin('dialog');",
+            'if (!start) return null;',
+            'await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });')
+            && /onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); endDialogStart\(\); \}\}/.test(c)
+            && /onCancelAfterCapture=\{\(\) => \{\n\s*shareStarting\.end\(\);\n\s*endDialogStart\(\);/.test(c)
+            && /shareStarting\.end\(\);\n\s*shareStarts\.end\(start\);\n\s*webrtcManager\.stopScreenShare\(\);\n\s*return null;/.test(c),
+        mutants: [
+            ['the dialog captures over a host start', replace("const start = shareStarts.begin('dialog');\n                    if (!start) return null;", "const start = shareStarts.begin('dialog');")],
+            ['closing leaves the start held', replace('shareStarting.end(); endDialogStart(); }}', 'shareStarting.end(); }}')],
+            ['a cancelled picker holds the start', replace('shareStarting.end();\n                        shareStarts.end(start);\n', 'shareStarting.end();\n')],
+        ],
+    },
+    {
+        name: "a host's Share and Stop, and the sharing state, reach registerEmbedCall; a Stop while starting cancels the start",
         src: 'vp',
         holds: (c) => {
             const reg = body(c, 'useEffect(() => registerEmbedCall({');
             return reg !== null
                 && reg.includes('sharing: isScreenSharingRef.current,')
                 && /startShare: \(\) => \(startHostShareRef\.current\s*\?\s*startHostShareRef\.current\(\)/.test(reg)
-                && inOrder(reg, 'stopShare: () => {', 'if (!isScreenSharingRef.current) return false;', 'stopMyScreenShareRef.current?.();', 'return true;')
+                && inOrder(reg, 'stopShare: () => {', 'if (isScreenSharingRef.current) {', 'stopMyScreenShareRef.current?.();', 'return true;', 'return shareStarts.cancel();')
                 && c.includes('startHostShareRef.current = startHostShare;')
                 && c.includes('useEffect(() => { stopMyScreenShareRef.current = stopMyScreenShare; }, [stopMyScreenShare]);');
         },
@@ -114,6 +140,54 @@ const PINS: Pin[] = [
             ['sharing reported as never', replace('sharing: isScreenSharingRef.current,', 'sharing: false,')],
             ['Stop stops nothing', replace('stopMyScreenShareRef.current?.();', '')],
             ['Share never wired', replace('startHostShareRef.current = startHostShare;', '')],
+            ['a Stop while starting dropped', replace('return shareStarts.cancel();', 'return false;')],
+        ],
+    },
+    {
+        name: 'the picture ending, or any stop of our own, while a share is starting cancels the start',
+        src: 'vp',
+        holds: (c) => inOrder(body(c, 'const stopMyScreenShare = useCallback(() => {'),
+            'if (!isScreenSharingRef.current) {', 'shareStarts.cancel();', 'return;', 'setSharing(false);')
+            && c.includes('webrtcManager.setOnScreenShareEnded(stopMyScreenShare);'),
+        mutants: [
+            ['an end while starting ignored', replace('        if (!isScreenSharingRef.current) {\n            shareStarts.cancel();\n            return;', '        if (!isScreenSharingRef.current) {\n            return;')],
+            ['guarded by the lagging state', replace('        if (!isScreenSharingRef.current) {\n            shareStarts.cancel();', '        if (!isScreenSharing) {\n            shareStarts.cancel();')],
+        ],
+    },
+    {
+        name: 'Go Live looks again before announcing, after the server answers and before going live, and never goes live without a picture',
+        src: 'vp',
+        holds: (c) => {
+            const live = body(c, 'const goLive = async (audioChoice: GoLiveAudio, apps?: GoLiveApps, start?: ShareStart | null): Promise<EmbedResult> => {');
+            return live !== null
+                && inOrder(live,
+                    "goLiveMark('audio');",
+                    'if (!stillWanted(start, picture())) return abandon(false);',
+                    'const ack = await wsClient.startScreenShareAcked(',
+                    'if (!stillWanted(start, picture())) return abandon(true);',
+                    'await webrtcManager.addScreenShareToPeers();',
+                    'if (!stillWanted(start, picture())) return abandon(true);',
+                    'setSharing(true);')
+                && inOrder(live, 'const abandon = (announced: boolean): EmbedResult => {', 'if (announced) {', 'wsClient.stopScreenShare(roomId);', 'webrtcManager.stopScreenShare();');
+        },
+        mutants: [
+            ['announced though stopped', replace("        if (!stillWanted(start, picture())) return abandon(false);\n", '')],
+            ['live with a dead picture', (code) => {
+                const last = 'if (!stillWanted(start, picture())) return abandon(true);';
+                const i = code.lastIndexOf(last);
+                return i < 0 ? code : code.slice(0, i) + code.slice(i + last.length);
+            }],
+            ['the announcement never taken back', replace('            if (announced) {', '            if (false) {')],
+        ],
+    },
+    {
+        name: 'the sharing ref changes with the state, everywhere',
+        src: 'vp',
+        holds: (c) => /const setSharing = useCallback\(\(on: boolean\) => \{\n\s*isScreenSharingRef\.current = on;\n\s*setIsScreenSharing\(on\);\n\s*\}, \[\]\);/.test(c)
+            && (c.match(/setIsScreenSharing\(/g) ?? []).length === 1,
+        mutants: [
+            ['the ref left to the effect', replace('        isScreenSharingRef.current = on;\n        setIsScreenSharing(on);', '        setIsScreenSharing(on);')],
+            ['a setter past setSharing', replace('setSharing(true);', 'setIsScreenSharing(true);')],
         ],
     },
     {

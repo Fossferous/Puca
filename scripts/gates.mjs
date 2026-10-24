@@ -257,7 +257,7 @@ const GATES = [
 // Never run by this script; printed in every summary.
 const NOT_RUN_HERE = [
     'connectedDebugAndroidTest (notes-app, headless emulator)',
-    'e2e/feature-flows.mjs, games-live, games-walk, own-voice-2device, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
+    'e2e/feature-flows.mjs, games-live, games-walk, own-voice-2device, host-share-start-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
     'e2e/poker-table-real-browser.mjs, user-context-menu-reach.mjs (vite dev server)',
     'e2e-live-verify, batch7-permbits-live, the two-peer voice suites (throwaway stack)',
 ];
