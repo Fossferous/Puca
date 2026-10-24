@@ -148,6 +148,66 @@ render_download_page() {
 		fi
 		QR_SVG="$qr" awk '{ i = index($0, "__APP_QR_SVG__"); if (i) $0 = substr($0, 1, i - 1) ENVIRON["QR_SVG"] substr($0, i + 14); print }' "$PAGE" > "$PAGE.qr" 			&& mv "$PAGE.qr" "$PAGE"
 	fi
+	# The "Install with one tap" button on the iPhone & iPad section links
+	# $WEB_CLIP_PATH, which the backend serves from a file rendered HERE, per
+	# deployment, from the web app's address (deploy/ops/make-web-clip-profile.mjs).
+	# Same refusal rule as the QR code: a page that promises a profile and cannot
+	# have one made must not ship. WEB_CLIP_PROFILE is set (and the file written)
+	# only when the page links the route; an operator's own page without it skips
+	# all of this, and so does every subcommand that ships no page.
+	WEB_CLIP_PROFILE=""
+	if grep -qF "$WEB_CLIP_PATH" "$PAGE"; then
+		local icon="$HERE/../../frontend/public/apple-touch-icon.png" prof_err
+		WEB_CLIP_PROFILE="$PAGE_DIR/ios-web-clip.mobileconfig"
+		if ! prof_err="$(node "$HERE/make-web-clip-profile.mjs" "https://$APP_HOST/" "$icon" 2>&1 >"$WEB_CLIP_PROFILE")" 			|| [ ! -s "$WEB_CLIP_PROFILE" ]; then
+			echo "REFUSING: $PAGE_SOURCE links $WEB_CLIP_PATH (the iPhone one-tap install) and deploy/ops/make-web-clip-profile.mjs could not render the profile:"
+			echo "  ${prof_err:-no output}"
+			echo "(it needs node on PATH and the 180x180 icon at frontend/public/apple-touch-icon.png)."
+			echo "Remove the link from the page to ship without it."
+			exit 1
+		fi
+	fi
+}
+
+# Where the backend serves the rendered iPhone profile (src/update_routes.rs).
+# The download page links this on the API host. It is the backend, not the
+# download host's Caddy, that serves it: iOS only offers to install a profile
+# sent as application/x-apple-aspen-config, and a stock Caddy/mime database does
+# not know `.mobileconfig` — so this needs no change to the production Caddyfile.
+WEB_CLIP_PATH="/api/ios-web-clip"
+WEB_CLIP_TYPE="application/x-apple-aspen-config"
+
+# Put the rendered profile on EVERY host and prove each one answers with it, as
+# iOS needs it: status 200, the aspen-config type, the bytes we rendered. Runs
+# before any artifact is uploaded (it is part of ensure_download_dirs), so the
+# run is still all-or-nothing, and before the page that links it. A backend older
+# than the route answers 404 — ship the backend first (the check says so).
+ship_web_clip_profile() {
+	[ -n "${WEB_CLIP_PROFILE:-}" ] || return 0
+	local entry label want code ctype served_sha
+	want="$(sha256sum "$WEB_CLIP_PROFILE" | cut -d' ' -f1)"
+	for entry in "${HOSTS[@]}"; do
+		label="$(label_of "$entry")"
+		scp_to "$entry" "$WEB_CLIP_PROFILE" "${entry#*:}:/tmp/puca-web-clip-dual.mobileconfig" 			&& ssh_to "$entry" "set -e
+				mv /tmp/puca-web-clip-dual.mobileconfig $INSTALL_DIR/ios-web-clip.mobileconfig
+				chmod 644 $INSTALL_DIR/ios-web-clip.mobileconfig" || {
+			echo "FAIL  $label: cannot place the iPhone profile in $INSTALL_DIR — nothing else has been uploaded to any host"
+			exit 1
+		}
+		code="$(remote_code "$entry" "$API_HOST" "$WEB_CLIP_PATH" 2>/dev/null || true)"
+		ctype="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve '$API_HOST:443:127.0.0.1' -D - -o /dev/null 'https://$API_HOST$WEB_CLIP_PATH' --max-time 20" 2>/dev/null | tr -d '\015' | sed -n 's/^[Cc]ontent-[Tt]ype: *//p' | head -1 || true)"
+		# piped straight into sha256sum: a $(...) capture would drop trailing newlines
+		served_sha="$(remote_body "$entry" "$API_HOST" "$WEB_CLIP_PATH" 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
+		if [ "$code" = 200 ] && [ "$ctype" = "$WEB_CLIP_TYPE" ] && [ "$served_sha" = "$want" ]; then
+			echo "PASS  $label serves the iPhone profile at $WEB_CLIP_PATH as $WEB_CLIP_TYPE"
+		else
+			echo "FAIL  $label: $API_HOST$WEB_CLIP_PATH answered status '${code:-none}', type '${ctype:-none}', hash match: $([ "$served_sha" = "$want" ] && echo yes || echo NO)."
+			echo "      A phone would not offer to install it. The backend serves the route from src/update_routes.rs"
+			echo "      (404 = a backend older than 'Install with one tap'): ship the backend to EVERY host first,"
+			echo "      then this. Nothing but the profile file has been uploaded; no artifact and no page."
+			exit 1
+		fi
+	done
 }
 
 # Refuse to publish a page that still names a placeholder domain. The same
@@ -195,6 +255,7 @@ ensure_download_dirs() {
 			exit 1
 		fi
 	done
+	ship_web_clip_profile
 }
 
 # Refuse to ship an artifact the page does not advertise.

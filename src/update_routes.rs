@@ -39,6 +39,18 @@
 //! receive NO updates at all (see frontend's bundleVariantMatches, which
 //! still fails closed if this ever regresses to serving one file for both).
 //!
+//! `GET /api/ios-web-clip` serves the iPhone/iPad configuration profile that puts
+//! the web app on a Home Screen with one tap (the download page's "Install with
+//! one tap"). The profile is rendered per deployment at ship time by
+//! `deploy/ops/make-web-clip-profile.mjs` and dropped next to the binary as
+//! `ios-web-clip.mobileconfig`, the same publish model as the files above. It is
+//! served from here, not from the download host's Caddy, for one reason: iOS
+//! offers to install a profile only when it arrives as
+//! `application/x-apple-aspen-config`, and Caddy would take the type from the
+//! host's mime database, which has no `.mobileconfig` on a stock distribution
+//! (the same reason the web app's manifest is `.json`). Serving it here needs no
+//! change to the production Caddyfile.
+//!
 //! `?variant=notes` serves a THIRD manifest, for Púca Notes' Android app
 //! (`com.sovereign.notes`) — a different app, not a variant, whose bundles are
 //! signed with a different key. An old server answers `?variant=notes` with
@@ -92,6 +104,48 @@ async fn serve_json_file(path: String, label: &str) -> axum::response::Response 
     }
 }
 
+/// Where the rendered configuration profile lives, next to the binary.
+const IOS_WEB_CLIP_FILE: &str = "ios-web-clip.mobileconfig";
+
+/// `application/x-apple-aspen-config`: what makes iOS Safari offer the profile.
+const IOS_PROFILE_TYPE: &str = "application/x-apple-aspen-config";
+
+/// Is this plausibly the profile dual-ship rendered, and nothing else? The file
+/// is operator-pushed, so a half-written upload or a stray file must not be
+/// handed to a phone as a profile. It must be a property list holding exactly
+/// one payload, a Web Clip (`com.apple.webClip.managed`): a profile that
+/// carried a certificate, a restriction or a VPN would be an entirely different
+/// thing to install, and this route refuses to be the way one gets served.
+fn is_web_clip_only_profile(body: &str) -> bool {
+    let payload_types = body.matches("<key>PayloadType</key>").count();
+    body.starts_with("<?xml")
+        && body.contains("<plist")
+        && body.contains("</plist>")
+        && payload_types == 2 // the profile's own, and the one Web Clip
+        && body.contains("<string>Configuration</string>")
+        && body.contains("<string>com.apple.webClip.managed</string>")
+}
+
+async fn ios_web_clip() -> impl IntoResponse {
+    match tokio::fs::read_to_string(IOS_WEB_CLIP_FILE).await {
+        Ok(body) if is_web_clip_only_profile(&body) => (
+            [
+                ("content-type", IOS_PROFILE_TYPE),
+                ("content-disposition", "attachment; filename=\"Puca.mobileconfig\""),
+                ("cache-control", "no-cache"),
+                ("x-content-type-options", "nosniff"),
+            ],
+            body,
+        )
+            .into_response(),
+        Ok(_) => {
+            tracing::warn!("[Update] {IOS_WEB_CLIP_FILE} is not a single Web Clip profile; not serving it");
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn app_version() -> impl IntoResponse {
     serve_json_file(version_file_path(), "app-version").await
 }
@@ -120,7 +174,34 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::mobile_update_file_path;
+    use super::{is_web_clip_only_profile, mobile_update_file_path};
+
+    fn profile(inner_type: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n\
+             <key>PayloadContent</key><array><dict><key>PayloadType</key><string>{inner_type}</string></dict></array>\n\
+             <key>PayloadType</key><string>Configuration</string>\n</dict></plist>\n"
+        )
+    }
+
+    /// The route serves the Web Clip profile (positive control) and refuses
+    /// everything that is not exactly that: another payload type, a second
+    /// payload, a truncated upload, not a property list at all.
+    #[test]
+    fn only_a_lone_web_clip_profile_is_served() {
+        assert!(is_web_clip_only_profile(&profile("com.apple.webClip.managed")));
+        assert!(!is_web_clip_only_profile(&profile("com.apple.security.root")));
+        assert!(!is_web_clip_only_profile(&profile("com.apple.vpn.managed")));
+        let two = profile("com.apple.webClip.managed").replace(
+            "</array>",
+            "<dict><key>PayloadType</key><string>com.apple.security.root</string></dict></array>",
+        );
+        assert!(!is_web_clip_only_profile(&two), "a second payload rides along");
+        let cut = profile("com.apple.webClip.managed").replace("</plist>", "");
+        assert!(!is_web_clip_only_profile(&cut), "a half-written file");
+        assert!(!is_web_clip_only_profile("<html>not a profile</html>"));
+        assert!(!is_web_clip_only_profile(""));
+    }
 
     // Deliberately does NOT set MOBILE_UPDATE_FILE{,_LITE,_NOTES}:
     // std::env::set_var is process-wide and other tests in this binary run in

@@ -666,6 +666,11 @@ the crowd. Three checks, cheapest first:
   the scanner really looked. The durable fix is a certificate —
   `frontend/scripts/sign-windows.mjs` is already wired into Tauri's
   `signCommand` and does nothing only because none is configured.
+- `make-web-clip-profile.mjs` — renders the iPhone/iPad "Install with one tap"
+  configuration profile (one Web Clip payload, nothing else) from `APP_HOST` and the
+  180 px icon; `dual-ship.sh` runs it whenever the download page links
+  `/api/ios-web-clip`, and the backend serves the result (needs the backend shipped
+  first, no Caddy change).
 - `check-versions.sh` — every surface (desktop `latest.json`, `/app-version`,
   the mobile OTA manifest, the download page, the web bundle, the CSP header)
   must agree on one version on every host; `--preflight` says whether the

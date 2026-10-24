@@ -14,7 +14,13 @@
 // the negative control that must FAIL the same check); and the download page puts
 // "iPhone & iPad" first for an iPhone user agent, keeps it in place for a
 // desktop one and with JavaScript off, keeps ?variant=lite working, loads nothing
-// from outside, and has no horizontal overflow.
+// from outside, and has no horizontal overflow. Since the one-tap install it also
+// checks: "Install with one tap" (the profile link, on the API host) is on screen at
+// the top for an iPhone and iPad user agent and absent for a computer's; the Share
+// steps stay below it; "Install Púca as an app" shows for Chromium browsers only; and
+// the web app's own "Install Púca" banner (components/InstallBanner.tsx) shows for
+// ?install=1 on a computer, and NEVER in a Home Screen / standalone window or on an
+// iPhone, even when the browser event is fired at it.
 //
 // WHAT IT CANNOT SEE, and nothing here pretends to: Add to Home Screen itself,
 // standalone mode (navigator.standalone is faked with an init script), the status
@@ -252,6 +258,97 @@ console.log('\n--- the web app, as a Home Screen app (navigator.standalone faked
     await context.close();
 }
 
+// ========================================== 1b. the web app's Install banner ===
+// WebKit never fires beforeinstallprompt itself, so the event is dispatched at the
+// page: what is under test is what the app DOES with one, in each kind of window.
+console.log('\n--- the web app "Install Púca" banner (components/InstallBanner.tsx) ---');
+{
+    const fireInstallEvent = (page) => page.evaluate(() => {
+        const e = new Event('beforeinstallprompt', { cancelable: true });
+        e.prompt = () => Promise.resolve();
+        e.userChoice = Promise.resolve({ outcome: 'dismissed' });
+        window.dispatchEvent(e);
+        return e.defaultPrevented;
+    });
+    const mounted = (page) => page.waitForFunction(() => (document.getElementById('root')?.children.length ?? 0) > 0, null, { timeout: 20000 }).catch(() => {});
+    const banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.install-banner');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        const btn = document.querySelector('[data-testid="install-banner-install"]').getBoundingClientRect();
+        const hit = document.elementFromPoint(btn.left + btn.width / 2, btn.top + btn.height / 2);
+        return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth, btnHit: hit?.getAttribute('data-testid') ?? hit?.tagName, btnH: Math.round(btn.height) };
+    });
+    const CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+
+    // POSITIVE CONTROL: a computer's browser, asked from the download page, offered the install.
+    {
+        const { context, page } = await open(`${app.url}/?install=1`, { viewport: { width: 1280, height: 800 }, userAgent: CHROME });
+        await mounted(page);
+        check('the marker is taken off the address', await page.evaluate(() => location.search === ''), await page.evaluate(() => location.href));
+        const prevented = await fireInstallEvent(page);
+        await page.waitForSelector('.install-banner', { timeout: 5000 }).catch(() => {});
+        const b = await banner(page);
+        check('CONTROL: ?install=1 plus the browser install event shows the banner, over the sign-in screen', b !== null && prevented === true, JSON.stringify(b));
+        check('and it is a slim strip on screen whose Install button is what a click hits', b !== null && b.top === 0 && b.h < 80 && b.btnHit === 'install-banner-install' && b.overflow <= 0, JSON.stringify(b));
+        await page.screenshot({ path: path.join(outDir, 'app-1280x800-install-banner.png') });
+        await page.click('[data-testid="install-banner-dismiss"]');
+        check('dismissing removes it', (await banner(page)) === null);
+        await page.goto(app.url, { waitUntil: 'load' });
+        await mounted(page);
+        const again = await fireInstallEvent(page);
+        check('and a dismissal PERSISTS: a plain visit afterwards shows nothing and leaves the browser prompt alone', (await banner(page)) === null && again === false);
+        await page.goto(`${app.url}/?install=1`, { waitUntil: 'load' });
+        await mounted(page);
+        await fireInstallEvent(page);
+        await page.waitForSelector('.install-banner', { timeout: 5000 }).catch(() => {});
+        check('but asking again from the download page is a fresh ask', (await banner(page)) !== null);
+        await context.close();
+    }
+    // An ordinary visit: nothing, and the browser's prompt is not taken from it.
+    {
+        const { context, page } = await open(app.url, { viewport: { width: 1280, height: 800 }, userAgent: CHROME });
+        await mounted(page);
+        const prevented = await fireInstallEvent(page);
+        check('an ordinary visit shows no banner and does not suppress the browser prompt', (await banner(page)) === null && prevented === false);
+        await context.close();
+    }
+    // NEVER in a standalone window, asked or not (navigator.standalone faked, as above).
+    const standalone = () => Object.defineProperty(Navigator.prototype, 'standalone', { get: () => true, configurable: true });
+    {
+        const { context, page } = await open(`${app.url}/?install=1`, { ...iphone }, { init: standalone });
+        await mounted(page);
+        const prevented = await fireInstallEvent(page);
+        await page.waitForTimeout(500);
+        check('a Home Screen (standalone) iPhone window NEVER shows the banner, even asked and sent the event', (await banner(page)) === null && prevented === false);
+        await context.close();
+    }
+    {
+        const { context, page } = await open(`${app.url}/?install=1`, { viewport: { width: 1280, height: 800 }, userAgent: CHROME }, { init: standalone });
+        await mounted(page);
+        const prevented = await fireInstallEvent(page);
+        await page.waitForTimeout(500);
+        check('nor does a standalone window on a computer (an installed Chrome or Edge app)', (await banner(page)) === null && prevented === false);
+        await context.close();
+    }
+    {
+        const { context, page } = await open(`${app.url}/?install=1`, { ...iphone });
+        await mounted(page);
+        const prevented = await fireInstallEvent(page);
+        await page.waitForTimeout(500);
+        check('nor does Safari on an iPhone (no install event there; the download page has its own route)', (await banner(page)) === null && prevented === false);
+        await context.close();
+    }
+    {
+        const { context, page } = await open(`${app.url}/?install=1`, { viewport: { width: 1280, height: 800 }, userAgent: CHROME }, { init: () => { window.__TAURI_INTERNALS__ = {}; } });
+        await mounted(page);
+        const prevented = await fireInstallEvent(page);
+        await page.waitForTimeout(500);
+        check('nor does the desktop app window (Tauri shell faked)', (await banner(page)) === null && prevented === false);
+        await context.close();
+    }
+}
+
 // ====================================================== 2. the download page ===
 const sectionState = (page) => page.evaluate(() => {
     const sec = document.getElementById('iphone');
@@ -263,9 +360,16 @@ const sectionState = (page) => page.evaluate(() => {
         prev: sec.previousElementSibling?.className ?? null, next: sec.nextElementSibling?.className ?? null,
         first: sec.classList.contains('first'), top: Math.round(r.top), sectionVisible: vis(sec),
         qrVisible: vis(qr) && !!qrBox && qrBox.width > 100, qrW: qrBox ? Math.round(qrBox.width) : 0,
-        steps: [...sec.querySelectorAll('.iphone-steps li')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
-        openHref: [...sec.querySelectorAll('a.btn')].map((a) => a.getAttribute('href')),
-        stepHrefs: [...sec.querySelectorAll('a')].map((a) => a.getAttribute('href')),
+        steps: [...sec.querySelectorAll(':scope > ol.iphone-steps li')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
+        tapSteps: [...sec.querySelectorAll('#onetap ol li')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()),
+        tapVisible: vis(document.getElementById('onetap')), tapHref: document.querySelector('#onetap a.btn')?.getAttribute('href') ?? null,
+        tapTop: Math.round(document.querySelector('#onetap a.btn').getBoundingClientRect().top), tapBtnVisible: vis(document.querySelector('#onetap a.btn')),
+        tapText: document.getElementById('onetap').textContent.replace(/\s+/g, ' '),
+        shareTop: Math.round(sec.querySelector(':scope > ol.iphone-steps').getBoundingClientRect().top),
+        tapBottom: Math.round(document.getElementById('onetap').getBoundingClientRect().bottom),
+        openHref: [...sec.querySelectorAll(':scope > .downloads a.btn')].map((a) => a.getAttribute('href')),
+        stepHrefs: [...sec.querySelectorAll(':scope > ol a, :scope > a')].map((a) => a.getAttribute('href')),
+        installWeb: (() => { const b = document.getElementById('install-web'); return b ? { visible: vis(b), href: b.getAttribute('href') } : null; })(),
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         tab: document.querySelector('.variant-btn.active')?.id, fullShown: document.querySelector('[data-variant-panel="full"].shown') !== null && vis(document.querySelector('[data-variant-panel="full"]')),
         liteShown: vis(document.querySelector('[data-variant-panel="lite"]')),
@@ -279,7 +383,15 @@ console.log('\n--- the download page on an iPhone ---');
     const s = await sectionState(page);
     check('the iPhone & iPad section comes first, directly under the tagline', s.prev === 'tag' && s.next === 'variant-picker' && s.first, JSON.stringify(s.order));
     check('it is on screen above the fold at 390x844', s.sectionVisible && s.top < 300, `top ${s.top}`);
-    check('the four steps are there, in order', s.steps.length === 4 && /Safari/.test(s.steps[0]) && /Share/.test(s.steps[1]) && /Add to Home Screen/.test(s.steps[2]) && /Add\b/.test(s.steps[3]), JSON.stringify(s.steps));
+    check('"Install with one tap" is the first thing in it: visible, on screen, linking the profile route on the API host',
+        s.tapVisible && s.tapBtnVisible && s.tapTop < 500 && s.tapHref === 'https://api.invalid/api/ios-web-clip', JSON.stringify({ v: s.tapVisible, top: s.tapTop, h: s.tapHref }));
+    check('its approval steps name Settings, Profile Downloaded and Install', s.tapSteps.length === 4 && /Allow/.test(s.tapSteps[0]) && /Settings/.test(s.tapSteps[1]) && /Profile Downloaded/.test(s.tapSteps[1]) && /Install/.test(s.tapSteps[2]), JSON.stringify(s.tapSteps));
+    check('the page says exactly what the file contains, and what Not Verified means', /nothing else/i.test(s.tapText) && /No certificates, no restrictions/.test(s.tapText) && /Not Verified/.test(s.tapText) && /not signed/.test(s.tapText), s.tapText.slice(0, 300));
+    check('it says the Share steps stay recommended and notifications are unconfirmed for this route', /Share steps below are the route Apple documents/.test(s.tapText) && /nothing about this route/.test(s.tapText), s.tapText.slice(0, 600));
+    check('the Share steps are BELOW the one-tap block (and still there)', s.shareTop >= s.tapBottom, JSON.stringify({ share: s.shareTop, tapBottom: s.tapBottom }));
+    check('"Install Púca as an app" (Chromium only) is not offered to an iPhone', s.installWeb !== null && !s.installWeb.visible, JSON.stringify(s.installWeb));
+    await page.screenshot({ path: path.join(outDir, 'download-390x844-iphone-onetap.png') });
+    check('the four Share steps are there, in order', s.steps.length === 4 && /Safari/.test(s.steps[0]) && /Share/.test(s.steps[1]) && /Add to Home Screen/.test(s.steps[2]) && /Add\b/.test(s.steps[3]), JSON.stringify(s.steps));
     check('Open Púca and the address link both point at the web app host', s.openHref.length === 1 && s.openHref[0] === `https://${APP_HOST}` && s.stepHrefs.every((h) => h === `https://${APP_HOST}`), JSON.stringify(s));
     check('the QR code is hidden for a visitor already on a phone', !s.qrVisible, JSON.stringify(s));
     check('no horizontal overflow at 390 px', s.overflow <= 0, String(s.overflow));
@@ -319,6 +431,8 @@ console.log('\n--- the download page on a computer, and with JavaScript off ---'
     const s = await sectionState(page);
     check('a desktop visitor: section in place (after the build tabs and panels, before Notes), not boxed first', !s.first && s.order.indexOf('iphone') > s.order.indexOf('variant-picker') && s.order[s.order.indexOf('iphone') + 1] === 'notes-app', JSON.stringify(s.order));
     check('the QR code is shown, 168 px, for scanning with a phone', s.qrVisible && s.qrW === 168, JSON.stringify(s));
+    check('a computer is not offered the iPhone profile (it could not use the file)', !s.tapVisible && !s.tapBtnVisible, JSON.stringify({ v: s.tapVisible }));
+    check('a Safari-like desktop browser cannot install a web app, so "Install Púca as an app" is hidden', s.installWeb !== null && !s.installWeb.visible, JSON.stringify(s.installWeb));
     await page.screenshot({ path: path.join(outDir, 'download-1280x800-desktop.png') });
     await context.close();
 }
@@ -327,13 +441,29 @@ console.log('\n--- the download page on a computer, and with JavaScript off ---'
     const s = await sectionState(page);
     check('JavaScript OFF: the section, its steps and the QR code are all there', s.sectionVisible && s.steps.length === 4 && s.qrVisible, JSON.stringify(s));
     check('JavaScript OFF: the downloads are still offered (the full panel is pre-selected)', s.fullShown && !s.liteShown && s.tab === 'tab-full', JSON.stringify(s));
+    check('JavaScript OFF: the one-tap block and the install button are simply there', s.tapVisible && s.installWeb?.visible === true, JSON.stringify({ tap: s.tapVisible, web: s.installWeb }));
     await context.close();
 }
 {
     const { context, page } = await open(site.url, { ...iphone, javaScriptEnabled: false });
     const s = await sectionState(page);
     check('JavaScript OFF on an iPhone: the section is in place and usable, QR shown', s.sectionVisible && s.steps.length === 4 && s.qrVisible && !s.first, JSON.stringify(s));
+    check('JavaScript OFF on an iPhone: the one-tap button is there with its steps', s.tapVisible && s.tapBtnVisible && s.tapHref === 'https://api.invalid/api/ios-web-clip' && s.tapSteps.length === 4, JSON.stringify({ v: s.tapVisible, h: s.tapHref }));
     await context.close();
+}
+
+{
+    // Chromium browsers (a computer's Chrome or Edge, Android Chrome) get the install button,
+    // and it opens the web app with the marker the banner listens for.
+    const CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+    const ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
+    for (const [name, opts] of [['Chrome on a computer', { viewport: { width: 1280, height: 800 }, userAgent: CHROME }], ['Chrome on Android', { viewport: { width: 390, height: 844 }, userAgent: ANDROID, hasTouch: true, isMobile: true }]]) {
+        const { context, page } = await open(site.url, opts);
+        const s = await sectionState(page);
+        check(`${name}: "Install Púca as an app" is shown and opens the web app with ?install=1`, s.installWeb?.visible === true && s.installWeb.href === `https://${APP_HOST}/?install=1`, JSON.stringify(s.installWeb));
+        check(`${name}: the iPhone profile is not offered`, !s.tapVisible, JSON.stringify({ v: s.tapVisible }));
+        await context.close();
+    }
 }
 
 await browser.close();

@@ -64,6 +64,12 @@ installFileDropGuard(window)
 import { installIosStandalone } from './api/iosStandalone'
 installIosStandalone()
 
+// The download page's "Install Púca as an app" opens the web app with ?install=1 and
+// the browser's install event can fire before React mounts: wire both now
+// (api/installPrompt.ts; nothing in the desktop or Android app, or an installed window).
+import { installInstallPrompt } from './api/installPrompt'
+installInstallPrompt()
+
 // Desktop shell: the tray capture badge, the tooltip and the native clip
 // capture threads live in the PROCESS, but every one of them is driven from
 // here. A webview reload (F5, a crash recovery, a dev reload) throws away the

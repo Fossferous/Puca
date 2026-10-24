@@ -194,6 +194,20 @@ download site serves now). Ship the plugin when it changes, not every release; r
 version first. Its update check asks the page for `downloadSite()` (docs/EMBEDDING.md,
 new after 0.9.846): until a webapp with it ships, installed plugins see no updates.
 
+**The download page's iPhone "Install with one tap" is a configuration profile the
+BACKEND serves** (`GET /api/ios-web-clip`, `src/update_routes.rs`), not Caddy: iOS
+offers a profile only as `application/x-apple-aspen-config`, and a stock mime
+database has no `.mobileconfig`, so serving it from the download vhost would have
+needed a production Caddyfile line. `dual-ship.sh` renders it per deployment from
+`APP_HOST` and `frontend/public/apple-touch-icon.png` (`make-web-clip-profile.mjs`;
+it refuses to ship a page that links the route if it cannot), puts it at
+`$INSTALL_DIR/ios-web-clip.mobileconfig` on EVERY host and proves each host answers
+it with the right type and bytes BEFORE any artifact or the page goes up.
+**Ship the backend to every host before the first page ship that carries the link** (a
+404 fails the ship by design, with that instruction). The profile is deliberately
+unsigned (the operator's TLS certificate is the wrong kind and renews every couple of
+months); the page says what "Not Verified" means.
+
 Mobile OTA is variant-aware over one query param: the installed app requests
 `GET /api/mobile-updates/check?variant=lite` (full omits the param), and
 `src/update_routes.rs` resolves that to `mobile-update-lite.json` instead of

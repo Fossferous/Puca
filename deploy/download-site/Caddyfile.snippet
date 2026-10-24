@@ -28,6 +28,11 @@ download.example.com {
 	# installers (release notes, privacy statement) — as text/markdown a
 	# browser downloads them instead of showing them. SHA256SUMS.txt is
 	# already text/plain by extension.
+	# The iPhone "Install with one tap" profile (.mobileconfig) is NOT served from
+	# here: iOS only offers to install a profile sent as
+	# application/x-apple-aspen-config, which a stock mime database does not know for
+	# that extension. The backend serves it (GET /api/ios-web-clip, src/update_routes.rs),
+	# so this vhost needs no line for it.
 	header /CHANGELOG.md Content-Type "text/plain; charset=utf-8"
 	header /PRIVACY.md Content-Type "text/plain; charset=utf-8"
 	encode gzip
