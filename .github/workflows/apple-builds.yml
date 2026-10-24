@@ -10,9 +10,11 @@
 #   - Puca-macOS-dmg    : universal (Intel+Apple Silicon) .dmg, ad-hoc
 #                              signed — first launch needs right-click → Open.
 #   - Puca-macOS-app    : the .app bundle, tar'd to preserve permissions.
-#   - Puca-iOS-unsigned : compile-proof unsigned .ipa. NOT installable on
-#                              a device until re-signed with an Apple Developer
-#                              certificate (TestFlight/sideload comes later).
+#   - Puca-iOS-unsigned : unsigned .ipa. Not installable as it is: SideStore
+#                              or AltStore re-signs it on the phone with that
+#                              person's own free Apple ID (7-day signature,
+#                              refreshed from the phone). Built against the
+#                              placeholder host unless `api_url` is given.
 name: Apple builds
 
 permissions:
@@ -20,6 +22,17 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      api_url:
+        description: >-
+          Server the iOS app talks to, e.g. https://chat.<your-domain>. Leave
+          empty for a compile-proof build against the placeholder host.
+        required: false
+        default: ''
+      ios_only:
+        description: Skip the ~45-minute macOS desktop build
+        type: boolean
+        default: false
   push:
     tags:
       - 'apple-*'
@@ -29,14 +42,17 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # PLACEHOLDER. Anything built here talks to a host that does not exist, so
-  # these artifacts are build-verification only and must never be handed to a
-  # user. Set a real host before any Apple build is actually distributed.
-  VITE_API_URL: https://chat.example.com
+  # The placeholder unless the dispatch named a server. A build against it
+  # talks to a host that does not exist: build-verification only, never to be
+  # handed to a user. The real host is typed into the dispatch form, never
+  # written here (this repository is public; hosts live in hosts.conf).
+  VITE_API_URL: ${{ inputs.api_url || 'https://chat.example.com' }}
 
 jobs:
   macos-desktop:
     name: macOS desktop (.dmg, universal)
+    # inputs.ios_only is null on a tag push, so tags still build both.
+    if: ${{ !inputs.ios_only }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -107,10 +123,10 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      # cap:build:ios, not a bare build + sync: it also strips Púca Notes'
+      # pages out of the synced bundle, as every native build does.
       - name: Build web assets + sync iOS project
-        run: |
-          npm run build
-          npx cap sync ios
+        run: npm run cap:build:ios
         working-directory: frontend
 
       # cap sync regenerates CapApp-SPM/Package.swift with Capacitor's default
@@ -130,6 +146,24 @@ jobs:
           CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
           build
         working-directory: frontend/ios/App
+
+      # A call survives a locked phone only with these in the BUILT app:
+      # WebKit mutes a hidden page's microphone unless the main bundle's
+      # UIBackgroundModes lists "audio" (RealtimeMediaSourceCenterCocoa.mm,
+      # shouldInterruptAudioOnPageVisibilityChange), and getUserMedia kills
+      # the app outright without the usage strings. Check the product, not
+      # the source plist.
+      - name: Built app keeps a call alive in the background
+        run: |
+          plist=App.app/Info.plist
+          plutil -extract UIBackgroundModes json -o - "$plist" | grep -q '"audio"' \
+            || { echo "::error::UIBackgroundModes has no audio: the microphone goes silent when the phone locks"; exit 1; }
+          for key in NSMicrophoneUsageDescription NSCameraUsageDescription; do
+            plutil -extract "$key" raw -o - "$plist" >/dev/null \
+              || { echo "::error::$key missing: getUserMedia crashes the app"; exit 1; }
+          done
+          echo "API base baked in: $VITE_API_URL"
+        working-directory: frontend/ios/App/build/Build/Products/Release-iphoneos
 
       - name: Package unsigned .ipa
         run: |
