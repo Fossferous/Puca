@@ -23,13 +23,14 @@ export function pruneExpiredTyping<K>(prev: Map<K, TypingEntry>, now: number): M
     return next ?? prev;
 }
 
-export interface MediaSummary { total: number; encrypted: number; supported: boolean; enforced: boolean }
+export interface MediaSummary { total: number; encrypted: number; supported: boolean; enforced: boolean; unconfirmed?: boolean }
 export interface E2eeDetailRow { userId: number; encrypted: boolean; reason: MediaE2eeReason }
 
 /** `next` unless it says exactly what `prev` says, in which case `prev`. */
 export function keepSummary(prev: MediaSummary, next: MediaSummary): MediaSummary {
     return prev.total === next.total && prev.encrypted === next.encrypted
-        && prev.supported === next.supported && prev.enforced === next.enforced ? prev : next;
+        && prev.supported === next.supported && prev.enforced === next.enforced
+        && !!prev.unconfirmed === !!next.unconfirmed ? prev : next;
 }
 
 /** `next` unless it lists the same peers in the same states, in which case `prev`. */

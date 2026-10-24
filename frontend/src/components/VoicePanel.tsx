@@ -4,8 +4,8 @@ import { webrtcManager } from '../api/webrtc';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { setSfuControlSender } from '../api/rtc/controlDc';
 import type { MediaE2eeReason } from '../api/rtc/types';
-import { mediaE2eeExplanation, localMediaNotice } from '../api/rtc/e2eeStatus';
-import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
+import { downgradeExplanations, localMediaNotice } from '../api/rtc/e2eeStatus';
+import { isMediaE2eeSupported, isScriptTransformSuspended } from '../api/rtc/mediaCrypto';
 import { isE2EESupported } from 'livekit-client';
 import { loadSettings, saveSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
@@ -398,7 +398,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { streamOnlyRef.current = streamOnly; }, [streamOnly]);
     // Aggregate media-E2EE status (polled) so the UI can show a lock — a
     // server-forced downgrade to transport-only is then visible.
-    const [mediaSecure, setMediaSecure] = useState<{ total: number; encrypted: number; supported: boolean; enforced: boolean }>(
+    const [mediaSecure, setMediaSecure] = useState<{ total: number; encrypted: number; supported: boolean; enforced: boolean; unconfirmed?: boolean }>(
         { total: 0, encrypted: 0, supported: true, enforced: false },
     );
     // Per-peer downgrade reasons, so the (i) tooltip can explain WHICH peer is
@@ -714,6 +714,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         required: requireE2ee,
         serverRequired: serverRequireMediaE2ee,
         sfuMode,
+        // A mesh call whose encryption could not be confirmed (and will be
+        // tried again) is not an engine that cannot: different words, and no
+        // advice to turn the setting off. The poll's `unconfirmed` is what
+        // re-renders this when it changes.
+        unconfirmed: !sfuMode && (mediaSecure.unconfirmed === true || isScriptTransformSuspended()),
     });
     const voiceDetectorCleanups = useRef<Map<number, () => void>>(new Map());
 
@@ -3323,13 +3328,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // encrypted, per peer. Shown in the (i) tooltip next to the E2EE badge.
     const nameFor = (userId: number) => globalVoiceUsers.get(roomId)?.get(userId)?.username || `User ${userId}`;
     const enforced = mediaSecure.enforced;
-    // Deduplicate: if OUR device can't do it, that's the single cause for all peers.
-    const localUnsupported = e2eeDetail.some(d => d.reason === 'local-unsupported') || mediaSecure.supported === false;
-    const downgradeLines: string[] = localUnsupported
-        ? [mediaE2eeExplanation('local-unsupported', '', enforced, serverRequireMediaE2ee)!]
-        : e2eeDetail.filter(d => !d.encrypted)
-            .map(d => mediaE2eeExplanation(d.reason, nameFor(d.userId), enforced))
-            .filter((s): s is string => !!s);
+    // Deduplicate: if OUR device can't do it, that's the single cause for all
+    // peers — and if it could not be confirmed on this call, THAT is, said
+    // as such (never "this browser can't", never "turn the setting off").
+    const downgradeLines = downgradeExplanations({
+        detail: e2eeDetail, summary: mediaSecure, enforced,
+        serverRequired: serverRequireMediaE2ee, sfuMode, nameFor,
+    });
 
     // Unified E2EE badge content — every state (including fully encrypted) gets
     // the same hover/focus popup, so the indicator always explains itself.

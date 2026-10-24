@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { mediaE2eeExplanation, localMediaBlockNotice, localMediaNotice } from '../api/rtc/e2eeStatus';
+import { downgradeExplanations, mediaE2eeExplanation, localMediaBlockNotice, localMediaNotice } from '../api/rtc/e2eeStatus';
+import type { MediaE2eeReason } from '../api/rtc/types';
 
 /**
  * Why THIS engine cannot encrypt: the first parenthesis of a local notice.
@@ -194,8 +195,52 @@ describe('mediaE2eeExplanation', () => {
         }
     });
 
+    it('encryption that could not be confirmed on THIS call: said as that, with no browser to change and NO setting to turn off', () => {
+        for (const enforced of [true, false]) {
+            const s = mediaE2eeExplanation('unconfirmed', '', enforced, true)!;
+            expect(s).toMatch(/could not be confirmed on this call/);
+            expect(s).toMatch(/tries again/);
+            expect(s, 'the remedy for an engine that cannot, given for a passing failure').not.toMatch(/turn off|Require encryption|Chrome|older browser|web view/i);
+        }
+        expect(mediaE2eeExplanation('unconfirmed', '', true)).toMatch(/held back/);
+        expect(mediaE2eeExplanation('unconfirmed', '', false)).toMatch(/only in transit/);
+    });
+
+    it('the notice for an unconfirmed call: blocked or warned as the setting says, never the "this browser can’t" text or its advice', () => {
+        const base = { supported: false, required: true, serverRequired: false, sfuMode: false, unconfirmed: true };
+        const blocked = localMediaNotice(base)!;
+        expect(blocked.level).toBe('blocked');
+        expect(blocked.text).toMatch(/could not be confirmed on this call/);
+        expect(blocked.text).not.toMatch(/turn off|Require encryption for calls|can’t end-to-end encrypt/i);
+        const warned = localMediaNotice({ ...base, required: false })!;
+        expect(warned.level).toBe('warning');
+        expect(warned.text).toMatch(/only in transit/);
+        // CONTROL: the same inputs without `unconfirmed` are the engine's story.
+        expect(localMediaNotice({ ...base, unconfirmed: false })!.text).toMatch(/can’t end-to-end encrypt live media/);
+        // An SFU channel is livekit's probe, never the mesh path's audit.
+        expect(localMediaNotice({ ...base, sfuMode: true })!.text).toMatch(/encrypted-only/);
+    });
+
+    it('the panel\'s lines: an unconfirmed call is ONE line, never the engine\'s or its advice; then an engine that cannot; then each peer', () => {
+        const base = { detail: [] as Array<{ userId: number; encrypted: boolean; reason: MediaE2eeReason }>, summary: { supported: true }, enforced: true, serverRequired: false, sfuMode: false, nameFor: (id: number) => `U${id}` };
+        const unconfirmed = downgradeExplanations({ ...base, summary: { supported: false, unconfirmed: true }, detail: [{ userId: 2, encrypted: false, reason: 'unconfirmed' }, { userId: 3, encrypted: false, reason: 'unconfirmed' }] });
+        expect(unconfirmed).toHaveLength(1);
+        expect(unconfirmed[0]).toMatch(/could not be confirmed on this call/);
+        expect(unconfirmed[0], 'the panel told a passing failure to turn the setting off').not.toMatch(/turn off|Require encryption/i);
+        // From the summary alone (no peer listed yet), too.
+        expect(downgradeExplanations({ ...base, summary: { supported: false, unconfirmed: true } })[0]).toMatch(/could not be confirmed/);
+        // CONTROL: unsupported without `unconfirmed` is the engine's line.
+        expect(downgradeExplanations({ ...base, summary: { supported: false } })[0]).toMatch(/can’t end-to-end encrypt live media/);
+        // An SFU channel never takes the mesh path's give-up for its own.
+        expect(downgradeExplanations({ ...base, sfuMode: true, summary: { supported: false, unconfirmed: true } })[0]).toMatch(/can’t end-to-end encrypt live media/);
+        // Otherwise one line per peer not encrypted.
+        const peers = downgradeExplanations({ ...base, detail: [{ userId: 2, encrypted: false, reason: 'peer-unsupported' }, { userId: 3, encrypted: true, reason: 'encrypted' }] });
+        expect(peers).toHaveLength(1);
+        expect(peers[0]).toContain('U2');
+    });
+
     it('covers every reason variant (no silent undefined)', () => {
-        const reasons = ['encrypted', 'negotiating', 'local-unsupported', 'peer-unsupported', 'peer-unencrypted', 'verification-failed', 'fingerprint-mismatch'] as const;
+        const reasons = ['encrypted', 'negotiating', 'local-unsupported', 'unconfirmed', 'peer-unsupported', 'peer-unencrypted', 'verification-failed', 'fingerprint-mismatch'] as const;
         for (const r of reasons) {
             const out = mediaE2eeExplanation(r, 'X');
             expect(out === null || typeof out === 'string').toBe(true);

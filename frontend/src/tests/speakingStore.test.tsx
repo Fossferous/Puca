@@ -98,6 +98,10 @@ describe('periodic ticks that change nothing', () => {
         const a = { total: 5, encrypted: 5, supported: true, enforced: false };
         expect(keepSummary(a, { ...a })).toBe(a);
         expect(keepSummary(a, { ...a, encrypted: 4 })).not.toBe(a);
+        // "could not be confirmed on this call" coming or going must re-render the panel's notice
+        expect(keepSummary(a, { ...a, unconfirmed: true }), 'a give-up for the call went unshown').not.toBe(a);
+        const b = { ...a, unconfirmed: false };
+        expect(keepSummary(b, a), 'false and absent are the same news').toBe(b);
         const d = [{ userId: 1, encrypted: true, reason: 'encrypted' as const }];
         expect(keepDetail(d, [{ ...d[0] }])).toBe(d);
         expect(keepDetail(d, [{ ...d[0], encrypted: false }])).not.toBe(d);

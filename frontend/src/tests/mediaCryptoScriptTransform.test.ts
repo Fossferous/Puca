@@ -31,12 +31,13 @@ import { fileURLToPath } from 'node:url';
 import {
     attachReceiverTransform, attachSenderTransform, importMediaKey, mediaTransformApi,
     noteScriptTransformUnavailable, __resetScriptTransformAvailability, preferSealableVideoCodecs, firstVideoCodecByMid,
-    sendSealableVideoCodec, newFrameCounts, type EncodedFrameLike, type FrameCounts, type MediaCryptoState,
+    sendSealableVideoCodec, newFrameCounts, isScriptTransformSuspended, type EncodedFrameLike, type FrameCounts, type MediaCryptoState,
 } from '../api/rtc/mediaCrypto';
 import { openIncoming, sealOutgoing } from '../api/rtc/frameCrypto';
 import { serveScriptTransforms, type ScriptTransformScope, type ScriptTransformCommand, type ScriptTransformReport } from '../api/rtc/scriptTransformWorker';
 import {
     PeerMediaCrypto, attachMediaReceiverTransform, attachMediaSenderTransform, onScriptTransformLost,
+    onScriptTransformRestored, retryScriptTransformNextCall,
     __runFrameAudit, __setScriptTransformWorkerFactory, type TransformWorkerLike,
 } from '../api/rtc/scriptTransform';
 
@@ -692,7 +693,7 @@ describe('one path per engine', () => {
         }
     });
 
-    it('an error AFTER the worker said it is running takes the path down too (its transforms may be dead)', async () => {
+    it('an error AFTER the worker said it is running takes the path down for the call (its transforms may be dead), and the next call tries again', async () => {
         stubScriptEngine();
         const lost = vi.fn();
         const off = onScriptTransformLost(lost);
@@ -706,9 +707,12 @@ describe('one path per engine', () => {
             fake.emit('error', new Event('error'));
             await settle();
             expect(mediaTransformApi(), 'a failed worker was still trusted').toBeNull();
+            expect(isScriptTransformSuspended(), 'a failure after starting was taken for a browser that cannot').toBe(true);
             expect(fake.terminated).toBe(true);
             expect(lost).toHaveBeenCalledTimes(1);
             expect(warn.mock.calls.some((c) => String(c[0]).includes('it failed'))).toBe(true);
+            retryScriptTransformNextCall();
+            expect(mediaTransformApi(), 'still given up on the next call').toBe('script-transform');
         } finally {
             off();
             warn.mockRestore();
@@ -762,7 +766,9 @@ function wired(op: 'seal' | 'open', kind: 'audio' | 'video' = 'audio') {
 describe('the audit: on the worker path "encrypted" is shown, not assumed', () => {
     let w: CountingWorker;
     let lost: ReturnType<typeof vi.fn<() => void>>;
-    let off: () => void;
+    let restored: ReturnType<typeof vi.fn<() => void>>;
+    let offs: Array<() => void>;
+    let warn: ReturnType<typeof vi.spyOn>;
     let key: CryptoKey;
     beforeAll(async () => { key = await importMediaKey(unhex(KEY1)); });
     beforeEach(() => {
@@ -772,19 +778,21 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         FakeScriptTransform.built = [];
         FakeScriptTransform.failNext = false;
         lost = vi.fn();
-        off = onScriptTransformLost(lost);
-        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        restored = vi.fn();
+        offs = [onScriptTransformLost(lost), onScriptTransformRestored(restored)];
+        warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     });
     afterEach(() => {
-        off();
+        offs.forEach((f) => f());
         vi.useRealTimers();
         vi.restoreAllMocks();
         vi.unstubAllGlobals();
         __setScriptTransformWorkerFactory(null);
     });
 
-    /** One peer with a sealed sender and an opened receiver, counted. */
-    function peer(required = true, kinds: { send?: 'audio' | 'video'; receive?: 'audio' | 'video' } = {}) {
+    /** One peer with a sealed sender and an opened receiver, counted. The
+     *  worker has said it is running, unless `started` is false. */
+    function peer(required = true, kinds: { send?: 'audio' | 'video'; receive?: 'audio' | 'video' } = {}, started = true) {
         const state = new PeerMediaCrypto(required);
         const sender = wired('seal', kinds.send);
         const receiver = wired('open', kinds.receive);
@@ -794,13 +802,17 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         const c = { S: newFrameCounts(), O: newFrameCounts() };
         w.counts.set(S, c.S);
         w.counts.set(O, c.O);
+        if (started) w.emit('message', { data: { type: 'ready' } });
         return { state, sender, receiver, c, S, O };
     }
     type Peer = ReturnType<typeof peer>;
-    /** A window's frames: through each transform, done (sealed/opened) or not, and on the wire. */
-    function frames(p: Peer, n: number, how: { seal?: 'done' | 'dropped' | 'clear' | 'bypass'; open?: 'done' | 'dropped' | 'clear' | 'bypass' } = {}) {
+    type How = 'done' | 'dropped' | 'clear' | 'bypass' | 'idle';
+    /** A window's frames: through each transform, done (sealed/opened) or
+     *  not, and on the wire — or, `bypass`, on the wire only; `idle`, nowhere. */
+    function frames(p: Peer, n: number, how: { seal?: How; open?: How } = {}) {
         for (const [side, c, t] of [['seal', p.c.S, p.sender], ['open', p.c.O, p.receiver]] as const) {
             const what = how[side] ?? 'done';
+            if (what === 'idle') continue;
             t.media += n;
             if (what === 'bypass') continue;
             c.seen += n;
@@ -811,6 +823,7 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
     }
     const encrypt = (p: Peer) => { p.state.key = key; p.state.enabled = true; };
     const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+    const said = (text: string) => warn.mock.calls.some((c: unknown[]) => String(c[0]).includes(text));
 
     it('not proven until a window shows every transform that carried frames sealing or opening them; inbound that stops opening un-proves it', async () => {
         const p = peer();
@@ -822,7 +835,7 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         expect(p.state.proven, 'proven before any window was seen').toBe(false);
         await __runFrameAudit();
         expect(p.state.proven).toBe(true);
-        expect(changed, 'told of the receiver\'s first opened frame, then of the proof').toHaveBeenCalledTimes(2);
+        expect(changed, 'told of the first sealed and opened frames, then of the proof').toHaveBeenCalledTimes(2);
 
         frames(p, 50, { open: 'dropped' });
         await __runFrameAudit();
@@ -841,7 +854,7 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         const p = peer();
         encrypt(p);
         await __runFrameAudit();
-        p.c.O.seen += 40; p.c.O.done += 40; p.receiver.media += 40;
+        frames(p, 40, { seal: 'idle' });
         await __runFrameAudit();
         expect(p.state.proven).toBe(true);
     });
@@ -862,7 +875,7 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         expect(lost).not.toHaveBeenCalled();
     });
 
-    it('SECURITY: a receiver whose connection took frames its transform never saw gives the path up, two windows running', async () => {
+    it('SECURITY: a receiver whose connection took frames its transform never saw: encryption off for THIS call, two windows running', async () => {
         const p = peer();
         await __runFrameAudit();
         frames(p, 100, { open: 'bypass' });
@@ -874,7 +887,9 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         await flush();
         expect(lost).toHaveBeenCalledTimes(1);
         expect(mediaTransformApi(), 'a transform frames go by was still trusted').toBeNull();
+        expect(isScriptTransformSuspended(), 'given up for good over one call').toBe(true);
         expect(w.terminated).toBe(true);
+        expect(said('could not be confirmed on this call')).toBe(true);
     });
 
     it('SECURITY: the same for a sender: video frames encoded that its transform never saw', async () => {
@@ -888,10 +903,96 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         expect(lost).toHaveBeenCalledTimes(1);
     });
 
-    it('CONTROL: the same packets WITH the transform seeing them, a bypass broken by a window it saw frames, and a trickle below the floor, give nothing up', async () => {
+    it('SECURITY: a screen share at one frame a second that its transform never sees is caught, though no window alone holds enough to judge; CONTROL: the same share seen', async () => {
+        const seen = peer(true, { send: 'video' });
+        await __runFrameAudit();
+        for (let i = 0; i < 6; i++) {
+            frames(seen, 1, { open: 'idle' }); // one frame a window, through the transform
+            await __runFrameAudit();
+        }
+        await flush();
+        expect(lost, 'a slow share that goes through its transform was taken for one that does not').not.toHaveBeenCalled();
+        seen.state.dispose();
+
+        // A frame every OTHER window: no three windows ever hold the three
+        // frames a window check needs, so only the count since the first
+        // look can catch it.
+        const p = peer(true, { send: 'video' });
+        await __runFrameAudit();
+        for (let i = 1; i <= 4; i++) {
+            frames(p, i % 2, { seal: 'bypass', open: 'idle' }); // 1, 0, 1, 0
+            await __runFrameAudit();
+        }
+        await flush();
+        expect(lost, 'judged before three of its frames had gone by').not.toHaveBeenCalled();
+        frames(p, 1, { seal: 'bypass', open: 'idle' }); // the third
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'plaintext share frames went past the transform unnoticed').toHaveBeenCalledTimes(1);
+        expect(said('never went through its transform')).toBe(true);
+    });
+
+    it('CONTROL: a worker that falls behind right at the start (nothing seen yet) and then catches up is not taken for one passed by', async () => {
         const p = peer(false);
         await __runFrameAudit();
-        for (let i = 0; i < 4; i++) {
+        p.receiver.media += 100; // its first frames queue in the worker
+        await __runFrameAudit();
+        p.receiver.media += 100; p.c.O.seen += 200; p.c.O.clear += 200; // and come through
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'a slow start was taken for a transform frames go past').not.toHaveBeenCalled();
+    });
+
+    it('SECURITY: a transform most frames go past (passed by partway) is caught', async () => {
+        const p = peer();
+        await __runFrameAudit();
+        for (let i = 0; i < 2; i++) {
+            p.receiver.media += 100;
+            p.c.O.seen += 10; p.c.O.dropped += 10; // one frame in ten reaches it
+            frames(p, 50, { open: 'idle' });
+            await __runFrameAudit();
+        }
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+        expect(said('mostly did not go through its transform')).toBe(true);
+    });
+
+    it('SECURITY: a transform HALF of every second\'s frames go past, steadily — which no window shows as most — is caught once enough has moved', async () => {
+        const p = peer();
+        await __runFrameAudit();
+        const half = () => {
+            p.receiver.media += 100;
+            p.c.O.seen += 50; p.c.O.done += 50; // every other frame reaches it
+            frames(p, 50, { open: 'idle' });
+        };
+        for (let i = 0; i < 2; i++) { half(); await __runFrameAudit(); }
+        await flush();
+        expect(lost, 'judged before it had been watched for three looks').not.toHaveBeenCalled();
+        half();
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'half the inbound frames went to the decoder unopened, unnoticed').toHaveBeenCalledTimes(1);
+        expect(said('a receiver took frames that partly did not go through its transform')).toBe(true);
+    });
+
+    it('SECURITY: the same at a frame a second (a share, half of it past its sender\'s transform): caught once thirty frames have gone, not before', async () => {
+        const p = peer(true, { send: 'video' });
+        await __runFrameAudit();
+        const window = () => { p.sender.media += 2; p.c.S.seen += 1; p.c.S.done += 1; frames(p, 0, { open: 'idle' }); };
+        for (let i = 0; i < 14; i++) { window(); await __runFrameAudit(); }
+        await flush();
+        expect(lost, 'judged on fewer frames than the two counts\' moments can tell apart').not.toHaveBeenCalled();
+        window();
+        await __runFrameAudit();
+        await flush();
+        expect(lost, 'half a slow share went out unsealed, unnoticed').toHaveBeenCalledTimes(1);
+        expect(said('a sender sent frames that partly did not go through its transform')).toBe(true);
+    });
+
+    it('CONTROL: no false alarm from frames the transform sees, a passed-by window between seen ones, a worker that fell behind for a window, a muted microphone, a microphone swapped, a camera stopped', async () => {
+        const p = peer(false, { send: 'video' });
+        await __runFrameAudit();
+        for (let i = 0; i < 3; i++) {
             frames(p, 100, { seal: 'clear', open: 'clear' });
             await __runFrameAudit();
         }
@@ -901,10 +1002,20 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         await __runFrameAudit();
         frames(p, 100, { open: 'bypass' });
         await __runFrameAudit();
-        for (let i = 0; i < 4; i++) {
-            frames(p, 5, { open: 'bypass' }); // 5 audio packets: a floor of 10
-            await __runFrameAudit();
-        }
+        // (Each of these on its own, a seen window between: two windows in a
+        // row that both lost frames, with under three quarters of all of
+        // them seen, are what a steady partial bypass looks like.)
+        frames(p, 100, { seal: 'clear', open: 'clear' });
+        await __runFrameAudit();
+        // The worker fell behind for a window, then caught up.
+        p.receiver.media += 100; await __runFrameAudit();
+        p.receiver.media += 100; p.c.O.seen += 200; p.c.O.clear += 200; await __runFrameAudit();
+        // Muted: silence still goes through the transform.
+        for (let i = 0; i < 3; i++) { frames(p, 50, { seal: 'clear', open: 'clear' }); await __runFrameAudit(); }
+        // A microphone swapped with replaceTrack: a short gap, then the same.
+        frames(p, 10, { seal: 'clear', open: 'clear' }); await __runFrameAudit();
+        // The camera stopped: nothing encoded, nothing seen.
+        for (let i = 0; i < 4; i++) { frames(p, 50, { seal: 'idle', open: 'clear' }); await __runFrameAudit(); }
         await flush();
         expect(lost).not.toHaveBeenCalled();
         expect(mediaTransformApi()).toBe('script-transform');
@@ -976,15 +1087,109 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         expect(mediaTransformApi()).toBe('script-transform');
     });
 
-    it('the first frame a receiver\'s transform opens is known at once (opened, onChange), not at the next look', async () => {
+    it('a worker still STARTING is not missing answers: nothing is asked and nothing counted while its script loads (a slow network), and it starts late, not never', async () => {
+        vi.useFakeTimers();
+        const p = peer(true, {}, false);
+        w.answering = false; // a worker that has not run yet answers nothing
+        await vi.advanceTimersByTimeAsync(28_000); // fourteen looks
+        await flush();
+        expect(lost, 'a worker still loading was taken for one that stopped answering').not.toHaveBeenCalled();
+        expect(w.posted.filter(m => m.type === 'report'), 'asked for counts before it could answer').toEqual([]);
+        w.answering = true;
+        w.emit('message', { data: { type: 'ready' } });
+        frames(p, 50);
+        await vi.advanceTimersByTimeAsync(2000);
+        await flush();
+        expect(w.posted.filter(m => m.type === 'report').length, 'not looked at once it started').toBeGreaterThan(0);
+        expect(lost).not.toHaveBeenCalled();
+        expect(mediaTransformApi()).toBe('script-transform');
+    });
+
+    it('a worker that never starts is given up for the call after 30 s of the page awake — asleep time barely counts', async () => {
+        vi.useFakeTimers();
+        peer(true, {}, false);
+        for (let i = 0; i < 5; i++) {
+            vi.setSystemTime(Date.now() + 60_000); // asleep: each late look counts for little
+            await vi.advanceTimersByTimeAsync(2000);
+        }
+        await flush();
+        expect(lost, 'five minutes of a sleeping page counted as five minutes of waiting').not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(12_000);
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+        expect(isScriptTransformSuspended()).toBe(true);
+        expect(said('it did not start')).toBe(true);
+    });
+
+    it('a give-up lasts ONE call: tried again after a cool-down that doubles each time in a row, or at once when the call ends', async () => {
+        vi.useFakeTimers();
+        const made: CountingWorker[] = [];
+        __setScriptTransformWorkerFactory(() => { const x = new CountingWorker(); made.push(x); return x; });
+        const fail = () => {
+            const s = new PeerMediaCrypto(true);
+            expect(attachMediaSenderTransform(wired('seal') as unknown as RTCRtpSender, s), 'attached on a path given up').toBe(true);
+            const x = made.at(-1)!;
+            x.emit('message', { data: { type: 'ready' } });
+            x.emit('error', new Event('error')); // fails after starting
+        };
+        fail();
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+        expect(isScriptTransformSuspended()).toBe(true);
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(mediaTransformApi(), 'tried again before the cool-down was over').toBeNull();
+        await vi.advanceTimersByTimeAsync(2000);
+        await flush();
+        expect(mediaTransformApi()).toBe('script-transform');
+        expect(restored).toHaveBeenCalledTimes(1);
+
+        fail();
+        expect(made, 'tried again on the worker that failed').toHaveLength(2);
+        await flush();
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(mediaTransformApi(), 'the second give-up in a row waited no longer than the first').toBeNull();
+        await vi.advanceTimersByTimeAsync(2000);
+        await flush();
+        expect(mediaTransformApi()).toBe('script-transform');
+
+        fail();
+        await flush();
+        expect(isScriptTransformSuspended()).toBe(true);
+        retryScriptTransformNextCall(); // the call ended
+        await flush();
+        expect(isScriptTransformSuspended()).toBe(false);
+        expect(mediaTransformApi(), 'the next call did not get the path back').toBe('script-transform');
+        expect(restored).toHaveBeenCalledTimes(3);
+    });
+
+    it('CONTROL: a worker whose script never loaded is given up for good — no cool-down brings it back, nor the end of a call', async () => {
+        vi.useFakeTimers();
+        attachMediaSenderTransform(wired('seal') as unknown as RTCRtpSender, new PeerMediaCrypto(true));
+        w.emit('error', new Event('error')); // before its first message
+        await flush();
+        expect(lost).toHaveBeenCalledTimes(1);
+        expect(isScriptTransformSuspended(), 'a page that cannot run the worker was told it might later').toBe(false);
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        retryScriptTransformNextCall();
+        await flush();
+        expect(mediaTransformApi()).toBeNull();
+        expect(restored).not.toHaveBeenCalled();
+    });
+
+    it('the first frame a transform seals or opens is known at once (sealed, opened, onChange), not at the next look', async () => {
         const p = peer();
         const changed = vi.fn();
         p.state.onChange = changed;
         expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(false);
+        expect(p.state.sealed(p.sender as unknown as RTCRtpSender)).toBe(false);
         w.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: p.O, seen: 1, done: 1, clear: 0, dropped: 0 }] } });
         expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(true);
         expect(changed).toHaveBeenCalledTimes(1);
+        w.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: p.S, seen: 3, done: 1, clear: 0, dropped: 2 }] } });
+        expect(p.state.sealed(p.sender as unknown as RTCRtpSender)).toBe(true);
+        expect(changed, 'a sender\'s first sealed frame was not told').toHaveBeenCalledTimes(2);
         expect(p.state.opened({} as RTCRtpReceiver), 'another receiver').toBe(false);
+        expect(p.state.sealed(p.receiver as unknown as RTCRtpSender), 'a receiver is not a sender').toBe(false);
     });
 
     it('a peer that goes is no longer looked at, or reported into', async () => {
@@ -995,6 +1200,18 @@ describe('the audit: on the worker path "encrypted" is shown, not assumed', () =
         expect(w.posted.slice(before).filter(m => m.type === 'report'), 'the audit asked about nobody').toEqual([]);
         w.emit('message', { data: { type: 'counts', seq: null, transforms: [{ id: p.O, seen: 9, done: 9, clear: 0, dropped: 0 }] } });
         expect(p.state.opened(p.receiver as unknown as RTCRtpReceiver)).toBe(false);
+    });
+
+    it('several fields change as ONE copy to the worker (set), with no half-changed state in between', async () => {
+        const s = new PeerMediaCrypto(false);
+        s.bindTo(w);
+        s.key = key;
+        s.enabled = true;
+        const before = w.posted.length;
+        s.set({ hold: true, enabled: false, key: null });
+        const sent = w.posted.slice(before);
+        expect(sent).toEqual([{ type: 'state', slot: s.slot, key: null, enabled: false, requireE2ee: false, hold: true }]);
+        expect(s.enabledSince, 'encryption off, yet still timed as on').toBeNull();
     });
 });
 

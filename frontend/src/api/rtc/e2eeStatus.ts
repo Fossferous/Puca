@@ -63,6 +63,15 @@ export function mediaE2eeExplanation(reason: MediaE2eeReason, peerName: string, 
             return enforced
                 ? `This device or browser can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}). Because encryption is required for this call, media is blocked both ways here: your microphone, camera and screen share are not sent, and nobody’s voice or video plays. ${localUnsupportedRemedy(serverRequired)}`
                 : `This device or browser can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}). Voice is still protected in transit (DTLS-SRTP), but the server could in principle access it.`;
+        case 'unconfirmed':
+            // NOT the local-unsupported wording, and never its remedy: this
+            // browser can encrypt, and does on other calls — the audit could
+            // not confirm it on this one (scriptTransform.ts). "Turn off
+            // Require encryption" would answer a passing hiccup with a
+            // setting that stays off for good.
+            return enforced
+                ? `End-to-end encryption could not be confirmed on this call, so your microphone, camera and screen share are held back here and nobody’s voice or video plays. Púca tries again in a moment, and on your next call.`
+                : `End-to-end encryption could not be confirmed on this call, so it is encrypted only in transit for now: the server could in principle access it. Púca tries again in a moment, and on your next call.`;
         case 'peer-unsupported':
             return enforced
                 ? `${peerName}’s app or device can’t end-to-end encrypt media. Because encryption is required for this call, their audio and video are blocked. Ask them to update Púca or their browser.`
@@ -83,6 +92,32 @@ export function mediaE2eeExplanation(reason: MediaE2eeReason, peerName: string, 
     }
 }
 
+/**
+ * The voice panel's (i) lines for a call that is not (fully) end-to-end
+ * encrypted. One cause covers every peer when it is ours: encryption that
+ * could not be confirmed on this call (said as that, with no advice to turn
+ * anything off — mesh only: an SFU channel's probe is livekit's), or an
+ * engine that cannot; otherwise one line per peer that is not encrypted.
+ */
+export function downgradeExplanations(i: {
+    detail: ReadonlyArray<{ userId: number; encrypted: boolean; reason: MediaE2eeReason }>;
+    summary: { supported: boolean; unconfirmed?: boolean };
+    enforced: boolean;
+    serverRequired: boolean;
+    sfuMode: boolean;
+    nameFor: (userId: number) => string;
+}): string[] {
+    if (!i.sfuMode && (i.summary.unconfirmed === true || i.detail.some(d => d.reason === 'unconfirmed'))) {
+        return [mediaE2eeExplanation('unconfirmed', '', i.enforced)!];
+    }
+    if (i.summary.supported === false || i.detail.some(d => d.reason === 'local-unsupported')) {
+        return [mediaE2eeExplanation('local-unsupported', '', i.enforced, i.serverRequired)!];
+    }
+    return i.detail.filter(d => !d.encrypted)
+        .map(d => mediaE2eeExplanation(d.reason, i.nameFor(d.userId), i.enforced))
+        .filter((s): s is string => !!s);
+}
+
 export interface LocalMediaBlockInputs {
     /** Can THIS engine encrypt live media on the transport in use? Mesh:
      *  isMediaE2eeSupported(); SFU: livekit's probe. Both accept Chromium's
@@ -95,6 +130,11 @@ export interface LocalMediaBlockInputs {
     serverRequired: boolean;
     /** SFU channel: encrypted-only by construction; the join THROWS. */
     sfuMode: boolean;
+    /** Mesh: `supported` is false only because the standard path's audit
+     *  could not confirm encryption on THIS call (mediaCrypto
+     *  isScriptTransformSuspended), and it will be tried again — not an
+     *  engine that cannot. */
+    unconfirmed?: boolean;
 }
 
 /**
@@ -115,6 +155,13 @@ export type LocalMediaNoticeLevel = 'blocked' | 'warning';
 
 export function localMediaNotice(i: LocalMediaBlockInputs): { level: LocalMediaNoticeLevel; text: string } | null {
     if (i.supported) return null;
+    if (i.unconfirmed && !i.sfuMode) {
+        // This call only, and to be tried again: no other browser to go to,
+        // and above all no setting to turn off (mediaE2eeExplanation).
+        return i.required
+            ? { level: 'blocked', text: mediaE2eeExplanation('unconfirmed', '', true)! }
+            : { level: 'warning', text: mediaE2eeExplanation('unconfirmed', '', false)! };
+    }
     if (i.sfuMode) {
         return {
             level: 'blocked',
