@@ -15,16 +15,29 @@
 
 export type ShareStartBy = 'dialog' | 'host';
 
-/** A start nobody ended by then (a dialog left open, a path that forgot) no
- *  longer holds the next one back: past WebView2's 5 s first-frame wait and a
- *  slow server's answer, short of forever. */
+/** A start nobody ended by then (a path that forgot, a picture that ended
+ *  while the dialog waited) no longer holds the next one back: past WebView2's
+ *  5 s first-frame wait and a slow server's answer, short of forever. Never
+ *  while it is still asking for its picture or still holds a live one: the
+ *  capture is one slot (a new capture stops the old one, media.ts), so
+ *  replacing it then would stop its picture under it. */
 export const SHARE_START_STALE_MS = 60_000;
+
+type StreamLike = { getVideoTracks(): { readyState: string }[] } | null | undefined;
 
 export interface ShareStart {
     readonly by: ShareStartBy;
     readonly startedAt: number;
     /** A Stop, or the picture ending, came while it was starting. */
     cancelled: boolean;
+    /** Its picture is still being asked for (captureFor). */
+    capturing: boolean;
+    /** The picture it captured (captureFor). */
+    picture: StreamLike;
+}
+
+function hasPicture(stream: StreamLike): boolean {
+    return stream?.getVideoTracks()[0]?.readyState === 'live';
 }
 
 export class ShareStarts {
@@ -39,9 +52,10 @@ export class ShareStarts {
      *  cancelled and replaced. */
     begin(by: ShareStartBy): ShareStart | null {
         const now = this.now();
-        if (this.current && now - this.current.startedAt < SHARE_START_STALE_MS) return null;
-        if (this.current) this.current.cancelled = true;
-        this.current = { by, startedAt: now, cancelled: false };
+        const cur = this.current;
+        if (cur && (now - cur.startedAt < SHARE_START_STALE_MS || cur.capturing || hasPicture(cur.picture))) return null;
+        if (cur) cur.cancelled = true;
+        this.current = { by, startedAt: now, cancelled: false, capturing: false, picture: null };
         return this.current;
     }
 
@@ -62,11 +76,28 @@ export class ShareStarts {
     }
 }
 
-type StreamLike = { getVideoTracks(): { readyState: string }[] } | null | undefined;
+/** Ask for a start's picture, and keep it on the start. While it is asked
+ *  for, and once it is there and live, the start is never taken for stale. */
+export async function captureFor<S extends NonNullable<StreamLike>>(start: ShareStart, ask: () => Promise<S>): Promise<S> {
+    start.capturing = true;
+    try {
+        const picture = await ask();
+        start.picture = picture;
+        return picture;
+    } finally {
+        start.capturing = false;
+    }
+}
 
 /** Whether a start may still go live: nobody stopped it, and its picture is still there. */
 export function stillWanted(start: ShareStart | null | undefined, stream: StreamLike): boolean {
     if (start?.cancelled) return false;
-    const video = stream?.getVideoTracks()[0];
-    return !!video && video.readyState === 'live';
+    return hasPicture(stream);
+}
+
+/** Whether what the capture slot holds is still this start's to take down:
+ *  nothing, or its own picture. A start replaced as stale finds its
+ *  replacement's there, and must leave that (and the announcement) alone. */
+export function ownsCapture(start: ShareStart | null | undefined, slot: StreamLike): boolean {
+    return !slot || !start?.picture || slot === start.picture;
 }

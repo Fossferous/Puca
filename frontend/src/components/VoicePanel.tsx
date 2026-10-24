@@ -28,7 +28,7 @@ import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
 import { useShareStarting } from './useShareStarting';
-import { ShareStarts, stillWanted, type ShareStart } from './shareStarts';
+import { ShareStarts, captureFor, ownsCapture, stillWanted, type ShareStart } from './shareStarts';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
 import { attachDfPause } from '../api/dfPause';
 import { startMicDeviceWatchdog, describeMicError, type MicRestartOutcome } from '../api/rtc/micDeviceWatchdog';
@@ -243,6 +243,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // One share start at a time, the dialog's or a host's, and a Stop, or the
     // picture ending, that reaches it before it is live (shareStarts.ts).
     const [shareStarts] = useState(() => new ShareStarts());
+    // The Share dialog's own start, from its capture to its Go Live or Cancel.
+    const dialogStartRef = useRef<ShareStart | null>(null);
     const [isCameraOn, setIsCameraOn] = useState(false);
     const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>(() => getNoiseSuppressionMode());
     // Whether the DeepFilter option is offered — Settings → Advanced →
@@ -547,13 +549,18 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         });
         return () => { delete w.__pucaClipDiag; };
     }, [roomId]);
-    useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
-    // The ref is written WITH the state, not by the effect above after the
-    // commit: a host's Stop, or a second Share, in the task right after the
-    // share went live must already see it (shareStarts.ts).
+    // The ref is written WITH the state, and only here, never by an effect
+    // after the commit: a host's Stop, or a second Share, in the task right
+    // after the share went live must already see it, and a pending effect
+    // would write back a value from a render ago (shareStarts.ts).
     const setSharing = useCallback((on: boolean) => {
         isScreenSharingRef.current = on;
         setIsScreenSharing(on);
+        // A Stop in the same batch as going live leaves the state React sees
+        // unchanged, so the effect on isScreenSharing below never runs: the
+        // OS sharing bar's hold taken at capture (and the tray's "sharing"
+        // badge) is released here as well.
+        if (!on) stopHidingCaptureBar();
     }, []);
     useEffect(() => { listenOnlyRef.current = listenOnly; }, [listenOnly]);
     useEffect(() => { isCameraOnRef.current = isCameraOn; }, [isCameraOn]);
@@ -3439,20 +3446,42 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // before it is live, it stops at the next step instead of going live with
     // nothing to show.
     const goLive = async (audioChoice: GoLiveAudio, apps?: GoLiveApps, start?: ShareStart | null): Promise<EmbedResult> => {
-        const picture = () => webrtcManager.getScreenShareStreamForPreview();
-        const abandon = (announced: boolean): EmbedResult => {
-            goLiveEnd('cancelled');
-            // A Stop needs no word; a picture that vanished (the shared window
-            // closed) does, or the dialog just closes with nothing live.
-            if (picture()?.getVideoTracks()[0]?.readyState !== 'live') setError('The picture ended before the stream started.');
-            if (announced) {
-                void sfuManager.stopScreenShare(); // no-op unless it was published there
-                wsClient.stopScreenShare(roomId); // retract the announcement
-            }
+        // The start's own picture: the capture is one slot, and a start
+        // replaced as stale (shareStarts.ts) finds its replacement's there,
+        // which it must neither go live with nor take down.
+        const picture = () => start?.picture ?? webrtcManager.getScreenShareStreamForPreview();
+        /** Take this start's capture down (and what it announced or
+         *  published); true when it was still its own to take down. */
+        const release = (opts: { retract?: boolean; unpublish?: boolean } = {}): boolean => {
+            if (!ownsCapture(start, webrtcManager.getScreenShareStreamForPreview())) return false;
+            if (opts.unpublish) void sfuManager.stopScreenShare(); // no-op unless it was published there
+            if (opts.retract) wsClient.stopScreenShare(roomId); // retract the announcement
             stopHidingCaptureBar();
             webrtcManager.stopScreenShare();
-            return { ok: false, error: start?.cancelled ? 'stopped' : 'the picture ended before the share went live' };
+            return true;
         };
+        const abandon = (announced: boolean): EmbedResult => {
+            // Only a Stop is 'stopped': the picture ending cancels the start
+            // too (stopMyScreenShare), and then the picture is the reason.
+            const ended = !stillWanted(null, picture());
+            if (release({ retract: announced, unpublish: announced })) {
+                goLiveEnd('cancelled');
+                // A Stop needs no word; a picture that vanished (the shared
+                // window closed) does, or the dialog just closes with nothing live.
+                if (ended) setError('The picture ended before the stream started.');
+            }
+            return { ok: false, error: ended ? 'the picture ended before the share went live' : 'stopped' };
+        };
+        // A hang-up takes the picture with it (closeAll): that is a quiet
+        // "left the call", never "the picture ended", so it is asked first.
+        const leftCall = (published = false): EmbedResult => {
+            release({ unpublish: published });
+            return { ok: false, error: 'left the call' };
+        };
+        // Stopped, or the picture gone, before this even began (the dialog
+        // waits on its app step): no audio to attach to it.
+        if (!isInVoiceRef.current) return leftCall();
+        if (!stillWanted(start, picture())) return abandon(false);
         const isDesktop = isTauri();
         try {
             if (isDesktop && audioChoice === 'app' && apps && apps.length > 0) {
@@ -3493,31 +3522,28 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             setError('Audio capture failed — streaming video only.');
         }
         goLiveMark('audio');
-        if (!stillWanted(start, picture())) return abandon(false);
-
         // Announce FIRST, publish on the server's echo (B7): the
         // STREAM bit is enforced on the announcement, and peers
         // render only announced video — publishing first would
         // put the tracks on the wire for a share the server is
         // about to refuse.
-        if (!isInVoiceRef.current) {
-            stopHidingCaptureBar();
-            webrtcManager.stopScreenShare();
-            return { ok: false, error: 'left the call' };
-        }
+        if (!isInVoiceRef.current) return leftCall();
+        if (!stillWanted(start, picture())) return abandon(false);
         const announcedStream = webrtcManager.getScreenShareStreamForPreview();
         const ack = await wsClient.startScreenShareAcked(roomId, announcedStream?.id, currentUserId);
         goLiveMark('ack');
+        // The server's answer can take a while: hung up meanwhile (a refusal
+        // then is the hang-up's, not news), stopped, or the picture gone?
+        if (!isInVoiceRef.current) return leftCall();
         if (!ack.ok) {
-            goLiveEnd('refused');
-            console.warn('[VoicePanel] screen share refused by the server:', ack.message);
-            setError(ack.message);
-            wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
-            stopHidingCaptureBar();
-            webrtcManager.stopScreenShare();
+            // Retracted: a timeout may still have been accepted.
+            if (release({ retract: true })) {
+                goLiveEnd('refused');
+                console.warn('[VoicePanel] screen share refused by the server:', ack.message);
+                setError(ack.message);
+            }
             return { ok: false, error: ack.message || 'the server refused the share' };
         }
-        // The server's answer can take a while: stopped meanwhile, or the picture gone?
         if (!stillWanted(start, picture())) return abandon(true);
 
         if (sfuMode) {
@@ -3527,12 +3553,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 const sfuStream = webrtcManager.getScreenShareStreamForPreview();
                 if (sfuStream) await sfuManager.startScreenShare(sfuStream);
             } catch (shareErr) {
+                // A hang-up mid-publish is not a failed share.
+                if (!isInVoiceRef.current) return leftCall();
                 console.warn('[VoicePanel] SFU screen share refused:', shareErr);
-                goLiveEnd('failed');
-                setError((shareErr as Error).message || 'Screen share failed');
-                wsClient.stopScreenShare(roomId); // retract the announcement
-                stopHidingCaptureBar();
-                webrtcManager.stopScreenShare();
+                if (release({ retract: true })) {
+                    goLiveEnd('failed');
+                    setError((shareErr as Error).message || 'Screen share failed');
+                }
                 return { ok: false, error: (shareErr as Error).message || 'Screen share failed' };
             }
         } else {
@@ -3543,12 +3570,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // (channel switch / hang-up mid-picker): announcing then
         // would hit the server's membership gate. Same guard as
         // the camera path — release and bail.
-        if (!isInVoiceRef.current) {
-            void sfuManager.stopScreenShare();
-            stopHidingCaptureBar();
-            webrtcManager.stopScreenShare();
-            return { ok: false, error: 'left the call' };
-        }
+        if (!isInVoiceRef.current) return leftCall(true);
         // Last look before it is live: never live with nothing to show.
         if (!stillWanted(start, picture())) return abandon(true);
         const stream = webrtcManager.getScreenShareStreamForPreview();
@@ -3577,7 +3599,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         shareStarting.begin();
         try {
             try {
-                await webrtcManager.getScreenShareStream({ width: 1280, height: 800, fps: 30, audio: false });
+                await captureFor(start, () => webrtcManager.getScreenShareStream({ width: 1280, height: 800, fps: 30, audio: false }));
             } catch (err) {
                 goLiveEnd('cancelled');
                 webrtcManager.stopScreenShare();
@@ -3590,12 +3612,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             shareStarts.end(start);
             shareStarting.end();
         }
-    };
-    /** The dialog's start, once it captured (shareStarts.ts): over when the
-     *  dialog closes, whatever happened in it. */
-    const endDialogStart = () => {
-        const s = shareStarts.active;
-        if (s?.by === 'dialog') shareStarts.end(s);
     };
     startHostShareRef.current = startHostShare;
     // Inside a host that supplies no picture the Share button could only fail.
@@ -4204,19 +4220,35 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             <ScreenShareModal
                 isOpen={showStreamSettings}
                 launch={shareLaunch}
-                onClose={() => { setShowStreamSettings(false); shareStarting.end(); endDialogStart(); }}
+                // Closing never ends the dialog's start: the dialog cannot close
+                // while it works (ScreenShareModal), and every way its start
+                // can end ends it (shareStarts.ts).
+                onClose={() => { setShowStreamSettings(false); shareStarting.end(); }}
                 onCancelAfterCapture={() => {
-                    // User backed out after the OS picker; drop the captured surface.
+                    // User backed out after the OS picker; drop the captured
+                    // surface: this dialog's own, never a capture that replaced it.
                     shareStarting.end();
-                    endDialogStart();
-                    stopHidingCaptureBar();
-                    webrtcManager.stopScreenShare();
+                    const start = dialogStartRef.current;
+                    dialogStartRef.current = null;
+                    shareStarts.end(start);
+                    if (ownsCapture(start, webrtcManager.getScreenShareStreamForPreview())) {
+                        stopHidingCaptureBar();
+                        webrtcManager.stopScreenShare();
+                    }
                 }}
                 onCaptureScreen={async ({ resolution, fps, prefetchApps }) => {
+                    // Live already (a host's share went live while this dialog
+                    // was open): a second capture would stop that share's
+                    // picture under it and leave its senders and announcement.
+                    if (isScreenSharingRef.current) {
+                        setShowStreamSettings(false);
+                        return null;
+                    }
                     // One start at a time: a host's may be on its way, and a
                     // second capture would stop its picture (shareStarts.ts).
                     const start = shareStarts.begin('dialog');
                     if (!start) return null;
+                    dialogStartRef.current = start;
                     // One source of truth with the step-down offer: two copies
                     // of this ladder is how "lower it" ends up capturing a size
                     // the dialog never offered.
@@ -4250,7 +4282,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // browsers must request audio at getDisplayMedia time.
                         goLiveBegin();
                         shareStarting.begin();
-                        const shareStream = await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });
+                        const shareStream = await captureFor(start, () => webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop }));
                         goLiveMark('picker');
                         // WebView2's "… is sharing a window" bar appears a beat after
                         // the picker resolves, i.e. NOW — long before go-live. Hide it
@@ -4288,15 +4320,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         goLiveEnd('cancelled');
                         shareStarting.end();
                         shareStarts.end(start);
+                        if (dialogStartRef.current === start) dialogStartRef.current = null;
                         webrtcManager.stopScreenShare();
                         return null;
                     }
                 }}
                 onGoLive={async (audioChoice, apps) => {
-                    const start = shareStarts.active?.by === 'dialog' ? shareStarts.active : null;
+                    // The start this dialog captured for, carried from
+                    // onCaptureScreen: never whichever start runs NOW, which
+                    // may be a host's that replaced it as stale (shareStarts.ts).
+                    const start = dialogStartRef.current;
                     try {
                         await goLive(audioChoice, apps, start);
                     } finally {
+                        if (dialogStartRef.current === start) dialogStartRef.current = null;
                         shareStarts.end(start);
                     }
                 }}
