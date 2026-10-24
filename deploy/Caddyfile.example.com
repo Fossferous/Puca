@@ -73,6 +73,11 @@ app.example.com {
 	# Notes pages stay pinned to an old build (check-versions.sh probes it).
 	@notesSw path /notes/sw.js
 	header @notesSw Cache-Control "no-cache"
+	# The web app's own service worker (Web Push, frontend/public/sw.js): the
+	# same rule, or a fix to it waits out the edge's copy before any browser
+	# sees it (check-versions.sh probes it too).
+	@pushSw path /sw.js
+	header @pushSw Cache-Control "no-cache"
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
