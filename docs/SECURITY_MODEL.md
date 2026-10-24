@@ -661,10 +661,14 @@ What this rests on is checked in real browsers by
 microphone a tone the other must hear — only under the right key, never from frames
 passed through unopened, again after a new key mid-call — plus Safari-shaped H.264-first
 offers, glare followed by renegotiation, plaintext refused inside Firefox's worker, a
-spoiled DTLS pin held both ways, the audit below catching a transform frames go by, an
-engine with neither API, and the worker under every Content-Security-Policy the app
-ships. **Safari itself runs the same standard API but had not been exercised on a
-device when this was written** (Playwright's Windows WebKit has no WebRTC). Two engine
+spoiled DTLS pin held both ways, the audit below catching a transform frames go by (and
+the next call trying again), the audit raising no alarm over a mute, a microphone
+swapped, cameras turned off or a share at one frame a second, a worker that arrives 20 s
+late, a sender transform the engine ignores (its sender sends only a silent stand-in, and
+the path is given up; for a camera turned on well into a call too, where the peer is shown
+black and never the picture), an engine with neither API, and the worker under every
+Content-Security-Policy the app ships. **Safari itself runs the same standard API but had
+not been exercised on a device when this was written** (Playwright's Windows WebKit has no WebRTC). Two engine
 behaviours the code handles: Chromium ignores an `RTCRtpScriptTransform` set on the
 OFFERING side's receiver in `ontrack` — it reports the transform attached and decodes
 what arrives unopened — so on that path every receiver is wrapped before negotiation
@@ -680,11 +684,28 @@ worker counts what each transform did with every frame; every two seconds the pa
 for the counts and reads the connection's own counters for the same sender or receiver.
 A peer is reported **encrypted** only once a window shows every transform that carried
 frames sealing or opening them. Under enforcement a receiver's track is silent until its
-transform has opened a frame. And the path is given up — every connection rebuilt as on an
-engine without the API — when frames go by a transform for two windows, when a transform
+transform has opened a frame, and a sender carries a silent, black stand-in of its track (a
+disabled clone) until its transform has sealed one (`holdUntilSealed` in
+[`manager.ts`](../frontend/src/api/rtc/manager.ts)): what goes past a transform the engine
+ignores is silence and black, never the microphone, camera or screen. One valve, for an
+engine that sends nothing for a disabled track: ten seconds into a hold with encryption on
+and nothing at all sent on that sender by the connection's own counters, its track goes on
+without that proof (and the audit keeps watching); a sender that did send keeps its hold.
+
+Encryption is given up **for the call** — every connection rebuilt as on an engine
+without the API, so under enforcement nothing is sent or played, and the panel says it
+"could not be confirmed on this call", never that the browser cannot encrypt, and never
+that the setting should go off — when frames go by a transform (none at all since it was
+first looked at, under a quarter of them over the latest windows, or, steadily, under three
+quarters since it was first looked at once enough have moved to tell), when a transform
 passes frames on unsealed while none may pass, when a sender's frames are not sealed
-although encryption is on, when the worker reports an error after starting, or when it
-stops answering while the page itself is awake.
+although encryption is on, or when the worker reports an error after starting, stops
+answering while the page itself is awake, or has not started after thirty seconds of the
+page being awake. It is tried again when the call ends, and within the call after thirty
+seconds, doubling with each give-up in a row up to five minutes. Only a path that cannot
+run on the page at all — a worker script that never loaded, a worker that will not take a
+key, a transform that cannot be built — is given up for the page and reported as an engine
+that cannot encrypt.
 
 A connection whose DTLS fingerprint does not match the pin the peer made under the
 pairwise key (`a=sovereign-dtls`, on every engine) is held both ways
@@ -692,7 +713,9 @@ pairwise key (`a=sovereign-dtls`, on every engine) is held both ways
 its senders and nothing is put back, every frame either way is dropped where a transform
 runs, and its receivers are silenced — with enforcement on or off. Before, with
 enforcement off, such a call went on, its frames unsealed, over a connection whoever
-substituted it could read.
+substituted it could read. The pin is checked before a remote description is applied and
+before our answer is made, so the hold is in place before any media can flow, and the
+worker gets it as one state copy, never half of it.
 
 ### The gap
 

@@ -17,6 +17,7 @@ import { AnnouncedVideoGate } from './announcedVideo';
 export { classifyRemoteVideo } from './announcedVideo';
 import {
     isMediaE2eeSupported,
+    isScriptTransformSuspended,
     mediaTransformApi,
     importMediaKey,
     advertiseE2ee,
@@ -27,7 +28,8 @@ import {
     advertiseDtlsPin, verifyDtlsPin,
 } from './mediaCrypto';
 import {
-    attachMediaReceiverTransform, attachMediaSenderTransform, onScriptTransformLost, PeerMediaCrypto,
+    attachMediaReceiverTransform, attachMediaSenderTransform, onScriptTransformLost, onScriptTransformRestored,
+    PeerMediaCrypto, retryScriptTransformNextCall,
 } from './scriptTransform';
 import type {
     UserId,
@@ -104,6 +106,17 @@ class PeerMap extends Map<UserId, PeerConnection> {
 
 function retireMediaCrypto(peer: PeerConnection | undefined): void {
     if (peer?.mediaCrypto instanceof PeerMediaCrypto) peer.mediaCrypto.dispose();
+}
+
+/** A sender carrying a stand-in until its transform seals (WebRTCManager.heldSenders):
+ *  the track it is to send, the stand-in on it, replaceTracks still pending,
+ *  and when the hold began (Date.now()). */
+interface HeldSender {
+    userId: UserId;
+    real: MediaStreamTrack | null;
+    stand: MediaStreamTrack;
+    swaps: number;
+    since: number;
 }
 
 export class WebRTCManager {
@@ -253,8 +266,6 @@ export class WebRTCManager {
         }
         peer.dtlsPin = result;
         if (result === 'mismatch') {
-            peer.mediaCrypto.enabled = false;
-            peer.mediaCrypto.key = null;
             this.holdMediaWith(userId);
             peer.mediaE2eeReason = 'fingerprint-mismatch';
             this.emitMediaE2ee(userId);
@@ -266,19 +277,29 @@ export class WebRTCManager {
      * whether or not encryption is required. Before this, a mismatch with
      * enforcement off went on sending — and, since encryption was then off
      * for the peer, sending PLAINTEXT to whoever had put themselves in the
-     * middle. Our tracks come off every sender (sendsTo is false from now
-     * on, so no path puts one back), every frame either way is dropped where
-     * a transform runs (`hold`), and every receiver is silenced
-     * (applyReceiveGates), which also covers the engines without transforms
-     * that the pin exists for.
+     * middle. The hold reaches the frame transforms FIRST and as one copy
+     * with encryption switched off and the key gone (PeerMediaCrypto.set):
+     * three copies, as before, let the worker handle frames under "encryption
+     * off, no hold" in between, and send them out as they came. Then our
+     * tracks come off every sender (sendsTo is false from now on, so no path
+     * puts one back), and every receiver is silenced (applyReceiveGates),
+     * which also covers the engines without transforms that the pin exists
+     * for.
      */
     private holdMediaWith(userId: UserId): void {
         const peer = this.peers.get(userId);
         if (!peer) return;
         console.warn(`[media-e2ee] holding all media to and from ${userId}: the connection is not the one they authenticated`);
-        peer.mediaCrypto.hold = true;
+        const c = peer.mediaCrypto;
+        if (c instanceof PeerMediaCrypto) {
+            c.set({ hold: true, enabled: false, key: null });
+        } else {
+            c.hold = true;
+            c.enabled = false;
+            c.key = null;
+        }
         for (const sender of peer.connection.getSenders()) {
-            if (sender.track) void sender.replaceTrack(null).catch(() => { /* peer gone */ });
+            if (this.trackOf(sender)) void this.replaceSenderTrack(sender, null);
         }
         this.applyReceiveGates(userId);
     }
@@ -354,10 +375,16 @@ export class WebRTCManager {
         // that way for a while, failing (`stuck`).
         const encrypted = this.framesEncrypted(peer);
         const c = peer.mediaCrypto;
+        //
+        // Not able to encrypt on THIS call (the standard path's audit could
+        // not confirm it, and will try again) is said as that, never as an
+        // engine that cannot: the remedy for the second — another browser,
+        // or turning "Require encryption for calls" off — is wrong for the
+        // first, and the off would outlive the call.
         const reason: MediaE2eeReason = peer.dtlsPin === 'mismatch'
             ? 'fingerprint-mismatch'
             : !isMediaE2eeSupported()
-                ? 'local-unsupported'
+                ? (isScriptTransformSuspended() ? 'unconfirmed' : 'local-unsupported')
                 : c.enabled && !encrypted
                     ? (c instanceof PeerMediaCrypto && c.stuck ? 'verification-failed' : 'negotiating')
                     : peer.mediaE2eeReason;
@@ -376,6 +403,8 @@ export class WebRTCManager {
             if (mediaTransformApi() === 'script-transform') this.applyReceiveGates(userId);
             this.emitMediaE2ee(userId);
         }
+        // A sender held for enforcement waits for nothing once it is off.
+        if (!enabled) this.sweepHeldSenders();
         // Where frames can be encrypted, the transforms read requireE2ee on
         // every frame — on the page, or in the worker, from the copy the
         // assignment above sent it (scriptTransform.ts PeerMediaCrypto) — so
@@ -421,13 +450,14 @@ export class WebRTCManager {
      *  supported=false ⇒ this browser can't do media E2EE at all (an older
      *  browser with no Encoded Transform API).
      *  enforced=true ⇒ require-E2EE is on, so unencrypted peers are muted. */
-    mediaEncryptionSummary(): { total: number; encrypted: number; supported: boolean; enforced: boolean } {
+    mediaEncryptionSummary(): { total: number; encrypted: number; supported: boolean; enforced: boolean; unconfirmed: boolean } {
         let total = 0, encrypted = 0;
         for (const [, peer] of this.peers) {
             total++;
             if (this.framesEncrypted(peer)) encrypted++;
         }
-        return { total, encrypted, supported: isMediaE2eeSupported(), enforced: this.requireMediaE2ee };
+        // unconfirmed ⇒ "supported: false" is this call's audit, not the engine.
+        return { total, encrypted, supported: isMediaE2eeSupported(), enforced: this.requireMediaE2ee, unconfirmed: isScriptTransformSuspended() };
     }
 
     /** Notify the UI whenever a peer's media-E2EE status changes. */
@@ -509,6 +539,7 @@ export class WebRTCManager {
         this.transformedSenders.add(sender);
         if (attachMediaSenderTransform(sender, peer.mediaCrypto)) {
             this.wireReceiverEarly(userId, peer.connection.getTransceivers().find(t => t.sender === sender)?.receiver);
+            if (this.requireMediaE2ee && mediaTransformApi() === 'script-transform') this.holdUntilSealed(userId, sender);
             return;
         }
         // Nothing wraps this sender, so whatever it sends goes out as the
@@ -569,15 +600,157 @@ export class WebRTCManager {
     constructor() {
         this.media = new MediaManager();
         this.setupSignalingHandlers();
-        // The RTCRtpScriptTransform worker would not start (a Content-
-        // Security-Policy without worker-src 'self', a missing chunk), or
-        // stopped taking state. Every connection built while this engine
-        // could encrypt relies on transforms that no longer run; rebuilt,
-        // they get what an engine that cannot encrypt gets (blocked under
-        // enforcement, transport-only and labelled so without it).
+        // The RTCRtpScriptTransform path was given up: for good (its worker
+        // would not start — a Content-Security-Policy without worker-src
+        // 'self', a missing chunk — or would not take state), or for this
+        // call (its audit could not confirm encryption). Every connection
+        // built while this engine could encrypt relies on transforms that
+        // may not run; rebuilt, they get what an engine that cannot encrypt
+        // gets (blocked under enforcement, transport-only and labelled so
+        // without it). When a suspended path is tried again within the call,
+        // they are rebuilt once more, with transforms.
         onScriptTransformLost(() => {
-            if (this.inVoice) this.rebuildEveryPeer('the frame-transform worker is unavailable');
+            if (this.inVoice) this.rebuildEveryPeer('end-to-end encryption is off on this browser for now');
         });
+        onScriptTransformRestored(() => {
+            if (this.inVoice) this.rebuildEveryPeer('trying end-to-end encryption again');
+        });
+    }
+
+    /**
+     * SENDERS HELD UNTIL SEALED. Under enforcement on the RTCRtpScriptTransform
+     * path, a new sender carries a silent, black stand-in of its track — a
+     * clone, disabled — until its transform has sealed a frame
+     * (PeerMediaCrypto.sealed); only then does the real track go on. A
+     * transform that frames go past is caught by the audit within seconds,
+     * and until then what went past it was silence and black, never the
+     * microphone, camera or screen. (Receivers have the twin: mayPlay.)
+     *
+     * The stand-in is on the sender, so everything that finds a sender by
+     * the track it carries asks trackOf(), and everything that changes it
+     * goes through replaceSenderTrack(), which changes the held track
+     * instead while the hold lasts. A hold ends — the real track on, or
+     * nothing — when the transform seals, when enforcement goes off, at once
+     * when the real track ends or is no longer ours to send, or by the valve:
+     * HOLD_VALVE_MS of the hold with encryption on and NOTHING sent on the
+     * sender, by the audit's look at the connection's own counters (an engine
+     * that sends nothing for a disabled track would otherwise never send at
+     * all). Frames that did go out unsealed — past the transform, or through
+     * it — keep the hold: they are the audit's to judge, and it gives the
+     * path up over them. Counted from the hold's start, not from when
+     * encryption came on, or a share or camera added an hour into a call
+     * would be let through at the first sweep.
+     */
+    private heldSenders = new Map<RTCRtpSender, HeldSender>();
+    private heldSweep: ReturnType<typeof setInterval> | null = null;
+    private readonly HOLD_VALVE_MS = 10_000;
+
+    /** The track a sender sends, or will send once its hold ends. */
+    private trackOf(sender: RTCRtpSender): MediaStreamTrack | null {
+        const held = this.heldSenders.get(sender);
+        return held ? held.real : sender.track;
+    }
+
+    /** sender.replaceTrack, through a hold: a held sender is given a stand-in
+     *  of the new track instead (a clone of the OLD one would keep its source
+     *  — a camera switched away from — running), or, with null, the hold
+     *  ends with nothing on the sender. */
+    private replaceSenderTrack(sender: RTCRtpSender, track: MediaStreamTrack | null): Promise<void> {
+        const held = this.heldSenders.get(sender);
+        if (held && track) {
+            const old = held.stand;
+            held.real = track;
+            return this.putStand(sender, held, track).finally(() => old.stop());
+        }
+        if (held) this.endHold(sender, held, null);
+        return sender.replaceTrack(track).catch(() => { /* peer gone */ });
+    }
+
+    /** Put a disabled clone of `track` on the held sender. */
+    private putStand(sender: RTCRtpSender, held: HeldSender, track: MediaStreamTrack): Promise<void> {
+        let stand: MediaStreamTrack;
+        try {
+            stand = track.clone();
+            stand.enabled = false; // silence, or black: nothing of what the real track carries
+        } catch (e) {
+            // No stand-in to be had: no hold, the track goes on as it did
+            // before holds existed (the audit still watches the transform).
+            console.warn('[media-e2ee] no stand-in for a held sender; sending its track', e);
+            this.endHold(sender, held, undefined);
+            return sender.replaceTrack(track).catch(() => { /* peer gone */ });
+        }
+        held.stand = stand;
+        held.swaps++;
+        // sender.track changes only when replaceTrack resolves: until then the
+        // sweep must not read the old track as someone else's.
+        return sender.replaceTrack(stand)
+            .catch(() => {
+                if (this.heldSenders.get(sender) === held && held.stand === stand) this.endHold(sender, held, undefined);
+            })
+            .finally(() => { held.swaps--; });
+    }
+
+    private isLocalTrack(track: MediaStreamTrack): boolean {
+        return !!(this.media.getLocalStreamSync()?.getTracks().includes(track)
+            || this.media.getScreenShareStreamSync()?.getTracks().includes(track));
+    }
+
+    private holdUntilSealed(userId: UserId, sender: RTCRtpSender): void {
+        const real = sender.track;
+        if (!real || this.heldSenders.has(sender)) return;
+        const held: HeldSender = { userId, real, stand: real, swaps: 0, since: Date.now() };
+        this.heldSenders.set(sender, held);
+        void this.putStand(sender, held, real);
+        this.heldSweep ??= setInterval(() => this.sweepHeldSenders(), 1000);
+    }
+
+    /** End a hold: put `next` on the sender (null: nothing; undefined: leave
+     *  whatever is there), and stop the stand-in. */
+    private endHold(sender: RTCRtpSender, held: HeldSender, next: MediaStreamTrack | null | undefined): void {
+        if (this.heldSenders.get(sender) === held) this.heldSenders.delete(sender);
+        const stand = held.stand;
+        const stop = () => { if (stand !== held.real) stand.stop(); };
+        if (next !== undefined && (sender.track === stand || held.swaps > 0)) void sender.replaceTrack(next).catch(() => { /* peer gone */ }).finally(stop);
+        else stop();
+        if (this.heldSenders.size === 0 && this.heldSweep !== null) {
+            clearInterval(this.heldSweep);
+            this.heldSweep = null;
+        }
+    }
+
+    /** End every hold that is over (see heldSenders). */
+    private sweepHeldSenders(): void {
+        for (const [sender, held] of [...this.heldSenders]) {
+            if (held.swaps > 0) continue; // a stand-in is still going on
+            const peer = this.peers.get(held.userId);
+            const c = peer?.mediaCrypto;
+            const onPeer = !!peer && peer.connection.getSenders().includes(sender);
+            const real = held.real;
+            const wanted = !!real && onPeer && real.readyState === 'live' && this.isLocalTrack(real) && this.sendsTo(held.userId);
+            if (!wanted || sender.track !== held.stand) {
+                // The real track ended or is not ours to send any more, or
+                // something put another track on the sender: nothing waits.
+                this.endHold(sender, held, wanted ? undefined : null);
+                continue;
+            }
+            const sealed = c instanceof PeerMediaCrypto && c.sealed(sender);
+            const valve = c instanceof PeerMediaCrypto && c.enabledSince !== null
+                && Date.now() - Math.max(c.enabledSince, held.since) > this.HOLD_VALVE_MS
+                && c.carriedOn(sender) === false;
+            if (sealed || !this.requireMediaE2ee || valve) {
+                if (!sealed && valve && this.requireMediaE2ee) {
+                    console.warn(`[media-e2ee] a sender to ${held.userId} sent nothing in ${this.HOLD_VALVE_MS / 1000} s of encryption, so nothing could be sealed (an engine that sends nothing for a disabled track); sending its track without that proof (the audit still watches it)`);
+                }
+                this.endHold(sender, held, real);
+            }
+        }
+    }
+
+    /** Stop the stand-ins of every held sender of this peer (it is going). */
+    private dropHolds(userId?: UserId): void {
+        for (const [sender, held] of [...this.heldSenders]) {
+            if (userId === undefined || held.userId === userId) this.endHold(sender, held, undefined);
+        }
     }
 
     setLocalUserId(id: UserId) {
@@ -797,7 +970,7 @@ export class WebRTCManager {
         this.noReceivePeers.add(userId);
         if (!peer) return;
         for (const sender of peer.connection.getSenders()) {
-            if (sender.track) void sender.replaceTrack(null).catch(() => { /* peer gone */ });
+            if (this.trackOf(sender)) void this.replaceSenderTrack(sender, null);
         }
     }
 
@@ -843,9 +1016,8 @@ export class WebRTCManager {
         if (removed.length === 0) return;
         for (const [, peer] of this.peers) {
             for (const sender of peer.connection.getSenders()) {
-                if (sender.track && removed.includes(sender.track)) {
-                    await sender.replaceTrack(null).catch(() => { /* peer gone */ });
-                }
+                const track = this.trackOf(sender);
+                if (track && removed.includes(track)) await this.replaceSenderTrack(sender, null);
             }
         }
     }
@@ -929,7 +1101,7 @@ export class WebRTCManager {
         if (this.publishBlockedByEnforcement()) return;
         for (const [userId, peer] of this.peers) {
             if (!this.sendsTo(userId)) continue;
-            if (peer.connection.getSenders().some(s => s.track === track)) continue;
+            if (peer.connection.getSenders().some(s => this.trackOf(s) === track)) continue;
             // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
             this.wireSender(userId, peer.connection.addTrack(track, localStream));
         }
@@ -1004,12 +1176,14 @@ export class WebRTCManager {
                 if (this.peers.get(userId) !== peer) continue;
                 if (!this.sendsTo(userId)) continue;
                 const senders = peer.connection.getSenders();
-                const videoSender = senders.find(s =>
-                    s.track?.kind === 'video' && !screenVideo.has(s.track));
+                const videoSender = senders.find(s => {
+                    const t = this.trackOf(s);
+                    return t?.kind === 'video' && !screenVideo.has(t);
+                });
 
                 if (videoSender) {
                     // replaceTrack needs no renegotiation.
-                    await videoSender.replaceTrack(newTrack);
+                    await this.replaceSenderTrack(videoSender, newTrack);
                 } else {
                     // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
                     this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
@@ -1073,7 +1247,10 @@ export class WebRTCManager {
             // that marks those m-lines inactive, so receivers' tracks end cleanly.
             for (const [, peer] of this.peers) {
                 peer.connection.getSenders().forEach(sender => {
-                    if (sender.track && screenTracks.has(sender.track)) {
+                    const track = this.trackOf(sender);
+                    if (track && screenTracks.has(track)) {
+                        const held = this.heldSenders.get(sender);
+                        if (held) this.endHold(sender, held, undefined);
                         try { peer.connection.removeTrack(sender); } catch { /* peer closing */ }
                     }
                 });
@@ -1100,7 +1277,8 @@ export class WebRTCManager {
         let sample: EncodeSample | null = null;
         for (const [, peer] of this.peers) {
             for (const sender of peer.connection.getSenders()) {
-                if (!sender.track || sender.track.kind !== 'video' || !screenTracks.has(sender.track)) continue;
+                const track = this.trackOf(sender);
+                if (!track || track.kind !== 'video' || !screenTracks.has(track)) continue;
                 try {
                     const stats = await sender.getStats();
                     stats.forEach((s) => {
@@ -1197,7 +1375,7 @@ export class WebRTCManager {
         if (localStream && sends) {
             const existing = pc.getSenders();
             localStream.getTracks().forEach(track => {
-                if (!existing.some(s => s.track === track)) {
+                if (!existing.some(s => this.trackOf(s) === track)) {
                     const sender = pc.addTrack(track, localStream);
                     this.wireSender(userId, sender); // media-E2EE encrypt transform
                 }
@@ -1211,7 +1389,7 @@ export class WebRTCManager {
         // transceiver makes us negotiate normally and tells the peer to send.
         const hasLocalAudio = sends && !!localStream?.getAudioTracks().length;
         const hasAudioTransceiver = pc.getTransceivers()
-            .some(t => t.sender.track?.kind === 'audio' || t.receiver.track?.kind === 'audio');
+            .some(t => this.trackOf(t.sender)?.kind === 'audio' || t.receiver.track?.kind === 'audio');
         if (!hasLocalAudio && !hasAudioTransceiver) {
             this.wireReceiverEarly(userId, pc.addTransceiver('audio', { direction: 'recvonly' })?.receiver);
         }
@@ -1247,7 +1425,7 @@ export class WebRTCManager {
     private async addScreenShareTracks(userId: UserId, pc: RTCPeerConnection, stream: MediaStream): Promise<void> {
         const existing = pc.getSenders();
         for (const track of stream.getTracks()) {
-            if (existing.some(s => s.track === track)) continue;
+            if (existing.some(s => this.trackOf(s) === track)) continue;
             const sender = pc.addTrack(track, stream);
             this.wireSender(userId, sender); // media-E2EE encrypt transform
             if (track.kind === 'video') await this.tuneScreenShareSender(sender);
@@ -1298,10 +1476,13 @@ export class WebRTCManager {
             if (!this.sendsTo(userId)) continue;
             const senders = peer.connection.getSenders();
             const micSender =
-                (oldTrack ? senders.find(s => s.track === oldTrack) : undefined) ??
-                senders.find(s => s.track?.kind === 'audio' && !screenAudio.has(s.track));
+                (oldTrack ? senders.find(s => this.trackOf(s) === oldTrack) : undefined) ??
+                senders.find(s => {
+                    const t = this.trackOf(s);
+                    return t?.kind === 'audio' && !screenAudio.has(t);
+                });
             if (micSender) {
-                await micSender.replaceTrack(newTrack).catch(() => { /* peer gone */ });
+                await this.replaceSenderTrack(micSender, newTrack);
             } else if (localStream && !(this.requireMediaE2ee && !isMediaE2eeSupported())) {
                 // No microphone sender on this peer at all: we joined with no
                 // microphone, so the join added only a receive-only audio
@@ -1757,6 +1938,7 @@ export class WebRTCManager {
         mediaCrypto.onChange = () => {
             if (this.peers.get(userId)?.mediaCrypto !== mediaCrypto) return;
             this.applyReceiveGates(userId);
+            this.sweepHeldSenders(); // a sender whose transform just sealed its first frame
             this.emitMediaE2ee(userId);
         };
         this.peers.set(userId, {
@@ -1950,6 +2132,13 @@ export class WebRTCManager {
             return;
         }
 
+        // The DTLS pin BEFORE the description is applied: it is a check of the
+        // SDP alone, and once an answer is applied media can flow — after an
+        // awaited candidate flush and whatever else comes first. Our offer
+        // needed the pairwise key, so for an answer it is there; for an offer
+        // it may still be on its way, and then it is checked again below,
+        // before our answer is made.
+        this.verifyRemoteDtls(fromUser, description.sdp || '');
         try {
             peer.isSettingRemoteAnswerPending = description.type === 'answer';
             // For the polite peer under collision this implicitly rolls back our
@@ -1990,6 +2179,9 @@ export class WebRTCManager {
 
         if (description.type === 'offer') {
             await this.setupMediaKey(fromUser); // tag ready to advertise in the answer
+            // The pin with the key now certainly in hand, before our answer
+            // lets anything flow (a no-op if the check above already ran).
+            this.verifyRemoteDtls(fromUser, description.sdp || '');
             // The offer's transceivers exist now: answer VP8 first to an
             // offer that put another codec first (preferSealableVideoCodecs).
             if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { answerTo: description.sdp || '' });
@@ -2019,11 +2211,10 @@ export class WebRTCManager {
         // (an answer cannot choose what its own side sends).
         if (isMediaE2eeSupported()) void sendSealableVideoCodec(pc);
 
-        // The DTLS pin first: a substituted connection is decided here, before
-        // frame encryption is even considered.
-        this.verifyRemoteDtls(fromUser, description.sdp || '');
-        // Verify the peer's ephemeral-bound tag and, if valid, derive the
-        // forward-secret session key and enable — see enableMediaWithRemote.
+        // (The DTLS pin was decided above, before frame encryption is even
+        // considered.) Verify the peer's ephemeral-bound tag and, if valid,
+        // derive the forward-secret session key and enable — see
+        // enableMediaWithRemote.
         await this.enableMediaWithRemote(fromUser, remoteCap);
     }
 
@@ -2055,6 +2246,7 @@ export class WebRTCManager {
         const peer = this.peers.get(fromUser);
         if (!peer) return;
         if (envelope.connId) peer.remoteConnId = envelope.connId;
+        this.verifyRemoteDtls(fromUser, envelope.sdp || ''); // before anything is applied (see handleIncomingDescription)
         try {
             await pc.setRemoteDescription({ type: envelope.type, sdp: envelope.sdp });
         } catch (e) {
@@ -2068,6 +2260,7 @@ export class WebRTCManager {
         await this.flushPendingCandidates(fromUser, pc);
         this.scheduleIceStartCheck(fromUser);
         await this.setupMediaKey(fromUser);
+        this.verifyRemoteDtls(fromUser, envelope.sdp || ''); // the key in hand, before our answer
         if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { answerTo: envelope.sdp || '' });
         await pc.setLocalDescription(); // implicit answer
         const local = pc.localDescription;
@@ -2085,7 +2278,6 @@ export class WebRTCManager {
             }));
         }
         if (isMediaE2eeSupported()) void sendSealableVideoCodec(pc);
-        this.verifyRemoteDtls(fromUser, envelope.sdp || '');
         await this.enableMediaWithRemote(fromUser, extractE2ee(envelope.sdp || ''));
     }
 
@@ -2136,6 +2328,7 @@ export class WebRTCManager {
         if (!keepSignalingChain) this.signalingChains.delete(userId);
         this.pendingCandidates.delete(userId);
         this.peerCreation.delete(userId);
+        this.dropHolds(userId);
         // Cancel any pending reconnect so it can't rebuild this peer.
         const t = this.reconnectTimeouts.get(userId);
         if (t) clearTimeout(t);
@@ -2179,9 +2372,13 @@ export class WebRTCManager {
         this.iceStartTimers.clear();
         this.iceStartRebuilds.clear();
         this.peerGeneration.clear();
+        this.dropHolds();
         this.media.stopLocalStream();
         this.media.stopScreenShare();
         this.media.closeVadContext();
+        // Encryption that could not be confirmed is given up for ONE call:
+        // the next call tries the standard path again from the start.
+        retryScriptTransformNextCall();
     }
 
     /** Whether ANY peer entry exists for this user (connected or not). Drives
@@ -2264,8 +2461,9 @@ export class WebRTCManager {
                 }
             }
             for (const s of pc.getSenders()) {
-                if (s.track && tracks.includes(s.track)) {
-                    out.push({ key: s, direction: 'outbound', kind: s.track.kind, getStats: () => s.getStats() });
+                const track = this.trackOf(s);
+                if (track && tracks.includes(track)) {
+                    out.push({ key: s, direction: 'outbound', kind: track.kind, getStats: () => s.getStats() });
                 }
             }
         }

@@ -39,11 +39,26 @@ export type MediaTransformApi = 'encoded-streams' | 'script-transform';
 /** Set once the RTCRtpScriptTransform worker is known not to work here
  *  (scriptTransform.ts): from then on this engine cannot encrypt. */
 let scriptTransformUnavailable = false;
+/** Set while the standard path is SUSPENDED: its audit could not confirm
+ *  that frames are sealed and opened on this call (scriptTransform.ts).
+ *  Lifted when the call ends, or after a cool-down. */
+let scriptTransformSuspended = false;
 
 /** The worker the standard path needs would not start, or stopped taking
  *  state (scriptTransform.ts calls this; never undone for this page). */
 export function noteScriptTransformUnavailable(): void {
     scriptTransformUnavailable = true;
+}
+
+/** scriptTransform.ts suspends the standard path for a call, and lifts it. */
+export function setScriptTransformSuspended(suspended: boolean): void {
+    scriptTransformSuspended = suspended;
+}
+
+/** Is encryption off on THIS call because it could not be confirmed (and to
+ *  be tried again), rather than because this engine cannot do it at all? */
+export function isScriptTransformSuspended(): boolean {
+    return scriptTransformSuspended && !scriptTransformUnavailable;
 }
 
 /**
@@ -59,7 +74,7 @@ export function noteScriptTransformUnavailable(): void {
 export function mediaTransformApi(): MediaTransformApi | null {
     if (typeof RTCRtpSender === 'undefined') return null;
     if ('createEncodedStreams' in RTCRtpSender.prototype) return 'encoded-streams';
-    if (!scriptTransformUnavailable
+    if (!scriptTransformUnavailable && !scriptTransformSuspended
         && typeof RTCRtpScriptTransform === 'function'
         && typeof Worker === 'function'
         && 'transform' in RTCRtpSender.prototype
@@ -77,6 +92,7 @@ export function isMediaE2eeSupported(): boolean {
 /** Tests only: forget that the standard path was found not to work. */
 export function __resetScriptTransformAvailability(): void {
     scriptTransformUnavailable = false;
+    scriptTransformSuspended = false;
 }
 
 export async function importMediaKey(rawKey: Uint8Array): Promise<CryptoKey> {

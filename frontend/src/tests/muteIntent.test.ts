@@ -459,7 +459,7 @@ const PINS: Pin[] = [
         name: 'mesh: a microphone with no sender to replace (a join with none) is ADDED to the peer, under the fail-closed rule',
         src: 'mgr',
         holds: (c) => inOrder(body(c, 'private async doReapplyNoiseMode('),
-            'if (micSender) {', 'await micSender.replaceTrack(newTrack)',
+            'if (micSender) {', 'await this.replaceSenderTrack(micSender, newTrack)',
             '} else if (localStream && !(this.requireMediaE2ee && !isMediaE2eeSupported())) {',
             'this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));'),
         mutants: [

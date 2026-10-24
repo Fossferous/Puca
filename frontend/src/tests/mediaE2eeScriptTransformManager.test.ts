@@ -36,8 +36,9 @@ vi.mock('../api/websocket', () => ({
 }));
 
 import { WebRTCManager } from '../api/rtc/manager';
-import { advertiseDtlsPin, newFrameCounts, type FrameCounts } from '../api/rtc/mediaCrypto';
-import { __runFrameAudit, __setScriptTransformWorkerFactory, PeerMediaCrypto, type TransformWorkerLike } from '../api/rtc/scriptTransform';
+import { advertiseDtlsPin, isScriptTransformSuspended, newFrameCounts, type FrameCounts } from '../api/rtc/mediaCrypto';
+import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
+import { __runFrameAudit, __setScriptTransformWorkerFactory, PeerMediaCrypto, retryScriptTransformNextCall, type TransformWorkerLike } from '../api/rtc/scriptTransform';
 import type { ScriptTransformCommand } from '../api/rtc/scriptTransformWorker';
 import type { MediaE2eeStatus } from '../api/rtc/types';
 
@@ -102,6 +103,8 @@ class FakeRTCPeerConnection {
         this.transceivers.push(t);
         return t;
     }
+    removedSenders: unknown[] = [];
+    removeTrack(sender: unknown) { this.removedSenders.push(sender); }
     createDataChannel() { return { close: () => {}, addEventListener: () => {} }; }
     async setRemoteDescription(d: { type: string; sdp?: string }) {
         events.push(`srd:${d.type}`);
@@ -339,6 +342,7 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         expect(mgr.isMediaEncrypted(2)).toBe(false);
         expect(mgr.mediaEncryptionSummary()).toMatchObject({ total: 1, encrypted: 0 });
 
+        worker.emit('message', { data: { type: 'ready' } });
         await __runFrameAudit();
         const sealed = worker.countsOf(pcs[0].senders[0]);
         const opened = worker.countsOf(receiver);
@@ -361,13 +365,14 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         expect(mgr.mediaE2eeStatus(2), 'five windows of nothing opening is a failure, not a set-up').toMatchObject({ encrypted: false, reason: 'verification-failed' });
     });
 
-    it('SECURITY: frames a receiver takes without its transform seeing them rebuild every peer as "cannot encrypt" (blocked)', async () => {
+    it('SECURITY: frames a receiver takes without its transform seeing them rebuild every peer, blocked, as "could not be confirmed on this call"', async () => {
         scriptEngine();
         const mgr = await inCall(true);
         let taken = 0;
         const receiver = { transform: null as unknown, getStats: async () => new Map([['in', { type: 'inbound-rtp', kind: 'audio', packetsReceived: taken }]]) };
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         deliver(pcs[0], receiver);
+        worker.emit('message', { data: { type: 'ready' } });
         await __runFrameAudit();
         for (let i = 0; i < 2; i++) {
             taken += 100; // the connection took them; the worker saw none
@@ -375,9 +380,10 @@ describe('mesh calls on an engine with only RTCRtpScriptTransform', () => {
         }
         await settle();
         expect(pcs[0].closed, 'a connection whose frames go by their transform stayed up').toBe(true);
-        expect(mgr.mediaE2eeStatus(2)).toMatchObject({ reason: 'local-unsupported', enforced: true, encrypted: false });
+        expect(mgr.mediaE2eeStatus(2)).toMatchObject({ reason: 'unconfirmed', enforced: true, encrypted: false });
+        expect(mgr.mediaEncryptionSummary()).toMatchObject({ supported: false, unconfirmed: true });
         expect(pcs[pcs.length - 1].senders, 'the rebuilt connection was sent media nothing can seal').toEqual([]);
-        expect(warn.mock.calls.some((c) => String(c[0]).includes('never went through its transform'))).toBe(true);
+        expect(warn.mock.calls.some((c) => /frames that (never went|mostly did not go) through its transform/.test(String(c[0])))).toBe(true);
         warn.mockRestore();
     });
 
@@ -704,5 +710,419 @@ describe('VP8 first, before every offer and answer, where frames are sealed', ()
         const mgr = await inCall(false);
         await (mgr as unknown as { makeOffer: (u: number, p: unknown) => Promise<void> }).makeOffer(2, pcs[0]);
         expect(events).toEqual(['sld:offer']);
+    });
+});
+
+/** A track that can be cloned and stopped, as a real one can. */
+interface FakeTrack { kind: 'audio' | 'video'; id: string; enabled: boolean; readyState: 'live' | 'ended'; stop(): void; clone(): FakeTrack }
+function track(kind: 'audio' | 'video', id: string): FakeTrack {
+    const t: FakeTrack = {
+        kind, id, enabled: true, readyState: 'live',
+        stop() { t.readyState = 'ended'; },
+        clone() { return track(kind, `${id}+stand`); },
+    };
+    return t;
+}
+const streamOf = (id: string, tracks: FakeTrack[]) => ({
+    id, getTracks: () => tracks,
+    getAudioTracks: () => tracks.filter(t => t.kind === 'audio'),
+    getVideoTracks: () => tracks.filter(t => t.kind === 'video'),
+});
+
+/** In a call with peer 2, sending `tracks` (and a share of `share`). */
+async function callWith(required: boolean, tracks: FakeTrack[], share: FakeTrack[] = []) {
+    const mgr = manager();
+    mgr.setLocalUserId(1);
+    mgr.setRequireMediaE2ee(required);
+    const media = (mgr as unknown as { media: Record<string, unknown> }).media;
+    media.getLocalStreamSync = () => streamOf('local', tracks);
+    media.getScreenShareStreamSync = () => (share.length ? streamOf('screen', share) : null);
+    await mgr.callUser(2);
+    await settle();
+    return { mgr, media, pc: pcs[pcs.length - 1] };
+}
+const sealedFirst = (sender: FakeSender) => worker.emit('message', {
+    data: { type: 'counts', seq: null, transforms: [{ id: (sender.transform as FakeScriptTransform).options.id, seen: 1, done: 1, clear: 0, dropped: 0 }] },
+});
+const sweep = (mgr: WebRTCManager) => (mgr as unknown as { sweepHeldSenders: () => void }).sweepHeldSenders();
+const aesKey = async () => await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt']) as CryptoKey;
+/** As if this sender's hold, and encryption with its peer, began `ms` ago. */
+function backdate(mgr: WebRTCManager, c: PeerMediaCrypto, sender: FakeSender, ms: number): void {
+    const held = (mgr as unknown as { heldSenders: Map<unknown, { since: number }> }).heldSenders.get(sender);
+    if (!held) throw new Error('not held');
+    held.since -= ms;
+    c.enabledSince = Date.now() - ms;
+}
+const PIN_SDP = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 ' + 'AB:'.repeat(31) + 'AB\r\na=setup:actpass\r\n';
+const PIN_KEY = new Uint8Array(32).fill(7);
+const OTHER_KEY = new Uint8Array(32).fill(9);
+
+describe('the third review: a give-up lasts one call, the pin comes first, senders wait for a sealed frame', () => {
+    it('a give-up is "could not be confirmed on this call" (no browser to change, no setting to turn off), blocks under enforcement, and the next call tries again', async () => {
+        scriptEngine();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const mgr = await inCall(true);
+        worker.emit('message', { data: { type: 'ready' } });
+        worker.emit('error', new Event('error')); // fails after starting
+        await settle();
+        expect(pcs[0].closed).toBe(true);
+        const st = mgr.mediaE2eeStatus(2)!;
+        expect(st).toMatchObject({ reason: 'unconfirmed', enforced: true, encrypted: false });
+        const told = mediaE2eeExplanation(st.reason, 'Alex', true, false)!;
+        expect(told).toMatch(/could not be confirmed on this call/);
+        expect(told, 'a passing failure answered with a setting that stays off for good').not.toMatch(/turn off|Require encryption|older browser/i);
+        expect(pcs[pcs.length - 1].senders, 'sent media while it could not be confirmed, under enforcement').toEqual([]);
+        expect(isScriptTransformSuspended()).toBe(true);
+
+        mgr.closeAll(); // the call ends
+        await settle();
+        expect(isScriptTransformSuspended(), 'still given up after the call').toBe(false);
+        const again = await inCall(true);
+        expect(pcs[pcs.length - 1].senders[0]?.transform, 'the next call did not get its transforms back').toBeInstanceOf(FakeScriptTransform);
+        expect(again.mediaE2eeStatus(2)?.reason).not.toBe('unconfirmed');
+        warn.mockRestore();
+    });
+
+    it('tried again within the call: the connections are rebuilt WITH transforms when the path comes back', async () => {
+        scriptEngine();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await inCall(true);
+        worker.emit('message', { data: { type: 'ready' } });
+        worker.emit('error', new Event('error'));
+        await settle();
+        const blocked = pcs[pcs.length - 1];
+        expect(blocked.senders).toEqual([]);
+        retryScriptTransformNextCall(); // the path comes back while still in the call (as the cool-down's end does)
+        await settle();
+        const back = pcs[pcs.length - 1];
+        expect(back, 'nothing rebuilt when the path came back').not.toBe(blocked);
+        expect(back.senders[0]?.transform).toBeInstanceOf(FakeScriptTransform);
+        warn.mockRestore();
+    });
+
+    it('the DTLS pin is checked BEFORE an answer is applied, and its hold reaches the worker as ONE copy, before anything else', async () => {
+        scriptEngine();
+        const mgr = await inCall(false);
+        const peer = peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null; mediaCrypto: PeerMediaCrypto };
+        peer.mediaStaticKeyRaw = PIN_KEY;
+        await handshakeDone(mgr, 2); // encryption on: the worst moment for a half-changed state
+        const post = worker.postMessage.bind(worker);
+        worker.postMessage = (m) => {
+            if (m.type === 'state') events.push(`state:hold=${m.hold}:enabled=${m.enabled}:key=${m.key ? 'set' : 'none'}`);
+            post(m);
+        };
+        events.length = 0;
+        pcs[0].signalingState = 'have-local-offer'; // our offer is out
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await (mgr as unknown as { handleIncomingDescription: (u: number, s: string) => Promise<void> })
+            .handleIncomingDescription(2, JSON.stringify({ type: 'answer', sdp: advertiseDtlsPin(PIN_SDP, OTHER_KEY) }));
+        warn.mockRestore();
+        const hold = events.findIndex(e => e.startsWith('state:hold=true'));
+        expect(hold, 'no hold reached the worker').toBeGreaterThanOrEqual(0);
+        expect(events.indexOf('srd:answer'), 'the answer was applied before the hold').toBeGreaterThan(hold);
+        expect(events[hold], 'the hold came with encryption off and the key gone, as one copy').toBe('state:hold=true:enabled=false:key=none');
+        expect(events.slice(0, hold).filter(e => e.startsWith('state:')), 'a half-changed state reached the worker first').toEqual([]);
+    });
+
+    it('CONTROL: an honest pin in the answer holds nothing, and the answer is applied', async () => {
+        scriptEngine();
+        const mgr = await inCall(false);
+        (peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null }).mediaStaticKeyRaw = PIN_KEY;
+        events.length = 0;
+        pcs[0].signalingState = 'have-local-offer';
+        await (mgr as unknown as { handleIncomingDescription: (u: number, s: string) => Promise<void> })
+            .handleIncomingDescription(2, JSON.stringify({ type: 'answer', sdp: advertiseDtlsPin(PIN_SDP, PIN_KEY) }));
+        expect(events).toContain('srd:answer');
+        expect(mgr.mediaE2eeStatus(2)?.dtls).toBe('bound');
+        expect(mgr.sendsTo(2)).toBe(true);
+    });
+
+    it('SECURITY: after a pin hold no path puts a track back: camera published, toggled on, switched; a share; the noise mode; NO RECEIVE lifted', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const mic2 = track('audio', 'mic2');
+        const screen = track('video', 'screen');
+        const local: FakeTrack[] = [mic];
+        const { mgr, media, pc } = await callWith(false, local);
+        (peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null }).mediaStaticKeyRaw = PIN_KEY;
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        (mgr as unknown as { verifyRemoteDtls: (u: number, s: string) => void }).verifyRemoteDtls(2, advertiseDtlsPin(PIN_SDP, OTHER_KEY));
+        await settle();
+        const sending = () => pc.senders.filter(s => s.track).map(s => (s.track as FakeTrack).id);
+        expect(sending(), 'precondition: the hold emptied the senders').toEqual([]);
+        const count = pc.senders.length;
+
+        local.push(cam);
+        media.toggleVideo = async () => cam;
+        mgr.publishCameraTrack(cam as unknown as MediaStreamTrack);
+        await mgr.toggleVideo(true);
+        media.switchCamera = async () => cam2;
+        await mgr.switchCamera('user');
+        media.getScreenShareStreamSync = () => streamOf('screen', [screen]);
+        await mgr.addScreenShareToPeers();
+        media.reacquireAudioTrack = async () => ({ oldTrack: mic, newTrack: mic2 });
+        await mgr.reapplyNoiseMode();
+        mgr.setPeerReceives(2, false);
+        mgr.setPeerReceives(2, true);
+        await settle();
+        warn.mockRestore();
+        expect(sending(), 'a track went to the substituted connection').toEqual([]);
+        expect(pc.senders.length, 'a sender was added to the substituted connection').toBe(count);
+    });
+
+    it('CONTROL: the same kind of path DOES reach a peer whose pin is fine (the test above can fail)', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const local: FakeTrack[] = [mic];
+        const { mgr, media, pc } = await callWith(false, local);
+        local.push(cam);
+        media.toggleVideo = async () => cam;
+        await mgr.toggleVideo(true);
+        await settle();
+        expect(pc.senders.filter(s => s.track).map(s => (s.track as FakeTrack).id)).toEqual(['mic', 'cam']);
+    });
+
+    it('SECURITY: under enforcement on the worker path a new sender carries a silent, black stand-in until its transform seals a frame — then its own track', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { pc } = await callWith(true, [mic]);
+        const sender = pc.senders[0];
+        const stand = sender.track as FakeTrack;
+        expect(stand, 'the microphone itself went on before anything was sealed').not.toBe(mic);
+        expect(stand.kind).toBe('audio');
+        expect(stand.enabled, 'the stand-in carries sound').toBe(false);
+        sealedFirst(sender);
+        await settle();
+        expect(sender.track, 'its own track did not follow the first sealed frame').toBe(mic);
+        expect(stand.readyState, 'the stand-in was left running').toBe('ended');
+    });
+
+    it('CONTROL: no stand-in without enforcement, or on the createEncodedStreams path (its pipe cannot be passed by)', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const loose = await callWith(false, [mic]);
+        expect(loose.pc.senders[0].track).toBe(mic);
+        vi.unstubAllGlobals();
+        vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
+        class Sender {}
+        (Sender.prototype as unknown as Record<string, unknown>).createEncodedStreams = () => ({});
+        vi.stubGlobal('RTCRtpSender', Sender);
+        const orig = FakeRTCPeerConnection.prototype.addTrack;
+        FakeRTCPeerConnection.prototype.addTrack = function (this: FakeRTCPeerConnection, t: unknown) {
+            const s = orig.call(this, t) as FakeSender & { createEncodedStreams?: () => unknown };
+            s.createEncodedStreams = () => { const ts = new TransformStream(); return { readable: ts.readable, writable: ts.writable }; };
+            return s;
+        };
+        try {
+            const mic2 = track('audio', 'mic2');
+            const chromium = await callWith(true, [mic2]);
+            expect(chromium.pc.senders[0].track).toBe(mic2);
+        } finally {
+            FakeRTCPeerConnection.prototype.addTrack = orig;
+        }
+    });
+
+    it('SECURITY: a held sender emptied meanwhile (NO RECEIVE) does not get its track back when its transform seals', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        const sender = pc.senders[0];
+        const stand = sender.track as FakeTrack;
+        mgr.setPeerReceives(2, false);
+        await settle();
+        expect(sender.track).toBeNull();
+        expect(stand.readyState).toBe('ended');
+        sealedFirst(sender);
+        await settle();
+        expect(sender.track, 'the microphone went back to a member who may not receive it').toBeNull();
+    });
+
+    it('a real track that ends during the hold (camera off) takes the stand-in with it, and nothing is put back', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const { mgr, pc } = await callWith(true, [mic, cam]);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        const stand = camSender.track as FakeTrack;
+        cam.stop();
+        sweep(mgr);
+        await settle();
+        expect(camSender.track).toBeNull();
+        expect(stand.readyState, 'a stand-in kept the camera running after it was turned off').toBe('ended');
+    });
+
+    it('a camera switched during the hold: the stand-in follows the new camera (letting the old go), which goes on when sealed', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        const oldStand = camSender.track as FakeTrack;
+        local[1] = cam2;
+        media.switchCamera = async () => cam2;
+        await mgr.switchCamera('user');
+        await settle();
+        expect((camSender.track as FakeTrack).id, 'the new camera went on before anything was sealed').toBe('cam2+stand');
+        expect(oldStand.readyState, 'the stand-in of the camera switched away from kept running').toBe('ended');
+        expect(pc.senders.length, 'a second camera sender was added').toBe(2);
+        sealedFirst(camSender);
+        await settle();
+        expect(camSender.track).toBe(cam2);
+    });
+
+    it('stopping a share finds its held sender (by the track it waits to send) and removes it', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const screen = track('video', 'screen');
+        const { mgr, media, pc } = await callWith(true, [mic], [screen]);
+        const shareSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'screen+stand');
+        expect(shareSender, 'precondition: the share is held').toBeTruthy();
+        const stand = shareSender!.track as FakeTrack;
+        media.stopScreenShare = () => true;
+        mgr.stopScreenShare();
+        expect(pc.removedSenders, 'a held share sender was left on the connection').toContain(shareSender);
+        expect(stand.readyState, 'the share\'s stand-in kept the capture alive').toBe('ended');
+    });
+
+    it('a peer that goes, and a call that ends, take their stand-ins with them', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        const stand = pc.senders[0].track as FakeTrack;
+        mgr.closePeer(2);
+        expect(stand.readyState, 'a gone peer\'s stand-in kept the microphone open').toBe('ended');
+        const mic2 = track('audio', 'mic2');
+        const again = await callWith(true, [mic2]);
+        const stand2 = again.pc.senders[0].track as FakeTrack;
+        expect(stand2.id).toBe('mic2+stand');
+        again.mgr.closeAll();
+        expect(stand2.readyState, 'an ended call\'s stand-in kept the microphone open').toBe('ended');
+    });
+
+    it('SECURITY: answering an offer whose pin only checks out once our key is ready: still held BEFORE our answer is made', async () => {
+        scriptEngine();
+        const mgr = await inCall(false);
+        const peer = peerOf(mgr, 2)! as unknown as { mediaStaticKeyRaw: Uint8Array | null };
+        peer.mediaStaticKeyRaw = null; // not derived yet when the offer lands
+        (mgr as unknown as { setupMediaKey: (u: number) => Promise<void> }).setupMediaKey = async () => { peer.mediaStaticKeyRaw = PIN_KEY; };
+        const post = worker.postMessage.bind(worker);
+        worker.postMessage = (m) => {
+            if (m.type === 'state' && m.hold) events.push('state:hold');
+            post(m);
+        };
+        events.length = 0;
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await (mgr as unknown as { handleIncomingDescription: (u: number, s: string) => Promise<void> })
+            .handleIncomingDescription(2, JSON.stringify({ type: 'offer', sdp: advertiseDtlsPin(PIN_SDP, OTHER_KEY) }));
+        warn.mockRestore();
+        expect(events.indexOf('state:hold'), 'no hold').toBeGreaterThanOrEqual(0);
+        expect(events.indexOf('sld:answer'), 'our answer went out before the substitution was held').toBeGreaterThan(events.indexOf('state:hold'));
+        expect(mgr.mediaE2eeStatus(2)).toMatchObject({ reason: 'fingerprint-mismatch', dtls: 'mismatch' });
+    });
+
+    it('the valve: 10 s of the hold with encryption on and NOTHING sent on the sender (an engine that sends nothing for a disabled track), the track goes on — said', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        const sender = pc.senders[0];
+        const c = peerOf(mgr, 2)!.mediaCrypto;
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        c.set({ key: await aesKey(), enabled: true });
+        worker.emit('message', { data: { type: 'ready' } });
+        await __runFrameAudit(); // its look: the connection names no stream for the sender (nothing sent)
+        sweep(mgr);
+        await settle();
+        expect(sender.track, 'released before the valve').not.toBe(mic);
+        backdate(mgr, c, sender, 11_000);
+        sweep(mgr);
+        await settle();
+        expect(sender.track).toBe(mic);
+        expect(warn.mock.calls.some(x => String(x[0]).includes('sent nothing in 10 s'))).toBe(true);
+        warn.mockRestore();
+    });
+
+    it('SECURITY: a sender added long after encryption came on (a share an hour in) is held until sealed — the valve counts from the hold, not from the call', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const screen = track('video', 'screen');
+        const share: FakeTrack[] = [];
+        const { mgr, pc } = await callWith(true, [mic], share);
+        const c = peerOf(mgr, 2)!.mediaCrypto;
+        c.set({ key: await aesKey(), enabled: true });
+        c.enabledSince = Date.now() - 3_600_000;
+        worker.emit('message', { data: { type: 'ready' } });
+        sealedFirst(pc.senders[0]);
+        await settle();
+        expect(pc.senders[0].track, 'precondition: the microphone, sealed, is on').toBe(mic);
+        share.push(screen);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // the fake sender takes no encoding tuning
+        await mgr.addScreenShareToPeers();
+        await settle();
+        warn.mockRestore();
+        const shareSender = pc.senders.find(s => s !== pc.senders[0])!;
+        expect((shareSender.track as FakeTrack).id, 'precondition: the share is held').toBe('screen+stand');
+        await __runFrameAudit();
+        sweep(mgr);
+        await settle();
+        expect(shareSender.track, 'the screen went out at the first sweep, its transform never seen to seal').not.toBe(screen);
+        sealedFirst(shareSender);
+        await settle();
+        expect(shareSender.track).toBe(screen);
+    });
+
+    it('SECURITY: frames that went out on a held sender without reaching its transform keep the hold, whatever the clock says — the audit decides, and gives the path up', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        const sender = pc.senders[0] as FakeSender & { getStats?: () => Promise<Map<string, unknown>> };
+        let packets = 0;
+        sender.getStats = async () => new Map([['out', { type: 'outbound-rtp', kind: 'audio', packetsSent: packets }]]);
+        const c = peerOf(mgr, 2)!.mediaCrypto;
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        c.set({ key: await aesKey(), enabled: true });
+        worker.emit('message', { data: { type: 'ready' } });
+        packets = 50; // the stand-in's silence went out; its transform saw none of it
+        await __runFrameAudit();
+        backdate(mgr, c, sender, 11_000);
+        sweep(mgr);
+        await settle();
+        expect(sender.track, 'the valve put the microphone on a sender whose frames go past its transform').not.toBe(mic);
+        for (let i = 0; i < 3 && !isScriptTransformSuspended(); i++) {
+            packets += 50;
+            await __runFrameAudit();
+        }
+        await settle();
+        warn.mockRestore();
+        expect(isScriptTransformSuspended(), 'the audit let it be').toBe(true);
+        expect(sender.track, 'the microphone went on after all').not.toBe(mic);
+    });
+
+    it('SECURITY: a worker still starting has said nothing about a held sender, so the valve waits for it', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        const sender = pc.senders[0];
+        const c = peerOf(mgr, 2)!.mediaCrypto;
+        c.set({ key: await aesKey(), enabled: true });
+        backdate(mgr, c, sender, 11_000);
+        await __runFrameAudit(); // not started: no look at anything
+        sweep(mgr);
+        await settle();
+        expect(sender.track, 'the valve put the microphone on before the worker had started').not.toBe(mic);
+    });
+
+    it('enforcement switched off releases every held sender at once', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, pc } = await callWith(true, [mic]);
+        expect(pc.senders[0].track).not.toBe(mic);
+        mgr.setRequireMediaE2ee(false);
+        await settle();
+        expect(pc.senders[0].track).toBe(mic);
     });
 });

@@ -47,7 +47,22 @@
 //   - The audit catching a transform frames go by: Chromium on the standard
 //     path with its early wraps switched off (its ontrack transform then
 //     ignored), fed plaintext — nothing heard while unproven, then the path
-//     given up; with the early wraps on, the control, the path is kept.
+//     given up FOR THE CALL ("could not be confirmed on this call"), and the
+//     next call tries it again; with the early wraps on, the control, the
+//     path is kept.
+//   - No false alarms: on Firefox (the audited engine) a mute, a microphone
+//     swapped through the noise-mode path (the new tone heard), cameras
+//     turned off and a screen share at one frame a second each way — nothing
+//     given up, still encrypted, both shares opened.
+//   - A worker 20 s late: not given up while it loads, nothing of Firefox's
+//     microphone reaches a peer that would play it, then encrypted.
+//   - A sender transform the engine ignores (Chromium, its sender's
+//     `transform` setter made a no-op), enforced, toward a peer that plays
+//     plaintext: the sender carries a silent stand-in until sealed, so the
+//     peer hears NOTHING, and the audit gives the path up over the frames
+//     that went past. Again for a camera turned on 11 s into an encrypted
+//     call (the hold's valve must count from the hold): the peer is shown
+//     black, never the picture; CONTROL: with its transform, the camera is.
 //   - A Safari-shaped offer (H.264 first, as Safari's default is): the answer
 //     still picks VP8, the codec whose header the frame format leaves clear.
 //   - Fail-closed: Firefox with NEITHER API, under enforcement, sends and
@@ -112,10 +127,12 @@ for (const [name, p] of Object.entries(POLICIES)) {
 // ---- Serving the harness, one origin per policy ----
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript' };
 const servers = [];
-async function serve(csp) {
+async function serve(csp, { delayWorkerMs = 0 } = {}) {
     const server = http.createServer(async (req, res) => {
         const rel = normalize(decodeURIComponent((req.url || '/').split('?')[0])).replace(/^([/\\])+/, '');
         if (rel.includes('..')) { res.writeHead(403); return res.end(); }
+        // A slow network, a busy self-hosted server: the worker's chunk arriving late.
+        if (delayWorkerMs && /scriptTransform\.worker/.test(rel)) await sleep(delayWorkerMs);
         for (const candidate of [join(ROOT, rel), join(ROOT, 'index.html')]) {
             try {
                 const body = await readFile(candidate);
@@ -196,8 +213,8 @@ const TONE = { 1: 600, 2: 900 };
  * both are delivered at once: each side receives the other's while its own
  * is outstanding.
  */
-async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer, rewrite, glare = false }) {
-    const origin = await serve(csp);
+async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer, rewrite, glare = false, delayWorkerMs = 0 }) {
+    const origin = await serve(csp, { delayWorkerMs });
     const pages = {};
     const logs = { 1: [], 2: [] };
     const heldOffers = [];
@@ -241,10 +258,12 @@ async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer, re
 }
 
 /** Both in the channel first, then the call: as in the app, nobody's offer
- *  reaches a page that has no manager to take it. */
+ *  reaches a page that has no manager to take it. `required` is both
+ *  sides' "Require encryption", or [page 1's, page 2's]. */
 async function enterCall(p, { required = true, camera = true } = {}) {
-    await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required, tone: TONE[1], camera });
-    await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required, tone: TONE[2], camera });
+    const [r1, r2] = Array.isArray(required) ? required : [required, required];
+    await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required: r1, tone: TONE[1], camera });
+    await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required: r2, tone: TONE[2], camera });
     await p.pages[1].evaluate(() => window.harness.call(2));
     await p.pages[2].evaluate(() => window.harness.call(1));
 }
@@ -332,6 +351,10 @@ await run('chromium-firefox', async () => {
             `${tag} Chromium: createEncodedStreams only, no transform on any sender or receiver`, JSON.stringify(w1));
         ck(w2.insertableStreams !== true && w2.senders.length >= 2 && [...w2.senders, ...w2.receivers].every((x) => x.transform === 'RTCRtpScriptTransform'),
             `${tag} Firefox: every sender and receiver on an RTCRtpScriptTransform`, JSON.stringify(w2));
+        const holds = await p.pages[2].evaluate(() => window.harness.holds(1));
+        ck(holds.held === 0 && holds.own === holds.total && holds.total >= 2,
+            `${tag} Firefox's senders, held on stand-ins until their transforms sealed, now carry its own microphone and camera`, JSON.stringify(holds));
+        ck(!p.logs[2].some((l) => /sent nothing in 10 s/.test(l)), `${tag} ...let go by a sealed frame each, not by the valve (Firefox sends its stand-ins' silence and black)`);
         await bothHear(p, tag);
         await videoFlows(p, tag);
 
@@ -608,25 +631,206 @@ await run('bypass-caught', async () => {
                 const lost = await (async () => {
                     const until2 = Date.now() + 20_000;
                     while (Date.now() < until2) {
-                        if (p.logs[1].some((l) => /never went through its transform/.test(l))) return true;
+                        if (p.logs[1].some((l) => /(never went|mostly did not go|partly did not go) through its transform/.test(l))) return true;
                         await sleep(250);
                     }
                     return false;
                 })();
-                ck(lost, `${tag} SECURITY: the audit sees the frames going by, and gives the path up`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-3).join(' / '));
+                ck(lost, `${tag} SECURITY: the audit sees the frames going by, and gives the path up for the call`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-3).join(' / '));
                 await sleep(1500);
                 const s = await statusOf(p.pages[1], 2);
-                ck(s?.reason === 'local-unsupported' && s.enforced && !s.encrypted && await p.pages[1].evaluate(() => window.harness.api()) === null,
-                    `${tag} rebuilt as an engine that cannot encrypt: blocked`, JSON.stringify(s));
+                ck(s?.reason === 'unconfirmed' && s.enforced && !s.encrypted && await p.pages[1].evaluate(() => window.harness.api()) === null,
+                    `${tag} rebuilt as "could not be confirmed on this call": blocked`, JSON.stringify(s));
                 const after = await hears(p.pages[1], 2);
                 ck(ABSENT(after), `${tag} SECURITY: and still nothing is heard`, fmt(after));
+                await p.pages[1].evaluate(() => window.harness.leave());
+                ck(await p.pages[1].evaluate(() => window.harness.api()) === 'script-transform', `${tag} the call ended: the next one tries the path again`);
             } else {
                 await sleep(8000);
-                const gone = p.logs[1].some((l) => /frame-transform worker is unavailable/.test(l));
+                const gone = p.logs[1].some((l) => /frame-transform worker is unavailable|could not be confirmed/.test(l));
                 ck(!gone && await p.pages[1].evaluate(() => window.harness.api()) === 'script-transform', `${tag} the path is kept: frames go through the transforms`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-2).join(' / '));
                 const a = await moved(p.pages[1], 2, 'open', 'audio');
                 ck(a.seen > 20 && a.dropped === a.seen, `${tag} and the worker drops the plaintext it sees`, JSON.stringify(a));
             }
+        } finally {
+            dumpLogs(p, tag);
+            await p.close();
+        }
+    }
+});
+
+await run('no-false-alarms', async () => {
+    // The audit must not give a good call up. On the audited engine
+    // (Firefox): its microphone muted and unmuted, swapped through the
+    // noise-mode path, its camera stopped; and a screen share at one frame a
+    // second each way, a rate no window of the audit holds much of.
+    const tag = `[${cr.name} <-> ${ff.name}, what a call does]`;
+    const p = await pair({ a: cr, b: ff });
+    try {
+        await enterCall(p);
+        await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        await sleep(1500);
+        await p.pages[2].evaluate(() => window.harness.muteMic(true));
+        await sleep(6000);
+        const muted = await hears(p.pages[1], 2);
+        ck(ABSENT(muted), `${tag} precondition: muted, Edge hears nothing of Firefox`, fmt(muted));
+        await p.pages[2].evaluate(() => window.harness.muteMic(false));
+        ck(await p.pages[2].evaluate(() => window.harness.swapMic(1200)), `${tag} precondition: the microphone swapped through the noise-mode path`);
+        await sleep(3000);
+        const swapped = await p.pages[1].evaluate(([id, f]) => window.harness.tone(id, f), [2, 1200]);
+        ck(PRESENT(swapped), `${tag} Edge hears the swapped microphone (its new tone), opened`, fmt(swapped));
+        await p.pages[2].evaluate(() => window.harness.stopCamera());
+        await p.pages[1].evaluate(() => window.harness.stopCamera());
+        const ffShare = await p.pages[2].evaluate(() => window.harness.startShare(1));
+        await p.pages[1].evaluate(([id, sid]) => window.harness.announceShare(id, sid), [2, ffShare]);
+        await sleep(4000); // one offer at a time: this is about the audit, not glare
+        const crShare = await p.pages[1].evaluate(() => window.harness.startShare(1));
+        await p.pages[2].evaluate(([id, sid]) => window.harness.announceShare(id, sid), [1, crShare]);
+        await sleep(16_000); // eight of the audit's looks
+        const alarms = [...p.logs[1], ...p.logs[2]].filter((l) => /could not be confirmed|frame-transform worker is unavailable|sent nothing in 10 s/.test(l));
+        ck(alarms.length === 0, `${tag} nothing given up (and no hold let go unproven) over a mute, a swap, cameras off and slow shares`, alarms.slice(0, 2).join(' / '));
+        const shareHolds = await p.pages[2].evaluate(() => window.harness.holds(1));
+        ck(shareHolds.held === 0, `${tag} Firefox's share sender, held until its transform sealed, carries the share`, JSON.stringify(shareHolds));
+        const st = [await statusOf(p.pages[1], 2), await statusOf(p.pages[2], 1)];
+        ck(st.every((s) => s?.encrypted), `${tag} still encrypted both ways`, JSON.stringify(st.map((s) => s?.reason)));
+        const [atEdge, atFf] = await Promise.all([moved(p.pages[1], 2, 'open', 'video', 6000), moved(p.pages[2], 1, 'open', 'video', 6000)]);
+        ck(atEdge.done >= 3 && atEdge.dropped === 0, `${tag} Edge opens Firefox's share at a frame a second`, JSON.stringify(atEdge));
+        ck(atFf.done >= 3 && atFf.dropped === 0, `${tag} Firefox opens Edge's`, JSON.stringify(atFf));
+        const ffHears = await hears(p.pages[2], 1);
+        ck(PRESENT(ffHears), `${tag} Firefox still hears Edge`, fmt(ffHears));
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('slow-worker', async () => {
+    // Firefox's worker chunk arrives 20 s late (a slow network, a busy self-
+    // hosted server). Its silence meanwhile is not a missed answer: nothing
+    // is given up, and encryption starts late. (Counted as misses, two would
+    // have given the path up at ~14 s.) Nor does anything go out unsealed —
+    // Edge here does NOT enforce, so it would play whatever came: Firefox's
+    // senders stay on their stand-ins, and the valve does not open for a
+    // worker that has said nothing (old valve: ~11 s in).
+    const tag = `[${cr.name} (not enforcing) <-> ${ff.name}, its worker 20 s late]`;
+    const p = await pair({ a: cr, b: ff, delayWorkerMs: 20_000 });
+    try {
+        await enterCall(p, { required: [false, true] });
+        await sleep(14_000);
+        const early = await hears(p.pages[1], 2);
+        ck(ABSENT(early), `${tag} SECURITY: while the worker loads, nothing of Firefox's microphone reaches Edge`, fmt(early));
+        const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted, 45_000);
+        const alarms = p.logs[2].filter((l) => /could not be confirmed|frame-transform worker is unavailable/.test(l));
+        ck(alarms.length === 0, `${tag} nothing given up while it loaded`, alarms.slice(0, 2).join(' / '));
+        ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways once it started`, JSON.stringify([s1?.reason, s2?.reason]));
+        await sleep(1500);
+        await bothHear(p, tag);
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('sender-bypass-held', async () => {
+    // A sender transform the engine ignores — no engine measured does; this
+    // is the defence in depth. Chromium on the standard path, its sender
+    // transforms never attached, enforcement on, toward a peer that plays
+    // plaintext (neither API, not enforced). Until its transform has sealed
+    // a frame a sender carries a silent, black stand-in, so the peer hears
+    // NOTHING; the audit sees the stand-in's frames go past the transform and
+    // gives the path up for the call.
+    const NO_SENDER_TRANSFORM = () => {
+        delete RTCRtpSender.prototype.createEncodedStreams;
+        delete RTCRtpReceiver.prototype.createEncodedStreams;
+        Object.defineProperty(RTCRtpSender.prototype, 'transform', { configurable: true, get() { return null; }, set() { /* ignored: frames pass it by */ } });
+    };
+    const NONE = () => { delete RTCRtpSender.prototype.createEncodedStreams; delete RTCRtpReceiver.prototype.createEncodedStreams; delete window.RTCRtpScriptTransform; };
+    const probePage = await cr.browser.newPage();
+    const probe = await probePage.evaluate(() => typeof RTCRtpScriptTransform);
+    await probePage.context().close();
+    if (probe !== 'function') { sk('[sender-bypass-held]', `this ${cr.name} has no RTCRtpScriptTransform (${probe})`); return; }
+    const tag = `[${cr.name}, its sender transforms ignored, enforced -> a peer that plays plaintext]`;
+    const p = await pair({ a: cr, b: cr, initA: NO_SENDER_TRANSFORM, initB: NONE });
+    try {
+        await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required: true, tone: TONE[1], camera: true });
+        await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required: false, tone: TONE[2], camera: true });
+        await p.pages[1].evaluate(() => window.harness.call(2));
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline && !(await p.pages[2].evaluate(() => window.harness.hasVoice(1)))) await sleep(100);
+        ck(await p.pages[2].evaluate(() => window.harness.hasVoice(1)), `${tag} precondition: its track reached the peer`);
+        const early = await hears(p.pages[2], 1);
+        ck(ABSENT(early), `${tag} SECURITY: the peer hears none of the microphone (a silent stand-in went past the transform, not the tone)`, fmt(early));
+        const given = await (async () => {
+            const until2 = Date.now() + 20_000;
+            while (Date.now() < until2) {
+                if (p.logs[1].some((l) => /a sender sent frames that (never went|mostly did not go|partly did not go) through its transform/.test(l))) return true;
+                await sleep(250);
+            }
+            return false;
+        })();
+        ck(given, `${tag} SECURITY: the audit sees frames go past the sender transform, and gives the path up for the call`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-3).join(' / '));
+        await sleep(1500);
+        const s = await statusOf(p.pages[1], 2);
+        ck(s?.reason === 'unconfirmed' && s.enforced && !s.encrypted, `${tag} said as "could not be confirmed on this call", blocked`, JSON.stringify(s));
+        const later = await hears(p.pages[2], 1);
+        ck(ABSENT(later), `${tag} SECURITY: and the peer still hears none of it`, fmt(later));
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('sender-bypass-midcall', async () => {
+    // A camera turned on well into a call — encryption on for longer than
+    // the hold's 10 s valve — on a sender whose transform the engine
+    // ignores, toward a peer that shows what it gets (not enforcing). The
+    // valve counts from the HOLD, and opens only for a sender that sent
+    // nothing, so the peer is shown the stand-in's black, never the picture,
+    // and the audit gives the path up. (A valve counted from when encryption
+    // came on opened at the first sweep: the picture, unsealed.) CONTROL
+    // first: the same camera with its transform working IS shown, so the
+    // picture measure can tell.
+    const NO_VIDEO_SENDER_TRANSFORM = () => {
+        delete RTCRtpSender.prototype.createEncodedStreams;
+        delete RTCRtpReceiver.prototype.createEncodedStreams;
+        const d = Object.getOwnPropertyDescriptor(RTCRtpSender.prototype, 'transform');
+        Object.defineProperty(RTCRtpSender.prototype, 'transform', {
+            configurable: true,
+            get() { return d.get.call(this); },
+            set(v) { if (this.track?.kind === 'video') return; /* ignored: frames pass it by */ d.set.call(this, v); },
+        });
+    };
+    const probePage = await cr.browser.newPage();
+    const probe = await probePage.evaluate(() => typeof RTCRtpScriptTransform);
+    await probePage.context().close();
+    if (probe !== 'function') { sk('[sender-bypass-midcall]', `this ${cr.name} has no RTCRtpScriptTransform (${probe})`); return; }
+    for (const attack of [false, true]) {
+        const tag = attack
+            ? `[${cr.name}, its video sender transforms ignored, a camera on mid-call -> a peer that shows what it gets]`
+            : `[${cr.name} on the standard path, a camera on mid-call -> the same peer (CONTROL)]`;
+        const p = await pair({ a: cr, b: cr, initA: attack ? NO_VIDEO_SENDER_TRANSFORM : HIDE_ENCODED_STREAMS });
+        try {
+            await enterCall(p, { required: [true, false], camera: false });
+            const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+            ck(s1?.encrypted && s2?.encrypted, `${tag} precondition: the call is encrypted (the microphones' transforms work)`, JSON.stringify([s1?.reason, s2?.reason]));
+            await sleep(11_000); // encryption on for longer than the valve
+            await p.pages[1].evaluate(() => window.harness.cameraOn());
+            let brightest = -1;
+            const end = Date.now() + 16_000; // past the 10 s valve, should it open
+            while (Date.now() < end) {
+                const v = await p.pages[2].evaluate(() => window.harness.picture(1));
+                if (v !== null) brightest = Math.max(brightest, v);
+                await sleep(200);
+            }
+            if (!attack) {
+                ck(brightest >= 60, `${tag} the peer is shown the camera`, `brightest ${brightest}`);
+                continue;
+            }
+            ck(brightest < 40, `${tag} SECURITY: the peer is never shown the picture (the stand-in's black at most)`, `brightest ${brightest}`);
+            const lines = p.logs[1].filter((l) => /media-e2ee/.test(l));
+            ck(lines.some((l) => /a sender sent frames that (never went|mostly did not go|partly did not go) through its transform/.test(l)),
+                `${tag} SECURITY: the audit gives the path up over the frames that went past`, lines.slice(-3).join(' / '));
+            ck(!lines.some((l) => /sent nothing in 10 s/.test(l)), `${tag} the valve stayed shut (the stand-in's frames went out: that sender sent)`);
         } finally {
             dumpLogs(p, tag);
             await p.close();

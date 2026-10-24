@@ -13,6 +13,7 @@ export type MediaE2eeReason =
     | 'encrypted'          // active: frames are E2E encrypted with a verified peer
     | 'negotiating'        // handshake in flight; not yet decided
     | 'local-unsupported'  // THIS device/browser runs no Encoded Transform API (an older browser; see mediaCrypto.mediaTransformApi)
+    | 'unconfirmed'        // the standard path's audit could not confirm encryption on THIS call (scriptTransform.ts); tried again on the next call or after a cool-down
     | 'peer-unsupported'   // the other peer didn't advertise media-E2EE capability
     | 'peer-unencrypted'   // SFU: participant PUBLISHED media not flagged E2EE (modified/foreign client) — refused, not rendered
     | 'verification-failed'  // peer advertised, but the tag didn't verify (possible tampering)

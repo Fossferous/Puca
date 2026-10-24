@@ -38,14 +38,17 @@ function peer(id: number): PeerView {
 
 /** Keep a remote stream PLAYING, muted (Chromium hands a remote track to Web
  *  Audio only while a media element plays it; muted, it plays nothing). */
-function sink(stream: MediaStream, kind: 'audio' | 'video'): void {
+function sink(stream: MediaStream, kind: 'audio' | 'video'): HTMLMediaElement {
     const el = document.createElement(kind);
     el.muted = true;
     el.autoplay = true;
     el.srcObject = stream;
     document.body.appendChild(el);
     void el.play().catch(() => { /* autoplay is allowed by the runner */ });
+    return el;
 }
+/** Each peer's camera, as this page shows it. */
+const cameras = new Map<number, HTMLVideoElement>();
 
 const unhex = (h: string) => new Uint8Array(h.match(/../g)!.map((b) => parseInt(b, 16)));
 
@@ -100,7 +103,7 @@ const harness = {
         mgr.setRequireMediaE2ee(opts.required);
         await (mgr.media as unknown as MediaManager).startTone(opts.tone, opts.camera !== false);
         mgr.setOnRemoteStream((uid, s) => { voices.set(uid, s); sink(s, 'audio'); });
-        mgr.setOnCameraStream((_uid, s) => { sink(s, 'video'); });
+        mgr.setOnCameraStream((uid, s) => { cameras.set(uid, sink(s, 'video') as HTMLVideoElement); });
         mgr.setPeerCamera(peerId, true); // the server's announcement (B7)
     },
 
@@ -139,6 +142,30 @@ const harness = {
 
     /** Renegotiate from this side, the way an ICE restart does. */
     restartIce(id: number): void { peer(id).connection.restartIce(); },
+
+    /** Mute or unmute, the way the app's mute does (the track disabled: silence still flows). */
+    muteMic(muted: boolean): void { mgr!.setAudioEnabled(!muted); },
+
+    /** Swap the microphone for a tone at `frequency`, through the manager's
+     *  own noise-mode path (a replaceTrack on the sender it carries). */
+    async swapMic(frequency: number): Promise<boolean> {
+        await (mgr!.media as unknown as MediaManager).prepareMicSwap(frequency);
+        return mgr!.reapplyNoiseMode();
+    },
+
+    /** The camera off, the way the app's camera button does: the track
+     *  stopped (MediaManager.toggleVideo(false)), its sender left with it, ended. */
+    async stopCamera(): Promise<void> { await mgr!.toggleVideo(false); },
+
+    /** Share a "screen" at `fps` frames a second to every peer; returns its stream id. */
+    async startShare(fps: number): Promise<string> {
+        const stream = (mgr!.media as unknown as MediaManager).startShare(fps);
+        await mgr!.addScreenShareToPeers();
+        return stream.id;
+    },
+
+    /** The server's announcement of a peer's share (B7: unannounced video is held). */
+    announceShare(id: number, streamId: string): void { mgr!.setPeerSharing(id, true, streamId); },
 
     /**
      * Wrap receivers in ontrack only, never before negotiation: the case the
@@ -197,6 +224,24 @@ const harness = {
         return { present, of: samples, marginDb: margins };
     },
 
+    /**
+     * How bright the peer's camera picture shown here is now: mean luma,
+     * 0-255, or null before it has a frame. The drawn "camera" (stubs/media.ts)
+     * is a bright colour; a disabled track's frames, black, are ~0.
+     */
+    picture(id: number): number | null {
+        const v = cameras.get(id);
+        if (!v || v.videoWidth === 0) return null;
+        const c = document.createElement('canvas');
+        c.width = 32; c.height = 24;
+        const g = c.getContext('2d', { willReadFrequently: true })!;
+        g.drawImage(v, 0, 0, 32, 24);
+        const d = g.getImageData(0, 0, 32, 24).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        return Math.round(sum / (d.length / 4));
+    },
+
     /** Inbound RTP so far: decoded video frames, bytes, and the video codec in use. */
     async inbound(id: number) {
         const pc = peer(id).connection;
@@ -240,6 +285,14 @@ const harness = {
     /** The senders that still carry a track to this peer. */
     sending(id: number): string[] {
         return peer(id).connection.getSenders().filter((s) => s.track).map((s) => s.track!.kind);
+    },
+    /** Senders to this peer still carrying a stand-in (held until their
+     *  transform seals), and senders carrying our own local tracks. */
+    holds(id: number) {
+        const local = new Set((mgr!.media as unknown as MediaManager).getLocalStreamSync()?.getTracks() ?? []);
+        const held = (mgr as unknown as { heldSenders: Map<RTCRtpSender, unknown> }).heldSenders;
+        const senders = peer(id).connection.getSenders().filter((s) => s.track);
+        return { held: senders.filter((s) => held.has(s)).length, own: senders.filter((s) => local.has(s.track!)).length, total: senders.length };
     },
 
     leave(): void { mgr?.closeAll(); },
