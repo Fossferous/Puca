@@ -327,6 +327,20 @@ migration.
   backend" line closed the owner's running app on every harness run. Stop a
   test backend by its PATH (`Where-Object { $_.Path -like '*target*puca.exe' }`)
   or by the PID you started.
+- **Every desktop-app update kills a debug backend.** This is the reverse of the
+  trap above. Before it installs, Tauri's per-user installer runs
+  `KillProcessCurrentUser "Puca.exe"`. That call matches image names
+  case-insensitively, checks only the owner's user SID and calls
+  `TerminateProcess(…, 1)`. So `target\debug\puca.exe` dies whenever the
+  owner's desktop app takes an update, which is every release. It exits with
+  code 1 and writes nothing to its log.
+  - A Deck rig's backend died this way on 2026-10-24, ten seconds after the
+    owner left a call and the pending 0.9.848 install ran.
+  - It was first blamed on PID reuse. That cannot happen here: a living child
+    keeps its dead parent's PID reserved.
+  - Run a throwaway backend from a copy under another name
+    (`cp target/debug/puca.exe <scratch>/puca-rig-backend.exe`), with the repo
+    root as its working directory.
 - **The backend tarball must carry `SOURCE_COMMIT`.** `GET /source` (AGPL §13)
   reports the commit `build.rs` embeds; a tarball has no `.git`, so write it
   first: `git rev-parse HEAD > SOURCE_COMMIT` and include the file in
@@ -664,7 +678,9 @@ production one. See the header of `frontend/e2e/e2ee-live-verify.mjs`.
 **Throwaway stack recipe (used for every 0.9.0 gate):** a second Postgres
 cluster on **5433** (`pg_ctl -D <scratch>/pgdata -o "-p 5433" start`), a
 fresh database per run, the debug backend on :3000 with `DATABASE_URL`
-pointing at it (migrations apply at startup), then the harness with its env:
+pointing at it (migrations apply at startup; run it as a renamed copy, see
+*Deploy traps*: the desktop app's updater kills every `Puca.exe`), then the
+harness with its env:
 
 - `frontend/e2e/e2ee-live-verify.mjs` — `PGDB=<db> PGPORT=5433 API=http://127.0.0.1:3000`
   (real SRP; covers E2EE, the password-proof/session binding and per-session
