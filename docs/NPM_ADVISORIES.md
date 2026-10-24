@@ -33,7 +33,7 @@ npm audit --json          # the raw set
 npm ls <package> --all    # the path that pulls it in
 ```
 
-## Snapshot — 2026-09-16, from `frontend/package-lock.json`
+## Snapshot — 2026-09-16 (`zod` added 2026-10-24), from `frontend/package-lock.json`
 
 Nothing here reaches a Púca user. Every entry is either a build/lint-time
 dependency that never ships in a bundle, or a runtime dependency whose
@@ -47,6 +47,7 @@ vulnerable code path this app does not enter.
 | [GHSA-28wg-ghj8-5hjv](https://github.com/advisories/GHSA-28wg-ghj8-5hjv), [GHSA-2v37-7h3g-55p8](https://github.com/advisories/GHSA-2v37-7h3g-55p8) | `nanoid` | `vite → postcss → nanoid` | no | Infinite loop for a negative or zero `size`. postcss calls it with its own constant for source-map identifiers; nothing in this app calls `nanoid` at all (`grep -r nanoid frontend/src` is empty). | the app takes a direct dependency on `nanoid` |
 | [GHSA-r28c-9q8g-f849](https://github.com/advisories/GHSA-r28c-9q8g-f849), [GHSA-fxqj-rqcc-2cmp](https://github.com/advisories/GHSA-fxqj-rqcc-2cmp) | `postcss` | `vite → postcss` | no | `sourceMappingURL` path traversal reading arbitrary `.map` files. It runs at build time on this repo's own CSS, on the machine doing the build, which already has those files. | CSS from an untrusted source is ever processed by the build |
 | [GHSA-r292-9mhp-454m](https://github.com/advisories/GHSA-r292-9mhp-454m) | `tar` | `@capacitor/cli → tar` | no | Stack-overflow DoS from a crafted long-path tar. `@capacitor/cli` untars its own downloaded platform assets during `cap sync`. | Capacitor is ever pointed at a tarball from an untrusted source |
+| [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) | `zod` | `eslint-plugin-react-hooks → zod` (and `→ zod-validation-error → zod`) | no | Memory exhaustion while validating an oversized constrained collection. The plugin validates its own rule options with it, and those come from this repo's eslint config, at lint time. Nothing in the app imports `zod` (no `from 'zod'` under `frontend/src`), and no built asset carries it. | anything starts validating outside input with `zod`, or eslint is run on an untrusted config |
 
 ## Standing recommendation
 
