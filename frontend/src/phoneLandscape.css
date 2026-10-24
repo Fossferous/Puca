@@ -1,0 +1,255 @@
+/**
+ * Phones held sideways, and a stream taking over the screen.
+ *
+ * READ docs/DESIGN_PHILOSOPHY.md and mobile.css's header first: this file is
+ * an extension of the phone layout, loaded right after mobile.css.
+ *
+ * The report this answers, from an iPhone in Safari: "horizontal mode is
+ * really bad and cant even see the stream at all". At 844 x 390 (and less in
+ * a Safari tab, whose toolbar keeps ~50 px) the phone layout spent 84 px on
+ * the chat header, 77 on the composer, 65 on the voice bar and 60 on the
+ * nav. A stream on the stage got the 17 px left over.
+ *
+ * Two parts:
+ *  1. THE TAKEOVER. html[data-stream-takeover] is set by the stream stage
+ *     (components/streamTakeover.ts decides; nothing here re-derives it):
+ *     the stage fills the screen, its controls float over the picture and a
+ *     tap shows or hides them along with the voice bar. Chat is the stage's
+ *     own Chat button away.
+ *  2. THE CHAT, SIDEWAYS. The same phone layout with its bars slimmed to the
+ *     44 px touch minimum, so the message list keeps about half the height.
+ */
+
+/* ==========================================================================
+   1. The takeover
+   ========================================================================== */
+
+/* .chat-main slides between panels with a transform, and a transformed
+   ancestor traps position:fixed inside itself. Off while a stream holds the
+   screen, so the stage below is fixed to the VIEWPORT; raised over the nav
+   (300) and under the voice bar (450 below). */
+html[data-stream-takeover] .chat-main {
+    transform: none !important;
+    will-change: auto;
+    z-index: 400;
+}
+
+html[data-stream-takeover] .stream-stage {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    height: auto;
+    background: #000;
+    /* iOS sends a tap's click only to something that looks clickable; the
+       tap that shows and hides the controls lands on the stage itself. */
+    cursor: pointer;
+    /* Room for the overlaid header: tile headers sit under it. */
+    --stream-head-h: calc(52px + var(--safe-area-top, 0px));
+}
+
+html[data-stream-takeover] .mobile-bottom-nav {
+    visibility: hidden;
+}
+
+/* The stage header floats over the top of the picture. */
+html[data-stream-takeover] .stream-stage-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    flex-wrap: nowrap;
+    min-height: 0;
+    padding: max(4px, var(--safe-area-top, 0px)) max(10px, var(--safe-area-right, 0px)) 4px max(10px, var(--safe-area-left, 0px));
+    background: linear-gradient(rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0));
+    border-bottom: none;
+    backdrop-filter: none;
+}
+
+html[data-stream-takeover] .stream-stage-controls {
+    width: auto;
+}
+
+/* The picture gets every pixel. */
+html[data-stream-takeover] .stream-grid {
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    gap: 2px;
+    background: #000;
+}
+
+html[data-stream-takeover] .stream-tile {
+    border-radius: 0;
+    background: #000;
+}
+
+/* Each tile's own controls, under the stage header, inside the notch's
+   side insets (0 unless the page extends under them). */
+html[data-stream-takeover] .stream-tile-header {
+    top: var(--stream-head-h);
+    padding-left: max(10px, var(--safe-area-left, 0px));
+    padding-right: max(10px, var(--safe-area-right, 0px));
+    background: none;
+    opacity: 1;
+}
+
+/* A tile in the in-app fullscreen covers the rest of the grid. */
+html[data-stream-takeover="fullscreen"] .stream-tile.is-app-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    max-width: none;
+    height: auto;
+    opacity: 1;
+}
+
+/* The voice bar floats over the bottom of the picture: the nav it sat on is
+   gone, and mute and hang-up have to stay one tap away. */
+html[data-stream-takeover] .voice-panel-compact,
+html[data-stream-takeover] .voice-panel-compact.vp-collapsed {
+    bottom: 0;
+    z-index: 450;
+    padding-bottom: max(8px, var(--safe-area-bottom, 0px));
+    padding-left: max(14px, var(--safe-area-left, 0px));
+    padding-right: max(10px, var(--safe-area-right, 0px));
+    background: rgba(12, 12, 20, 0.82);
+    box-shadow: none;
+}
+
+/* The controls overlay, hidden by a tap (or a few idle seconds): gone from
+   sight AND from touch, so a tap on the picture lands on the picture. */
+html[data-stream-takeover] .stream-stage-header,
+html[data-stream-takeover] .stream-tile-header,
+html[data-stream-takeover] .voice-panel-compact {
+    transition: opacity 0.2s ease, visibility 0s linear 0s;
+}
+
+html[data-stream-chrome="hidden"] .stream-stage-header,
+html[data-stream-chrome="hidden"] .stream-tile-header,
+html[data-stream-chrome="hidden"] .voice-panel-compact {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-stream-takeover] .stream-stage-header,
+    html[data-stream-takeover] .stream-tile-header,
+    html[data-stream-takeover] .voice-panel-compact,
+    html[data-stream-chrome="hidden"] .stream-stage-header,
+    html[data-stream-chrome="hidden"] .stream-tile-header,
+    html[data-stream-chrome="hidden"] .voice-panel-compact {
+        transition: none;
+    }
+}
+
+/* ==========================================================================
+   2. The chat, sideways
+   ========================================================================== */
+
+@media (pointer: coarse) and (max-width: 1024px) and (orientation: landscape) and (max-height: 500px) {
+
+    /* Every panel's bottom edge is computed from this (mobile.css). */
+    :root {
+        --mobile-nav-height: 44px;
+    }
+
+    /* Six tabs across 844 px have the width to put the label BESIDE the icon,
+       so the bar is one 44 px row instead of a 60 px stack. */
+    html .mobile-nav-btn {
+        flex-direction: row;
+        justify-content: center;
+        gap: 6px;
+        padding: 0 2px;
+    }
+
+    html .chat-header {
+        padding-top: 0;
+        padding-bottom: 0;
+        min-height: 46px;
+    }
+
+    html .message-form {
+        padding-top: 4px;
+        padding-bottom: 4px;
+    }
+
+    html .voice-panel-compact.vp-collapsed {
+        padding-top: 4px;
+        padding-bottom: 4px;
+    }
+
+    html .voice-panel-compact .voice-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    /* Watching in the docked mini-player while chatting: sideways, a full-
+       width 16:9 row under the header left the message list ~15 px in a
+       Safari tab. The player takes a column on the left instead, the full
+       height of the chat, and the header, list and composer the rest. */
+    html .chat-main:has(.stream-pip.docked:not(.is-hidden)) {
+        padding-left: 46%;
+    }
+
+    html .chat-main .stream-pip.docked:not(.is-hidden) {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 46%;
+        max-height: none;
+        min-height: 0;
+        aspect-ratio: auto;
+        padding-left: var(--safe-area-left, 0px);
+        border-bottom: none;
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        box-sizing: border-box;
+    }
+}
+
+/* ==========================================================================
+   3. A camera tile in the in-app fullscreen (mediaFullscreen.ts route 3)
+   ========================================================================== */
+
+html[data-media-fullscreen] .chat-main {
+    transform: none !important;
+    will-change: auto;
+    z-index: 400;
+}
+
+html[data-media-fullscreen] .mobile-bottom-nav {
+    visibility: hidden;
+}
+
+html[data-media-fullscreen] .camera-rail-tile.is-app-fullscreen,
+html[data-media-fullscreen] .voice-stage-tile.is-app-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    aspect-ratio: auto;
+    border-radius: 0;
+    background: #000;
+}
+
+html[data-media-fullscreen] .is-app-fullscreen video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+/* Its exit button stays in reach, clear of a notch and the home indicator. */
+html[data-media-fullscreen] .is-app-fullscreen .camera-rail-fullscreen,
+html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn {
+    top: max(8px, var(--safe-area-top, 0px));
+    right: max(8px, var(--safe-area-right, 0px));
+    min-width: 44px;
+    min-height: 44px;
+    opacity: 1;
+}

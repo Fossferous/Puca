@@ -5672,8 +5672,10 @@ export function Chat({ onLogout }: ChatProps) {
                                     className="watch-streams-btn"
                                     onClick={() => setViewMode('stream')}
                                     title="Watch live streams"
+                                    aria-label={`Watch live streams (${getSelectedStreams().length})`}
                                 >
-                                    <LiveDotIcon /> Watch Streams ({getSelectedStreams().length})
+                                    <LiveDotIcon /><span className="watch-streams-label"> Watch Streams ({getSelectedStreams().length})</span>
+                                    <span className="watch-streams-count" aria-hidden="true">{getSelectedStreams().length}</span>
                                 </button>
                             )}
                             <button

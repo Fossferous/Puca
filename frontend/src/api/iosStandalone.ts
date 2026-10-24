@@ -10,6 +10,15 @@
  * indicator. In LANDSCAPE it takes `cover` back off: the notch and the rounded
  * corners then sit at the sides, where the layout has no inset to give them, and
  * iOS's own default (the page laid out inside the safe area) is correct for free.
+ * Landscape stays that way on purpose: the stream takeover (phoneLandscape.css)
+ * goes edge to edge inside that area, its letterbox bars are black like iOS's
+ * margins, and no control can land under the notch.
+ *
+ * ONLY WHERE THE PHONE LAYOUT IS. `cover` hands the insets to the page, and only
+ * mobile.css's layout (its gate: a coarse pointer, at most 1024 px wide) pads
+ * for them. A 13-inch iPad in portrait is 1032 px wide and gets the DESKTOP
+ * layout, which pads for nothing: with `cover` its composer and user bar sat
+ * under the home indicator. So the query below carries that gate too.
  *
  * WHY NOT A STATIC `viewport-fit=cover` IN index.html. That file is also the
  * Android app's and the desktop app's. On Android, `cover` turns on real
@@ -22,6 +31,9 @@
  * `navigator.standalone` is the one reliable signal on iOS: `(display-mode:
  * standalone)` reports it on recent versions but not on every one Púca runs on.
  */
+
+/** When `cover` is on: portrait, in the phone layout (mobile.css's gate). */
+export const COVER_QUERY = '(orientation: portrait) and (pointer: coarse) and (max-width: 1024px)';
 
 export interface StandaloneNavigator {
     standalone?: boolean;
@@ -58,7 +70,7 @@ export function installIosStandalone(win: Window = window): () => void {
     if (!meta) return () => { delete root.dataset.iosStandalone; };
 
     const original = meta.getAttribute('content') ?? '';
-    const portrait = win.matchMedia('(orientation: portrait)');
+    const portrait = win.matchMedia(COVER_QUERY);
     const apply = () => meta.setAttribute('content', viewportContent(original, portrait.matches));
     apply();
     portrait.addEventListener('change', apply);

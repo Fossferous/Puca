@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { onUserGesture } from '../utils/onUserGesture';
 import {
     subscribeToStreamState,
@@ -43,7 +43,7 @@ import { requestShareQualityPanel } from '../api/rtc/shareHealthLive';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, SlidersIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
+    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, SlidersIcon, FullscreenExitIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
     LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
@@ -58,6 +58,10 @@ import {
     fmtSens, loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
 } from '../utils/fpsSens';
 import { installBackgroundResumeAll } from './deviceStageResume';
+import { enterMediaFullscreen } from './mediaFullscreen';
+import {
+    CHROME_HIDE_MS, PHONE_LANDSCAPE_QUERY, publishTakeover, useMediaQuery, type StreamTakeover,
+} from './streamTakeover';
 
 const MOBILE = isMobile();
 
@@ -186,6 +190,29 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     const graphsRef = useRef<Map<number, StreamAudioGraph>>(new Map());
     const duckedRef = useRef(false);
     const menuRef = useRef<HTMLDivElement>(null);
+    // The stream filling the screen INSIDE the app (mediaFullscreen.ts route
+    // 3): where neither the element nor the system player can go fullscreen.
+    const [appFullscreenRaw, setAppFullscreen] = useState<number | null>(null);
+    // It ends with its stream: closing the last tile must not leave an empty
+    // black screen over the app.
+    const appFullscreen = appFullscreenRaw !== null && selectedStreams.includes(appFullscreenRaw)
+        ? appFullscreenRaw : null;
+    // A phone held sideways: the stage takes the whole screen
+    // (streamTakeover.ts).
+    const phoneLandscape = useMediaQuery(PHONE_LANDSCAPE_QUERY);
+    const takeover: StreamTakeover = appFullscreen !== null ? 'fullscreen' : phoneLandscape ? 'landscape' : null;
+    // Taking over the screen, the controls are an overlay a tap shows and
+    // hides, like any video player's; they hide by themselves after a while.
+    // They are back each time a takeover starts (state adjusted during render,
+    // React's pattern for "reset when a value changes").
+    const [chromeHidden, setChromeHidden] = useState(false);
+    const [chromeKick, setChromeKick] = useState(0);
+    const [prevTakeover, setPrevTakeover] = useState<StreamTakeover>(takeover);
+    if (prevTakeover !== takeover) {
+        setPrevTakeover(takeover);
+        setChromeHidden(false);
+    }
+    const chromeOff = takeover !== null && chromeHidden;
 
     // Gain for a stream = user volume × mute × attenuation ducking × master.
     // The ONE formula: the slider and mute handlers use it too, because they
@@ -614,11 +641,25 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     };
 
     const requestFullscreen = (userId: number) => {
-        const video = videoRefs.current.get(userId);
+        if (appFullscreen === userId) { setAppFullscreen(null); return; }
+        const video = videoRefs.current.get(userId) ?? null;
         // Fullscreen the tile (not the bare <video>) so the control-capture
         // overlay stays on top; otherwise you couldn't control while fullscreen.
-        const target = video?.parentElement ?? video;
-        target?.requestFullscreen?.();
+        // Where only the bare <video> can go (iPhone), the system player takes
+        // it; where nothing can, the stage fills the screen itself.
+        enterMediaFullscreen(video?.parentElement ?? null, video, {
+            fallback: () => setAppFullscreen(userId),
+            // The system player's speaker button, on a stream muted here.
+            onUnmuteRequest: () => { if (mutedStreams.has(userId)) toggleMute(userId); },
+        });
+    };
+
+    /** A tap on the picture shows or hides the takeover's controls. */
+    const onStageTap = (e: ReactMouseEvent) => {
+        if (!takeover) return;
+        const t = e.target as HTMLElement;
+        if (t.closest('button, a, input, select, textarea, .stream-context-menu, .control-capture, .quality-menu, .stream-stats-overlay, .is-thumb, .camera-rail')) return;
+        setChromeHidden(h => !h);
     };
 
     // Who is on the STAGE right now. Focus mode always has one: falling back to
@@ -638,6 +679,27 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     useEffect(() => {
         sfuManager.setFocusedRemote(stageUser);
     }, [stageUser]);
+
+    // The takeover, on <html> for the stylesheet: before paint, so a phone
+    // turned sideways never shows a frame of the squashed chat layout.
+    useLayoutEffect(() => publishTakeover(takeover, chromeOff), [takeover, chromeOff]);
+
+    // The controls hide themselves after a while — never while a menu is open
+    // or a control session needs its Stop button in reach.
+    const controllingNow = control.controlling?.status === 'active';
+    useEffect(() => {
+        if (!takeover || chromeHidden || ctxMenu || controllingNow) return;
+        const t = setTimeout(() => setChromeHidden(true), CHROME_HIDE_MS);
+        return () => clearTimeout(t);
+    }, [takeover, chromeHidden, ctxMenu, controllingNow, chromeKick]);
+
+    // Escape leaves the in-app fullscreen, as it leaves the real one.
+    useEffect(() => {
+        if (appFullscreen === null) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setAppFullscreen(null); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [appFullscreen]);
 
     // If no streams selected, nothing to show
     if (selectedStreams.length === 0) {
@@ -667,7 +729,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     const canFocus = streamCount > 1 || unwatched.length > 0;
 
     return (
-        <div className="stream-stage">
+        <div
+            className={`stream-stage${takeover ? ' is-takeover' : ''}`}
+            onClick={onStageTap}
+            // Any touch keeps the takeover's controls up a while longer.
+            onPointerDown={takeover ? () => setChromeKick(k => k + 1) : undefined}
+        >
             {/* Slim header */}
             <div className="stream-stage-header">
                 <div className="stream-stage-title">
@@ -817,6 +884,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                 // the top of the flex container without the DOM
                                 // node moving at all.
                                 focusMode ? (isThumb ? 'is-thumb' : 'is-stage') : '',
+                                appFullscreen === userId ? 'is-app-fullscreen' : '',
                             ].filter(Boolean).join(' ')}
                             onClick={() => focusMode && setFocusedStream(userId)}
                             onContextMenu={(e) => {
@@ -937,9 +1005,10 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     <button
                                         className="tile-btn"
                                         onClick={(e) => { e.stopPropagation(); requestFullscreen(userId); }}
-                                        title="Fullscreen"
+                                        title={appFullscreen === userId ? 'Exit fullscreen' : 'Fullscreen'}
+                                        aria-label={appFullscreen === userId ? 'Exit fullscreen' : 'Fullscreen'}
                                     >
-                                        <FullscreenIcon />
+                                        {appFullscreen === userId ? <FullscreenExitIcon /> : <FullscreenIcon />}
                                     </button>
                                     <button
                                         className="tile-btn close"
@@ -1369,7 +1438,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                         className="scm-item"
                         onClick={() => { setCtxMenu(null); requestFullscreen(ctxMenu.userId); }}
                     >
-                        Fullscreen <span className="scm-icon"><FullscreenIcon /></span>
+                        {appFullscreen === ctxMenu.userId
+                            ? <>Exit fullscreen <span className="scm-icon"><FullscreenExitIcon /></span></>
+                            : <>Fullscreen <span className="scm-icon"><FullscreenIcon /></span></>}
                     </button>
                 </div>
             )}

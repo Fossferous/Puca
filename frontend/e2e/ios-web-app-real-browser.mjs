@@ -249,6 +249,17 @@ console.log('\n--- the web app, as a Home Screen app (navigator.standalone faked
     await page.waitForFunction(() => /viewport-fit=cover/.test(document.querySelector('meta[name="viewport"]').content), null, { timeout: 5000 }).catch(() => {});
     check('back to portrait: cover is back', /viewport-fit=cover/.test(await viewportContent(page)), String(await viewportContent(page)));
     await page.screenshot({ path: path.join(outDir, 'app-390x844-standalone.png') });
+    // A 13-inch iPad in portrait is 1032 px wide: the DESKTOP layout, which pads
+    // for no inset, so cover there put its composer under the home indicator.
+    await page.setViewportSize({ width: 1032, height: 1376 });
+    await page.waitForFunction(() => !/viewport-fit/.test(document.querySelector('meta[name="viewport"]').content), null, { timeout: 5000 }).catch(() => {});
+    check('a 13-inch iPad in portrait (1032 px, the desktop layout): no cover', !/viewport-fit/.test(await viewportContent(page)), String(await viewportContent(page)));
+    // CONTROL: an 11-inch iPad in portrait (834 px) is in the phone layout, and
+    // gets cover back — so the check above is the width, not a stuck listener.
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await page.waitForFunction(() => /viewport-fit=cover/.test(document.querySelector('meta[name="viewport"]').content), null, { timeout: 5000 }).catch(() => {});
+    check('CONTROL: an 11-inch iPad in portrait (834 px, the phone layout) gets cover', /viewport-fit=cover/.test(await viewportContent(page)), String(await viewportContent(page)));
+    await page.setViewportSize({ width: 390, height: 844 });
     await context.close();
 }
 

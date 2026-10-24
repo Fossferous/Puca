@@ -2565,6 +2565,39 @@ button.message-attachment.error { color: #ffb4b4; }
     box-shadow: 0 2px 8px rgba(237, 66, 69, 0.5);
 }
 
+/* The count alone, for a phone (below). */
+.watch-streams-count {
+    display: none;
+}
+
+/* Phones: the header is ~390 px wide and also holds the channel name, the
+   checklist and pins buttons and search. "Watch Streams (1)" wrapped onto
+   three lines there and crushed the channel name to its first letter. On a
+   phone it is the live dot and the count, on one line; the label is still its
+   accessible name. Gate mirrors mobile.css. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .watch-streams-btn {
+        flex-shrink: 0;
+        white-space: nowrap;
+        margin-right: 0;
+    }
+}
+
+@media (pointer: coarse) and (max-width: 600px) {
+    .watch-streams-label {
+        display: none;
+    }
+
+    .watch-streams-count {
+        display: inline;
+    }
+
+    .chat-header:has(.watch-streams-btn) {
+        padding-left: 12px;
+        padding-right: 12px;
+    }
+}
+
 /* Floating Watch Live Button */
 .watch-live-floating {
     position: fixed;

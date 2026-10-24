@@ -10,7 +10,8 @@ import {
     subscribeToSpeaking,
 } from './voiceState';
 import { SmartAvatar } from './SmartAvatar';
-import { MicOffIcon, NoMicIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
+import { MicOffIcon, NoMicIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenExitIcon, FullscreenIcon } from './Icons';
+import { enterMediaFullscreen, useAppMediaFullscreen } from './mediaFullscreen';
 import { ActivityTile, type ActivityTileProps } from './games/ActivityTile';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
@@ -71,6 +72,9 @@ export function VoiceStage({
         return () => { unsubVoice(); unsubStream(); unsubSpeaking(); clearInterval(interval); };
     }, []);
 
+    // Where nothing can go fullscreen, the tile fills the app (mediaFullscreen.ts).
+    const [appFullscreen, setAppFullscreen] = useAppMediaFullscreen((id) => globalCameraStreams.has(id));
+
     const users = getVoiceUsersInRoom(roomId);
 
     return (
@@ -108,7 +112,7 @@ export function VoiceStage({
                         return (
                             <div
                                 key={user.id}
-                                className={`voice-stage-tile ${speaking ? 'speaking' : ''}`}
+                                className={`voice-stage-tile ${speaking ? 'speaking' : ''}${appFullscreen === user.id && camStream ? ' is-app-fullscreen' : ''}`}
                                 onClick={(e) => onUserMenu?.(
                                     { userId: user.id, username: user.username },
                                     { x: e.clientX, y: e.clientY },
@@ -151,14 +155,18 @@ export function VoiceStage({
                                 {camStream && (
                                     <button
                                         className="vs-fullscreen-btn"
-                                        title={`Fullscreen ${name}'s camera`}
-                                        aria-label={`Fullscreen ${name}'s camera`}
+                                        title={appFullscreen === user.id ? 'Exit fullscreen' : `Fullscreen ${name}'s camera`}
+                                        aria-label={appFullscreen === user.id ? 'Exit fullscreen' : `Fullscreen ${name}'s camera`}
                                         onClick={(e) => {
                                             e.stopPropagation();
-                                            (e.currentTarget.parentElement as HTMLElement | null)?.requestFullscreen?.();
+                                            if (appFullscreen === user.id) { setAppFullscreen(null); return; }
+                                            const tile = e.currentTarget.parentElement as HTMLElement | null;
+                                            enterMediaFullscreen(tile, tile?.querySelector('video') ?? null, {
+                                                fallback: () => setAppFullscreen(user.id),
+                                            });
                                         }}
                                     >
-                                        <FullscreenIcon />
+                                        {appFullscreen === user.id ? <FullscreenExitIcon /> : <FullscreenIcon />}
                                     </button>
                                 )}
                                 {streaming && <span className="vs-live-badge">LIVE</span>}
