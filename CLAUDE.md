@@ -325,15 +325,16 @@ migration.
   0.9.0 the desktop binary is `Puca.exe`, and PowerShell process names match
   case-insensitively, so the throwaway-stack scripts' "stop the debug
   backend" line closed the owner's running app on every harness run. Stop a
-  test backend by its PATH (`Where-Object { $_.Path -like '*target*puca.exe' }`)
-  or by the PID you started.
-- **Every desktop-app update kills a debug backend.** This is the reverse of the
-  trap above. Before it installs, Tauri's per-user installer runs
+  test backend by the PID you started, or by its own path: for the renamed
+  copy below, `Where-Object { $_.Path -like '*puca-rig-backend.exe' }`.
+- **Every update of the full desktop app kills a debug backend.** This is the
+  reverse of the trap above. Before it installs, Tauri's per-user installer runs
   `KillProcessCurrentUser "Puca.exe"`. That call matches image names
   case-insensitively, checks only the owner's user SID and calls
   `TerminateProcess(…, 1)`. So `target\debug\puca.exe` dies whenever the
   owner's desktop app takes an update, which is every release. It exits with
-  code 1 and writes nothing to its log.
+  code 1 and writes nothing to its log. (The Lite installer kills
+  `Puca-Lite.exe` instead, so a Lite update leaves it alone.)
   - A Deck rig's backend died this way on 2026-10-24, ten seconds after the
     owner left a call and the pending 0.9.848 install ran.
   - It was first blamed on PID reuse. That cannot happen here: a living child
