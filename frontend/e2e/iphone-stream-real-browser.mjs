@@ -36,8 +36,19 @@
 //      requestFullscreen removed, fullscreenEnabled false): the stream fills
 //      the screen in-app, its exit is 44 px and hit-testable, and it leaves.
 //   5. Desktop and Android unchanged: a 1280x800 fine-pointer window asks the
-//      TILE for real fullscreen exactly as before and never takes over; a
-//      portrait Android phone takes no takeover.
+//      TILE for real fullscreen exactly as before and never takes over, nor
+//      does a short 1000x400 one; a portrait Android phone takes no takeover,
+//      and neither does one typing upright with the keyboard shrinking its
+//      viewport to 360x278 (the composer keeps its width beside the docked
+//      player; the old viewport-shaped rule as the control that must fail).
+//   6. The controls in reach: a touch on the voice bar (outside the stage)
+//      restarts the clock; Tab brings hidden controls back and keyboard focus
+//      on one keeps them up; a control session lays them out above and below
+//      the remote screen, never over it (the overlay as the control).
+//   "Sideways" is the DEVICE turning (api/phoneSideways.ts): Chromium's
+//   emulation turns its screen with the viewport; Playwright's WebKit always
+//   reports landscape-primary, so its screen orientation is made to follow
+//   its emulated screen (ORIENTATION_FOLLOWS_SCREEN).
 //   NEGATIVE CONTROLS, which must FAIL: the same checks with the new rules
 //   removed from the page's stylesheets (the old layout: 1 and 2 fail), and
 //   the old fullscreen call on the iPhone shape (nothing fills the screen).
@@ -51,7 +62,10 @@ import http from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ANDROID_UA, IPHONE_FULLSCREEN, IPHONE_UA, OLD_LAYOUT, RECORD_FULLSCREEN, insets, measure, overlap } from './iphone-stream/checks.mjs';
+import {
+    ANDROID_UA, IPHONE_FULLSCREEN, IPHONE_UA, OLD_LAYOUT, ORIENTATION_FOLLOWS_SCREEN, ORIENTATION_UPRIGHT, RECORD_FULLSCREEN,
+    insets, measure, overlap,
+} from './iphone-stream/checks.mjs';
 
 const here = fileURLToPath(new URL('..', import.meta.url));
 const outdir = process.argv[2] || join(here, 'e2e-artifacts', 'iphone-stream-shots');
@@ -122,9 +136,12 @@ async function chatSideways(page, tag, { withPip }) {
     return { m, each, disjoint, listH, pipOk, navOk: m.navBtns.length === 6 && m.navBtns.every((b) => b.h >= 44 - 0.5) };
 }
 
+/** Init scripts every page of the running engine gets (WebKit's orientation). */
+let engineInit = [];
+
 async function openPage(browser, opts, { init = [], view = 'stream', streams = 1 } = {}) {
     const ctx = await browser.newContext(opts);
-    for (const i of init) await ctx.addInitScript(i);
+    for (const i of [...engineInit, ...init]) await ctx.addInitScript(i);
     const page = await ctx.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e).slice(0, 300)));
@@ -142,6 +159,7 @@ async function suite(browser, engine) {
         ? { viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: IPHONE_UA }
         : { ...devices['iPhone 15'], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 } };
     delete phone.defaultBrowserType;
+    engineInit = engine === 'webkit' ? [ORIENTATION_FOLLOWS_SCREEN] : [];
     console.log(`\n===== ${engine} as an iPhone =====`);
 
     // ---- 3. Portrait: what worked keeps working.
@@ -194,6 +212,25 @@ async function suite(browser, engine) {
         ck(`${tag}: left alone, they hide by themselves`, (await measure(page)).chrome === 'hidden');
         await tapAt(page, before.vw / 2, before.vh / 2);
 
+        // 6. A touch on the voice bar (portaled outside the stage) restarts
+        // the clock: Mute at ~3 s, still up 1.7 s later, gone ~4 s after it.
+        await sleep(3000);
+        await tapAt(page, back.mute.l + back.mute.w / 2, back.mute.t + back.mute.h / 2);
+        await sleep(1350);
+        ck(`${tag}: a touch on the voice bar keeps the controls up (4.7 s after they came back)`, (await measure(page)).chrome === null);
+        await sleep(2700);
+        ck(`${tag}: ...and they hide 4 s after that touch`, (await measure(page)).chrome === 'hidden');
+        // Hidden, a key brings them back with focus on a control, and
+        // keyboard focus on a control keeps them up.
+        await page.keyboard.press('Tab');
+        await sleep(300);
+        const kb = await page.evaluate(() => ({ chrome: document.documentElement.dataset.streamChrome ?? null, on: !!document.activeElement?.closest('.stream-stage, .voice-panel-compact') }));
+        ck(`${tag}: Tab brings hidden controls back, focus on one of them`, kb.chrome === null && kb.on, JSON.stringify(kb));
+        await sleep(4600);
+        ck(`${tag}: keyboard focus on a control keeps them up past the idle time`, (await measure(page)).chrome === null);
+        await page.evaluate(() => (document.activeElement)?.blur?.());
+        if ((await measure(page)).chrome === 'hidden') await tapAt(page, before.vw / 2, before.vh / 2);
+
         // Chat: out of the takeover, into the chat with the docked player.
         await page.locator('.stream-stage-header .back-to-chat-btn').first().click();
         await page.waitForSelector('.stream-pip', { timeout: 5000 }).catch(() => {});
@@ -221,6 +258,45 @@ async function suite(browser, engine) {
         await sleep(200);
         const o = await chatSideways(page, tag, { withPip: false });
         control(`${tag}, OLD layout: the message list keeps >= 120 px (${Math.round(o.listH)})`, o.listH >= 120);
+        await ctx.close();
+    }
+
+    // ---- 6. A control session sideways: the controls beside the remote
+    // screen, not over it (every tap on it is a click on the other computer).
+    {
+        const tag = `${engine} 844x390 control session`;
+        const { ctx, page } = await openPage(browser, { ...phone, viewport: { width: 844, height: 390 }, screen: { width: 844, height: 390 } });
+        // Settled: the voice bar re-measures itself (--mobile-voice-panel-h)
+        // once the takeover has restyled it.
+        await sleep(1200);
+        // What StreamStage publishes with an active session (vitest pins that
+        // it does), and the capture surface it lays over the tile.
+        const layout = () => page.evaluate(() => {
+            const r = (s) => { const b = document.querySelector(s)?.getBoundingClientRect(); return b ? { t: b.top, b: b.bottom, h: b.height } : null; };
+            return {
+                head: r('.stream-stage-header'), tile: r('.stream-tile'), grid: r('.stream-grid'), voice: r('.voice-panel-compact'),
+                tileHead: getComputedStyle(document.querySelector('.stream-tile-header')).display,
+                stagePad: getComputedStyle(document.querySelector('.stream-stage')).paddingBottom,
+                barVar: getComputedStyle(document.documentElement).getPropertyValue('--mobile-voice-panel-h'),
+            };
+        });
+        await page.evaluate(() => {
+            document.documentElement.dataset.streamControlling = 'true';
+            const cap = document.createElement('div');
+            cap.className = 'control-capture';
+            document.querySelector('.stream-tile').appendChild(cap);
+        });
+        await sleep(200);
+        const l = await layout();
+        const m = await measure(page);
+        ck(`${tag}: the header is above the remote screen and the voice bar below it, nothing over it`, !!l.head && !!l.tile && !!l.voice && l.head.b <= l.tile.t + 0.5 && l.voice.t >= l.tile.b - 0.5 && l.tile.h >= 200, JSON.stringify(l));
+        ck(`${tag}: the tile's own overlay steps aside (the capture surface covers it)`, l.tileHead === 'none');
+        ck(`${tag}: Chat and the voice bar's Mute are in reach`, !!m.buttons.find((b) => /chat/i.test(b.label))?.hit && !!m.mute?.hit, JSON.stringify(m.buttons));
+        await page.screenshot({ path: join(outdir, `${engine}-844x390-control-session.png`) });
+        await page.evaluate(() => { delete document.documentElement.dataset.streamControlling; });
+        await sleep(200);
+        const o = await layout();
+        control(`${tag}, without the session layout: nothing over the remote screen`, !!o.head && o.head.b <= o.tile.t + 0.5 && o.voice.t >= o.tile.b - 0.5, JSON.stringify(o));
         await ctx.close();
     }
 
@@ -281,6 +357,44 @@ async function unchanged(browser) {
         await ctx.close();
     }
     {
+        // A short, wide DESKTOP window is not a phone on its side.
+        const { ctx, page } = await openPage(browser, { viewport: { width: 1000, height: 400 } });
+        const m = await measure(page);
+        const side = await page.evaluate(() => document.documentElement.dataset.phoneSideways ?? null);
+        ck('desktop 1000x400: no takeover, not "sideways", the stage in the page flow', m.takeover === null && side === null
+            && (await page.evaluate(() => getComputedStyle(document.querySelector('.stream-stage')).position)) === 'relative', JSON.stringify({ takeover: m.takeover, side }));
+        await ctx.close();
+    }
+    {
+        // An Android phone typing UPRIGHT: Android 14 and older WebViews shrink
+        // the viewport for the keyboard, 360x640 -> 360x278.
+        const typing = { viewport: { width: 360, height: 278 }, screen: { width: 360, height: 640 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: ANDROID_UA };
+        const tag = 'Android 360x640 typing upright (viewport 360x278)';
+        const { ctx, page } = await openPage(browser, typing, { init: [ORIENTATION_UPRIGHT], view: 'pip' });
+        await page.waitForSelector('.stream-pip', { timeout: 5000 }).catch(() => {});
+        await sleep(300);
+        ck(`${tag}: precondition: the OLD viewport-shaped rule would have matched here`,
+            await page.evaluate(() => matchMedia('(pointer: coarse) and (max-width: 1024px) and (orientation: landscape) and (max-height: 500px)').matches));
+        const state = await page.evaluate(() => ({
+            side: document.documentElement.dataset.phoneSideways ?? null,
+            takeover: document.documentElement.dataset.streamTakeover ?? null,
+            input: document.querySelector('.input-wrapper')?.getBoundingClientRect().width ?? 0,
+            pipBottom: document.querySelector('.stream-pip')?.getBoundingClientRect().bottom ?? 0,
+            listTop: document.querySelector('.messages-container')?.getBoundingClientRect().top ?? 0,
+        }));
+        ck(`${tag}: not "sideways", no takeover`, state.side === null && state.takeover === null, JSON.stringify(state));
+        // 136 px is this composer's width on any upright 360 px phone (four
+        // buttons beside it); the sideways rule left it ~0.
+        ck(`${tag}: the composer keeps its width (${Math.round(state.input)} px) with the player above, not beside`, state.input >= 100 && state.pipBottom <= state.listTop + 0.5, JSON.stringify(state));
+        await page.screenshot({ path: join(outdir, 'android-360x278-typing-upright.png') });
+        // NEGATIVE CONTROL: decided by the viewport's shape (the old rule).
+        await page.evaluate(() => { document.documentElement.dataset.phoneSideways = 'true'; });
+        await sleep(200);
+        const old = await page.evaluate(() => document.querySelector('.input-wrapper')?.getBoundingClientRect().width ?? 0);
+        control(`${tag}, decided by the viewport: the composer keeps its width (${Math.round(old)} px)`, old >= 100);
+        await ctx.close();
+    }
+    {
         const android = { viewport: { width: 412, height: 915 }, deviceScaleFactor: 2.6, isMobile: true, hasTouch: true, userAgent: ANDROID_UA };
         const { ctx, page } = await openPage(browser, android, { init: [RECORD_FULLSCREEN] });
         const m = await measure(page);
@@ -293,9 +407,11 @@ async function unchanged(browser) {
     }
 }
 
+// Desktop, not WebKit's iPhone emulation, for the surfaces that must not change.
 const cr = await chromium.launch({ channel: 'msedge', headless: true, args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required'] });
 try {
     await suite(cr, 'chromium');
+    engineInit = [];
     await unchanged(cr);
 } finally {
     await cr.close();

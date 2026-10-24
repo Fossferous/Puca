@@ -60,8 +60,9 @@ import {
 import { installBackgroundResumeAll } from './deviceStageResume';
 import { enterMediaFullscreen } from './mediaFullscreen';
 import {
-    CHROME_HIDE_MS, PHONE_LANDSCAPE_QUERY, publishTakeover, useMediaQuery, type StreamTakeover,
+    CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
+import { interceptBack } from '../api/mobileApp';
 
 const MOBILE = isMobile();
 
@@ -190,17 +191,25 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     const graphsRef = useRef<Map<number, StreamAudioGraph>>(new Map());
     const duckedRef = useRef(false);
     const menuRef = useRef<HTMLDivElement>(null);
+    const stageRef = useRef<HTMLDivElement>(null);
     // The stream filling the screen INSIDE the app (mediaFullscreen.ts route
     // 3): where neither the element nor the system player can go fullscreen.
     const [appFullscreenRaw, setAppFullscreen] = useState<number | null>(null);
     // It ends with its stream: closing the last tile must not leave an empty
-    // black screen over the app.
+    // black screen over the app, and the same person sharing again later must
+    // not reopen it fullscreen unasked (state adjusted during render).
+    if (appFullscreenRaw !== null && !selectedStreams.includes(appFullscreenRaw)) {
+        setAppFullscreen(null);
+    }
     const appFullscreen = appFullscreenRaw !== null && selectedStreams.includes(appFullscreenRaw)
         ? appFullscreenRaw : null;
     // A phone held sideways: the stage takes the whole screen
-    // (streamTakeover.ts).
-    const phoneLandscape = useMediaQuery(PHONE_LANDSCAPE_QUERY);
+    // (streamTakeover.ts; the DEVICE turning, never the viewport's shape).
+    const phoneLandscape = usePhoneSideways();
     const takeover: StreamTakeover = appFullscreen !== null ? 'fullscreen' : phoneLandscape ? 'landscape' : null;
+    // A control session on the stage: its Stop must always be in reach, and a
+    // tap on the picture is a click on the other computer, not "hide".
+    const controllingNow = control.controlling?.status === 'active';
     // Taking over the screen, the controls are an overlay a tap shows and
     // hides, like any video player's; they hide by themselves after a while.
     // They are back each time a takeover starts (state adjusted during render,
@@ -212,7 +221,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         setPrevTakeover(takeover);
         setChromeHidden(false);
     }
-    const chromeOff = takeover !== null && chromeHidden;
+    const chromeOff = takeover !== null && chromeHidden && !controllingNow;
 
     // Gain for a stream = user volume × mute × attenuation ducking × master.
     // The ONE formula: the slider and mute handlers use it too, because they
@@ -604,21 +613,27 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         }
     };
 
-    const toggleMute = (userId: number) => {
+    /** Mute, unmute (`want`) or toggle. From the state it is given and the
+     *  stored volume, never a render's copy: the iPhone's player calls this
+     *  long after the render that handed it over. */
+    const setMute = (userId: number, want?: boolean) => {
         setMutedStreams(prev => {
+            const wasMuted = prev.has(userId);
+            const nowMuted = want ?? !wasMuted;
+            if (nowMuted === wasMuted) return prev;
             const newSet = new Set(prev);
-            const nowMuted = !newSet.has(userId);
             if (nowMuted) newSet.add(userId); else newSet.delete(userId);
             setStreamMuted(userId, nowMuted);
             const graph = graphsRef.current.get(userId);
             const ctx = audioCtxRef.current;
             if (graph && ctx) {
                 graph.gain.gain.setTargetAtTime(
-                    gainFor(volumes[userId] ?? DEFAULT_STREAM_VOLUME, nowMuted), ctx.currentTime, 0.02);
+                    gainFor(getStreamVolumes()[userId] ?? DEFAULT_STREAM_VOLUME, nowMuted), ctx.currentTime, 0.02);
             }
             return newSet;
         });
     };
+    const toggleMute = (userId: number) => setMute(userId);
 
     const updateAttenuation = (next: AttenuationSettings) => {
         setAttenuationState(next);
@@ -647,16 +662,25 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         // overlay stays on top; otherwise you couldn't control while fullscreen.
         // Where only the bare <video> can go (iPhone), the system player takes
         // it; where nothing can, the stage fills the screen itself.
+        // Stream audio is this stage's Web Audio graph, not the <video>: keep
+        // it running through the iPhone's player, which can interrupt it.
+        const resumeAudio = () => {
+            const ctx = audioCtxRef.current;
+            if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => { /* next gesture */ });
+        };
+        resumeAudio(); // inside the tap, while it is allowed
         enterMediaFullscreen(video?.parentElement ?? null, video, {
             fallback: () => setAppFullscreen(userId),
+            onVideoBegin: resumeAudio,
+            onVideoExit: resumeAudio,
             // The system player's speaker button, on a stream muted here.
-            onUnmuteRequest: () => { if (mutedStreams.has(userId)) toggleMute(userId); },
+            onUnmuteRequest: () => setMute(userId, false),
         });
     };
 
     /** A tap on the picture shows or hides the takeover's controls. */
     const onStageTap = (e: ReactMouseEvent) => {
-        if (!takeover) return;
+        if (!takeover || controllingNow) return;
         const t = e.target as HTMLElement;
         if (t.closest('button, a, input, select, textarea, .stream-context-menu, .control-capture, .quality-menu, .stream-stats-overlay, .is-thumb, .camera-rail')) return;
         setChromeHidden(h => !h);
@@ -682,16 +706,59 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
 
     // The takeover, on <html> for the stylesheet: before paint, so a phone
     // turned sideways never shows a frame of the squashed chat layout.
-    useLayoutEffect(() => publishTakeover(takeover, chromeOff), [takeover, chromeOff]);
+    useLayoutEffect(() => publishTakeover(takeover, chromeOff, controllingNow), [takeover, chromeOff, controllingNow]);
 
-    // The controls hide themselves after a while — never while a menu is open
-    // or a control session needs its Stop button in reach.
-    const controllingNow = control.controlling?.status === 'active';
+    // The controls hide themselves after a while — never while a menu is open,
+    // a control session needs its Stop button in reach, or the keyboard is on
+    // one of them (a hidden control would drop that focus to the page).
     useEffect(() => {
         if (!takeover || chromeHidden || ctxMenu || controllingNow) return;
-        const t = setTimeout(() => setChromeHidden(true), CHROME_HIDE_MS);
+        const t = setTimeout(() => {
+            const a = document.activeElement;
+            let keyboardOnControl = false;
+            try { keyboardOnControl = !!a && a !== document.body && inTakeoverControls(a) && a.matches(':focus-visible'); } catch { /* engine without :focus-visible */ }
+            if (keyboardOnControl) setChromeKick(k => k + 1);
+            else setChromeHidden(true);
+        }, CHROME_HIDE_MS);
         return () => clearTimeout(t);
     }, [takeover, chromeHidden, ctxMenu, controllingNow, chromeKick]);
+
+    // Interaction anywhere in the takeover's controls keeps them up: a touch
+    // (the voice bar is portaled outside the stage, so the document listens),
+    // a key, or focus arriving on one. A key while they are hidden brings
+    // them back, so the keyboard and a screen reader can always reach them.
+    useEffect(() => {
+        if (!takeover) return;
+        const kick = () => setChromeKick(k => k + 1);
+        const show = () => { setChromeHidden(false); kick(); };
+        const onFocus = (e: FocusEvent) => { if (inTakeoverControls(e.target as Element)) show(); };
+        const onKey = (e: KeyboardEvent) => {
+            // Hidden controls cannot take focus, so Tab's own move would skip
+            // them all: it shows them and lands on the first one instead.
+            if (e.key === 'Tab' && document.documentElement.dataset.streamChrome === 'hidden') {
+                e.preventDefault();
+                show();
+                setTimeout(() => stageRef.current?.querySelector<HTMLElement>('button:not([disabled])')?.focus(), 0);
+                return;
+            }
+            show();
+        };
+        document.addEventListener('pointerdown', kick, true);
+        document.addEventListener('keydown', onKey, true);
+        document.addEventListener('focusin', onFocus, true);
+        return () => {
+            document.removeEventListener('pointerdown', kick, true);
+            document.removeEventListener('keydown', onKey, true);
+            document.removeEventListener('focusin', onFocus, true);
+        };
+    }, [takeover]);
+
+    // Android's BACK leaves the in-app fullscreen first, as it does a video's
+    // (api/mobileApp.ts interceptBack; nothing on the web or the desktop).
+    useEffect(() => {
+        if (appFullscreen === null) return;
+        return interceptBack(() => setAppFullscreen(null));
+    }, [appFullscreen]);
 
     // Escape leaves the in-app fullscreen, as it leaves the real one.
     useEffect(() => {
@@ -730,10 +797,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
 
     return (
         <div
+            ref={stageRef}
             className={`stream-stage${takeover ? ' is-takeover' : ''}`}
             onClick={onStageTap}
-            // Any touch keeps the takeover's controls up a while longer.
-            onPointerDown={takeover ? () => setChromeKick(k => k + 1) : undefined}
         >
             {/* Slim header */}
             <div className="stream-stage-header">

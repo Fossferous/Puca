@@ -341,7 +341,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             '--mobile-voice-panel-h', `${Math.ceil(el.getBoundingClientRect().height)}px`);
         apply();
         const ro = new ResizeObserver(apply);
-        ro.observe(el);
+        // The BORDER box: the phone's sideways layout and the stream takeover
+        // (phoneLandscape.css) change only the bar's padding, which the
+        // default content-box observation never reports, and the reservation
+        // went stale by those pixels.
+        ro.observe(el, { box: 'border-box' });
         return () => {
             ro.disconnect();
             document.documentElement.style.removeProperty('--mobile-voice-panel-h');

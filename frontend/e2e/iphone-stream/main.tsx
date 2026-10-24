@@ -25,6 +25,10 @@ import { StreamStage } from '../../src/components/StreamStage';
 import { StreamPip } from '../../src/components/StreamPip';
 import { globalScreenSharers, globalSelectedStreams, globalStreamData, notifyStreamStateChange } from '../../src/components/voiceState';
 import chrome from './real-phone-chrome.json';
+import { installPhoneSideways } from '../../src/api/phoneSideways';
+
+// As main.tsx does: <html data-phone-sideways>, the device turned.
+installPhoneSideways();
 
 const params = new URLSearchParams(location.search);
 const streams = Number(params.get('streams') ?? '1');
@@ -40,7 +44,7 @@ document.body.insertAdjacentHTML('beforeend', chrome.voice);
 const panel = document.querySelector<HTMLElement>('.voice-panel-compact')!;
 new ResizeObserver(() => {
     document.documentElement.style.setProperty('--mobile-voice-panel-h', `${Math.round(panel.getBoundingClientRect().height)}px`);
-}).observe(panel);
+}).observe(panel, { box: 'border-box' }); // as VoicePanel.tsx does
 
 // Some messages, so the list has something to show.
 const messages = document.querySelector<HTMLElement>('.messages-container')!;

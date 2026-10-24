@@ -18,6 +18,11 @@
  *     own Chat button away.
  *  2. THE CHAT, SIDEWAYS. The same phone layout with its bars slimmed to the
  *     44 px touch minimum, so the message list keeps about half the height.
+ *
+ * "Sideways" is html[data-phone-sideways] (api/phoneSideways.ts): the DEVICE
+ * turned, never `(orientation: landscape)`. That media feature is the
+ * viewport's shape, and an Android WebView shrinks the viewport for the soft
+ * keyboard: a phone typing upright matched it and lost its composer.
  */
 
 /* ==========================================================================
@@ -47,7 +52,14 @@ html[data-stream-takeover] .stream-stage {
     --stream-head-h: calc(52px + var(--safe-area-top, 0px));
 }
 
-html[data-stream-takeover] .mobile-bottom-nav {
+/* What the stage covers is out of reach as well as out of sight: Tab and a
+   screen reader must not wander into a composer or a panel behind it. */
+html[data-stream-takeover] .mobile-bottom-nav,
+html[data-stream-takeover] .chat-header,
+html[data-stream-takeover] .message-form,
+html[data-stream-takeover] .sidebar,
+html[data-stream-takeover] .member-sidebar,
+html[data-stream-takeover] .server-list-container {
     visibility: hidden;
 }
 
@@ -134,6 +146,25 @@ html[data-stream-chrome="hidden"] .voice-panel-compact {
     transition: opacity 0.2s ease, visibility 0s linear 0.2s;
 }
 
+/* A CONTROL SESSION on the stage (a PC being driven from the phone). Every
+   tap on the picture is a click over there, so nothing may float over it or
+   hide: the header (Stop controlling, Type, Chat) takes its own row above
+   the picture, the voice bar its own below, and the tile's overlay, which the
+   capture surface covers anyway, steps aside. */
+html[data-stream-controlling] .stream-stage {
+    padding-bottom: var(--mobile-voice-panel-h, 60px);
+    cursor: auto;
+}
+
+html[data-stream-controlling] .stream-stage-header {
+    position: relative;
+    background: #000;
+}
+
+html[data-stream-controlling] .stream-tile:has(.control-capture) .stream-tile-header {
+    display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
     html[data-stream-takeover] .stream-stage-header,
     html[data-stream-takeover] .stream-tile-header,
@@ -149,65 +180,62 @@ html[data-stream-chrome="hidden"] .voice-panel-compact {
    2. The chat, sideways
    ========================================================================== */
 
-@media (pointer: coarse) and (max-width: 1024px) and (orientation: landscape) and (max-height: 500px) {
+/* Every panel's bottom edge is computed from this (mobile.css). */
+html[data-phone-sideways] {
+    --mobile-nav-height: 44px;
+}
 
-    /* Every panel's bottom edge is computed from this (mobile.css). */
-    :root {
-        --mobile-nav-height: 44px;
-    }
+/* Six tabs across 844 px have the width to put the label BESIDE the icon,
+   so the bar is one 44 px row instead of a 60 px stack. */
+html[data-phone-sideways] .mobile-nav-btn {
+    flex-direction: row;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 2px;
+}
 
-    /* Six tabs across 844 px have the width to put the label BESIDE the icon,
-       so the bar is one 44 px row instead of a 60 px stack. */
-    html .mobile-nav-btn {
-        flex-direction: row;
-        justify-content: center;
-        gap: 6px;
-        padding: 0 2px;
-    }
+html[data-phone-sideways] .chat-header {
+    padding-top: 0;
+    padding-bottom: 0;
+    min-height: 46px;
+}
 
-    html .chat-header {
-        padding-top: 0;
-        padding-bottom: 0;
-        min-height: 46px;
-    }
+html[data-phone-sideways] .message-form {
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
 
-    html .message-form {
-        padding-top: 4px;
-        padding-bottom: 4px;
-    }
+html[data-phone-sideways]:not([data-stream-takeover]) .voice-panel-compact.vp-collapsed {
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
 
-    html .voice-panel-compact.vp-collapsed {
-        padding-top: 4px;
-        padding-bottom: 4px;
-    }
+html[data-phone-sideways] .voice-panel-compact .voice-btn {
+    width: 44px;
+    height: 44px;
+}
 
-    html .voice-panel-compact .voice-btn {
-        width: 44px;
-        height: 44px;
-    }
+/* Watching in the docked mini-player while chatting: sideways, a full-
+   width 16:9 row under the header left the message list ~15 px in a
+   Safari tab. The player takes a column on the left instead, the full
+   height of the chat, and the header, list and composer the rest. */
+html[data-phone-sideways] .chat-main:has(.stream-pip.docked:not(.is-hidden)) {
+    padding-left: 46%;
+}
 
-    /* Watching in the docked mini-player while chatting: sideways, a full-
-       width 16:9 row under the header left the message list ~15 px in a
-       Safari tab. The player takes a column on the left instead, the full
-       height of the chat, and the header, list and composer the rest. */
-    html .chat-main:has(.stream-pip.docked:not(.is-hidden)) {
-        padding-left: 46%;
-    }
-
-    html .chat-main .stream-pip.docked:not(.is-hidden) {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 46%;
-        max-height: none;
-        min-height: 0;
-        aspect-ratio: auto;
-        padding-left: var(--safe-area-left, 0px);
-        border-bottom: none;
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
-        box-sizing: border-box;
-    }
+html[data-phone-sideways] .chat-main .stream-pip.docked:not(.is-hidden) {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 46%;
+    max-height: none;
+    min-height: 0;
+    aspect-ratio: auto;
+    padding-left: var(--safe-area-left, 0px);
+    border-bottom: none;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    box-sizing: border-box;
 }
 
 /* ==========================================================================
@@ -220,7 +248,9 @@ html[data-media-fullscreen] .chat-main {
     z-index: 400;
 }
 
-html[data-media-fullscreen] .mobile-bottom-nav {
+html[data-media-fullscreen] .mobile-bottom-nav,
+html[data-media-fullscreen] .chat-header,
+html[data-media-fullscreen] .message-form {
     visibility: hidden;
 }
 

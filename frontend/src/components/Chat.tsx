@@ -14,6 +14,7 @@ import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
 import './FileUpload.css';
 import { StreamStage } from './StreamStage';
+import { screenTakenOver } from './streamTakeover';
 import { VoiceStage } from './VoiceStage';
 import { ServerList } from './ServerList';
 import { ServerCreateWizard, type WizardResult } from './ServerCreateWizard';
@@ -1373,8 +1374,8 @@ export function Chat({ onLogout }: ChatProps) {
         // protect when Devices sat outside the run.
         enabled: isMobile && !showFriendsPanel,
         threshold: 70,
-        onSwipeLeft: () => stepPanel(1),
-        onSwipeRight: () => stepPanel(-1),
+        onSwipeLeft: () => { if (!screenTakenOver()) stepPanel(1); },
+        onSwipeRight: () => { if (!screenTakenOver()) stepPanel(-1); },
     });
 
     // Trigger re-renders when globalVoiceUsers changes (updated by global stream listeners)

@@ -63,6 +63,10 @@ installFileDropGuard(window)
 // (api/iosStandalone.ts). Nothing anywhere else.
 import { installIosStandalone } from './api/iosStandalone'
 installIosStandalone()
+// <html data-phone-sideways>: the device turned, not the viewport's shape
+// (phoneLandscape.css, the stream takeover).
+import { installPhoneSideways } from './api/phoneSideways'
+installPhoneSideways()
 
 // Desktop shell: the tray capture badge, the tooltip and the native clip
 // capture threads live in the PROCESS, but every one of them is driven from

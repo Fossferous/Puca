@@ -201,6 +201,10 @@ try {
         const pairs = [];
         for (let i = 0; i < m.buttons.length; i++) for (let j = i + 1; j < m.buttons.length; j++) if (overlap(m.buttons[i], m.buttons[j]) > 1) pairs.push([m.buttons[i].label, m.buttons[j].label]);
         check(`${tag}: no two controls overlap`, pairs.length === 0, JSON.stringify(pairs));
+        // The voice bar's published height (VoicePanel's ResizeObserver) must
+        // follow the takeover's restyle, which changes only its padding.
+        const bar = await phone.evaluate(() => ({ v: getComputedStyle(document.documentElement).getPropertyValue('--mobile-voice-panel-h').trim(), h: Math.ceil(document.querySelector('.voice-panel-compact').getBoundingClientRect().height) }));
+        check(`${tag}: the voice bar's published height is its real height`, bar.v === `${bar.h}px`, JSON.stringify(bar));
         await shot(phone, `02-${w}x${h}-stream.png`);
     }
     // The voice bar works from there: Mute mutes.
@@ -231,6 +235,11 @@ try {
     await phone.locator('.stream-pip .pip-btn[title*="xpand"], .stream-pip button[title*="xpand"], .stream-pip button[title*="ull"]').first().tap().catch(() => {});
     await sleep(800);
     check('the player\'s expand brings the stage back, taking over', (await measure(phone)).takeover === 'landscape');
+    // Already sideways, only the voice bar's PADDING changes here (no turn,
+    // no width change): the case a content-box ResizeObserver never saw.
+    await sleep(300);
+    const barAfter = await phone.evaluate(() => ({ v: getComputedStyle(document.documentElement).getPropertyValue('--mobile-voice-panel-h').trim(), h: Math.ceil(document.querySelector('.voice-panel-compact').getBoundingClientRect().height) }));
+    check('back in the takeover without turning: the voice bar\'s published height is still its real height', barAfter.v === `${barAfter.h}px`, JSON.stringify(barAfter));
 
     // ── 4. Portrait Fullscreen, on the iPhone's engine.
     await phone.setViewportSize({ width: 390, height: 844 });
