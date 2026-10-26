@@ -20,13 +20,17 @@
  *     the last LOSSY_OF windows. A window needs MIN_PACKETS to be judged at
  *     all: one packet of twenty is 5% and means nothing.
  *   - FREEZES: FREEZES_NEEDED freezes inside FREEZE_SPAN_MS, each in a window
- *     that also lost packets, asked for them again (NACK) or asked for a
- *     keyframe (PLI). A freeze with none of that is not this viewer's
- *     connection: the sharer's frames never left (the other viewer that evening
- *     froze for 1.4-2.3 s with nothing lost, behind a share whose own machine
- *     was short of frames: shareHealth.ts), or the picture stopped changing,
- *     which the browser counts as a freeze too. A smaller copy freezes there
- *     just the same, so stepping down would cost the picture for nothing.
+ *     that also lost CLEAN_PCT of its packets or more, or asked for a keyframe
+ *     again (PLI). A freeze without that is not this viewer's connection: the
+ *     sharer's frames never left (the other viewer that evening froze for
+ *     1.4-2.3 s with nothing lost, behind a share whose own machine was short
+ *     of frames: shareHealth.ts), or the picture stopped changing, which the
+ *     browser counts as a freeze too (one to three a window for slides or
+ *     code, measured). A smaller copy freezes there just the same, so stepping
+ *     down would cost the picture for nothing. A lone retransmission (NACK) is
+ *     not trouble either: busy Wi-Fi repairs a packet now and then.
+ *   - A share being remote-controlled is left alone (sfuManager): its jitter
+ *     buffer is held at zero on purpose, which freezes more.
  *
  * NEVER THRASH. Nothing is judged for SETTLE_MS after the share is first seen
  * or after a step: the new copy starts on a keyframe, and the switch can itself
@@ -164,7 +168,14 @@ export class ShareLayerGuard {
         const lost = Math.max(0, d('packetsLost') ?? 0);
         const packets = (recv ?? 0) + lost;
         const lossPct = packets >= MIN_PACKETS ? (100 * lost) / packets : null;
-        const trouble = lost > 0 || (nack ?? 0) > 0 || (pli ?? 0) > 0;
+        // A freeze is the NETWORK's only beside real loss (CLEAN_PCT or more
+        // of a window's packets) or a keyframe asked for again (PLI): the
+        // picture broke. Never beside a lone retransmission (NACK): busy
+        // Wi-Fi repairs a packet now and then, and a share of slides or code
+        // "freezes" one to three times a window just by pausing (measured on
+        // a real capture, nothing lost) — those two together once stepped a
+        // healthy viewer down for good.
+        const trouble = (lossPct !== null && lossPct >= CLEAN_PCT) || (pli ?? 0) > 0;
         const netFreezes = trouble ? Math.max(0, frz ?? 0) : 0;
 
         this.lossy.push(lossPct !== null && lossPct > LOSSY_PCT);
@@ -179,7 +190,7 @@ export class ShareLayerGuard {
             if (lossyCount >= LOSSY_NEEDED) {
                 why = `${lossyCount} of the last ${this.lossy.length} windows lost over ${LOSSY_PCT}% of their packets, ${(lossPct ?? 0).toFixed(1)}% in the last`;
             } else if (this.freezes.length >= FREEZES_NEEDED) {
-                why = `${this.freezes.length} freezes with packet loss or repair requests in ${Math.round(FREEZE_SPAN_MS / 1000)} s`;
+                why = `${this.freezes.length} freezes with packet loss or keyframe requests in ${Math.round(FREEZE_SPAN_MS / 1000)} s`;
             }
             if (!why) return null;
             if (s.atMs - this.lastUpAt < RELAPSE_MS) this.cleanNeeded = Math.min(this.cleanNeeded * 2, CLEAN_MAX_MS);

@@ -145,6 +145,32 @@ describe('outgoing video rows on a mesh call', () => {
         });
     });
 
+    it('keep the share\'s frame reading on the same peer while it sends nearly as much, so the watch can compare its counters', async () => {
+        // A new peer each reading is a new sender each reading: its counters
+        // cannot be compared with the last ones, and the reading has no verdict.
+        const mgr = new WebRTCManager();
+        const share = track('screen', 'live', 60);
+        (mgr as unknown as { media: { screenShareStream: unknown } }).media.screenShareStream =
+            { getTracks: () => [share], getVideoTracks: () => [share] };
+        const fps: Record<number, number> = { 7: 28, 8: 29 };
+        const sender = (peer: number) => ({
+            track: share,
+            getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }),
+            getStats: async () => new Map([
+                ['o', { id: 'o', type: 'outbound-rtp', kind: 'video', mediaSourceId: 'm', framesPerSecond: fps[peer], framesEncoded: 900, bytesSent: 1e6, frameWidth: 1920, frameHeight: 1080, ssrc: peer, qualityLimitationReason: 'none' }],
+                ['m', { id: 'm', type: 'media-source', kind: 'video', trackIdentifier: 'screen', framesPerSecond: 31 }],
+            ]),
+        });
+        addPeer(mgr, 7, fakePc([], [sender(7)]));
+        addPeer(mgr, 8, fakePc([], [sender(8)]));
+        expect((await mgr.shareEncodeSample())?.sent?.ssrc, 'the peer sent the most').toBe(8);
+        fps[7] = 29;
+        fps[8] = 25;
+        expect((await mgr.shareEncodeSample())?.sent?.ssrc, 'still nearly as much: kept').toBe(8);
+        fps[8] = 12;
+        expect((await mgr.shareEncodeSample())?.sent?.ssrc, 'fell well behind: the most again').toBe(7);
+    });
+
     it('carry source, chosen and captured rates, cap and sender id for a live sender', async () => {
         const mgr = new WebRTCManager();
         const sender = { track: track('mycam', 'live', 24), getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }) };

@@ -141,6 +141,17 @@ export const SAMPLE_MS = 3000;
  * that has stopped is refreshed about once a second with frames the encoder
  * spends its spare bits on (measured up to 1.3 bits a pixel, and up to 44%
  * of the target), which would otherwise read as motion.
+ *
+ * A PICTURE AT ITS OWN STEADY RATE IS NOT SHORT EITHER. A film plays at 24,
+ * 25 or 30 frames a second, and a game capped at 30 renders 30: under a 60
+ * setting each reads "short at the capture" on every reading (measured: 24 fps
+ * motion under 60, ten readings of ten), and offering them a step down would
+ * be wrong advice. What the content's own rate never does is lose frames: the
+ * capture is steady and what is sent keeps up with it. So the window speaks
+ * only when frames are lost: SEND_NEEDED readings short at the send, or a
+ * capture that keeps jumping (UNEVEN_SWINGS jumps of UNEVEN_SWING of its
+ * median between readings). The sharer of 2026-10-25 had both: captures
+ * swinging between 30 and 44-49, and 20-41 sent.
  */
 
 /** A share is short of frames below this share of what it should manage. */
@@ -156,6 +167,14 @@ export const FRAMES_WINDOW = 8;
 /** ...and this many of them must be short. A level loading, a scene change
  *  or a moment of contention is a reading or two, not six. */
 export const FRAMES_NEEDED = 6;
+/** And frames must be LOST: this many readings short at the send... */
+export const SEND_NEEDED = 2;
+/** ...or the capture jumping, between one reading and the next, by this
+ *  share of its median... */
+export const UNEVEN_SWING = 0.25;
+/** ...this many times in the window. A content's own rate changing (a film
+ *  starting after a game) is one jump, not three. */
+export const UNEVEN_SWINGS = 3;
 
 /** What one reading says about the share's frames. 'still' and 'unknown' are
  *  never short: no evidence is not evidence of starvation. */
@@ -210,41 +229,70 @@ function sentFps(s: EncodeSample, prev: EncodeSample | null): number | null {
     return ((b.frames - a.frames) * 1000) / (s.atMs - prev!.atMs!);
 }
 
-/** One reading, judged (see the note above FRAME_SHORT_RATIO). */
-export function frameVerdict(s: EncodeSample, prev: EncodeSample | null): FrameVerdict {
-    const set = s.setFps;
-    const cap = s.captureFps;
-    if (!finite(set) || set <= 0 || !finite(cap) || cap < 0) return 'unknown';
-    if (cap <= STILL_FPS) return 'still';
-    const motion = moving(s, prev);
-    if (motion === null) return 'unknown';
-    if (!motion) return 'still';
-    if (cap < FRAME_SHORT_RATIO * set) return 'capture';
-    const sent = sentFps(s, prev);
-    if (sent !== null) {
-        const rungCap = s.sent?.maxFps;
-        const expected = Math.min(cap, finite(rungCap) && rungCap > 0 ? rungCap : Infinity);
-        if (sent < FRAME_SHORT_RATIO * expected) return 'send';
-    }
-    return 'ok';
-}
-
-/** A judged reading, with the numbers the offer quotes. */
+/** A judged reading, with the numbers the offer and its log line quote. */
 interface FrameReading {
     verdict: FrameVerdict;
+    /** Moving, and captured under FRAME_SHORT_RATIO of the setting. */
+    captureShort: boolean;
+    /** Moving, and sending under FRAME_SHORT_RATIO of what it captures (or of
+     *  the rung's own cap): judged whatever the capture did. */
+    sendShort: boolean;
     set: number | null;
     capture: number | null;
     sent: number | null;
+    bpp: number | null;
+    /** kbps sent over the encoder's target. */
+    targetShare: number | null;
+}
+
+/** One reading, judged in full (see the notes above FRAME_SHORT_RATIO). */
+function judge(s: EncodeSample, prev: EncodeSample | null): FrameReading {
+    const set = s.setFps;
+    const cap = s.captureFps;
+    const sent = sentFps(s, prev);
+    const bpp = bitsPerPixel(s, prev);
+    const kbps = sentKbps(s, prev);
+    const target = s.sent?.targetKbps;
+    const r: FrameReading = {
+        verdict: 'unknown', captureShort: false, sendShort: false,
+        set: finite(set) ? set : null, capture: finite(cap) ? cap : null, sent, bpp,
+        targetShare: kbps !== null && finite(target) && target > 0 ? kbps / target : null,
+    };
+    if (!finite(set) || set <= 0 || !finite(cap) || cap < 0) return r;
+    if (cap <= STILL_FPS) return { ...r, verdict: 'still' };
+    const motion = moving(s, prev);
+    if (motion === null) return r;
+    if (!motion) return { ...r, verdict: 'still' };
+    r.captureShort = cap < FRAME_SHORT_RATIO * set;
+    if (sent !== null) {
+        const rungCap = s.sent?.maxFps;
+        const expected = Math.min(cap, finite(rungCap) && rungCap > 0 ? rungCap : Infinity);
+        r.sendShort = sent < FRAME_SHORT_RATIO * expected;
+    }
+    r.verdict = r.captureShort ? 'capture' : r.sendShort ? 'send' : 'ok';
+    return r;
+}
+
+/** One reading, judged (see the note above FRAME_SHORT_RATIO). A reading
+ *  short at both ends reads 'capture'. */
+export function frameVerdict(s: EncodeSample, prev: EncodeSample | null): FrameVerdict {
+    return judge(s, prev).verdict;
 }
 
 /** The share is short of frames: where, and the typical numbers (medians of
  *  the short readings), for the offer and the log. */
 export interface FrameShortfall {
+    /** 'capture': the capture keeps jumping well under the setting; 'send':
+     *  frames reach the encoder and do not go out. */
     kind: 'capture' | 'send';
     setFps: number;
     captureFps: number;
     /** null when the sent rate could not be read. */
     sentFps: number | null;
+    /** What the encoder made of the frames, for the log: bits a pixel, and
+     *  the share of its bandwidth target it sent (null: not read). */
+    bpp: number | null;
+    targetShare: number | null;
 }
 
 function median(xs: number[]): number {
@@ -253,21 +301,45 @@ function median(xs: number[]): number {
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-/** FRAMES_NEEDED of the last FRAMES_WINDOW readings short, or null. Like
- *  cpuStarved, nothing is said before there is a full window to judge on. */
+/** Does the capture keep jumping? UNEVEN_SWINGS jumps, each of UNEVEN_SWING of
+ *  the median or more, between one judged reading and the next. */
+function captureUneven(caps: readonly number[]): boolean {
+    if (caps.length < 2) return false;
+    const typical = median([...caps]);
+    if (!(typical > 0)) return false;
+    let swings = 0;
+    for (let i = 1; i < caps.length; i++) if (Math.abs(caps[i] - caps[i - 1]) >= UNEVEN_SWING * typical) swings++;
+    return swings >= UNEVEN_SWINGS;
+}
+
+/** FRAMES_NEEDED of the last FRAMES_WINDOW readings short, with frames being
+ *  LOST (see the note above FRAME_SHORT_RATIO), or null. Like cpuStarved,
+ *  nothing is said before there is a full window to judge on. */
 function framesStarved(readings: readonly FrameReading[]): FrameShortfall | null {
     const window = readings.slice(-FRAMES_WINDOW);
     if (window.length < FRAMES_WINDOW) return null;
-    const short = window.filter(r => r.verdict === 'capture' || r.verdict === 'send');
+    const short = window.filter(r => r.captureShort || r.sendShort);
     if (short.length < FRAMES_NEEDED) return null;
-    const atCapture = short.filter(r => r.verdict === 'capture').length;
-    const nums = (pick: (r: FrameReading) => number | null) => short.map(pick).filter(finite);
-    const sent = nums(r => r.sent);
+    const judged = window.filter(r => r.verdict === 'capture' || r.verdict === 'send' || r.verdict === 'ok');
+    const uneven = captureUneven(judged.map(r => r.capture).filter(finite));
+    const sends = window.filter(r => r.sendShort);
+    // Steady, and keeping up with what it captures: the content's own rate.
+    if (sends.length < SEND_NEEDED && !uneven) return null;
+    const atCapture = short.filter(r => r.captureShort);
+    const kind: FrameShortfall['kind'] = uneven && atCapture.length * 2 >= short.length ? 'capture' : 'send';
+    const of = kind === 'capture' ? atCapture : sends;
+    const nums = (pick: (r: FrameReading) => number | null) => of.map(pick).filter(finite);
+    const med = (xs: number[]) => (xs.length ? median(xs) : null);
+    const sent = med(nums(r => r.sent));
+    const bpp = med(nums(r => r.bpp));
+    const share = med(nums(r => r.targetShare));
     return {
-        kind: atCapture * 2 >= short.length ? 'capture' : 'send',
-        setFps: Math.round(median(nums(r => r.set))),
-        captureFps: Math.round(median(nums(r => r.capture))),
-        sentFps: sent.length ? Math.round(median(sent)) : null,
+        kind,
+        setFps: Math.round(med(nums(r => r.set)) ?? 0),
+        captureFps: Math.round(med(nums(r => r.capture)) ?? 0),
+        sentFps: sent === null ? null : Math.round(sent),
+        bpp: bpp === null ? null : Math.round(bpp * 1000) / 1000,
+        targetShare: share === null ? null : Math.round(share * 100) / 100,
     };
 }
 
@@ -300,13 +372,7 @@ export function createShareLoadWatch() {
         add(s: EncodeSample | null): boolean {
             if (s) {
                 samples.push(s);
-                const verdict = frameVerdict(s, prev);
-                readings.push({
-                    verdict,
-                    set: finite(s.setFps) ? s.setFps : null,
-                    capture: finite(s.captureFps) ? s.captureFps : null,
-                    sent: sentFps(s, prev),
-                });
+                readings.push(judge(s, prev));
                 prev = s;
             }
             // Bounded: only the last window is ever consulted, and a three-hour
@@ -572,41 +638,56 @@ export function liveQuality(saved: ShareQuality, setFps: number | null | undefin
     return live === undefined ? saved : { resolution: saved.resolution, fps: live };
 }
 
+/** An offer: what to say, what "Lower it" sets, and whether that is kept as
+ *  the person's setting for the next share. */
+export interface ShareLoadOffer { text: string; to: ShareQuality; remember: boolean }
+
 /**
  * What to say when the share is short of frames, or null when there is
  * nothing left to give up. Plain words: what is happening, and, in the
  * question, exactly what "Lower it" will set.
+ *
+ * FOR THIS SHARE ONLY (remember: false). The frames this share loses are this
+ * share's trouble: the game, the window, what else the machine is doing. Kept
+ * as the setting, a step taken during one evening's share would start the
+ * next game share at 30 fps, and a second step would walk it on down.
  */
 export function framesOffer(
     short: FrameShortfall,
     current: ShareQuality,
     capture?: { width: number; height: number } | null,
-): { text: string; to: ShareQuality } | null {
+): ShareLoadOffer | null {
     const to = framesStepDown(liveQuality(current, short.setFps), capture);
     if (!to) return null;
     const what = short.kind === 'send' && short.sentFps !== null
         ? `Your screen share is sending only about ${short.sentFps} of the ${short.captureFps} frames a second it captures, so it stutters for viewers.`
-        : `Your screen share is getting only about ${short.captureFps} of the ${short.setFps} frames a second you chose, so it can look choppy to viewers.`;
-    return { text: `${what} Lower it to ${qualityLabel(to)}?`, to };
+        : `Your screen share is getting only about ${short.captureFps} of the ${short.setFps} frames a second you chose, and unevenly, so it stutters for viewers.`;
+    return { text: `${what} Lower this share to ${qualityLabel(to)}?`, to, remember: false };
 }
 
-/** The offer for whatever the watch found. */
+/** The offer for whatever the watch found. The CPU step is remembered, as it
+ *  always was: an encoder short of CPU is the machine, and stays so. */
 export function shareLoadOffer(
     why: ShareLoadReason,
     current: ShareQuality,
     capture?: { width: number; height: number } | null,
-): { text: string; to: ShareQuality } | null {
-    return why.kind === 'cpu' ? starvedOffer(current, capture) : framesOffer(why, current, capture);
+): ShareLoadOffer | null {
+    if (why.kind !== 'cpu') return framesOffer(why, current, capture);
+    const offer = starvedOffer(current, capture);
+    return offer ? { ...offer, remember: true } : null;
 }
 
 /** The puca.log line that goes with an offer, or with the watch speaking when
- *  there was nothing left to offer (the share was already as low as it goes). */
+ *  there was nothing left to offer (the share was already as low as it goes).
+ *  A shortfall carries what the encoder made of the frames (bits a pixel, and
+ *  the share of its target sent), so a log from a hardware encoder can show
+ *  whether the still-picture check holds there too. */
 export function shareLoadLogLine(why: ShareLoadReason, encoder: string | undefined, to: ShareQuality | null): string {
     const offer = to ? `offered ${qualityLabel(to)}` : 'nothing lower to offer';
     const enc = `encoder=${encoder ?? 'unknown'}`;
     if (why.kind === 'cpu') return `[share] encoder CPU-limited (${enc}); ${offer}`;
     return `[share] short of frames at the ${why.kind}: set ${why.setFps} fps, captured ${why.captureFps}, `
-        + `sent ${why.sentFps ?? '?'} (${enc}); ${offer}`;
+        + `sent ${why.sentFps ?? '?'}, bpp ${why.bpp ?? '?'}, of target ${why.targetShare ?? '?'} (${enc}); ${offer}`;
 }
 
 /**

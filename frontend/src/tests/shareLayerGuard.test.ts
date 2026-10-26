@@ -98,13 +98,14 @@ describe('when it steps down', () => {
         expect(MIN_PACKETS).toBeGreaterThan(20);
     });
 
-    it('on two freezes in a minute that came with packet trouble', () => {
+    it('on two freezes in a minute in windows that lost packets or asked for a keyframe again', () => {
         const g = new ShareLayerGuard();
         const next = link();
         run(g, next, settleWindows, clean);
-        expect(run(g, next, 1, { freezes: 1, lossPct: 0.2 })).toEqual([]);
+        // 0.6% lost: the network's (CLEAN_PCT or more), though not a lossy window.
+        expect(run(g, next, 1, { freezes: 1, lossPct: 0.6 })).toEqual([]);
         run(g, next, 5, clean);
-        const [c] = run(g, next, 1, { freezes: 1, nack: 3 });
+        const [c] = run(g, next, 1, { freezes: 1, pli: 1 });
         expect(c?.to).toBe('reduced');
         expect(c?.why).toContain('2 freezes');
     });
@@ -117,9 +118,20 @@ describe('when it steps down', () => {
         const g = new ShareLayerGuard();
         const next = link();
         run(g, next, settleWindows, clean);
-        run(g, next, 1, { freezes: 1, nack: 2 });
+        run(g, next, 1, { freezes: 1, pli: 1 });
         run(g, next, Math.ceil(FREEZE_SPAN_MS / VIEW_SAMPLE_MS), clean);
-        expect(run(g, next, 1, { freezes: 1, nack: 2 })).toEqual([]);
+        expect(run(g, next, 1, { freezes: 1, pli: 1 })).toEqual([]);
+    });
+
+    it('never on freezes beside a lone repaired packet: slides or code over busy Wi-Fi', () => {
+        // Measured on a real capture: a picture that pauses "freezes" one to
+        // three times a window with nothing lost, and busy Wi-Fi repairs a
+        // packet now and then. One NACK in every busy window stepped a healthy
+        // viewer down within 9-15 s, and it never came back.
+        expect(run(new ShareLayerGuard(), link(), 400, { freezes: 2, nack: 1 })).toEqual([]);
+        expect(run(new ShareLayerGuard(), link(), 400, { freezes: 3, nack: 1, lossPct: 0.3 }), '7 of 2400 lost: under CLEAN_PCT').toEqual([]);
+        // POSITIVE CONTROL: the same freezes beside a keyframe asked for again.
+        expect(run(new ShareLayerGuard(), link(), 40, { freezes: 2, nack: 1, pli: 1 }).map(c => c.to)).toEqual(['reduced']);
     });
 
     it('judges nothing while the share settles after it is first seen', () => {
@@ -155,6 +167,13 @@ describe('coming back to the full picture', () => {
         run(g, next, 1, lossy);
         const changes = run(g, next, 200, clean);
         expect(changes[0].at - at, 'half a stretch, a lossy window, then a whole one').toBeGreaterThan(SETTLE_MS + CLEAN_MS * 1.5);
+    });
+
+    it('comes back through freezes beside lone repaired packets, and stays back', () => {
+        // The other half of the trap above: those windows used to restart the
+        // clean stretch for ever.
+        const { g, next } = steppedDown();
+        expect(run(g, next, 400, { freezes: 2, nack: 1 }).map(c => c.to)).toEqual(['full']);
     });
 
     it('stays on the smaller copy for as long as that copy keeps losing too', () => {

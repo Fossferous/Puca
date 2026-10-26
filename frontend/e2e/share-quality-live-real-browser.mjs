@@ -105,9 +105,17 @@ const page = () => {
 };
 const type = () => { x.fillStyle = '#222'; x.font = '14px monospace'; x.fillText(String.fromCharCode(97 + (f++ % 26)), 10 + (col % 60) * 9, 40 + (Math.floor(col / 60) % 18) * 18); col++; };
 drawNoise();
-window.setPicture = (kind, fps) => {
-    clearInterval(t); t = null;
+let s = null;
+window.setPicture = (kind, fps, other) => {
+    clearInterval(t); clearInterval(s); t = null; s = null;
     if (kind === 'type') page();
+    // 'jumping': noise at fps, then at other, four seconds each, over and over.
+    if (kind === 'jumping') {
+        let at = fps;
+        t = setInterval(drawNoise, 1000 / at);
+        s = setInterval(() => { clearInterval(t); at = at === fps ? other : fps; t = setInterval(drawNoise, 1000 / at); }, 4000);
+        return;
+    }
     if (kind !== 'still') t = setInterval(kind === 'noise' ? drawNoise : kind === 'type' ? type : drawBox, 1000 / fps);
 };
 </script>`;
@@ -209,7 +217,8 @@ await tab.goto(`http://127.0.0.1:${server.address().port}/frames`);
 await tab.addScriptTag({ content: bundle.outputFiles[0].text });
 const w = await tab.evaluate(async () => {
     const {
-        shareVideoConstraints, shareSendReading, frameVerdict, bitsPerPixel, sentKbps, MOVING_BPP, MOVING_TARGET_SHARE, STILL_FPS,
+        shareVideoConstraints, shareSendReading, frameVerdict, bitsPerPixel, sentKbps, createShareLoadWatch,
+        MOVING_BPP, MOVING_TARGET_SHARE, STILL_FPS, FRAMES_WINDOW,
     } = window.ShareHealth;
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -257,6 +266,29 @@ const w = await tab.evaluate(async () => {
     out.still = await phase('still', 0);
     out.small = await phase('box', 12);
     out.typing = await phase('type', 10);
+    // The WATCH, fed exactly as VoicePanel feeds it, under a 60 fps setting:
+    // a film's steady 24 must never be offered a step (every reading is
+    // still "short at the capture"); a capture that keeps jumping must.
+    const watched = async (kind, fps, other) => {
+        window.setPicture(kind, fps, other);
+        await sleep(2500);
+        const watch = createShareLoadWatch();
+        let prev = null;
+        const verdicts = [];
+        const offers = [];
+        for (let i = 0; i <= FRAMES_WINDOW + 2; i++) {
+            if (i > 0) await sleep(2000);
+            const s = await read();
+            if (prev) verdicts.push(`${frameVerdict(s, prev)}(cap ${s.captureFps}, sent ${s.sent?.fps})`);
+            if (watch.add(s)) offers.push({ at: i, why: watch.reason() });
+            prev = s;
+        }
+        return { verdicts, offers };
+    };
+    await track.applyConstraints(shareVideoConstraints(640, 360, 60));
+    out.set60 = track.getSettings().frameRate;
+    out.film = await watched('noise', 24);
+    out.jumping = await watched('jumping', 20, 40);
     pc1.close(); pc2.close();
     track.stop();
     return out;
@@ -276,7 +308,9 @@ const f = w.first;
 ck(f.setFps === 30 && typeof f.captureFps === 'number' && typeof f.sent?.frames === 'number' && typeof f.sent?.bytes === 'number'
     && f.sent?.height > 0 && typeof f.sent?.ssrc === 'number' && typeof f.sent?.targetKbps === 'number',
 'a real sender report carries every field the frame watch reads (set, captured, sent, counters, size, ssrc, target)', JSON.stringify(f));
-ck(count(w.motion, 'capture') === 0, 'negative control: motion captured at the rate set is never short at the capture', show(w.motion));
+// Every reading ok, not merely "never short at the capture": a reading short
+// at the SEND, or with no verdict at all, would pass that and prove nothing.
+ck(w.motion.length === 4 && w.motion.every((x) => x.verdict === 'ok'), 'negative control: motion captured and sent at the rate set reads ok, every reading', show(w.motion));
 ck((median(w.motion.map((x) => x.bpp)) ?? 0) >= MOVING_BPP && (median(w.motion.map((x) => x.share)) ?? 0) >= MOVING_TARGET_SHARE,
     `full-frame motion is moving by both measures (${MOVING_BPP} bits a pixel, ${MOVING_TARGET_SHARE} of the target)`, show(w.motion));
 ck(count(w.motionThird, 'capture') >= 2, 'positive control: the same motion at a third of the rate set IS short at the capture', show(w.motionThird));
@@ -289,6 +323,14 @@ for (const [name, p] of [['a small square repainted (a cursor)', w.small], ['tex
         && (median(p.map((x) => x.share)) ?? 1) < MOVING_TARGET_SHARE,
     `${name}: over ${STILL_FPS} fps captured, and still by what the encoder made of it`, show(p));
 }
+ck(Math.round(w.set60) === 60, 'the capture re-capped to 60 fps for the watch\'s phases', String(w.set60));
+// The film: short at the capture reading after reading (24 of 60), and the
+// watch, which wants frames LOST, never speaks.
+ck(w.film.verdicts.filter((v) => v.startsWith('capture')).length >= 6, 'a film\'s steady 24 under 60 reads short at the capture, reading after reading', w.film.verdicts.join(' '));
+ck(w.film.offers.length === 0, 'and the watch never offers it a step: that is the content\'s own rate', JSON.stringify(w.film.offers));
+// POSITIVE CONTROL: the same motion, captured at 20 then 40 then 20...
+ck(w.jumping.offers.length === 1 && w.jumping.offers[0].why?.kind === 'capture',
+    'a capture that keeps jumping (20 and 40 of 60) IS offered a step', `${JSON.stringify(w.jumping.offers)} ${w.jumping.verdicts.join(' ')}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 await browser.close();

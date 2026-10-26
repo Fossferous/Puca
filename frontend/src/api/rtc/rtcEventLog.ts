@@ -55,16 +55,35 @@ export const CRYPTOR_REASONS: Readonly<Record<number, string>> = {
     2: 'internal',
 };
 
+/** The same reasons by the NAME livekit-client's frame worker writes them
+ *  under (CryptorErrorReason[reason]), also pinned by a test. */
+const CRYPTOR_REASON_NAMES: Readonly<Record<string, string>> = {
+    InvalidKey: 'invalid-key',
+    MissingKey: 'missing-key',
+    InternalError: 'internal',
+};
+
 /**
  * The line for RoomEvent.EncryptionError: whose media, why (the reason LiveKit
  * gives: a key that does not open the frames is `invalid-key`, which is what
  * the badge calls verification-failed), and LiveKit's own words without the
  * identity's suffix.
+ *
+ * THE REASON IS IN THE MESSAGE. The frame worker cannot post a CryptorError
+ * across to the page, so it posts `new Error("MissingKey: <its message>")`
+ * (livekit-client e2ee.worker.ts setupCryptorErrorEvents): that plain Error,
+ * with no `reason` field, is what the room emits. A `reason` number is read
+ * as well, for an error raised on the page itself.
  */
 export function encryptionErrorLine(error: unknown, userId: number | null): string {
     const e = (error && typeof error === 'object' ? error : {}) as { reason?: unknown; message?: unknown };
-    const reason = typeof e.reason === 'number' ? (CRYPTOR_REASONS[e.reason] ?? `reason ${e.reason}`) : 'unknown';
-    const text = typeof e.message === 'string' && e.message ? e.message : String(error);
+    let text = typeof e.message === 'string' && e.message ? e.message : String(error);
+    let reason = typeof e.reason === 'number' ? (CRYPTOR_REASONS[e.reason] ?? `reason ${e.reason}`) : null;
+    const named = /^(\w+): /.exec(text);
+    if (named && CRYPTOR_REASON_NAMES[named[1]]) {
+        reason ??= CRYPTOR_REASON_NAMES[named[1]];
+        text = text.slice(named[0].length);
+    }
     const whose = userId === null ? 'media' : `user ${userId}'s media`;
-    return `[sfu-e2ee] ${whose} failed to decrypt: ${reason} (${identityFree(text).slice(0, 200)})`;
+    return `[sfu-e2ee] ${whose} failed to decrypt: ${reason ?? 'unknown'} (${identityFree(text).slice(0, 200)})`;
 }

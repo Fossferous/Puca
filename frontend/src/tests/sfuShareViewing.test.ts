@@ -18,6 +18,7 @@ import { CryptorError, CryptorErrorReason, DisconnectReason, RoomEvent, Track, V
 import { SfuManager } from '../api/rtc/sfuManager';
 import { CRYPTOR_REASONS, encryptionErrorLine, identityFree, rtcEventLogSettled } from '../api/rtc/rtcEventLog';
 import { CLEAN_MS, SETTLE_MS, VIEW_SAMPLE_MS } from '../api/rtc/shareLayerGuard';
+import { setScreenLatencyMinimised } from '../api/rtc/receiverLatency';
 
 /** A receiver whose inbound-rtp counters grow by `perRead` on every read. */
 class FakeReceiver {
@@ -135,6 +136,22 @@ describe('a viewer whose connection keeps losing a share', () => {
         await m.disconnect();
     });
 
+    it('leaves a share being remote-controlled alone: its jitter buffer is held at zero on purpose', async () => {
+        const { m, pub, receiver } = watching([0, 1, 2]);
+        setScreenLatencyMinimised(7, true);
+        try {
+            receiver.lossPct = 3;
+            await vi.advanceTimersByTimeAsync(SETTLE_MS + VIEW_SAMPLE_MS * 10);
+            expect(new Set(pub.asked), 'only ever the full picture while controlled').toEqual(new Set([VideoQuality.HIGH]));
+        } finally {
+            setScreenLatencyMinimised(7, false);
+        }
+        // POSITIVE CONTROL: control over, the same loss steps it down.
+        const down = await readsUntil(() => pub.asked.at(-1) === VideoQuality.MEDIUM, 20);
+        expect(down).toBeLessThan(Infinity);
+        await m.disconnect();
+    });
+
     it('never asks for less of a share sent at one size', async () => {
         const { m, pub, receiver } = watching([2]);
         receiver.lossPct = 10;
@@ -214,23 +231,38 @@ describe('the room\'s moments, in puca.log', () => {
         return { m, room };
     };
 
-    it('names LiveKit\'s decrypt-failure reasons by the numbers its enum really has', () => {
+    it('names LiveKit\'s decrypt-failure reasons as its enum really has them, by number and by name', () => {
         // rtcEventLog.ts maps them without importing LiveKit; an upgrade that
-        // renumbered CryptorErrorReason must fail here, not mislabel the log.
+        // renumbered or renamed CryptorErrorReason must fail here, not
+        // mislabel the log.
         expect(CRYPTOR_REASONS[CryptorErrorReason.InvalidKey]).toBe('invalid-key');
         expect(CRYPTOR_REASONS[CryptorErrorReason.MissingKey]).toBe('missing-key');
         expect(CRYPTOR_REASONS[CryptorErrorReason.InternalError]).toBe('internal');
+        for (const name of Object.keys(CryptorErrorReason).filter(k => Number.isNaN(Number(k)))) {
+            const line = encryptionErrorLine(new Error(`${name}: frame`), 1);
+            expect(line, name).toBe(`[sfu-e2ee] user 1's media failed to decrypt: ${CRYPTOR_REASONS[CryptorErrorReason[name as keyof typeof CryptorErrorReason]]} (frame)`);
+        }
         expect(identityFree('u12#Zz-9_q and u3#a')).toBe('u12 and u3');
         expect(encryptionErrorLine(new Error('boom'), null)).toBe('[sfu-e2ee] media failed to decrypt: unknown (boom)');
+        expect(encryptionErrorLine(new Error('undefined: no reason'), null), 'a name LiveKit did not give').toBe('[sfu-e2ee] media failed to decrypt: unknown (undefined: no reason)');
     });
 
-    it('an encryption error, with LiveKit\'s reason and no per-connection id', async () => {
+    it('an encryption error AS THE ROOM EMITS IT: a plain Error from the frame worker, its reason in the message', async () => {
+        // livekit-client's worker cannot post a CryptorError to the page, so it
+        // posts new Error(`${CryptorErrorReason[reason]}: ${message}`)
+        // (e2ee.worker.ts setupCryptorErrorEvents) and the room emits that.
         const { room } = wired();
+        const fromWorker = new Error('MissingKey: missing key at index 3 for participant u1#k3yX-9');
+        expect((fromWorker as { reason?: unknown }).reason, 'fixture: no reason field, as in the app').toBeUndefined();
+        room.emit(RoomEvent.EncryptionError, fromWorker, { identity: 'u1#k3yX-9' });
+        // ...and one raised on the page, which does carry the number.
         room.emit(RoomEvent.EncryptionError,
-            new CryptorError('missing key at index 3 for participant u1#k3yX-9', CryptorErrorReason.MissingKey, 'u1#k3yX-9'),
-            { identity: 'u1#k3yX-9' });
+            new CryptorError('Decryption failed: OperationError', CryptorErrorReason.InvalidKey, 'u1#k3yX-9'), { identity: 'u1#k3yX-9' });
         await rtcEventLogSettled();
-        expect(lines()).toEqual(["[sfu-e2ee] user 1's media failed to decrypt: missing-key (missing key at index 3 for participant u1)"]);
+        expect(lines()).toEqual([
+            "[sfu-e2ee] user 1's media failed to decrypt: missing-key (missing key at index 3 for participant u1)",
+            "[sfu-e2ee] user 1's media failed to decrypt: invalid-key (Decryption failed: OperationError)",
+        ]);
         expect(lines().join(' '), 'the identity suffix never reaches the log').not.toContain('k3yX');
     });
 

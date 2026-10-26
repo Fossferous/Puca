@@ -65,12 +65,15 @@ describe('changeLiveShareQuality', () => {
         stepOk: false,
         calls: [] as unknown[][],
         retunes: 0,
+        /** The running share's stream, as the mesh manager hands it out. */
+        stream: null as { getVideoTracks: () => unknown[] } | null,
     }));
     vi.mock('../api/webrtc', () => ({
         webrtcManager: {
             shareCaptureSize: () => live.size,
             setShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.result; },
             applyShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.stepOk; },
+            getScreenShareStreamForPreview: () => live.stream,
         },
     }));
     // Only retuneShare: nothing here may ask whether the share is laddered
@@ -89,6 +92,38 @@ describe('changeLiveShareQuality', () => {
         live.result = { width: 1920, height: 1080, fps: 60 };
         live.calls = [];
         live.retunes = 0;
+        live.stream = null;
+    });
+
+    it('shows a step taken for this share alone while that share lasts, and nothing after', async () => {
+        // The frame watch's step is NOT remembered (shareHealth.ts
+        // framesOffer): without this the panel opened after it would
+        // highlight the remembered 60 fps while the share went out at 30.
+        const { applyShareQuality, liveShareQuality, changeLiveShareQuality } = await real();
+        const remembered = { resolution: '1080', fps: 60 };
+        const track = { readyState: 'live' };
+        live.stream = { getVideoTracks: () => [track] };
+        live.stepOk = true;
+        await applyShareQuality({ resolution: '1080', fps: 30 }, { remember: false });
+        expect(liveShareQuality(remembered)).toEqual({ resolution: '1080', fps: 30 });
+        // A remembered step (the CPU one) shows the remembered quality, as before.
+        await applyShareQuality({ resolution: '720', fps: 60 });
+        expect(liveShareQuality(remembered)).toEqual(remembered);
+        await applyShareQuality({ resolution: '1080', fps: 30 }, { remember: false });
+        track.readyState = 'ended';
+        expect(liveShareQuality(remembered), 'that share is over').toEqual(remembered);
+        track.readyState = 'live';
+        await applyShareQuality({ resolution: '1080', fps: 30 }, { remember: false });
+        live.stream = { getVideoTracks: () => [{ readyState: 'live' }] };
+        expect(liveShareQuality(remembered), 'a new share is not the stepped one').toEqual(remembered);
+        live.stream = { getVideoTracks: () => [track] };
+        await applyShareQuality({ resolution: '1080', fps: 30 }, { remember: false });
+        await changeLiveShareQuality({ resolution: '1080', fps: 60 });
+        expect(liveShareQuality(remembered), 'the person\'s own choice replaces it').toEqual(remembered);
+        // A step the engine refused changed nothing, so it shows nothing.
+        live.stepOk = false;
+        await applyShareQuality({ resolution: '1080', fps: 30 }, { remember: false });
+        expect(liveShareQuality(remembered), 'refused: nothing changed').toEqual(remembered);
     });
 
     it('applies the chosen size to the running capture', async () => {

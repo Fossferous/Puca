@@ -42,7 +42,7 @@ import type { RtpEndpoint } from './streamStats';
 import { encryptionErrorLine, logRtcEvent } from './rtcEventLog';
 import { ShareLayerGuard, VIEW_SAMPLE_MS, lowerLayer, qualityName, shareLayers, type LayerChange } from './shareLayerGuard';
 import { deriveSfuMediaKey } from '../e2ee';
-import { registerScreenReceiver } from './receiverLatency';
+import { isScreenLatencyMinimised, registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
 import {
     receiverHints, shareSendReading, summariseInboundAudio, videoSendExtras, summariseRtcStats, summariseRtcStatsDelta,
@@ -1830,8 +1830,10 @@ export class SfuManager {
         if (!r || this.viewWatch.get(uid) !== st) return;
         this.noteShareSize(uid, st, r, pub);
         let change: LayerChange | null = null;
-        if (lowerLayer(this.sharePolicyQuality(uid), shareLayers(pub)) === null) {
-            // Only a share with a smaller copy can be helped this way.
+        if (isScreenLatencyMinimised(uid) || lowerLayer(this.sharePolicyQuality(uid), shareLayers(pub)) === null) {
+            // Only a share with a smaller copy can be helped this way, and a
+            // share being controlled is left alone: its jitter buffer is held
+            // at zero on purpose (receiverLatency.ts), which freezes more.
             st.guard.reset();
         } else {
             const n = (k: string) => (typeof r[k] === 'number' && Number.isFinite(r[k]) ? r[k] as number : null);
