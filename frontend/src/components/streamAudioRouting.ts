@@ -9,7 +9,10 @@
  *    every watched stream through one hidden <audio> per stream.
  *
  * Every <video> that shows a stream outside the stage (the float, the OS
- * popout host, the Doc-PiP tiles) is hard-muted: picture only.
+ * popout host, the Doc-PiP tiles) is hard-muted: picture only. The host's
+ * own <audio>s are sinks; what sounds there is a Web Audio gain per stream,
+ * like the stage's, with the element itself as the fallback
+ * (streamAudioHostCore.ts).
  *
  * Why a claim and not viewMode: the stage is not mounted for every
  * viewMode === 'stream' (the All-checklists board takes the same slot), and
@@ -18,6 +21,7 @@
  * commit, before the stage graph can reach the speakers (it joins only after
  * an awaited output-device routing).
  */
+import { streamGain } from './streamVolumeStore';
 
 let stageClaims = 0;
 const listeners = new Set<() => void>();
@@ -52,23 +56,27 @@ export function subscribeStageAudio(cb: () => void): () => void {
 
 export interface StreamAudioEntry {
     userId: number;
-    /** May this stream's host element be unmuted (before output routing)? */
+    /** May this stream sound here at all (not muted, no stage claim)? */
     audible: boolean;
-    /** Element volume, 0..1. */
+    /** Element volume, 0..1: the fallback path, which cannot boost. */
     volume: number;
+    /** The stream's Web Audio gain: its level on the loudness curve times
+     *  the master Output Volume, NOT capped (a boost is real on the graph). */
+    gain: number;
 }
 
 /**
  * The host's plan: one entry per watched stream except your own share (the
- * game you are playing is already your audio). Volume is the stream's own
- * level times the master Output Volume, clamped to what an element can do —
- * the >100% boost lives in the stage's graph, as it did for the float.
+ * game you are playing is already your audio). Each stream's gain is its OWN
+ * level (streamGain) times the master Output Volume; the element fallback
+ * clamps that to what an element can do.
  */
 export function streamAudioPlan(input: {
     selected: readonly number[];
     ownId: number | null;
     stageOwns: boolean;
     mutes: Record<number, boolean>;
+    /** Slider positions (streamVolumeStore), by user id. */
     volumes: Record<number, number>;
     master: number;
     defaultVolume?: number;
@@ -77,11 +85,12 @@ export function streamAudioPlan(input: {
     return input.selected
         .filter(id => id !== input.ownId)
         .map(userId => {
-            const level = ((input.volumes[userId] ?? def) / 100) * input.master;
+            const gain = Math.max(streamGain(input.volumes[userId] ?? def) * input.master, 0);
             return {
                 userId,
                 audible: !input.stageOwns && !input.mutes[userId],
-                volume: Math.min(Math.max(level, 0), 1),
+                volume: Math.min(gain, 1),
+                gain,
             };
         });
 }

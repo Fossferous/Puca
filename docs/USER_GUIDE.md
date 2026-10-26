@@ -532,9 +532,11 @@ button. Several streams can be watched at once; **Switch to Grid View** /
 
 Opening a text channel or a DM while you watch keeps the stream in a small
 player over the chat (docked under the header on a phone). Every stream you
-watch stays audible wherever you are in the app, at its own volume and mute;
-boosting a stream above 100% and **Stream Attenuation** work in the stream
-view. While a stream is popped out (**Pop out**, below), the small player
+watch stays audible wherever you are in the app, each at its own volume and
+mute, a boost above 100% and **Stream Attenuation** included, on an iPhone or
+iPad too. (In a browser that cannot run Web Audio, the small player plays a
+stream at most at 100% and does not lower it while people talk.) While a
+stream is popped out (**Pop out**, below), the small player
 shows the next stream you are watching instead of a second copy, and hides
 when every stream you watch is popped out.
 
@@ -553,7 +555,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | Control | Action |
 |---------|--------|
 | **Mute stream** / **Unmute stream** | Silence that stream's audio (the menu row is **Mute**) |
-| **Stream Volume** | Menu only. That stream's volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. Kept on this device for the person sharing and used every time you watch them; someone you have not set starts at 100% |
+| **Stream Volume** | Menu only. That stream's own volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. The slider follows loudness, so quiet levels are as easy to set as loud ones; above 100% boosts it. Each stream you watch has its own, and moving one never moves another. Kept on this device for the person sharing and used every time you watch them, in the stream view and the small player. Someone you have never set starts at the last level you set on anyone (100% before you have set any) and keeps that as their own |
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |

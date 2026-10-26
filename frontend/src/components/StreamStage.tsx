@@ -25,6 +25,8 @@ import {
     DEFAULT_STREAM_VOLUME,
     MAX_STREAM_VOLUME,
     STREAM_VOLUME_STEP,
+    seedStreamVolumes,
+    streamGain,
     streamVolumeKeyStep,
 } from './streamVolumeStore';
 import {
@@ -70,6 +72,15 @@ const MOBILE = isMobile();
 
 // FPS-mode mouse sensitivity + toggle persistence live in utils/fpsSens,
 // SHARED with DeviceStage so the two viewers cannot drift.
+
+/** The same remembered levels: the stage re-renders only when one changed. */
+function sameLevels(a: Record<number, number>, b: Record<number, number>): boolean {
+    const ka = Object.keys(a);
+    if (ka.length !== Object.keys(b).length) return false;
+    const ra = a as Record<string, number>;
+    const rb = b as Record<string, number>;
+    return ka.every(k => ra[k] === rb[k]);
+}
 
 /** Map a typed character (from a mobile soft keyboard) to a KeyboardEvent.code
  *  the host can inject. Covers letters/digits/space; other chars are skipped. */
@@ -225,18 +236,20 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     }
     const chromeOff = takeover !== null && chromeHidden && !controllingNow;
 
-    // Gain for a stream = user volume × mute × attenuation ducking × master.
-    // The ONE formula: the slider and mute handlers use it too, because they
-    // run before the new volume/mute reaches state (so targetGain would read
-    // the old one). Each used to re-derive it without the master, aiming the
-    // gain at the un-mastered level until the next applyGain overwrote it.
-    const gainFor = useCallback((volumePercent: number, muted: boolean): number => {
+    // Gain for a stream = its level on the loudness curve × mute × attenuation
+    // ducking × master. The ONE formula: the slider and mute handlers use it
+    // too, because they run before the new volume/mute reaches state (so
+    // targetGain would read the old one). Each used to re-derive it without
+    // the master, aiming the gain at the un-mastered level until the next
+    // applyGain overwrote it. StreamAudioHost applies the same curve and the
+    // same ducking (streamAudioRouting.ts, streamAudioHostCore.ts).
+    const gainFor = useCallback((level: number, muted: boolean): number => {
         if (muted) return 0;
         const duck = duckedRef.current && attenuation.enabled ? (1 - attenuation.strength) : 1;
         // Master output volume from Settings governs everything you hear, not
         // just voice — otherwise turning it down would silence people but leave
         // a stream at full volume.
-        return (volumePercent / 100) * duck * outputGain();
+        return streamGain(level) * duck * outputGain();
     }, [attenuation]);
 
     // Current gain for a stream, from state.
@@ -407,6 +420,13 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         const update = () => {
             const selected = getSelectedStreams();
             const allStreamers = getAllStreamers();
+            // Someone watched for the first time gets their first level now —
+            // the last level set on any stream — and keeps it as their own
+            // (streamVolumeStore). Never our own share's.
+            const own = getCurrentStreamingUserId();
+            seedStreamVolumes(selected.filter(id => id !== own));
+            const levels = getStreamVolumes();
+            setVolumes(prev => (sameLevels(prev, levels) ? prev : levels));
             setSelectedStreams(selected);
             setStreamers(allStreamers);
 
@@ -1459,13 +1479,17 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                             </label>
 
                             {(() => {
-                                // This person's level, remembered per user id
-                                // (streamVolumeStore). 1% a step, shown as it
-                                // moves; the element fallback cannot boost, so
-                                // it shows (and goes) no higher than 100%.
+                                // THIS person's level, remembered per user id
+                                // (streamVolumeStore): every watched stream has
+                                // its own menu, slider and gain. The shown % is
+                                // the slider's position (whole steps of 1%; a
+                                // level converted to the loudness curve keeps
+                                // its exact gain until moved). The element
+                                // fallback cannot boost, so it shows (and goes)
+                                // no higher than 100%.
                                 const userId = ctxMenu.userId;
                                 const max = audioFallback ? 100 : MAX_STREAM_VOLUME;
-                                const level = Math.min(volumes[userId] ?? DEFAULT_STREAM_VOLUME, max);
+                                const level = Math.round(Math.min(volumes[userId] ?? DEFAULT_STREAM_VOLUME, max));
                                 return (
                                     <div className="scm-slider-block">
                                         <span className="scm-label-row">

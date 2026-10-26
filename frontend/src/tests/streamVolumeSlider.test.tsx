@@ -151,12 +151,15 @@ function press(key: string, mods: KeyboardEventInit = {}): boolean {
     act(() => { range.dispatchEvent(ev); });
     return ev.defaultPrevented;
 }
+/** The loudness curve, stated independently of the code under test. */
+const loud = (p: number) => (p <= 100 ? (p / 100) ** 2 : 2 ** ((p - 100) / 100));
+
 /** The level the slider, the label, the store and the gain all agree on. */
 function expectLevel(level: number) {
     expect(slider().value, 'the slider').toBe(String(level));
     expect(shown(), 'the level shown').toBe(`${level}%`);
     expect(getStreamVolumes()[1], 'the level remembered for this person').toBe(level);
-    expect(gains[0].effective, 'the gain (level x Output Volume 50%)').toBeCloseTo((level / 100) * 0.5, 9);
+    expect(gains[0].effective, 'the gain (level on the curve x Output Volume 50%)').toBeCloseTo(loud(level) * 0.5, 9);
 }
 
 describe('Stream Volume: 1% steps, and its level on show', () => {
@@ -185,6 +188,21 @@ describe('Stream Volume: 1% steps, and its level on show', () => {
         openMenu();
         expect(slider().value).toBe('42');
         expect(shown()).toBe('42%');
+    });
+
+    it('a level from before the loudness curve shows its new slider position, plays at its old gain, and the keys step 1% from what is shown', () => {
+        // Linear 30% before the curve: gain 0.30, now slider position 54.77.
+        localStorage.setItem('sovereign_stream_volumes', JSON.stringify({ 1: 30 }));
+        renderStage();
+        expect(gains[0].effective, 'the same gain as before').toBeCloseTo(0.3 * 0.5, 9);
+        openMenu();
+        expect(slider().value).toBe('55');
+        expect(shown()).toBe('55%');
+        press('ArrowUp');
+        expectLevel(56);
+        press('ArrowDown');
+        press('ArrowDown');
+        expectLevel(54);
     });
 });
 

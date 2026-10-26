@@ -83,8 +83,8 @@ describe('streamAudioPlan — every watched stream once, at the right level', ()
 
     it('every watched stream gets an audible entry at its level', () => {
         expect(streamAudioPlan(base)).toEqual([
-            { userId: 5, audible: true, volume: 1 },
-            { userId: 6, audible: true, volume: 1 },
+            { userId: 5, audible: true, volume: 1, gain: 1 },
+            { userId: 6, audible: true, volume: 1, gain: 1 },
         ]);
     });
 
@@ -102,11 +102,21 @@ describe('streamAudioPlan — every watched stream once, at the right level', ()
         expect(plan.find(e => e.userId === 6)!.audible).toBe(false);
     });
 
-    it('volume = stream volume × master, clamped to what an element can do', () => {
+    it('gain = the level on the loudness curve × master, uncapped; the element volume is that, clamped', () => {
         const plan = streamAudioPlan({ ...base, volumes: { 5: 40, 6: 200 }, master: 0.5 });
-        expect(plan[0].volume).toBeCloseTo(0.2, 9);
-        expect(plan[1].volume).toBe(1); // 200% × 50%
-        expect(streamAudioPlan({ ...base, volumes: { 5: 180 } })[0].volume).toBe(1);
-        expect(streamAudioPlan({ ...base, master: 0 })[0].volume).toBe(0);
+        expect(plan[0].gain).toBeCloseTo(0.4 ** 2 * 0.5, 9); // 40% is (0.4)^2
+        expect(plan[0].volume).toBeCloseTo(0.08, 9);
+        expect(plan[1].gain).toBeCloseTo(2 * 0.5, 9); // 200% is 2x (+6 dB)
+        expect(plan[1].volume).toBe(1);
+        const boosted = streamAudioPlan({ ...base, volumes: { 5: 150 } })[0];
+        expect(boosted.gain).toBeCloseTo(Math.SQRT2, 9); // a boost: +3 dB, real on the graph
+        expect(boosted.volume).toBe(1); // an element cannot boost
+        expect(streamAudioPlan({ ...base, master: 0 })[0]).toMatchObject({ gain: 0, volume: 0 });
+    });
+
+    it("each stream's gain is its own: a level for one never reaches another", () => {
+        const plan = streamAudioPlan({ ...base, volumes: { 5: 30 }, defaultVolume: 100 });
+        expect(plan[0].gain).toBeCloseTo(0.09, 9);
+        expect(plan[1].gain).toBe(1);
     });
 });

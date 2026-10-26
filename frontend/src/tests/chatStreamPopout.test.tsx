@@ -16,13 +16,16 @@
  *    a release build does not keep.
  *
  * Audio here is ROUTING, never sound: which element is unmuted and bound to
- * which stream's audio track. Nothing in jsdom can play anything.
+ * which stream's audio track, and (since 2026-10-26, when the small player
+ * moved onto a Web Audio gain per stream) which gain node carries it at what
+ * value. Nothing in jsdom can play anything.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
+import { FakeStreamAudioContext, fakeAudio, resetFakeStreamAudio } from './fixtures/fakeStreamAudio';
 
 const h = vi.hoisted(() => ({
     tauri: false, servers: [] as unknown[], channels: [] as unknown[],
@@ -33,8 +36,6 @@ const h = vi.hoisted(() => ({
     popouts: [] as number[],
     docPip: [] as number[][],
     invokes: [] as Array<[string, unknown]>,
-    /** Audio tracks the stage's Web Audio graph took a source from. */
-    graphed: [] as string[],
 }));
 
 vi.mock('../api/platform', async importOriginal => ({
@@ -97,24 +98,9 @@ vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), headers: new Headers() } as unknown as Response;
 }));
 
-// The stage's Web Audio graph, enough of it to build and tear down. The
-// setup file's base mock has no gain node and a close() with no promise.
-class StageContext {
-    state = 'running';
-    currentTime = 0;
-    destination = {};
-    resume = async () => {};
-    close = async () => { this.state = 'closed'; };
-    createMediaStreamSource(s: MediaStream) {
-        void s; // the setup file's MediaStream drops constructor tracks
-        h.graphed.push('source');
-        return { connect() {}, disconnect() {} };
-    }
-    createGain() {
-        return { gain: { value: 1, setTargetAtTime() {} }, connect() {}, disconnect() {} };
-    }
-}
-vi.stubGlobal('AudioContext', StageContext);
+// The stage's and the small player's Web Audio, recorded (the setup file's
+// base mock has no gain node and a close() with no promise).
+vi.stubGlobal('AudioContext', FakeStreamAudioContext);
 
 const { Chat } = await import('../components/Chat');
 
@@ -157,14 +143,18 @@ function share(id: number) {
 }
 const audioTrackOf = (id: number) => h.data.get(id)!.stream!.getAudioTracks()[0];
 
-/** Every media element in the page that would SOUND this stream's audio:
- *  unmuted and bound to a MediaStream carrying its audio track. */
-function audiblePathsFor(id: number): HTMLMediaElement[] {
+/** Everything in the page that would SOUND this stream's audio: a media
+ *  element unmuted and bound to a MediaStream carrying its audio track, or a
+ *  small-player gain carrying that track above 0 and joined to the speakers. */
+function audiblePathsFor(id: number): unknown[] {
     const track = audioTrackOf(id);
-    return [...document.querySelectorAll<HTMLMediaElement>('audio, video')].filter(el => {
+    const elements = [...document.querySelectorAll<HTMLMediaElement>('audio, video')].filter(el => {
         const src = el.srcObject as MediaStream | null;
         return !el.muted && !!src && typeof src.getAudioTracks === 'function' && src.getAudioTracks().includes(track);
     });
+    const gains = fakeAudio.gainsOf('host').filter(g =>
+        !g.disconnected && g.tracks.includes(track.id) && g.speakersAt !== null && g.gain.effective > 0);
+    return [...elements, ...gains];
 }
 
 /** In a text channel, with the float up over it. */
@@ -199,7 +189,7 @@ beforeEach(() => {
     h.popouts = [];
     h.docPip = [];
     h.invokes = [];
-    h.graphed = [];
+    resetFakeStreamAudio();
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
 });
 afterEach(() => {
@@ -310,13 +300,14 @@ describe('every watched stream is heard exactly once, wherever you are', () => {
         h.channels = [GENERAL, LOUNGE];
         await mountChat();
         expect(host!.querySelector('.stream-stage')).not.toBeNull();
-        expect(h.graphed).toHaveLength(2); // positive control: the stage IS playing them
+        expect(fakeAudio.gainsOf('stage')).toHaveLength(2); // positive control: the stage IS playing them
         expect(audiblePathsFor(5).length).toBeLessThanOrEqual(1);
         expect(audiblePathsFor(6).length).toBeLessThanOrEqual(1);
         // Whatever the stage plays through, the always-mounted host is not it.
         for (const el of document.querySelectorAll<HTMLAudioElement>('audio[data-stream-audio]')) {
             expect(el.muted).toBe(true);
         }
+        for (const g of fakeAudio.gainsOf('host')) expect(g.gain.effective).toBe(0);
     });
 
     it('in the voice view with the float up (no stage, no float mounted): still every stream', async () => {
