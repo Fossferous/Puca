@@ -1,5 +1,6 @@
 import { API_BASE_URL } from './config';
 import { stripFileMetadata } from './imageMetadata';
+import { trackUpload } from './workInFlight';
 
 
 // --- Types ---
@@ -72,7 +73,10 @@ export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: n
     // see the picture. Doing it HERE, not at each caller, is what stopped the server-creation
     // wizard's icon (a caller nobody remembered) from being missed. Ciphertext (octet-stream)
     // and audio are not touched: only a declared JPEG / PNG / WebP is read.
-    return stripFileMetadata(file).then(clean => postUpload(clean, opts));
+    //
+    // Counted while it is on its way (workInFlight.ts): a PC updating itself
+    // waits for it rather than cutting it off.
+    return trackUpload(stripFileMetadata(file).then(clean => postUpload(clean, opts)));
 }
 
 function postUpload(file: File, opts?: { wantCap?: boolean; channelId?: number; signal?: AbortSignal }): Promise<UploadedFile> {

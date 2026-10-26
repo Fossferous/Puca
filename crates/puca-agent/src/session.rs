@@ -790,6 +790,12 @@ pub struct Agent {
     streams: HashMap<String, crate::stream::Stream>,
     #[cfg(windows)]
     monitor_reservations: HashMap<usize, StreamKey>,
+    /// The reservations and the raw captures, mirrored for the stream threads
+    /// after every request (`publish_held`): a stream that moves itself for
+    /// the lid passes over every screen another capture holds, as StartStream
+    /// would refuse it.
+    #[cfg(windows)]
+    held_screens: crate::stream::HeldScreens,
     #[cfg(windows)]
     next_generation: u64,
     #[cfg(windows)]
@@ -804,16 +810,20 @@ pub struct Agent {
     /// and read by Request::SessionStatus, so the app can bring up the bridge.
     #[cfg(windows)]
     secure_desktop_up: std::collections::HashSet<String>,
-    /// Session ids whose stream this agent REAPED because the display never
-    /// produced a first frame (`stream::NO_FRAME_EVER_REASON`), newest last.
-    /// Read by `SessionStatus` as `stream_end: "no_frame"`, so the app does
-    /// not answer a sleeping panel with a restart — the viewer's own media
-    /// deadline already says "the screens may be asleep", and a restart would
-    /// replace that with "could not be re-established". Cleared for an id by
-    /// StopStream and by a fresh StartStream; bounded, because an agent lives
-    /// for days and nothing else ever removes an entry.
+    /// Session ids whose stream this agent REAPED for a reason a restart
+    /// cannot fix, with the `stream_end` code that names it
+    /// (`stream_end_code`), newest last: the display never produced a first
+    /// frame (`"no_frame"`), the lid closed mid-session with no screen to
+    /// move to (`"no-screen:lid"`, `"no-screen:virtual-failed"`), or a pinned
+    /// stream's screen changed under it (`"no-screen:changed"`). Read by
+    /// `SessionStatus` as `stream_end`, so the app does not answer a sleeping
+    /// panel with a restart — the viewer's own media deadline already says
+    /// "the screens may be asleep", and a restart would replace that with
+    /// "could not be re-established". Cleared for an id by StopStream and by
+    /// a fresh StartStream; bounded, because an agent lives for days and
+    /// nothing else ever removes an entry.
     #[cfg(windows)]
-    ended_without_frame: std::collections::VecDeque<String>,
+    ended_without_frame: std::collections::VecDeque<(String, &'static str)>,
     /// What `SessionStatus` last found about whether this agent's input can
     /// reach the window in front (`input_reach`), so the log says it once
     /// per change rather than once per poll.
@@ -824,6 +834,28 @@ pub struct Agent {
 /// sessions still being polled matter, and there are rarely more than one.
 #[cfg(windows)]
 const ENDED_WITHOUT_FRAME_CAP: usize = 16;
+
+/// The `SessionStatus.stream_end` code for a stream that ended with
+/// `reason`, when that is a reason a restart cannot fix. Matched EXACTLY:
+/// run() returns each of these as it is (stream.rs), and a reason with
+/// anything added is one a restart is the answer to.
+///
+/// - The display never produced a first frame: `"no_frame"`.
+/// - The lid closed mid-session and there was no screen to move the picture
+///   to: the code a session start ends with, `"no-screen:lid"` (no virtual
+///   screen on this PC) or `"no-screen:virtual-failed"`, which the host can
+///   hand the viewer as the end reason (noScreen.ts).
+/// - A stream PINNED to its screen (StartStream `steer_on_lid` off) whose
+///   screen is no longer the one at its index, `"no-screen:changed"`: a
+///   restart goes by index and could land on a screen nobody shared.
+#[cfg(windows)]
+fn stream_end_code(reason: &str) -> Option<&'static str> {
+    use crate::virtual_screen::{NO_SCREEN_CHANGED, NO_SCREEN_LID, NO_SCREEN_VIRTUAL_FAILED};
+    if reason == crate::stream::NO_FRAME_EVER_REASON {
+        return Some(crate::protocol::STREAM_END_NO_FRAME);
+    }
+    [NO_SCREEN_LID, NO_SCREEN_VIRTUAL_FAILED, NO_SCREEN_CHANGED].into_iter().find(|code| reason == *code)
+}
 
 /// Whether this Linux box can actually host: an X server we can reach, with
 /// XTEST present.
@@ -862,6 +894,8 @@ impl Agent {
             #[cfg(windows)]
             monitor_reservations: HashMap::new(),
             #[cfg(windows)]
+            held_screens: crate::stream::HeldScreens::default(),
+            #[cfg(windows)]
             next_generation: 1,
             #[cfg(windows)]
             next_request_id: 1,
@@ -879,7 +913,49 @@ impl Agent {
     /// stopped on purpose.
     #[cfg(windows)]
     fn forget_stream_end(&mut self, session_id: &str) {
-        self.ended_without_frame.retain(|id| id != session_id);
+        self.ended_without_frame.retain(|(id, _)| id != session_id);
+    }
+
+    /// How many streams this agent holds, live or ended and not yet reaped.
+    #[cfg(windows)]
+    pub(crate) fn stream_count(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// THE BOOKS FOLLOW THE PICTURE. A stream says its capture now shows
+    /// `monitor` (`StreamEvent::Moved`: a switch, a rebuild, or a move it
+    /// made itself because the lid closed or opened), and the session's
+    /// monitor (what Inject, privacy, the clip check and SessionStatus's
+    /// `monitor` read) and its reservations move with it, as a switch's do.
+    ///
+    /// The stream reports EVERY change it commits, in the order it commits
+    /// them, so after a drain the books are its last word whatever order this
+    /// agent's own handlers ran in: a lid move committed just before a switch
+    /// the app asked for is drained after that switch's handler, and the
+    /// switch's own event, behind it, puts the books back. A screen another
+    /// session holds is not taken from it. Input is not aimed here: the stream
+    /// aims for the moves it makes itself, the handlers for theirs.
+    #[cfg(windows)]
+    fn follow_stream(&mut self, session_id: &str, generation: u64, monitor: usize) {
+        let key = StreamKey { session_id: session_id.to_string(), generation };
+        release_reservations(&mut self.monitor_reservations, &key);
+        for k in reservation_keys(monitor, &puca_capture::outputs()) {
+            match self.monitor_reservations.get(&k) {
+                Some(held) if held.session_id != session_id => eprintln!(
+                    "[agent] session {session_id} now shows monitor {monitor}; {k} stays reserved by session {}",
+                    held.session_id
+                ),
+                _ => {
+                    self.monitor_reservations.insert(k, key.clone());
+                }
+            }
+        }
+        if let Some(m) = self.sessions.get_mut(session_id) {
+            if *m != monitor {
+                eprintln!("[agent] session {session_id}'s stream now shows monitor {monitor} (was {m})");
+                *m = monitor;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -906,7 +982,10 @@ impl Agent {
         }
     }
 
-    fn aim_input_at(session_id: &str, monitor: usize) {
+    /// Also called by a stream that moved its own capture (stream.rs, the
+    /// lid and the topology rebuild), so input follows the picture at once
+    /// rather than at the agent's next request.
+    pub(crate) fn aim_input_at(session_id: &str, monitor: usize) {
         let outputs = puca_capture::outputs();
         let list = puca_input::list_monitors();
         let target = resolve_target(monitor, &outputs, &list);
@@ -1008,6 +1087,9 @@ impl Agent {
                 // is nothing for an app to hand down, and the sealed arm wins
                 // regardless.
                 input_auth: None,
+                // Pinned, as for any app that has not said otherwise: nothing
+                // on this path follows a move, and the lid's end is honest.
+                steer_on_lid: false,
             });
             let Response::Streaming { answer_sdp, monitor: steered, .. } = started else {
                 // Pass the agent's own refusal through unchanged rather than
@@ -1120,6 +1202,28 @@ impl Agent {
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
+        let response = self.handle_request(req);
+        #[cfg(windows)]
+        self.publish_held();
+        response
+    }
+
+    /// Mirror the screens every capture holds for the stream threads: each
+    /// reserved monitor with the session whose stream holds it, and each raw
+    /// capture's. After every request, since any of them can change these: a
+    /// start, a stop, a switch, or a reap or a move in the event drain.
+    #[cfg(windows)]
+    fn publish_held(&self) {
+        let mut held: Vec<(usize, Option<String>)> = self
+            .monitor_reservations
+            .iter()
+            .map(|(m, key)| (*m, Some(key.session_id.clone())))
+            .collect();
+        held.extend(self.captures.keys().map(|m| (*m, None)));
+        self.held_screens.set(held);
+    }
+
+    fn handle_request(&mut self, req: Request) -> Response {
         // Drain ALL pending stream events, matching each — a `while let Ok(Term…)`
         // would stop at the first SecureDesktop event and leave the rest (and the
         // Terminated events behind them) unhandled.
@@ -1139,16 +1243,23 @@ impl Agent {
                                 release_reservations(&mut self.monitor_reservations, &key);
                                 eprintln!("[agent] reaped terminated stream session={session_id} gen={generation} reason={reason}");
                                 self.forget_stream_end(&session_id);
-                                if reason == crate::stream::NO_FRAME_EVER_REASON {
+                                if let Some(code) = stream_end_code(&reason) {
                                     if self.ended_without_frame.len() >= ENDED_WITHOUT_FRAME_CAP {
                                         self.ended_without_frame.pop_front();
                                     }
-                                    self.ended_without_frame.push_back(session_id);
+                                    self.ended_without_frame.push_back((session_id, code));
                                 }
                             }
                             Err(crate::stream::ReapError::GenerationMismatch { .. }) => {}
                         }
                     }
+                }
+                crate::stream::StreamEvent::Moved { session_id, generation, monitor } => {
+                    // A late event from a replaced stream moves nothing.
+                    if !self.streams.get(&session_id).is_some_and(|s| s.generation == generation) {
+                        continue;
+                    }
+                    self.follow_stream(&session_id, generation, monitor);
                 }
                 crate::stream::StreamEvent::SecureDesktop { session_id, generation, up } => {
                     // AN ELEVATED AGENT NEVER RAISES THIS, whatever its stream
@@ -1326,7 +1437,7 @@ impl Agent {
             #[cfg(windows)]
             Request::StartStream {
                 session_id, monitor, offer_sdp, fps, bitrate, ice_servers, data_only, input_auth,
-                view_width, view_height,
+                view_width, view_height, steer_on_lid,
             } => {
                 if let Some(r) = self.gate(crate::flavour::Capability::Capture) {
                     return r;
@@ -1426,6 +1537,9 @@ impl Agent {
                 match crate::stream::start(
                     &offer_sdp,
                     target_monitor,
+                    // The screen asked for, so the stream can go back to it
+                    // once the lid that steered it off opens.
+                    steered.map(|_| requested),
                     fps.unwrap_or(30),
                     bitrate.unwrap_or(6_000_000),
                     view,
@@ -1439,6 +1553,8 @@ impl Agent {
                     session_id.clone(),
                     generation,
                     input_channel,
+                    steer_on_lid,
+                    self.held_screens.clone(),
                 ) {
                     Ok(stream) => {
                         let answer_sdp = stream.answer_sdp.clone();
@@ -1482,6 +1598,10 @@ impl Agent {
                 self.forget_stream_end(&session_id);
                 if let Some(mut stream) = self.streams.remove(&session_id) {
                     let generation = stream.generation;
+                    // A stream the HOST ends used to leave no line on either
+                    // side; the stream thread adds how long it ran and what
+                    // it sent ("[stream] stopped by the host after …").
+                    eprintln!("[agent] the app stopped the stream: session={session_id} gen={generation}");
                     stream.stop_and_join();
                     let key = StreamKey { session_id: session_id.clone(), generation };
                     self.sessions.remove(&session_id);
@@ -1709,16 +1829,24 @@ impl Agent {
                 // claim either way: None, never a false that would have a
                 // Linux host restart a session it never streamed.
                 #[cfg(windows)]
-                let (stream_live, stream_end) = {
+                let (stream_live, stream_end, monitor) = {
                     let live = self.streams.contains_key(&session_id);
-                    let no_frame = !live && self.ended_without_frame.iter().any(|id| id == &session_id);
-                    (
-                        Some(live),
-                        no_frame.then(|| crate::protocol::STREAM_END_NO_FRAME.to_string()),
-                    )
+                    let end = if live {
+                        None
+                    } else {
+                        self.ended_without_frame
+                            .iter()
+                            .rev()
+                            .find(|(id, _)| id == &session_id)
+                            .map(|(_, code)| code.to_string())
+                    };
+                    // The screen the stream shows, by the agent's books, which
+                    // follow every change the stream commits (follow_stream).
+                    let shows = if live { self.sessions.get(&session_id).copied() } else { None };
+                    (Some(live), end, shows)
                 };
                 #[cfg(not(windows))]
-                let (stream_live, stream_end) = (None, None);
+                let (stream_live, stream_end, monitor) = (None, None, None);
                 // CAN THIS SESSION'S INPUT LAND AT ALL? A window above this
                 // agent's integrity level (an elevated game, Task Manager)
                 // silently swallows every injected event (input_reach.rs), and
@@ -1745,6 +1873,7 @@ impl Agent {
                     stream_end,
                     input_blocked,
                     pointer_captured,
+                    monitor,
                 }
             }
 
@@ -3533,6 +3662,12 @@ mod tests {
             run.contains("return Err(NO_FRAME_EVER_REASON.to_string());"),
             "stream.rs run() must end a frameless stream with NO_FRAME_EVER_REASON as it is",
         );
+        // And a lid shut mid-session with no screen to move to, with the
+        // start's own code as it is (OffReason::code), the same way.
+        assert!(
+            run.contains("return Err(reason.code().to_string());"),
+            "stream.rs run() must end a lid-darkened stream with the no-screen code as it is",
+        );
         // The thread body stores run()'s error AS IT IS in the reason cell.
         let body = between(&stream, "if let Err(e) = run(", "puca_input::release_all();");
         assert!(body.contains("*r = e;"), "the stream thread must store run()'s error unchanged");
@@ -3542,11 +3677,165 @@ mod tests {
             guard.contains(".map(|r| r.clone())") && guard.contains("reason,") && !guard.contains("format!"),
             "TerminatedGuard must send the stored reason unchanged",
         );
-        // And the reap compares against the very same constant.
+        // And the reap names the end through `stream_end_code`, which compares
+        // against the very same constants.
         assert!(
-            session.contains("if reason == crate::stream::NO_FRAME_EVER_REASON {"),
-            "the reap must match the constant stream.rs sends",
+            session.contains("if let Some(code) = stream_end_code(&reason) {"),
+            "the reap must name the end through stream_end_code",
         );
+        let code_fn = between(&session, "fn stream_end_code(", "\n}\n");
+        assert!(
+            code_fn.contains("if reason == crate::stream::NO_FRAME_EVER_REASON {")
+                && code_fn.contains("NO_SCREEN_LID, NO_SCREEN_VIRTUAL_FAILED"),
+            "stream_end_code must match the constants stream.rs sends",
+        );
+    }
+
+    /// The two ways the HOST ends a stream used to leave no line: its own
+    /// StopStream, and its connection to this agent closing (which drops the
+    /// Agent and every stream with it). Each names what ended now. Pinned in
+    /// the source, since the line itself goes to the process's stderr.
+    #[test]
+    fn the_host_ending_a_stream_says_so() {
+        let session = include_str!("session.rs").replace('\r', "");
+        let stop = session
+            .split("Request::StopStream { session_id } => {")
+            .nth(1)
+            .and_then(|s| s.split("stream.stop_and_join();").next())
+            .expect("the StopStream arm");
+        assert!(stop.contains("eprintln!(\"[agent] the app stopped the stream: session={session_id} gen={generation}\");"));
+        let pipe = include_str!("pipe.rs").replace('\r', "");
+        let served = pipe.split("pub fn serve(").nth(1).expect("serve");
+        let closed = served.split("puca_input::release_all();").next().unwrap();
+        assert!(closed.contains("the app's connection to this agent closed; stopping its {streams} stream(s)"));
+    }
+
+    /// Each reason a restart cannot fix gets its code, and nothing else does:
+    /// a reason with anything added to it is one a restart is the answer to.
+    #[cfg(windows)]
+    #[test]
+    fn only_the_ends_a_restart_cannot_fix_are_named() {
+        assert_eq!(stream_end_code(crate::stream::NO_FRAME_EVER_REASON), Some("no_frame"));
+        assert_eq!(stream_end_code("no-screen:lid"), Some("no-screen:lid"));
+        assert_eq!(stream_end_code("no-screen:virtual-failed"), Some("no-screen:virtual-failed"));
+        // A pinned stream whose screen changed under it: a restart by index
+        // could land on another screen.
+        assert_eq!(stream_end_code("no-screen:changed"), Some("no-screen:changed"));
+        // NEGATIVE CONTROLS.
+        for reason in ["exited", "the encoder failed", "capture: no monitor at index 1", "no-screen:lid (and more)", ""] {
+            assert_eq!(stream_end_code(reason), None, "{reason:?}");
+        }
+    }
+
+    /// THE LID, MID-SESSION, AS THE APP SEES IT. A stream that ended because
+    /// the lid shut with no screen to move to says so as its `stream_end`,
+    /// with the code the viewer turns into "<PC>'s screen is off — is its lid
+    /// closed?…", until it is stopped. Delete the code from stream_end_code
+    /// and the first assertion goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_stream_the_lid_ended_names_the_lid_until_it_is_stopped() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test(
+            "s1".into(), 7, 0, handle,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+        );
+        a.streams.insert("s1".into(), stream);
+        a.sessions.insert("s1".into(), 0);
+        a.stream_events.0.send(crate::stream::StreamEvent::Terminated {
+            session_id: "s1".into(),
+            generation: 7,
+            reason: crate::virtual_screen::NO_SCREEN_LID.to_string(),
+        }).unwrap();
+        assert_eq!(stream_status(&mut a, "s1"), (Some(false), Some("no-screen:lid".to_string())));
+        a.handle(Request::StopStream { session_id: "s1".into() });
+        assert_eq!(stream_status(&mut a, "s1"), (Some(false), None));
+        let _ = rx;
+    }
+
+    /// The screen a live stream shows, as SessionStatus reports it.
+    #[cfg(windows)]
+    fn stream_monitor(a: &mut Agent, id: &str) -> Option<usize> {
+        match a.handle(Request::SessionStatus { session_id: id.into() }) {
+            Response::SessionState { monitor, .. } => monitor,
+            other => panic!("expected SessionState, got {other:?}"),
+        }
+    }
+
+    /// THE BOOKS FOLLOW THE PICTURE. The stream moved itself off the panel
+    /// (0) onto the virtual screen (1) because the lid shut: the session's
+    /// monitor, its reservation and SessionStatus's `monitor` all follow, so
+    /// the host can tell the viewer which screen it now sees. A late event
+    /// from a replaced stream moves nothing (the control).
+    #[cfg(windows)]
+    #[test]
+    fn a_stream_that_moves_itself_takes_the_books_with_it() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test(
+            "s1".into(), 3, 0, handle,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+        );
+        a.streams.insert("s1".into(), stream);
+        a.sessions.insert("s1".into(), 0);
+        let key = StreamKey { session_id: "s1".into(), generation: 3 };
+        a.monitor_reservations.insert(0, key.clone());
+        assert_eq!(stream_monitor(&mut a, "s1"), Some(0));
+
+        a.stream_events.0.send(crate::stream::StreamEvent::Moved {
+            session_id: "s1".into(), generation: 3, monitor: 1,
+        }).unwrap();
+        assert_eq!(stream_monitor(&mut a, "s1"), Some(1), "the app is told the screen it moved to");
+        assert_eq!(a.sessions.get("s1"), Some(&1), "Inject and privacy follow it");
+        assert_eq!(a.monitor_reservations.get(&1), Some(&key), "it holds its new screen");
+        assert!(!a.monitor_reservations.contains_key(&0), "and lets the old one go");
+
+        // CONTROL: a replaced stream's late word changes nothing.
+        a.stream_events.0.send(crate::stream::StreamEvent::Moved {
+            session_id: "s1".into(), generation: 2, monitor: 0,
+        }).unwrap();
+        assert_eq!(stream_monitor(&mut a, "s1"), Some(1));
+        let _ = rx;
+    }
+
+    /// IN COMMIT ORDER, THE LAST WORD WINS. A lid move the stream committed
+    /// just before a switch the app asked for is drained AFTER that switch's
+    /// handler has set the books; the switch's own event behind it puts them
+    /// back. A screen another session holds is not taken from it.
+    #[cfg(windows)]
+    #[test]
+    fn the_books_end_on_the_streams_last_move() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test(
+            "s1".into(), 5, 0, handle,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+        );
+        a.streams.insert("s1".into(), stream);
+        a.sessions.insert("s1".into(), 2); // the switch's handler already ran
+        let other = StreamKey { session_id: "s2".into(), generation: 9 };
+        a.monitor_reservations.insert(4, other.clone());
+        for monitor in [1, 2] {
+            a.stream_events.0.send(crate::stream::StreamEvent::Moved {
+                session_id: "s1".into(), generation: 5, monitor,
+            }).unwrap();
+        }
+        assert_eq!(stream_monitor(&mut a, "s1"), Some(2));
+        assert!(!a.monitor_reservations.contains_key(&1));
+        // Another session's screen stays its own.
+        a.stream_events.0.send(crate::stream::StreamEvent::Moved {
+            session_id: "s1".into(), generation: 5, monitor: 4,
+        }).unwrap();
+        assert_eq!(stream_monitor(&mut a, "s1"), Some(4));
+        assert_eq!(a.monitor_reservations.get(&4), Some(&other));
+        let _ = rx;
     }
 
     /// A platform that does not stream has nothing to claim either way: None,
@@ -3674,6 +3963,7 @@ mod tests {
             ice_servers: vec![],
             data_only: false,
             input_auth: None,
+            steer_on_lid: false,
         });
         assert!(matches!(resp, Response::Error { .. }));
         assert_eq!(a.monitor_reservations.get(&0), Some(&existing_key));
@@ -3688,6 +3978,26 @@ mod tests {
         assert_eq!(a.monitor_reservations.get(&1), None);
         // And it released only its own: the other session's is untouched.
         assert_eq!(a.monitor_reservations.get(&0), Some(&existing_key));
+    }
+
+    /// REVIEW FINDING 4 (reservations). A stream moving itself for the lid
+    /// took the first lit screen whatever the agent's books said, another
+    /// session's included. Every request now tells the streams which screens
+    /// other captures hold.
+    #[cfg(windows)]
+    #[test]
+    fn every_request_tells_the_streams_which_screens_others_hold() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        a.monitor_reservations.insert(0, StreamKey { session_id: "s1".into(), generation: 1 });
+        a.monitor_reservations.insert(1, StreamKey { session_id: "s2".into(), generation: 4 });
+        a.handle(Request::SessionStatus { session_id: "s1".into() });
+        assert_eq!(a.held_screens.others("s1"), vec![1]);
+        assert_eq!(a.held_screens.others("s2"), vec![0]);
+        // And when one is let go, the next request says so.
+        a.monitor_reservations.remove(&1);
+        a.handle(Request::SessionStatus { session_id: "s1".into() });
+        assert!(a.held_screens.others("s1").is_empty());
     }
 
     #[cfg(windows)]
@@ -3711,6 +4021,7 @@ mod tests {
             ice_servers: vec![],
             data_only,
             input_auth: None,
+            steer_on_lid: false,
         };
 
         // POSITIVE CONTROL: with a picture, the reservation really does block —

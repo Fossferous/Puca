@@ -131,10 +131,6 @@ mod launch_token_tests {
 /// an outage.
 #[cfg(windows)]
 fn redirect_stderr_to(path: &str) {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
-
     let file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -142,16 +138,13 @@ fn redirect_stderr_to(path: &str) {
             return;
         }
     };
-    unsafe {
-        let _ = SetStdHandle(STD_ERROR_HANDLE, HANDLE(file.as_raw_handle() as _));
-    }
-    // Leak the File on purpose: closing it would invalidate the handle we just
-    // installed as the process-wide stderr, and this lives for the process.
-    std::mem::forget(file);
-    // ANCHOR THE LOG IN REAL TIME. Every other line is relative to process
-    // start, and without this the file cannot be lined up with anything the
-    // user reports ("it was laggy around four o'clock") or with the app's own
-    // logs. Formatted by hand because the agent deliberately has no date crate.
+    // EVERY LINE WITH ITS UTC TIME (file_log.rs, "agent.log times"): stderr
+    // becomes a pipe that a thread reads, stamps line by line and appends to
+    // the file. The file stays open for the process, since it is the log;
+    // if the pipe cannot be had, stderr is the file itself, as before.
+    file_log::stamp_stderr_into(file);
+    // ANCHOR THE LOG IN REAL TIME. Every line now carries its own time; this
+    // one still marks where each run of the agent begins, as it always has.
     eprintln!(
         "--- puca-agent starting (pid {}) at {} ---",
         std::process::id(),
@@ -166,26 +159,15 @@ fn wall_clock_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Civil-from-days (Howard Hinnant's algorithm): integer arithmetic, no
-    // dependency, correct across leap years.
-    let days = (secs / 86_400) as i64;
-    let tod = secs % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z",
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60,
-    )
+    format!("{}Z", file_log::utc_date_time(secs))
+}
+
+/// Everything written so far into the log, before this process goes: lines
+/// pass through the stamping thread, and `std::process::exit` does not wait
+/// for it. Bounded, so a stuck log can never hold up an exit.
+#[cfg(windows)]
+fn flush_log() {
+    file_log::drain_log(std::time::Duration::from_millis(500));
 }
 
 /// Block until the process `pid` exits.
@@ -288,6 +270,14 @@ fn main() {
     #[cfg(windows)]
     if let Some(path) = arg("--log") {
         redirect_stderr_to(&path);
+        // A panic that ends the process must reach the file too: the default
+        // hook writes the message, and this waits for the stamping thread to
+        // put it there before the process can go.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            default_hook(info);
+            flush_log();
+        }));
     }
     #[cfg(target_os = "linux")]
     if let Some(path) = arg("--log") {
@@ -317,6 +307,7 @@ fn main() {
             // Release before dying: the app being gone must not strand a key
             // down in whatever window had focus.
             puca_input::release_all();
+            flush_log();
             std::process::exit(0);
         });
     }
@@ -356,6 +347,7 @@ fn main() {
             // Release anything a session left held before going away: a crash
             // mid-keypress must not strand a key down in another application.
             puca_input::release_all();
+            flush_log();
             std::process::exit(1);
         }
     }

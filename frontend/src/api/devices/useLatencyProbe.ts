@@ -28,6 +28,14 @@ export interface LatencyReading {
     samples: number;
     /** The far end never answers (an older agent), or there is no direct channel. */
     unavailable: boolean;
+    /** At least one probe of this session was answered: the agent there
+     *  knows the probe, and so the pointer shape, which came in the same
+     *  release (olderHost.ts takes it as proof that computer is NOT older).
+     *  Kept for the session through a back-off. The other way round proves
+     *  nothing: a probe can go unanswered from a current agent too (a busy
+     *  stream loop, a channel full of a file transfer), so silence is never
+     *  read as "older" (review 2026-10-26). */
+    answered: boolean;
 }
 
 export interface LatencyComparison {
@@ -58,7 +66,7 @@ export function useLatencyProbe(
     on: boolean,
     video: () => HTMLVideoElement | null,
 ): { reading: LatencyReading | null; comparison: LatencyComparison; compare: () => void } {
-    const [state, setState] = useState<{ id: string; results: ProbeResult[]; unavailable: boolean } | null>(null);
+    const [state, setState] = useState<{ id: string; results: ProbeResult[]; unavailable: boolean; answered: boolean } | null>(null);
     const [comparison, setComparison] = useState<LatencyComparison>({ running: false, oldMs: null, newMs: null });
     const compareRef = useRef<{ old: number[]; now: number[]; left: number } | null>(null);
     const videoRef = useRef(video);
@@ -90,6 +98,7 @@ export function useLatencyProbe(
                 id: sessionId,
                 results: [...(prev && prev.id === sessionId ? prev.results : []), r].slice(-30),
                 unavailable: false,
+                answered: true,
             }));
         });
 
@@ -126,7 +135,12 @@ export function useLatencyProbe(
                 if (misses >= GIVE_UP_AFTER) {
                     misses = GIVE_UP_AFTER - 1;
                     quietUntil = t + RETRY_AFTER_MS;
-                    setState({ id: sessionId, results: [], unavailable: true });
+                    setState(prev => ({
+                        id: sessionId, results: [], unavailable: true,
+                        // What was answered stays answered: this is a back-off, and
+                        // an answer earlier in the session still says who is there.
+                        answered: prev !== null && prev.id === sessionId && prev.answered,
+                    }));
                     if (cmp) {
                         compareRef.current = null;
                         setComparison({ running: false, oldMs: null, newMs: null });
@@ -181,6 +195,7 @@ export function useLatencyProbe(
             hostMs: recentMedian(mine.results.filter(r => r.hostMs !== null).map(r => r.hostMs as number)),
             samples: mine.results.length,
             unavailable: mine.unavailable,
+            answered: mine.answered,
         }
         : null;
     return { reading, comparison, compare };

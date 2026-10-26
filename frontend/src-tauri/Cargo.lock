@@ -95,6 +95,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tokio",
  "wasapi",
  "windows 0.58.0",
  "windows-core 0.58.0",

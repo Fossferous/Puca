@@ -28,8 +28,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 import {
     noScreenMessage, noScreenEndReason, virtualStartingMessage, LID_CLOSED_OPTION,
     NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON, NO_SCREEN_NO_FRAME_REASON,
+    NO_SCREEN_SHARED_OFF_REASON, NO_SCREEN_CHANGED_REASON, noScreenCodeForShared,
+    noScreenCodeForStreamEnd, AGENT_STREAM_END_NO_FRAME,
 } from '../api/devices/noScreen';
-import { agentPrepareScreen } from '../api/devices/hostAgent';
+import { agentAnswerOffer, agentPrepareScreen } from '../api/devices/hostAgent';
+
+// agentAnswerOffer asks for ICE servers first; none needed to read its frame.
+vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
 
 describe('what the phone says when that PC has no screen on', () => {
     it('the lid reason names the PC, asks about the lid, and names the option to turn on', () => {
@@ -86,11 +91,155 @@ describe('what the phone says when that PC has no screen on', () => {
         expect(noScreenMessage('', 'Work Laptop')).toBeNull();
     });
 
+    // REVIEW 2026-10-26: a session whose person shared ONE screen is not let
+    // follow a lid, so its lid end means "the screen they shared is behind
+    // the lid" — and the lid code's advice (turn on the lid option, usually on
+    // already by then) would send the viewer to fix the wrong thing.
+    it('the shared screen going dark is its own sentence, with the fix that works', () => {
+        const m = noScreenMessage(NO_SCREEN_SHARED_OFF_REASON, 'Work Laptop')!;
+        expect(m).toBe('Work Laptop’s shared screen went dark — is its lid closed? '
+            + 'Only that screen was shared, so the picture could not move to another. '
+            + 'Connect again with the lid open, or share another screen.');
+        expect(m).not.toContain(LID_CLOSED_OPTION);
+        expect(noScreenMessage(NO_SCREEN_SHARED_OFF_REASON, null)).toMatch(/^That PC’s shared screen/);
+        const wire = noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON);
+        expect(wire.startsWith(`${NO_SCREEN_SHARED_OFF_REASON} — that PC’s shared screen`)).toBe(true);
+        expect(noScreenMessage(wire, 'Work Laptop')).toBe(m);
+        expect(wire.length).toBeLessThanOrEqual(200);
+        expect(new TextEncoder().encode(wire).length).toBeLessThan(512);
+    });
+
+    // A stream pinned to the one shared screen whose capture shows another
+    // (Windows renumbered the screens, or that one went away): ended, never
+    // restarted, because a restart by index could land on a screen nobody
+    // shared.
+    it('the shared screen changing is its own sentence, and both forms are recognised', () => {
+        const m = noScreenMessage(NO_SCREEN_CHANGED_REASON, 'Work Laptop')!;
+        expect(m).toBe('Work Laptop’s shared screen changed or was turned off. Connect again to choose a screen.');
+        expect(noScreenMessage(NO_SCREEN_CHANGED_REASON, null)).toMatch(/^That PC’s shared screen changed/);
+        const wire = noScreenEndReason(NO_SCREEN_CHANGED_REASON);
+        expect(wire.startsWith(`${NO_SCREEN_CHANGED_REASON} — that PC’s shared screen`)).toBe(true);
+        expect(noScreenMessage(wire, 'Work Laptop')).toBe(m);
+        expect(wire.length).toBeLessThanOrEqual(200);
+        expect(noScreenCodeForShared(NO_SCREEN_CHANGED_REASON, false), 'its own words, not shared-off').toBe(NO_SCREEN_CHANGED_REASON);
+    });
+
+    it('a lid end is said as shared-off ONLY for a session that shared one screen', () => {
+        expect(noScreenCodeForShared(NO_SCREEN_LID_REASON, false)).toBe(NO_SCREEN_SHARED_OFF_REASON);
+        // CONTROLS: every screen shared, the lid code (and its advice) stands;
+        // the other codes are never rewritten.
+        expect(noScreenCodeForShared(NO_SCREEN_LID_REASON, true)).toBe(NO_SCREEN_LID_REASON);
+        for (const code of [NO_SCREEN_VIRTUAL_FAILED_REASON, NO_SCREEN_NO_FRAME_REASON]) {
+            expect(noScreenCodeForShared(code, false)).toBe(code);
+            expect(noScreenCodeForShared(code, true)).toBe(code);
+        }
+    });
+
     it('the codes are the exact strings the agent ends a sign-in-screen session with', () => {
         // A DIFFERENT file from this one, so the scan cannot match itself.
         const agent = readFileSync(resolve(process.cwd(), '../crates/puca-agent/src/virtual_screen.rs'), 'utf8');
         expect(agent).toContain(`pub const NO_SCREEN_LID: &str = "${NO_SCREEN_LID_REASON}";`);
         expect(agent).toContain(`pub const NO_SCREEN_VIRTUAL_FAILED: &str = "${NO_SCREEN_VIRTUAL_FAILED_REASON}";`);
+    });
+});
+
+/**
+ * The agent's `stream_end` (its status poll) → the code a HOST ends with.
+ * Since the agent follows a lid shut mid-session, a LIVE stream can end with
+ * the session-start codes themselves, and a host that restarted those got the
+ * same code back a round trip later.
+ */
+describe('noScreenCodeForStreamEnd', () => {
+    it('no_frame and both lid codes end the session, each with its own code', () => {
+        expect(noScreenCodeForStreamEnd('no_frame')).toBe(NO_SCREEN_NO_FRAME_REASON);
+        expect(noScreenCodeForStreamEnd(NO_SCREEN_LID_REASON)).toBe(NO_SCREEN_LID_REASON);
+        expect(noScreenCodeForStreamEnd(NO_SCREEN_VIRTUAL_FAILED_REASON)).toBe(NO_SCREEN_VIRTUAL_FAILED_REASON);
+    });
+
+    // A host app must END on every no-screen:* code the agent can send, and
+    // restart on none (protocol: "an app from before it restarts on any code
+    // it does not know, and a restart by index lands on whatever screen has
+    // that index now"). Read from the agent, so a code added there without
+    // this side knowing it fails here.
+    it('every no-screen:* code the agent defines is an end, never a restart', () => {
+        const agent = readFileSync(resolve(process.cwd(), '../crates/puca-agent/src/virtual_screen.rs'), 'utf8');
+        const codes = [...agent.matchAll(/pub const NO_SCREEN_[A-Z_]+: &str = "(no-screen:[a-z-]+)";/g)].map(m => m[1]);
+        expect(codes.sort(), 'the codes the agent spells today').toEqual(['no-screen:changed', 'no-screen:lid', 'no-screen:virtual-failed']);
+        for (const code of codes) expect(noScreenCodeForStreamEnd(code), code).toBe(code);
+    });
+
+    it('so does a pinned stream whose screen changed under it: no restart by index', () => {
+        expect(noScreenCodeForStreamEnd('no-screen:changed')).toBe(NO_SCREEN_CHANGED_REASON);
+        expect(noScreenCodeForStreamEnd('no-screen:changed (index 1)'), 'literal, like the rest').toBeNull();
+    });
+
+    it('NEGATIVE CONTROL: anything else is restarted, not named (literal match only)', () => {
+        for (const other of [undefined, null, '', 'exited', 'the encoder failed', 'no-screen', 'no-screen:lid (and more)', 'NO_FRAME', NO_SCREEN_NO_FRAME_REASON]) {
+            expect(noScreenCodeForStreamEnd(other), String(other)).toBeNull();
+        }
+    });
+
+    it('the capture ends the lid can cause, which a restart CAN fix, are restarted', () => {
+        // stream.rs ends a stream with these when the screen it showed went
+        // away or its capture showed another; session.rs stream_end_code
+        // reports none of them, and should one ever reach stream_end, it is
+        // still a restart, never a "screen is off" end. (A PINNED stream
+        // whose capture shows another screen ends with no-screen:changed
+        // instead, above; a steering one keeps this restartable end.)
+        for (const restartable of [
+            'capture: the screen this stream showed is gone',
+            'capture: the capture is showing another screen than this stream\'s',
+            'capture: no screen for 20 s after the lid changed the displays',
+        ]) {
+            expect(noScreenCodeForStreamEnd(restartable), restartable).toBeNull();
+        }
+        // The agent's one builder of these ends (stream.rs capture_failed_end):
+        // "capture: …" for a restart, a no-screen code when it may not be.
+        const stream = readFileSync(resolve(process.cwd(), '../crates/puca-agent/src/stream.rs'), 'utf8');
+        expect(stream).toContain('format!("capture: {error}")');
+    });
+
+    it('the agent writes exactly these into stream_end (protocol.rs, its own pins)', () => {
+        const protocol = readFileSync(resolve(process.cwd(), '../crates/puca-agent/src/protocol.rs'), 'utf8');
+        expect(protocol).toContain(`"stream_end":"${AGENT_STREAM_END_NO_FRAME}"`);
+        expect(protocol).toContain(`"stream_end":"${NO_SCREEN_LID_REASON}"`);
+    });
+});
+
+/**
+ * May the agent move the picture to another screen when a lid shuts on the
+ * one it shows? Only a session whose consent covers every screen says yes
+ * (session.ts consentCoversEveryScreen); this is the field that says it.
+ * ALWAYS written, false included: it is a privacy boundary, and its meaning
+ * must not hang on the agent's default staying false.
+ */
+describe('start_stream says whether a lid may move the picture', () => {
+    beforeEach(() => {
+        invokeMock.mockReset();
+        invokeMock.mockResolvedValue(JSON.stringify({ ok: 'streaming', answer_sdp: 'v=0' }));
+    });
+    const frame = () => JSON.parse((invokeMock.mock.calls.at(-1)![1] as { request: string }).request) as Record<string, unknown>;
+
+    it('steer_on_lid: true only when the session says every screen was shared', async () => {
+        await agentAnswerOffer('s1', 'offer', 255, { steerOnLid: true });
+        expect(frame().cmd).toBe('start_stream');
+        expect(frame().steer_on_lid).toBe(true);
+    });
+
+    it('false is SENT, not left out — and so is an omitted option', async () => {
+        await agentAnswerOffer('s1', 'offer', 0, { steerOnLid: false });
+        expect(frame().steer_on_lid).toBe(false);
+        await agentAnswerOffer('s1', 'offer', 0);
+        expect('steer_on_lid' in frame()).toBe(true);
+        expect(frame().steer_on_lid).toBe(false);
+    });
+
+    it('is the field the agent parses, with the default the absence means (protocol.rs pins both)', () => {
+        const protocol = readFileSync(resolve(process.cwd(), '../crates/puca-agent/src/protocol.rs'), 'utf8');
+        // The field, defaulted: absent (any app before it) is PINNED.
+        expect(protocol).toMatch(/#\[serde\(default\)\]\s+steer_on_lid: bool,/);
+        // And the frame its own test parses as "may steer".
+        expect(protocol).toContain('"steer_on_lid":true}');
     });
 });
 

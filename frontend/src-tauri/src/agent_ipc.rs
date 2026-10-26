@@ -835,14 +835,60 @@ pub async fn agent_diagnose() -> String {
 /// Bounded and newline-stripped: this appends to a file a user is asked to send
 /// back, so an unbounded or multi-line string from the webview would let one
 /// call forge arbitrary log content.
+///
+/// STAMPED like every line the agent writes (`2026-10-26 02:36:44.123Z
+/// [host] …`, UTC): since 2026-10-26 the agent puts that time in front of each
+/// of its own lines (crates/puca-agent/src/file_log.rs `utc_stamp`), and an
+/// unstamped `[host]` line between two stamped ones would be the one line of
+/// the timeline that could not be placed.
 #[tauri::command]
 pub fn agent_log(line: String) {
-    let line: String = line.chars().filter(|c| *c != '\n' && *c != '\r').take(2000).collect();
+    let line = stamped_agent_log_line(unix_millis_now(), &line);
     let path = agent_log_path();
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         use std::io::Write;
         let _ = writeln!(f, "{line}");
     }
+}
+
+/// One `agent_log` line as it goes into the file: the UTC time, then the
+/// caller's text, bounded and on one line.
+fn stamped_agent_log_line(unix_ms: u64, line: &str) -> String {
+    let line: String = line.chars().filter(|c| *c != '\n' && *c != '\r').take(2000).collect();
+    format!("{} {line}", utc_stamp(unix_ms))
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// `2026-10-26 02:36:44.123Z` — byte for byte the agent's format
+/// (file_log.rs `utc_stamp`, whose test vectors the tests below repeat).
+/// By hand, as the agent does it: neither binary carries a date crate.
+/// Civil-from-days (Howard Hinnant's algorithm), integer arithmetic.
+fn utc_stamp(unix_ms: u64) -> String {
+    let secs = unix_ms / 1000;
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:03}Z",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60,
+        unix_ms % 1000,
+    )
 }
 
 /// Send one JSON request to the agent and return its JSON response.
@@ -1162,5 +1208,53 @@ mod skew_tests {
         assert_eq!(build_from_reply(r#"{"build":"#), None);
         assert_eq!(build_from_reply(r#"{"build":"unterminated"#), None);
         assert_eq!(build_from_reply(r#"{"build":""}"#), Some(""));
+    }
+}
+
+/// The app's own `[host]` lines in agent.log carry the agent's time stamp,
+/// in the agent's exact format, so the two halves of the file sort as one.
+#[cfg(test)]
+mod log_stamp_tests {
+    use super::{stamped_agent_log_line, utc_stamp};
+
+    /// The agent's own vectors (crates/puca-agent/src/file_log.rs): the
+    /// epoch, the 2026-10-26 field log's moment, a leap day's last
+    /// millisecond, and the century rules either side of 2000 and 2100.
+    #[test]
+    fn the_stamp_is_the_agents_format_to_the_millisecond() {
+        assert_eq!(utc_stamp(0), "1970-01-01 00:00:00.000Z");
+        assert_eq!(utc_stamp(1_792_982_204_123), "2026-10-26 02:36:44.123Z");
+        assert_eq!(utc_stamp(1_709_251_199_999), "2024-02-29 23:59:59.999Z");
+        assert_eq!(utc_stamp(951_868_800_000), "2000-03-01 00:00:00.000Z");
+        assert_eq!(utc_stamp(4_107_542_400_000), "2100-03-01 00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_host_line_goes_in_stamped_and_on_one_line() {
+        assert_eq!(
+            stamped_agent_log_line(1_792_982_204_123, "[host] using the NATIVE AGENT for this session"),
+            "2026-10-26 02:36:44.123Z [host] using the NATIVE AGENT for this session",
+        );
+        // A line from the webview cannot forge a second, unstamped one.
+        assert_eq!(
+            stamped_agent_log_line(0, "[host] a\r\n2026-10-26 02:36:44.123Z [stream] forged"),
+            "1970-01-01 00:00:00.000Z [host] a2026-10-26 02:36:44.123Z [stream] forged",
+        );
+        // Bounded as before: 2000 characters of text after the stamp.
+        let long = stamped_agent_log_line(0, &"x".repeat(5000));
+        assert_eq!(long.len(), "1970-01-01 00:00:00.000Z ".len() + 2000);
+    }
+
+    /// The command writes THAT line, with the time it is called — not the
+    /// caller's text as it came (what it did until 2026-10-26).
+    #[test]
+    fn the_command_writes_the_stamped_line() {
+        let src = include_str!("agent_ipc.rs").replace('\r', "");
+        let start = src.find("pub fn agent_log(").expect("the command exists");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("the command ends")];
+        assert!(
+            body.contains("let line = stamped_agent_log_line(unix_millis_now(), &line);"),
+            "agent_log must write the stamped line: {body}",
+        );
     }
 }

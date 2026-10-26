@@ -16,6 +16,7 @@
  * approval from the lite build along with remote control.
  */
 import { ServiceUpdateBanner } from './ServiceUpdateBanner';
+import { HostAutoUpdate } from './HostAutoUpdate';
 import { RemoteControlOverlay } from './RemoteControlOverlay';
 import { DeviceStage } from './DeviceStage';
 import { UnattendedPassphrasePrompt } from './UnattendedPassphrasePrompt';
@@ -42,11 +43,17 @@ import { DeviceFileBrowser } from './DeviceFileBrowser';
  * ServiceUpdateBanner, hiding the real "service needs an update" notice the
  * release should have shown. rc_leftovers_status is also variant-gated in
  * Rust now, so remounting this here would still show nothing.
+ *
+ * HostAutoUpdate renders nothing: it is the PC-set-up-for-remote-control half
+ * of updating (a host installs a newer Púca by itself while nobody is
+ * connected). Here, not beside UpdateBanner, because only the full build has
+ * hosts — the lite stand-in must not carry it.
  */
 export function RcGlobals() {
     return (
         <>
             <ServiceUpdateBanner />
+            <HostAutoUpdate />
             <RemoteControlOverlay />
             <DeviceStage />
             <UnattendedPassphrasePrompt />

@@ -69,7 +69,10 @@ interface AgentReply {
      *  (session.ts NO_SCREEN_LID_REASON / NO_SCREEN_VIRTUAL_FAILED_REASON). */
     reason?: string;
     /** `start_stream` (`streaming`): the screen the stream ACTUALLY captures,
-     *  present only when the agent steered off the one asked for. */
+     *  present only when the agent steered off the one asked for.
+     *  `session_state`: the screen the session's live stream shows now, which
+     *  changes when the agent moves it (a lid shut or opened mid-session).
+     *  Absent from an agent older than either. */
     monitor?: number;
 }
 
@@ -249,9 +252,16 @@ export async function agentAnswerOffer(
          *  RESTART so the fit survives it the way fps and bitrate do. Absent
          *  (a fresh session) means native until the controller reports. */
         viewSize?: { w: number; h: number };
+        /** May the agent move the picture to ANOTHER screen when a lid shuts
+         *  on the one it shows (at the start, or mid-session)? Only when what
+         *  the person at this machine agreed to covers every screen:
+         *  session.ts consentCoversEveryScreen. Without it the agent ends the
+         *  stream with the lid code instead, because "the first lit screen"
+         *  can be an external monitor they chose not to share. */
+        steerOnLid?: boolean;
     },
 ): Promise<string> {
-    const { fps, bitrateKbps, dataOnly, inputAuth, viewSize } = opts ?? {};
+    const { fps, bitrateKbps, dataOnly, inputAuth, viewSize, steerOnLid } = opts ?? {};
     // THE AGENT CANNOT FETCH THESE ITSELF — it holds no account token and never
     // speaks to the Púca server, which is the property that makes it safe
     // to run headless. So the app has to hand them over, and until 0.8.6 it did
@@ -281,6 +291,13 @@ export async function agentAnswerOffer(
         bitrate,
         ice_servers: iceServers,
         data_only: dataOnly === true,
+        // ALWAYS SENT, false included, unlike the optional fields below: it
+        // is a privacy boundary, and its meaning must not hang on the agent's
+        // default staying false. An older agent ignores the field (its
+        // StartStream takes unknown fields), and one from before the field
+        // still steers at the start: session.ts checks what it says it chose
+        // against the consent and ends the session when that is outside it.
+        steer_on_lid: steerOnLid === true,
         // Omitted rather than sent as null when there is nothing to arm: the
         // agent's field is `Option<InputAuth>` with `#[serde(default)]`, and an
         // older agent ignores it entirely.
@@ -543,6 +560,11 @@ export function agentHostBackend(): HostBackend {
                     // agent and the ordinary case alike, both "input lands".
                     inputBlocked: blockedAppName(reply.input_blocked) ?? undefined,
                     pointerCaptured: reply.pointer_captured === true ? true : undefined,
+                    // A screen index, or nothing: a malformed value must not
+                    // be able to retarget what the viewer believes it sees.
+                    monitor: typeof reply.monitor === 'number' && Number.isInteger(reply.monitor) && reply.monitor >= 0
+                        ? reply.monitor
+                        : undefined,
                 };
             } catch {
                 return { secureDesktop: false, cursorClipped: false };

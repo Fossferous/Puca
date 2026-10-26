@@ -66,6 +66,12 @@ tauri-plugin-dialog = "2"
 # archives) and every tauri-plugin-updater release through 2.14 requires ^4.
 # The other two defaults are kept as they were.
 tauri-plugin-updater = { version = "2.11.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+# A host's own look at latest.json is bounded (host_update.rs check_offer):
+# tokio::time::timeout, on the runtime Tauri already runs. Its "time" feature
+# is on already (reqwest enables it for the updater), so this adds nothing to
+# the build. NOT the updater builder's .timeout(), which would also cap the
+# download itself.
+tokio = { version = "1", features = ["time"] }
 # Remember window size/position/maximized across launches (standard desktop-app behavior).
 tauri-plugin-window-state = "2"
 # Start with the OS, so a device can be reachable without someone launching the

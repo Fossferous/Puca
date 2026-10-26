@@ -75,6 +75,8 @@ import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
+import { olderHostMessage } from '../api/devices/olderHost';
+import { logRcConnect } from '../api/devices/connectLog';
 import { MAX_TYPED_CHARS, typeTextPlan } from '../api/devices/typeText';
 import { QUICK_TIMEOUT_MS, withTimeout } from '../api/withTimeout';
 import { readLocalClipboardDetailed } from '../api/devices/clipboard';
@@ -85,7 +87,7 @@ import { DeviceStageStats } from './DeviceStageStats';
 import { DeviceStageTypeText } from './DeviceStageTypeText';
 import { enterStageFullscreen, leaveStageFullscreen, onFullscreenChange, stageElementFullscreen } from './stageFullscreen';
 import {
-    CrosshairIcon, LiveDotIcon, PlayIcon,
+    CloseIcon, CrosshairIcon, LiveDotIcon, PlayIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
 
@@ -1358,16 +1360,55 @@ export function DeviceStage() {
     // for good. So the shape decides: no report within SHAPE_WAIT_MS of the
     // host handing the pointer over, and it goes back to the host for the
     // rest of the session, which draws its own as before.
+    //
+    // THE SILENCE IS MEASURED ONLY WHILE THE HOST COULD SPEAK, because it is
+    // now also what tells the person that computer runs an older Púca
+    // (olderHost.ts): the shape rides the caret channel, so the clock runs
+    // only once THAT is open (`caretOpen`), and the picture with it — the ack
+    // itself comes over the relay and can beat the media path by seconds on
+    // a slow start, and the picture can beat the channel (review 2026-10-26:
+    // a current agent was called older that way). Not while the picture is
+    // awaited, restarting or behind a security screen, nor while the relay
+    // is reconnecting. And never once the agent has answered a latency probe
+    // this session: the probe came with the shape, so that agent CAN say it,
+    // and a shape that is slow (its write refused while a file transfer fills
+    // the channel) is waited for, not taken for an old agent. And on the
+    // PHONE too: its trackpad takes the pointer, and a current agent says
+    // the shape to any viewer that holds it (the phone draws its own marker
+    // either way, so there it only informs).
+    //
+    // The measured input-to-picture time (the latency probe), here because
+    // the wait reads it. Not while paused: there is no hand to measure, and a
+    // probe is not one.
+    const getVideo = useCallback(() => videoRef.current, []);
+    const latency = useLatencyProbe(isMobile ? null : sessionActiveId, !isMobile && controlEnabled, getVideo);
+    const probeAnswered = latency.reading?.answered === true;
     const cursorOwned = session?.cursorOwned === true;
     const [noShapesFor, setNoShapesFor] = useState<string | null>(null);
+    // A probe answered AFTER the wait gave up takes the verdict back: that
+    // agent can say its shape, so the pointer comes back here.
+    const gaveUpOnShapes = noShapesFor === sessionActiveId && !probeAnswered;
     const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled
-        && noShapesFor !== sessionActiveId;
+        && !gaveUpOnShapes;
     const shapeReported = session?.remoteCursor != null;
+    const hostCouldSayShape = session != null && session.stream != null && !session.awaitingMedia
+        && !session.mediaRestarting && !session.secureDesktop && !session.reconnecting
+        && session.caretOpen === true;
+    const shapeWaitArmed = !!sessionActiveId && cursorOwned && !shapeReported && hostCouldSayShape
+        && !probeAnswered
+        && noShapesFor !== sessionActiveId && (desktopPointer || (isMobile && isMouseMode));
     useEffect(() => {
-        if (!sessionActiveId || !desktopPointer || !cursorOwned || shapeReported) return;
-        const t = setTimeout(() => setNoShapesFor(sessionActiveId), SHAPE_WAIT_MS);
+        if (!sessionActiveId || !shapeWaitArmed) return;
+        const t = setTimeout(() => {
+            setNoShapesFor(sessionActiveId);
+            // The controller's half of the timeline: the host logs the
+            // hand-back as "host cursor compositing -> on", this end why.
+            logRcConnect(`control: that computer sent no pointer shape within ${SHAPE_WAIT_MS / 1000} s`
+                + ' of handing the pointer over (an older Púca there)'
+                + (isMobile ? '' : '; it draws its own pointer again'));
+        }, SHAPE_WAIT_MS);
         return () => clearTimeout(t);
-    }, [sessionActiveId, desktopPointer, cursorOwned, shapeReported]);
+    }, [sessionActiveId, shapeWaitArmed, isMobile]);
     useEffect(() => {
         if (!sessionActiveId) return;
         const want = (isMobile && isMouseMode) || desktopPointer;
@@ -2741,10 +2782,26 @@ export function DeviceStage() {
     }, []);
     /** The desktop bar's live numbers: polled only on a desktop stage. */
     const liveStats = useDeviceLiveStats(isMobile ? null : sessionActiveId, !isMobile);
-    /** And the measured input-to-picture time (the latency probe). */
-    const getVideo = useCallback(() => videoRef.current, []);
-    // Not while paused: there is no hand to measure, and a probe is not one.
-    const latency = useLatencyProbe(isMobile ? null : sessionActiveId, !isMobile && controlEnabled, getVideo);
+    // (The latency probe is read further up, where the shape wait needs it.)
+
+    // "<PC> RUNS AN OLDER PÚCA" — one line on the stage, from what that
+    // computer did (olderHost.ts): no pointer shape while it held the pointer
+    // and could have said one (both stages), and no latency probe answered.
+    // Put away per computer for the rest of this run: it stays true until
+    // that computer is updated, and the top of the picture is where the
+    // remote's title bars are.
+    const [olderHostDismissed, setOlderHostDismissed] = useState<ReadonlySet<string>>(() => new Set());
+    const olderHostLine = session
+        ? olderHostMessage(session.peerName, {
+            noShapes: gaveUpOnShapes,
+            shapeReported,
+            probeAnswered,
+        })
+        : null;
+    const olderHostShown = olderHostLine !== null && !!session && !olderHostDismissed.has(session.peerDevice);
+    const dismissOlderHost = useCallback((peerDevice: string) => {
+        setOlderHostDismissed(prev => new Set(prev).add(peerDevice));
+    }, []);
 
     // ZOOM FROM THE BAR, about the middle of the picture (Ctrl+wheel zooms
     // at the pointer). The same floor, ceiling and pan clamp as the wheel.
@@ -3637,6 +3694,32 @@ export function DeviceStage() {
                                 controlled computer.
                             </>
                         )}
+                    </div>
+                )}
+                {/* THAT COMPUTER RUNS AN OLDER PÚCA. The fix is over there, and
+                    nothing else on the stage says so: the pointer just lags,
+                    or freezes over a screen that presents nothing (the
+                    2026-10-26 laptop report). Parked at the top like the
+                    banners above and yielding to every one of them — each is
+                    the bigger story while it lasts. The band lets presses
+                    through to the picture; only its close button is a
+                    control, and its presses stop there, as Resume's do. */}
+                {olderHostShown && !session.secureDesktop && !session.inputBlocked
+                    && !session.cursorClipped && !session.reconnecting && (
+                    <div className="device-stage-secure device-stage-older-host" role="status">
+                        <span>{olderHostLine}</span>
+                        <button
+                            type="button"
+                            className="device-stage-btn device-stage-older-host-close"
+                            aria-label="Dismiss"
+                            title="Dismiss"
+                            onPointerDown={e => e.stopPropagation()}
+                            onPointerUp={e => e.stopPropagation()}
+                            onPointerMove={e => e.stopPropagation()}
+                            onClick={() => dismissOlderHost(session.peerDevice)}
+                        >
+                            <CloseIcon size={16} />
+                        </button>
                     </div>
                 )}
                 {(session.awaitingMedia || !session.stream) && !session.secureDesktop && (

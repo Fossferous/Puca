@@ -195,6 +195,15 @@ pub fn starts_hidden<S: AsRef<str>>(args: &[S]) -> bool {
         && !matches!(link_from_args(args), ArgLink::Invite(_))
 }
 
+/// A SECOND launch while Púca runs (the single-instance callback, lib.rs):
+/// bring the window up, as a click on a shortcut asks, unless that launch was
+/// a hidden one with no invite. The same rule as a first launch's
+/// (`starts_hidden`), so `--hidden` never shows a window whichever copy it
+/// reaches: a sign-in autostart while Púca already runs used to pop it.
+pub fn second_launch_shows_window<S: AsRef<str>>(argv: &[S]) -> bool {
+    !starts_hidden(argv)
+}
+
 /// One line for the log about a command line's link, WITHOUT its content:
 /// only whether there was one and, for a refusal, why.
 pub fn describe(outcome: &ArgLink) -> Option<String> {
@@ -496,6 +505,31 @@ mod tests {
         assert!(starts_hidden(&argv));
         // Positive control for the rule below: --hidden alone is what hides.
         assert!(!starts_hidden(&[EXE]));
+    }
+
+    #[test]
+    fn a_hidden_second_launch_leaves_the_window_where_it_is() {
+        // A sign-in autostart (or any --hidden launch) while Púca runs.
+        assert!(!second_launch_shows_window(&[EXE, "--hidden"]));
+        // CONTROLS: a click on a shortcut shows it, and so does an invite,
+        // which is why that launch was made.
+        assert!(second_launch_shows_window(&[EXE]));
+        assert!(second_launch_shows_window(&[EXE, "--hidden", "puca://invite/aBc123Xy"]));
+    }
+
+    /// Pinned in lib.rs: the single-instance callback shows the window only
+    /// through the rule above; it used to show it for every second launch.
+    #[test]
+    fn the_single_instance_callback_asks_before_it_shows_the_window() {
+        let lib = include_str!("lib.rs");
+        let cb = lib
+            .split("tauri_plugin_single_instance::init(")
+            .nth(1)
+            .and_then(|s| s.split("}))").next())
+            .expect("the single-instance callback");
+        let ask = cb.find("deep_link::second_launch_shows_window(&argv)").expect("the rule is asked");
+        let show = cb.find("show_main_window(app)").expect("the window is still shown for a click");
+        assert!(ask < show, "asked before it shows");
     }
 
     #[test]

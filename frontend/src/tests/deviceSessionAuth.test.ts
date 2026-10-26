@@ -17,6 +17,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import type { FileScopeRequest } from '../api/devices/hostBackend';
 import type { PowerAction } from '../api/devices/session';
+import { noScreenEndReason, NO_SCREEN_SHARED_OFF_REASON } from '../api/devices/noScreen';
 
 // --- the seams. Everything below the session layer is replaced so the test
 // --- observes exactly what would have hit the machine.
@@ -962,6 +963,9 @@ describe('the screen the host consents to is the screen that streams', () => {
                 // `granted` drift to true on a view-only share would pass
                 // while the agent typed for a peer that may not.
                 inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+                // One screen shared: a lid must not move the picture to
+                // another (review 2026-10-26).
+                steerOnLid: false,
             });
     });
 
@@ -984,6 +988,8 @@ describe('the screen the host consents to is the screen that streams', () => {
                 // `granted` drift to true on a view-only share would pass
                 // while the agent typed for a peer that may not.
                 inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+                // Nobody here picked a screen: the agent may follow a lid.
+                steerOnLid: true,
             },
         );
     });
@@ -1556,6 +1562,45 @@ describe('display power actions', () => {
         expect(frames.find(f => f.kind === 'monitors'),
             'a single-screen announce is topology-only').toBeUndefined();
     });
+
+    /**
+     * Detaching keeps the PRIMARY display. A viewer the person here gave ONE
+     * other screen could detach that screen and be streamed the primary, which
+     * the agent's remap lands on (output 0) and nobody shared (review
+     * 2026-10-26, the sibling of the lid finding). Every way the picture can
+     * leave the consent ends the session.
+     */
+    it('a detach that takes away the ONE shared screen ends the session instead of streaming the primary', async () => {
+        armed = false;
+        consentAnswer = { monitor: 2 };
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        // After the detach only the primary is left, as output 0.
+        monitorsList = [{ id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 }];
+        const before = sent.length;
+        const endsBefore = deviceEnds().length;
+        await signal(key, { kind: 'power', action: 'displays_detach_others' });
+        await framesWhen(key, before, hasKind('power-ack'));
+        for (let i = 0; i < 50 && deviceEnds().length === endsBefore; i++) await new Promise(r => setTimeout(r, 20));
+        const ends = deviceEnds().slice(endsBefore) as Array<{ payload?: { reason?: string } }>;
+        expect(ends.map(e => e.payload?.reason)).toEqual([noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON)]);
+        expect((await sentFrames(key, before)).find(f => f.kind === 'monitors'),
+            'and the primary is not announced to them').toBeUndefined();
+    });
+
+    it('NEGATIVE CONTROL: the same detach with every screen shared is a re-announce, not an end', async () => {
+        armed = false;
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        monitorsList = [{ id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 }];
+        const before = sent.length;
+        const endsBefore = deviceEnds().length;
+        await signal(key, { kind: 'power', action: 'displays_detach_others' });
+        const frames = await framesWhen(key, before, hasKind('monitors'));
+        expect(frames.find(f => f.kind === 'monitors')).toBeTruthy();
+        expect(deviceEnds().length).toBe(endsBefore);
+    });
 });
 
 /**
@@ -1816,6 +1861,9 @@ describe('the consented screen bounds every later set-monitor', () => {
                 // `granted` drift to true on a view-only share would pass
                 // while the agent typed for a peer that may not.
                 inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+                // One screen shared: a lid must not move the picture to
+                // another (review 2026-10-26).
+                steerOnLid: false,
             });
     });
 });

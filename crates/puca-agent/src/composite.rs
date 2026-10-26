@@ -551,6 +551,13 @@ fn canvas_is_a_picture(session_cold: bool, switch_waiting: bool, filled: usize, 
 pub trait ScreenSource {
     fn next_frame(&mut self, timeout_ms: u32) -> Result<Frame, CaptureError>;
     fn set_draw_cursor(&mut self, on: bool);
+    /// Bring the pointer up to date on `frame`, the picture this screen last
+    /// delivered, when nothing new was presented (`ScreenCapture::redraw_cursor`).
+    /// True only when the pixels changed; any other frame is left untouched.
+    fn redraw_cursor(&mut self, frame: &mut Frame) -> bool;
+    /// The screen its pictures are of now, by handle (`ScreenCapture::screen`),
+    /// or None when that is not known.
+    fn screen(&self) -> Option<isize>;
 }
 
 impl ScreenSource for ScreenCapture {
@@ -562,12 +569,20 @@ impl ScreenSource for ScreenCapture {
     fn set_draw_cursor(&mut self, on: bool) {
         ScreenCapture::set_draw_cursor(self, on)
     }
+
+    fn redraw_cursor(&mut self, frame: &mut Frame) -> bool {
+        ScreenCapture::redraw_cursor(self, frame)
+    }
+
+    fn screen(&self) -> Option<isize> {
+        Some(ScreenCapture::screen(self)).filter(|&h| h != 0)
+    }
 }
 
-/// A failed build, carrying back the capture the caller lent us (if any) so it
-/// is never dropped on an error path.
+/// A failed build, carrying back the capture the caller lent us (if any), and
+/// the picture it brought, so neither is dropped on an error path.
 enum BuildError {
-    Failed(CaptureError, Option<ScreenCapture>),
+    Failed(CaptureError, Option<ScreenCapture>, Option<Frame>),
 }
 
 /// One output inside the composite: which capture index it is, where its
@@ -621,7 +636,7 @@ fn block_target(tile_count: usize, cursor: usize) -> Option<usize> {
 
 impl VirtualCapture {
     pub fn new() -> Result<Self, CaptureError> {
-        Self::build(None, None).map_err(|BuildError::Failed(e, _)| e)
+        Self::build(None, None).map_err(|BuildError::Failed(e, _, _)| e)
     }
 
     /// Build the composite while REUSING a capture the caller already holds.
@@ -641,32 +656,41 @@ impl VirtualCapture {
     /// does not fit the tile (`seed_fits`) is not used, and the tile starts
     /// empty for the stream's stranded-switch net to fetch.
     ///
-    /// On failure the adopted capture is handed BACK in the `Err`, because the
-    /// caller's contract is that a refused switch leaves the current screen
-    /// streaming; dropping it here would release the duplication and kill the
-    /// session it was trying to protect.
+    /// The picture is MOVED in, not copied: it is the very buffer its capture
+    /// drew the pointer into, and `redraw_cursor` moves the pointer only on
+    /// that buffer. A copy was refused, so the pointer stood frozen on the
+    /// screen being left while it moved on another one: two pointers in one
+    /// picture, until the first screen presented again (review finding 5).
+    ///
+    /// On failure the adopted capture and its picture are handed BACK in the
+    /// `Err`, because the caller's contract is that a refused switch leaves
+    /// the current screen streaming, still held picture and all; dropping the
+    /// capture here would release the duplication and kill the session it was
+    /// trying to protect.
+    #[allow(clippy::type_complexity)]
     pub fn adopt(
         existing_index: usize,
         existing: ScreenCapture,
-        held: Option<&Frame>,
-    ) -> Result<Self, (ScreenCapture, CaptureError)> {
+        held: Option<Frame>,
+    ) -> Result<Self, (ScreenCapture, Option<Frame>, CaptureError)> {
         match Self::build(Some((existing_index, existing)), held) {
             Ok(v) => Ok(v),
-            Err(BuildError::Failed(e, Some(returned))) => Err((returned, e)),
-            Err(BuildError::Failed(e, None)) => {
+            Err(BuildError::Failed(e, Some(returned), held)) => Err((returned, held, e)),
+            Err(BuildError::Failed(e, None, held)) => {
                 // Only reachable when no capture was passed in, which this call
                 // site never does.
                 debug_assert!(false, "adopt lost the capture it was given: {e}");
                 Err((
                     ScreenCapture::new(existing_index)
                         .unwrap_or_else(|_| panic!("cannot recover capture {existing_index}")),
+                    held,
                     e,
                 ))
             }
         }
     }
 
-    fn build(adopted: Option<(usize, ScreenCapture)>, held: Option<&Frame>) -> Result<Self, BuildError> {
+    fn build(adopted: Option<(usize, ScreenCapture)>, held: Option<Frame>) -> Result<Self, BuildError> {
         let adopted_index = adopted.as_ref().map(|(i, _)| *i);
         // Driven by the CAPTURE enumeration, whose index is the one
         // `ScreenCapture::new` takes and whose rectangle belongs to that same
@@ -681,6 +705,7 @@ impl VirtualCapture {
             return Err(BuildError::Failed(
                 CaptureError::Failed("No monitors available".into()),
                 spare.take().map(|(_, c)| c),
+                held,
             ));
         }
         if let Some(idx) = adopted_index {
@@ -688,6 +713,7 @@ impl VirtualCapture {
                 return Err(BuildError::Failed(
                     CaptureError::Failed(format!("output {idx} is not capturable")),
                     spare.take().map(|(_, c)| c),
+                    held,
                 ));
             }
         }
@@ -696,6 +722,7 @@ impl VirtualCapture {
             return Err(BuildError::Failed(
                 CaptureError::Failed("the displays have no area".into()),
                 spare.take().map(|(_, c)| c),
+                held,
             ));
         };
 
@@ -722,20 +749,20 @@ impl VirtualCapture {
                                     .map(|at| captures.remove(at).1)
                             })
                         });
-                        return Err(BuildError::Failed(e, recovered));
+                        return Err(BuildError::Failed(e, recovered, held));
                     }
                 },
             };
             captures.push((*m, cap));
         }
 
+        let shape = held.as_ref().map(|f| (f.width, f.height, f.stride));
         let composite = Self::lay_out(union, captures, adopted_index.zip(held));
-        if let (Some(i), Some(f)) = (adopted_index, held) {
+        if let (Some(i), Some((w, h, stride))) = (adopted_index, shape) {
             if !composite.tile_has_picture(i) {
                 eprintln!(
-                    "[switch] the picture held for screen {i} ({}x{}, stride {}) does not fit its tile; \
-                     All Displays starts without it",
-                    f.width, f.height, f.stride
+                    "[switch] the picture held for screen {i} ({w}x{h}, stride {stride}) does not fit its tile; \
+                     All Displays starts without it"
                 );
             }
         }
@@ -747,15 +774,17 @@ impl<C: ScreenSource> VirtualCapture<C> {
     /// Lay open captures out on a fresh canvas: each at its output's place in
     /// `union` (`union_box` of those same outputs), and `held` — a picture one
     /// of them already delivered, by capture index — pasted into its tile
-    /// when it fits (`seed_fits`). Every other tile starts as the canvas's
-    /// zero-fill, owing its first picture.
+    /// when it fits (`seed_fits`), and kept as that tile's picture, the very
+    /// buffer (`adopt`). Every other tile starts as the canvas's zero-fill,
+    /// owing its first picture.
     ///
     /// Separate from `build` so everything here is tested without DXGI.
     fn lay_out(
         union: (i32, i32, u32, u32),
         captures: Vec<(OutputInfo, C)>,
-        held: Option<(usize, &Frame)>,
+        held: Option<(usize, Frame)>,
     ) -> Self {
+        let mut held = held;
         let (min_left, min_top, union_w, union_h) = union;
         let (step, width, height) = composite_geometry(union_w, union_h);
         let stride = (width * 4) as usize;
@@ -778,7 +807,7 @@ impl<C: ScreenSource> VirtualCapture<C> {
                 last_frame: None,
                 dirty: false,
             };
-            if let Some((_, frame)) = held.filter(|(i, f)| *i == m.index && seed_fits(f, m.width, m.height)) {
+            if let Some((_, frame)) = held.take_if(|(i, f)| *i == m.index && seed_fits(f, m.width, m.height)) {
                 let step = step as usize;
                 paste_tile(
                     &mut composite.bgra,
@@ -787,11 +816,11 @@ impl<C: ScreenSource> VirtualCapture<C> {
                     step,
                     tile.left as usize / step,
                     tile.top as usize / step,
-                    frame,
+                    &frame,
                 );
-                // A copy, not the caller's: a refused switch keeps streaming
-                // the screen it was on, and its held still with it.
-                tile.last_frame = Some(frame.clone());
+                // MOVED, not copied: the buffer its capture drew the pointer
+                // into, which is the only one `redraw_cursor` will move it on.
+                tile.last_frame = Some(frame);
             }
             composite.captures.push(tile);
         }
@@ -928,8 +957,13 @@ impl<C: ScreenSource> VirtualCapture<C> {
             return Err(CaptureError::Timeout);
         }
 
-        // Paste only what changed: the canvas is retained between calls, so
-        // re-copying a monitor that produced no new frame is pure cost.
+        self.paste_dirty();
+        Ok(())
+    }
+
+    /// Paste only what changed: the canvas is retained between calls, so
+    /// re-copying a monitor that produced no new frame is pure cost.
+    fn paste_dirty(&mut self) {
         let step = self.step as usize;
         let (canvas_w, canvas_h) = (self.width as usize, self.height as usize);
         for tile in &mut self.captures {
@@ -951,8 +985,37 @@ impl<C: ScreenSource> VirtualCapture<C> {
                 frame,
             );
         }
+    }
 
-        Ok(())
+    /// Bring the pointer up to date on every screen's last picture, and
+    /// re-paste the screens whose pixels that changed. True when any did: the
+    /// canvas is then a new picture although no screen presented one.
+    ///
+    /// WHY. Each tile draws the host's pointer into its own pictures, so on a
+    /// still desktop the composite showed it frozen where it was at the last
+    /// present, as the single screen did (2026-10-26): DXGI reports a moved
+    /// pointer as no new picture. The stream calls this on every tick while
+    /// the HOST draws the pointer, including ticks where another screen did
+    /// present, because the pointer may be over a screen that did not.
+    ///
+    /// Cheap when nothing moved: a tile's capture compares the pointer with
+    /// what it last drew and touches nothing, so nothing is pasted. A screen
+    /// whose picture was brought into the composite (`adopt`) brought the
+    /// very buffer its capture drew the pointer into, so its pointer moves
+    /// from the start, like every other screen's.
+    pub fn redraw_cursors(&mut self) -> bool {
+        let mut any = false;
+        for tile in &mut self.captures {
+            let Some(frame) = tile.last_frame.as_mut() else { continue };
+            if tile.capture.redraw_cursor(frame) {
+                tile.dirty = true;
+                any = true;
+            }
+        }
+        if any {
+            self.paste_dirty();
+        }
+        any
     }
 
     /// Which desktop rectangle this composite shows, and at what step:
@@ -1041,6 +1104,17 @@ impl<C: ScreenSource> AnyCapture<C> {
         }
     }
 
+    /// The screen a single-screen capture's pictures are of NOW, by handle
+    /// (`ScreenSource::screen`): asked of the capture, never of a fresh
+    /// enumeration, which can already name another screen at that index.
+    /// None for the composite, which shows them all.
+    pub(crate) fn screen(&self) -> Option<isize> {
+        match self {
+            Self::Single(c) => c.screen(),
+            Self::Virtual(_) => None,
+        }
+    }
+
     /// What this capture is showing, in desktop pixels, for mapping a caret onto
     /// it.
     ///
@@ -1083,26 +1157,102 @@ pub(crate) mod testing {
     /// A screen whose polls follow a script: `Some(picture)` presents it, and
     /// `None`, like the end of the script, times out, which is all the
     /// duplication of a still screen ever does.
-    pub(crate) struct Scripted(VecDeque<Option<Frame>>);
+    ///
+    /// Its pointer follows a second script (`pointer`): each `redraw_cursor`
+    /// takes the next entry, and `Some(level)` is a pointer that moved, drawn
+    /// by writing `level` into the first pixel of the picture it is handed
+    /// (as the real capture writes the pointer into its last picture);
+    /// `None`, like the end of that script, is a pointer that did not move.
+    /// `redraws` counts the calls, so a test can see that nothing was asked.
+    ///
+    /// AS STRICT AS THE REAL ONE about which picture it draws on: only the
+    /// one it delivered last (or, `delivered`, the one a test says it did),
+    /// by buffer address and size, the way `ScreenCapture::redraw_cursor`
+    /// guards its save-under. A copy is refused untouched, though it still
+    /// takes its turn in the pointer script.
+    ///
+    /// `lost` makes every poll answer AccessLost (a screen in exclusive
+    /// fullscreen, or showing protected content), and `on_screen` names the
+    /// screen its pictures are of (`ScreenSource::screen`).
+    pub(crate) struct Scripted {
+        polls: VecDeque<Option<Frame>>,
+        pointer: VecDeque<Option<u8>>,
+        pub(crate) redraws: usize,
+        owner: Option<(usize, usize)>,
+        lost: bool,
+        screen: Option<isize>,
+    }
+
+    fn identity(f: &Frame) -> (usize, usize) {
+        (f.bgra.as_ptr() as usize, f.bgra.len())
+    }
 
     impl Scripted {
         /// Presents nothing, ever: the duplication a stream is switching away
         /// from, which has already handed over everything it had.
         pub(crate) fn still() -> Self {
-            Self(VecDeque::new())
+            Self::polls(Vec::new())
         }
 
         pub(crate) fn polls(script: Vec<Option<Frame>>) -> Self {
-            Self(script.into())
+            Self { polls: script.into(), pointer: VecDeque::new(), redraws: 0, owner: None, lost: false, screen: None }
+        }
+
+        /// The same screen, with its pointer scripted too.
+        pub(crate) fn pointer(mut self, script: Vec<Option<u8>>) -> Self {
+            self.pointer = script.into();
+            self
+        }
+
+        /// This screen delivered `frame` before the test began: the picture a
+        /// stream holds of the screen it shows (`last_frame`).
+        pub(crate) fn delivered(mut self, frame: &Frame) -> Self {
+            self.owner = Some(identity(frame));
+            self
+        }
+
+        /// Every poll answers AccessLost.
+        pub(crate) fn lost(mut self) -> Self {
+            self.lost = true;
+            self
+        }
+
+        pub(crate) fn on_screen(mut self, handle: isize) -> Self {
+            self.screen = Some(handle);
+            self
         }
     }
 
     impl ScreenSource for Scripted {
         fn next_frame(&mut self, _timeout_ms: u32) -> Result<Frame, CaptureError> {
-            self.0.pop_front().flatten().ok_or(CaptureError::Timeout)
+            if self.lost {
+                return Err(CaptureError::AccessLost);
+            }
+            let frame = self.polls.pop_front().flatten().ok_or(CaptureError::Timeout)?;
+            self.owner = Some(identity(&frame));
+            Ok(frame)
         }
 
         fn set_draw_cursor(&mut self, _on: bool) {}
+
+        fn redraw_cursor(&mut self, frame: &mut Frame) -> bool {
+            self.redraws += 1;
+            let moved = self.pointer.pop_front().flatten();
+            if self.owner != Some(identity(frame)) {
+                return false;
+            }
+            match moved {
+                Some(level) => {
+                    frame.bgra[..3].fill(level);
+                    true
+                }
+                None => false,
+            }
+        }
+
+        fn screen(&self) -> Option<isize> {
+            self.screen
+        }
     }
 
     pub(crate) fn output(index: usize, left: i32, top: i32, width: i32, height: i32) -> OutputInfo {
@@ -1128,7 +1278,7 @@ pub(crate) mod testing {
     /// `held` is the picture the adopted screen brings (`adopt`).
     pub(crate) fn composite(
         screens: Vec<(OutputInfo, Scripted)>,
-        held: Option<(usize, &Frame)>,
+        held: Option<(usize, Frame)>,
     ) -> VirtualCapture<Scripted> {
         let outputs: Vec<OutputInfo> = screens.iter().map(|(o, _)| *o).collect();
         VirtualCapture::lay_out(union_box(&outputs).expect("screens with an area"), screens, held)
@@ -1282,7 +1432,7 @@ mod tests {
 
         let mut v = composite(
             vec![(screen0, Scripted::still()), (screen1, Scripted::still())],
-            Some((1, &held)),
+            Some((1, held.clone())),
         );
         assert!(matches!(v.refresh(5), Err(CaptureError::Timeout)), "precondition: no screen presents");
         assert!(all_grey(&area(&v, &screen1), 0x80), "the adopted screen's tile shows the picture it brought");
@@ -1307,7 +1457,7 @@ mod tests {
     fn on_one_screen_the_held_picture_is_the_whole_composite() {
         let screen0 = output(0, 0, 0, 4, 2);
         let held = picture(4, 2, 0x40);
-        let mut v = composite(vec![(screen0, Scripted::still())], Some((0, &held)));
+        let mut v = composite(vec![(screen0, Scripted::still())], Some((0, held.clone())));
         assert!(matches!(v.refresh(5), Err(CaptureError::Timeout)));
         assert!(v.is_complete());
         assert!(all_grey(v.surface().3, 0x40));
@@ -1338,14 +1488,14 @@ mod tests {
             ("shorter than it says", Frame { bgra: vec![0x80; 20], ..picture(4, 2, 0x80) }),
         ] {
             assert!(!seed_fits(&held, 4, 2), "{why}");
-            let v = composite(vec![(screen0, Scripted::still())], Some((0, &held)));
+            let v = composite(vec![(screen0, Scripted::still())], Some((0, held.clone())));
             assert!(!v.is_complete(), "{why}: must not count as the tile's picture");
             assert!(v.surface().3.iter().all(|&b| b == 0), "{why}: must not be pasted");
         }
         let held = picture(4, 2, 0x80);
         assert!(seed_fits(&held, 4, 2), "positive control");
         // A picture of a screen this composite does not have is nobody's.
-        let v = composite(vec![(screen0, Scripted::still())], Some((7, &held)));
+        let v = composite(vec![(screen0, Scripted::still())], Some((7, held.clone())));
         assert!(!v.is_complete());
     }
 
@@ -1362,7 +1512,7 @@ mod tests {
                 (screen0, Scripted::still()),
                 (screen1, Scripted::polls(vec![Some(picture(4, 2, 0x20))])),
             ],
-            Some((0, &held)),
+            Some((0, held.clone())),
         );
         assert!(!v.is_complete());
         v.refresh(5).expect("screen 1 presented");
@@ -1370,6 +1520,113 @@ mod tests {
         assert!(all_grey(&area(&v, &screen0), 0x80));
         assert!(all_grey(&area(&v, &screen1), 0x20));
         assert_eq!(v.empty_tiles().count(), 0);
+    }
+
+    // ---- the host's pointer over a still desktop ------------------------
+
+    /// The first pixel of output `o` on a step-1 canvas.
+    fn first_px(v: &VirtualCapture<Scripted>, o: &OutputInfo) -> [u8; 4] {
+        let a = area(v, o);
+        [a[0], a[1], a[2], a[3]]
+    }
+
+    /// THE FROZEN POINTER, ON ALL DISPLAYS. Nothing presents (a still
+    /// desktop), and the pointer moves over screen 1: `refresh` says Timeout,
+    /// so before `redraw_cursors` the canvas kept the pointer where it was at
+    /// the last present. Now the moved pointer reaches the canvas, on that
+    /// screen's tile only, and the composite says it has a new picture.
+    #[test]
+    fn a_pointer_moving_over_a_still_desktop_reaches_the_canvas() {
+        let screen0 = output(0, 0, 0, 4, 2);
+        let screen1 = output(1, 4, 0, 4, 2);
+        let mut v = composite(
+            vec![
+                (screen0, Scripted::polls(vec![Some(picture(4, 2, 0x20))])),
+                (
+                    screen1,
+                    Scripted::polls(vec![Some(picture(4, 2, 0x40))]).pointer(vec![None, Some(0xEE)]),
+                ),
+            ],
+            None,
+        );
+        v.refresh(5).expect("both screens present once");
+        assert!(matches!(v.refresh(5), Err(CaptureError::Timeout)), "precondition: then nothing presents");
+        let before = v.surface().3.to_vec();
+
+        // NEGATIVE CONTROL: a pointer that did not move changes nothing and
+        // is not a new picture.
+        assert!(!v.redraw_cursors(), "an unmoved pointer is not a new picture");
+        assert_eq!(v.surface().3, &before[..], "and nothing was pasted");
+
+        // The pointer moves over screen 1.
+        assert!(v.redraw_cursors(), "a moved pointer is a new picture of the desktop");
+        assert_eq!(first_px(&v, &screen1), [0xEE, 0xEE, 0xEE, 255], "screen 1's tile shows it");
+        assert!(all_grey(&area(&v, &screen0), 0x20), "screen 0's tile is untouched");
+        let tile1 = area(&v, &screen1);
+        assert!(tile1[4..].chunks(4).all(|px| px == [0x40, 0x40, 0x40, 255]), "only the pointer changed on screen 1");
+    }
+
+    /// The pointer can be over a screen that did NOT present while another
+    /// one did (a video playing on screen 0). `refresh` pastes only what
+    /// presented, so the stream also asks for the pointer on a tick that has
+    /// a new picture, and the still screen's tile gets the moved pointer in
+    /// that same frame.
+    #[test]
+    fn the_pointer_moves_on_a_still_screen_while_another_presents() {
+        let screen0 = output(0, 0, 0, 4, 2);
+        let screen1 = output(1, 4, 0, 4, 2);
+        let mut v = composite(
+            vec![
+                (screen0, Scripted::polls(vec![Some(picture(4, 2, 0x20)), Some(picture(4, 2, 0x21))])),
+                (
+                    screen1,
+                    Scripted::polls(vec![Some(picture(4, 2, 0x40))]).pointer(vec![Some(0xEE)]),
+                ),
+            ],
+            None,
+        );
+        v.refresh(5).expect("both present once");
+        v.refresh(5).expect("screen 0 presents again; screen 1 is still");
+        // CONTROL: refresh alone left screen 1's pointer where it was.
+        assert_eq!(first_px(&v, &screen1), [0x40, 0x40, 0x40, 255]);
+        assert!(v.redraw_cursors());
+        assert_eq!(first_px(&v, &screen1), [0xEE, 0xEE, 0xEE, 255]);
+        assert!(all_grey(&area(&v, &screen0), 0x21), "the screen that presented keeps its new picture");
+    }
+
+    /// A tile with no picture yet has nothing to draw the pointer on, and
+    /// its capture is not asked: the canvas there is the birth zero-fill.
+    #[test]
+    fn a_tile_without_a_picture_is_not_asked_about_the_pointer() {
+        let screen0 = output(0, 0, 0, 4, 2);
+        let mut v = composite(vec![(screen0, Scripted::still().pointer(vec![Some(0xEE)]))], None);
+        assert!(!v.redraw_cursors());
+        assert!(v.surface().3.iter().all(|&b| b == 0));
+        assert_eq!(v.captures[0].capture.redraws, 0);
+    }
+
+    /// REVIEW FINDING 5 (the second pointer). Switching into All Displays,
+    /// the screen being left brings its picture into the composite. It used
+    /// to bring a COPY, which its capture refuses to draw on (the save-under
+    /// belongs to the buffer it drew into, `Scripted` is as strict), so its
+    /// pointer stood frozen there while it moved on another screen: two
+    /// pointers, until the first screen presented. The picture is the very
+    /// buffer now, and its pointer moves at once.
+    #[test]
+    fn the_screen_being_left_brings_a_picture_its_pointer_moves_on() {
+        let (screen0, screen1) = (output(0, 0, 0, 4, 2), output(1, 4, 0, 4, 2));
+        let held = picture(4, 2, 0x30);
+        let left = Scripted::still().delivered(&held).pointer(vec![Some(0xEE)]);
+        let mut v = composite(vec![(screen0, left), (screen1, Scripted::still())], Some((0, held)));
+        assert!(v.redraw_cursors(), "the pointer over the screen being left moves");
+        assert_eq!(first_px(&v, &screen0), [0xEE, 0xEE, 0xEE, 255]);
+        // NEGATIVE CONTROL: a copy of that picture is refused, as the real
+        // capture refuses one.
+        let held = picture(4, 2, 0x30);
+        let left = Scripted::still().delivered(&held).pointer(vec![Some(0xEE)]);
+        let mut copied = composite(vec![(screen0, left), (screen1, Scripted::still())], Some((0, held.clone())));
+        assert!(!copied.redraw_cursors());
+        assert_eq!(first_px(&copied, &screen0), [0x30, 0x30, 0x30, 255]);
     }
 
     /// WHOLE IS PER MONITOR, NOT PER PIXEL. Screens of different sizes leave
@@ -1390,7 +1647,7 @@ mod tests {
                 (tall, Scripted::still()),
                 (short, Scripted::polls(vec![Some(picture(4, 2, 0x20))])),
             ],
-            Some((0, &held)),
+            Some((0, held.clone())),
         );
         v.refresh(5).expect("the short screen presented");
         assert!(area(&v, &gap).iter().all(|&b| b == 0), "precondition: the gap is still zero-fill");
@@ -1402,7 +1659,7 @@ mod tests {
 
         // A screen that is itself black is a picture too, not an empty tile.
         let dark = picture(4, 4, 0);
-        let v = composite(vec![(tall, Scripted::still())], Some((0, &dark)));
+        let v = composite(vec![(tall, Scripted::still())], Some((0, dark.clone())));
         assert!(v.surface().3.chunks(4).all(|px| px[..3] == [0, 0, 0]), "precondition: every colour byte is zero");
         assert!(v.is_complete());
     }
@@ -1429,7 +1686,7 @@ mod tests {
         let held = picture(4, 2, 0x80);
         let v = composite(
             vec![(output(0, 0, 0, 4, 2), Scripted::still()), (output(1, 4, 0, 4, 2), Scripted::still())],
-            Some((0, &held)),
+            Some((0, held.clone())),
         );
         assert!(!v.holds_picture(false, true), "warm, mid-switch, one tile empty: not holding");
         assert!(v.holds_picture(false, false));
@@ -1452,13 +1709,13 @@ mod tests {
         let held = picture(4, 2, 0x80);
         let partial = AnyCapture::Virtual(composite(
             vec![(output(0, 0, 0, 4, 2), Scripted::still()), (output(1, 4, 0, 4, 2), Scripted::still())],
-            Some((1, &held)),
+            Some((1, held.clone())),
         ));
         for still in [false, true] {
             assert!(!partial.holds_whole_picture(still), "held still {still}");
             assert_eq!(partial.awaited_screens(ALL_DISPLAYS, still), vec![0], "held still {still}");
         }
-        let whole = AnyCapture::Virtual(composite(vec![(output(0, 0, 0, 4, 2), Scripted::still())], Some((0, &held))));
+        let whole = AnyCapture::Virtual(composite(vec![(output(0, 0, 0, 4, 2), Scripted::still())], Some((0, held.clone()))));
         assert!(whole.holds_whole_picture(false));
         assert!(whole.awaited_screens(ALL_DISPLAYS, false).is_empty());
     }
@@ -1888,7 +2145,7 @@ mod tests {
         // covered without hardware (an_adopted_screen_brings_its_picture...).
         let mut composite = match VirtualCapture::adopt(0, held, None) {
             Ok(v) => v,
-            Err((_, e)) => panic!("adopt failed while holding screen 0: {e}"),
+            Err((_, _, e)) => panic!("adopt failed while holding screen 0: {e}"),
         };
 
         let (w, h, stride, _) = composite.surface();

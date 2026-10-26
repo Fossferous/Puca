@@ -137,6 +137,18 @@ pub enum StreamEvent {
         generation: u64,
         up: bool,
     },
+    /// The stream's capture now shows `monitor`: EVERY change it commits, in
+    /// commit order. A switch the agent asked for, a rebuild, or a move the
+    /// stream made itself: off a built-in panel behind a lid that closed
+    /// mid-session (and back once it opened), or a topology rebuild's remap,
+    /// for which it has already re-aimed input. The agent's books follow
+    /// (session.rs `follow_stream`), and the app reads them back through
+    /// `SessionStatus.monitor`, so the viewer can be told.
+    Moved {
+        session_id: String,
+        generation: u64,
+        monitor: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -187,6 +199,10 @@ pub enum StreamCommand {
         cancelled: Arc<AtomicBool>,
         monitor: usize,
         reply_tx: std::sync::mpsc::Sender<Result<(), StreamCommandError>>,
+        /// Who asked, which decides how the rebuild is done and who aims
+        /// input at the new screen. Either way the commit is reported
+        /// (`StreamEvent::Moved`), and the agent's books follow it.
+        why: RebuildFor,
     },
     /// Force the next encoded frame to be an IDR. Fire-and-forget: no
     /// generation, deadline or reply — unlike a monitor switch, running late
@@ -204,6 +220,67 @@ pub enum StreamCommand {
     /// is idempotent, and the step is re-derived per frame from the picture
     /// the capture actually produced (a monitor switch changes it).
     SetViewSize { width: u32, height: u32 },
+}
+
+/// A move the lid watch sent (`RebuildFor::Lid`), until its reply lands.
+struct LidMove {
+    target: usize,
+    /// The target is the virtual screen: a move there that keeps failing
+    /// ends the stream naming it.
+    to_virtual: bool,
+    /// What the stream is asked for once the move lands (`after_lid_move`),
+    /// decided with the displays the move was decided on.
+    asked: Option<crate::virtual_screen::Asked>,
+    /// The viewer's switches when it was decided: one made since wins.
+    switches: u64,
+    reply: std::sync::mpsc::Receiver<Result<(), StreamCommandError>>,
+}
+
+/// Who asked for a capture rebuild (`StreamCommand::RebuildCapture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildFor {
+    /// The agent (`rebuild_capture_sync`, a display-topology poke): its
+    /// handler aims input and moves its books after the reply.
+    App,
+    /// The stream's own topology self-heal: the stream aims input.
+    SelfHeal,
+    /// The stream's lid watch, decided when the viewer's switches numbered
+    /// `switches`. A switch the viewer made since wins: the rebuild is
+    /// dropped (`Cancelled`), since it was decided on a screen the viewer has
+    /// left. Quick, on the stream's own thread: one build, the current
+    /// capture released first only when it holds the screen the build needs,
+    /// and no wait; the lid watch backs off and tries again itself.
+    Lid { switches: u64 },
+}
+
+/// The screens the agent's books give to OTHER captures, as a stream thread
+/// reads them: each reserved monitor with the session whose stream holds it,
+/// and None for a raw capture. The agent publishes them after every request
+/// (session.rs `publish_held`); a stream moving itself for the lid never takes
+/// one, as StartStream would refuse to. Capture duplication is exclusive per
+/// output, so taking one would fail anyway, after dropping the stream's own.
+#[derive(Clone, Default)]
+pub struct HeldScreens(Arc<Mutex<Vec<(usize, Option<String>)>>>);
+
+impl HeldScreens {
+    pub fn set(&self, held: Vec<(usize, Option<String>)>) {
+        if let Ok(mut h) = self.0.lock() {
+            *h = held;
+        }
+    }
+
+    /// The screens held by anything but `session_id`'s own stream.
+    pub fn others(&self, session_id: &str) -> Vec<usize> {
+        self.0
+            .lock()
+            .map(|h| {
+                h.iter()
+                    .filter(|(_, by)| by.as_deref() != Some(session_id))
+                    .map(|(m, _)| *m)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[allow(dead_code)]
@@ -302,6 +379,7 @@ impl Stream {
             cancelled: cancelled.clone(),
             monitor,
             reply_tx: tx,
+            why: RebuildFor::App,
         }).map_err(|_| "stream dead")?;
         match rx.recv_timeout(timeout) {
             Ok(res) => res.map_err(|e| format!("{e:?}")),
@@ -720,6 +798,9 @@ fn apply_quality_update(
 pub fn start(
     offer_sdp: &str,
     monitor: usize,
+    // The screen asked for, when StartStream steered off a dark panel onto
+    // `monitor` (virtual_screen::steer_monitor); None when it did not.
+    steered_from: Option<usize>,
     fps: u32,
     bitrate: u32,
     // The viewer's stage in its device pixels, or (0, 0) for native. See
@@ -735,6 +816,13 @@ pub fn start(
     // (an attended session, whose key lives in the APP — the agent is
     // deliberately not a second client) and input keeps its existing path.
     input_channel: Option<std::sync::Arc<crate::input_wire::InputChannel>>,
+    // The host app can follow a move to another screen, and asks the person
+    // at the host about it: the stream may steer for the lid. Off (the
+    // default, and every older host app), it never leaves its screen
+    // (virtual_screen.rs `pinned_step`).
+    steer_on_lid: bool,
+    // The screens other captures hold, for a move the stream makes itself.
+    held: HeldScreens,
 ) -> Result<Stream, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("could not bind a socket: {e}"))?;
     let local_addr = socket
@@ -869,7 +957,7 @@ pub fn start(
                 stream_events_tx: stream_events_tx_clone,
                 reason: Arc::clone(&reason_cell),
             };
-            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, view, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
+            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, steered_from, fps, bitrate, view, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel, steer_on_lid, held) {
                 eprintln!("[stream] ended: {e}");
                 if let Ok(mut r) = reason_cell.lock() {
                     *r = e;
@@ -1124,6 +1212,10 @@ fn run(
     relayed_addr: Option<SocketAddr>,
     remote_candidates: Arc<Mutex<Vec<String>>>,
     initial_monitor: usize,
+    // The screen StartStream was asked for, when it steered the stream off a
+    // built-in panel behind a closed lid onto `initial_monitor`: what to go
+    // back to once the lid opens (`LidWatch::asked`).
+    steered_from: Option<usize>,
     initial_fps: u32,
     initial_bitrate: u32,
     initial_view: (u32, u32),
@@ -1141,6 +1233,10 @@ fn run(
     session_id: String,
     // R4: Some = this stream may serve the direct input channel (see start()).
     input_channel: Option<std::sync::Arc<crate::input_wire::InputChannel>>,
+    // May the stream move to another screen for the lid (see start()).
+    steer_on_lid: bool,
+    // The screens other captures hold, which a lid move passes over.
+    held_screens: HeldScreens,
 ) -> Result<(), String> {
     // VIDEO ONLY. The justification — frame pacing rides socket read timeouts,
     // which tick at the ~15.6ms default — does not apply to a DataOnly session:
@@ -1360,8 +1456,10 @@ fn run(
         crate::topology::outputs_signature(&built_outs);
     // Which physical screen current_monitor is (its HMONITOR), because the
     // index alone is a position that another screen can shift into. Kept in
-    // step with current_monitor by adopt_new_capture.
-    let mut current_output: Option<isize> = screen_identity(&built_outs, current_monitor);
+    // step with current_monitor by adopt_new_capture, and read from the
+    // CAPTURE (`screen`), never from an enumeration: the two can already
+    // disagree, and a pinned stream checks every picture against this.
+    let mut current_output: Option<isize> = capture.as_ref().and_then(|c| c.screen());
     let mut topology_checked: Option<Instant> = None;
     let mut pump_stats = PumpStats::default();
     let started_at = Instant::now();
@@ -1420,6 +1518,38 @@ fn run(
     // when the last one was.
     let mut stranded_repaints: u8 = 0;
     let mut stranded_repainted_at: Option<Instant> = None;
+    // THE LID, MID-SESSION (virtual_screen.rs, "mid-session"): what this
+    // stream last saw of the lid and when to look again (`LidWatch`), a move
+    // it asked for until its reply lands, a `prepare` running on its own
+    // thread (it may ask the service for the virtual screen, which can take a
+    // second) until it answers, and the last thing each said, so the log says
+    // each once.
+    let mut lid_watch = crate::virtual_screen::LidWatch::new(
+        Instant::now(),
+        crate::lid::closed(),
+        // A pinned stream never goes back to it either: that is a move too.
+        steered_from
+            .filter(|_| steer_on_lid)
+            .map(|m| crate::virtual_screen::Asked::of(m, crate::composite::ALL_DISPLAYS)),
+    );
+    let mut lid_move: Option<LidMove> = None;
+    let mut lid_prepare: Option<std::sync::mpsc::Receiver<crate::virtual_screen::ScreenState>> = None;
+    let mut lid_prepare_said: Option<crate::virtual_screen::ScreenState> = None;
+    // Whether this lid episode (from a lid change until a move lands) has
+    // asked for a screen yet, and whether that brought the virtual screen
+    // into it: the first ask starts afresh (`prepare_anew`), and a move that
+    // keeps failing then names the virtual screen in the end it gives.
+    let mut lid_asking = false;
+    let mut lid_virtual_asked = false;
+    // The viewer's switches so far. A lid move decided before the latest one
+    // was decided on a screen the viewer has left, and is dropped
+    // (`RebuildFor::Lid`).
+    let mut switch_count: u64 = 0;
+    // A capture lost while the lid moved the desktop, said once per loss.
+    let mut capture_loss_said = false;
+    // The topology self-heal held back from another screen (`heal_target`),
+    // said once until it rebuilds again.
+    let mut heal_held_back_said = false;
     {
         let scope_for_worker = Arc::clone(&file_scope);
         if let Err(e) = std::thread::Builder::new()
@@ -1484,7 +1614,12 @@ fn run(
                     // refused even when the request is a no-op.
                     if target_monitor == current_monitor {
                         match command_gate(generation, gen, &cancelled, deadline) {
-                            Ok(()) => { let _ = reply_tx.send(Ok(())); }
+                            Ok(()) => {
+                                // Still the viewer's choice (see the commit).
+                                lid_watch.asked = None;
+                                switch_count += 1;
+                                let _ = reply_tx.send(Ok(()));
+                            }
                             Err(e) => { let _ = reply_tx.send(Err(e)); }
                         }
                         continue;
@@ -1504,14 +1639,18 @@ fn run(
                             // duplication has already handed that picture
                             // over, so on a still screen it has nothing new
                             // for the composite, whose tile would be black
-                            // until the screen repainted. Read here, before
-                            // adopt_new_capture drops the held frame below;
-                            // the composite keeps its own copy, and a refused
-                            // switch keeps streaming with this one.
+                            // until the screen repainted. MOVED in (the very
+                            // buffer its pointer is drawn on, `adopt`), so
+                            // adopt_new_capture below finds nothing held; a
+                            // refused switch hands it back with the capture,
+                            // and keeps streaming with both.
                             (crate::composite::ALL_DISPLAYS, AnyCapture::Single(sc)) => {
-                                VirtualCapture::adopt(from_monitor, sc, last_frame.as_ref())
+                                VirtualCapture::adopt(from_monitor, sc, last_frame.take())
                                     .map(AnyCapture::Virtual)
-                                    .map_err(|(sc, e)| (AnyCapture::Single(sc), e.to_string()))
+                                    .map_err(|(sc, held, e)| {
+                                        last_frame = held;
+                                        (AnyCapture::Single(sc), e.to_string())
+                                    })
                             }
                             // Out of the composite: take the screen back out of
                             // it rather than re-opening one it still holds.
@@ -1553,13 +1692,15 @@ fn run(
                             // drop-and-rebuild inside the pump; a same-size
                             // switch (cloned monitors) now costs only an IDR.
                             //
-                            // This also moves current_monitor onto the target.
+                            // This also moves current_monitor onto the target,
+                            // and current_output onto the screen the new
+                            // capture itself reports.
                             let outs = puca_capture::outputs();
                             adopt_new_capture(
                                 &mut current_monitor,
                                 &mut current_output,
                                 target_monitor,
-                                screen_identity(&outs, target_monitor),
+                                capture.as_ref().and_then(|c| c.screen()),
                                 &mut last_frame,
                                 &mut want_keyframe,
                                 &mut switch_started,
@@ -1567,7 +1708,21 @@ fn run(
                                 &mut stranded_repainted_at,
                                 Instant::now(),
                             );
+                            // The viewer chose this screen: it is the one the
+                            // stream is asked for now, whatever the lid had
+                            // moved it off before, and a lid move decided
+                            // before this choice is dropped when it comes up
+                            // (`RebuildFor::Lid`): the viewer's choice wins.
+                            lid_watch.asked = None;
+                            switch_count += 1;
                             eprintln!("[switch] capture committed -> monitor {target_monitor}");
+                            // In commit order with any move the stream made
+                            // itself, so the agent's books end on this one.
+                            let _ = events_tx.send(StreamEvent::Moved {
+                                session_id: session_id.clone(),
+                                generation,
+                                monitor: target_monitor,
+                            });
                             // OUT OF THE COMPOSITE the taken tile's duplication
                             // has long delivered its pictures, and a still
                             // destination screen presents nothing more, so the
@@ -1613,7 +1768,7 @@ fn run(
                         }
                     }
                 }
-                StreamCommand::RebuildCapture { generation: gen, deadline, cancelled, monitor: target_monitor, reply_tx } => {
+                StreamCommand::RebuildCapture { generation: gen, deadline, cancelled, monitor: target_monitor, reply_tx, why } => {
                     // Gated on the MODE, not on holding a capture: a VIDEO
                     // stream whose previous rebuild failed sits at capture ==
                     // None, and this command is exactly its way back (the
@@ -1629,6 +1784,29 @@ fn run(
                         let _ = reply_tx.send(Err(e));
                         continue;
                     }
+                    // THE VIEWER'S CHOICE WINS. A lid move queued just before
+                    // a switch the viewer asked for was decided on the screen
+                    // the viewer has since left; carried out after it, it took
+                    // the picture off the screen the viewer had just chosen.
+                    if !rebuild_still_wanted(why, switch_count) {
+                        let _ = reply_tx.send(Err(StreamCommandError::Cancelled));
+                        continue;
+                    }
+                    // PINNED: never to another index, whoever asks. The agent's
+                    // own remap after a topology change (`App`) goes by index,
+                    // and the host app's consent is by index too.
+                    let pinned = is_pinned(steer_on_lid, current_monitor);
+                    if pinned && target_monitor != current_monitor {
+                        eprintln!(
+                            "[stream] not rebuilding {} as {}: it shows no screen but its own (steer_on_lid)",
+                            screen_name(current_monitor),
+                            screen_name(target_monitor)
+                        );
+                        let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(
+                            "this stream shows no screen but its own".to_string(),
+                        )));
+                        continue;
+                    }
                     let build = |m: usize| -> Result<AnyCapture, String> {
                         if m == crate::composite::ALL_DISPLAYS {
                             VirtualCapture::new().map(AnyCapture::Virtual).map_err(|e| e.to_string())
@@ -1636,30 +1814,75 @@ fn run(
                             ScreenCapture::new(m).map(AnyCapture::Single).map_err(|e| e.to_string())
                         }
                     };
-                    // Build fresh FIRST: after a topology change the old
-                    // duplication is normally dead, so there is no exclusivity
-                    // collision. If it IS still healthy (a reattach that left
-                    // this output alone), the fresh build fails on exclusivity
-                    // — release ours and try once more. No silent retarget on
-                    // failure: the session layer chose `monitor` and keeps its
-                    // records against it, and a stream that quietly lands on a
-                    // different screen than the agent's books is the exact
-                    // drift class SetMonitor's CommittedLate exists to prevent.
-                    let fresh = build(target_monitor).or_else(|first| {
-                        capture = None;
-                        build(target_monitor)
-                            .map_err(|second| format!("{first}; after releasing the old capture: {second}"))
-                    }).or_else(|both| {
-                        // Right after SetDisplayConfig the desktop is still
-                        // recomposing and DXGI can answer with exactly the
-                        // transient states the capture layer documents
-                        // (is_transient_display_state); one short beat is
-                        // usually all they need, and this thread has nothing
-                        // to pump while its capture is gone anyway.
-                        std::thread::sleep(Duration::from_millis(250));
-                        build(target_monitor).map_err(|third| format!("{both}; after 250ms: {third}"))
-                    });
+                    let fresh = match why {
+                        // QUICK, for the lid: one build, with no wait. The
+                        // capture held is let go first only when the build
+                        // needs a screen it duplicates; otherwise a build that
+                        // fails leaves the stream as it was. The lid watch
+                        // backs off, passes the screen over and gives up into
+                        // a named end by itself: this used to be up to three
+                        // builds and a 250 ms sleep on this thread, every half
+                        // second, for as long as the screen refused.
+                        RebuildFor::Lid { .. } => {
+                            let held = capture.as_ref().map(|c| matches!(c, AnyCapture::Virtual(_)));
+                            let target_output = screen_identity(&puca_capture::outputs(), target_monitor);
+                            if lid_rebuild_releases_first(target_monitor, target_output, held, current_output) {
+                                capture = None;
+                            }
+                            build(target_monitor)
+                        }
+                        // Build fresh FIRST: after a topology change the old
+                        // duplication is normally dead, so there is no
+                        // exclusivity collision. If it IS still healthy (a
+                        // reattach that left this output alone), the fresh
+                        // build fails on exclusivity — release ours and try
+                        // once more. No silent retarget on failure: the session
+                        // layer chose `monitor` and keeps its records against
+                        // it, and a stream that quietly lands on a different
+                        // screen than the agent's books is the exact drift
+                        // class SetMonitor's CommittedLate exists to prevent.
+                        RebuildFor::App | RebuildFor::SelfHeal => build(target_monitor).or_else(|first| {
+                            capture = None;
+                            build(target_monitor)
+                                .map_err(|second| format!("{first}; after releasing the old capture: {second}"))
+                        }).or_else(|both| {
+                            // Right after SetDisplayConfig the desktop is still
+                            // recomposing and DXGI can answer with exactly the
+                            // transient states the capture layer documents
+                            // (is_transient_display_state); one short beat is
+                            // usually all they need, and this thread has
+                            // nothing to pump while its capture is gone anyway.
+                            std::thread::sleep(Duration::from_millis(250));
+                            build(target_monitor).map_err(|third| format!("{both}; after 250ms: {third}"))
+                        }),
+                    };
                     match fresh {
+                        // BUILT BY INDEX, CHECKED BY HANDLE. The outputs can be
+                        // renumbered between deciding a rebuild and building it,
+                        // so for a PINNED stream the capture's own answer
+                        // (`screen`) decides: another screen at its index ends
+                        // the stream, and is never adopted.
+                        Ok(next)
+                            if !rebuilt_capture_accepted(
+                                pinned,
+                                current_monitor,
+                                current_output,
+                                target_monitor,
+                                next.screen(),
+                            ) =>
+                        {
+                            drop(next);
+                            let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(
+                                "the rebuilt capture shows another screen".to_string(),
+                            )));
+                            let code = changed_end(lid_watch.lid_changed_recently(Instant::now()), false);
+                            eprintln!(
+                                "[stream] the capture rebuilt for {} shows another screen (the outputs were \
+                                 renumbered); not adopted, and the stream ends ({code}) (steer_on_lid)",
+                                screen_name(current_monitor)
+                            );
+                            return Err(code.to_string());
+                        }
                         Ok(next) => {
                             capture = Some(next);
                             // A fresh capture is born drawing the host pointer;
@@ -1683,7 +1906,7 @@ fn run(
                                 &mut current_monitor,
                                 &mut current_output,
                                 target_monitor,
-                                screen_identity(&outs, target_monitor),
+                                capture.as_ref().and_then(|c| c.screen()),
                                 &mut last_frame,
                                 &mut want_keyframe,
                                 &mut switch_started,
@@ -1691,12 +1914,46 @@ fn run(
                                 &mut stranded_repainted_at,
                                 Instant::now(),
                             );
+                            // What the lid asked for. A lid move's is settled
+                            // by the lid watch when this reply lands, from the
+                            // displays the move was decided on. Any other
+                            // rebuild asks for nothing, and one that lands
+                            // back on what the lid asked for has it again: a
+                            // desktop whose screen was remapped (no lid) used
+                            // to move itself back by index once the screen
+                            // returned, as if a lid had opened.
+                            if !matches!(why, RebuildFor::Lid { .. }) && lid_watch.asked.is_some() {
+                                lid_watch.asked = crate::virtual_screen::after_other_rebuild(
+                                    lid_watch.asked,
+                                    target_monitor,
+                                    &crate::virtual_screen::displays(),
+                                    crate::composite::ALL_DISPLAYS,
+                                );
+                            }
                             // Rebuilt against the current enumeration: reset the
                             // self-heal baseline so it does not immediately fire
                             // again on the change that prompted this rebuild.
                             built_output_sig = crate::topology::outputs_signature(&outs);
                             topology_checked = Some(Instant::now());
-                            eprintln!("[stream] capture rebuilt for a display-topology change -> monitor {target_monitor}");
+                            match why {
+                                RebuildFor::Lid { .. } => eprintln!("[lid] capture rebuilt -> monitor {target_monitor}"),
+                                _ => eprintln!("[stream] capture rebuilt for a display-topology change -> monitor {target_monitor}"),
+                            }
+                            // A rebuild the STREAM chose (the lid, the
+                            // self-heal) has nobody else to aim input: it is
+                            // aimed here at once, so the very next click lands
+                            // on the screen the viewer now sees. The agent's
+                            // books follow every change this loop commits
+                            // (session.rs `follow_stream`), and the app reads
+                            // them back (SessionStatus `monitor`).
+                            if why != RebuildFor::App {
+                                crate::session::Agent::aim_input_at(&session_id, target_monitor);
+                            }
+                            let _ = events_tx.send(StreamEvent::Moved {
+                                session_id: session_id.clone(),
+                                generation,
+                                monitor: target_monitor,
+                            });
                             // The SAME caret is a different fraction of a
                             // different surface — same bookkeeping as a switch.
                             caret_surf += 1;
@@ -1715,8 +1972,11 @@ fn run(
                             // NOT permanently: the mode-based guard above lets
                             // the next RebuildCapture (the reattach's topology
                             // poke fires one) revive this stream. Loud, not
-                            // silent, in the meantime.
-                            eprintln!("[stream] topology rebuild FAILED, the picture is frozen until the next rebuild: {e}");
+                            // silent, in the meantime. A lid move's failure is
+                            // the lid watch's to say, once (it retries).
+                            if !matches!(why, RebuildFor::Lid { .. }) {
+                                eprintln!("[stream] topology rebuild FAILED, the picture is frozen until the next rebuild: {e}");
+                            }
                             let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(e)));
                         }
                     }
@@ -1795,9 +2055,18 @@ fn run(
                     // is of the screen this stream last adopted. The
                     // keyframe makes the correction land on a decodable frame
                     // rather than a delta against a picture the controller no
-                    // longer has.
-                    if let (Some(f), Some(AnyCapture::Single(c))) = (last_frame.as_mut(), capture.as_mut()) {
-                        c.redraw_cursor(f);
+                    // longer has. All Displays corrects each screen's last
+                    // picture the same way and re-pastes it: marking its tiles
+                    // dirty alone re-pasted the pictures with the old pointer
+                    // still baked in, and only once some screen presented.
+                    match (last_frame.as_mut(), capture.as_mut()) {
+                        (Some(f), Some(AnyCapture::Single(c))) => {
+                            c.redraw_cursor(f);
+                        }
+                        (_, Some(AnyCapture::Virtual(v))) => {
+                            v.redraw_cursors();
+                        }
+                        _ => {}
                     }
                     want_keyframe = true;
                 }
@@ -2353,33 +2622,406 @@ fn run(
             topology_checked = Some(now);
             let outs = puca_capture::outputs();
             let sig = crate::topology::outputs_signature(&outs);
-            if crate::topology::topology_differs(&built_output_sig, &sig) {
-                let present: Vec<usize> = outs.iter().map(|o| o.index).collect();
-                let target = crate::topology::remap_monitor_for(current_monitor, &present);
-                eprintln!(
-                    "[stream] display topology changed under the capture ({} -> {} outputs); self-rebuilding for monitor {target}",
-                    built_output_sig.len(),
-                    sig.len()
-                );
-                // The baseline is deliberately NOT advanced here: only a
-                // SUCCESSFUL rebuild (its arm below) refreshes it. So if the
-                // rebuild fails — the desktop still recomposing, the target
-                // briefly unavailable — the next 2 s check sees the same
-                // mismatch and tries again, instead of one shot then a frozen
-                // picture until the human intervenes (the whole bug). The 2 s
-                // clock bounds this to one attempt per interval, never a storm.
-                let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-                if self_tx
-                    .send(StreamCommand::RebuildCapture {
-                        generation,
-                        deadline: now + Duration::from_secs(5),
-                        cancelled: Arc::new(AtomicBool::new(false)),
-                        monitor: target,
-                        reply_tx,
-                    })
-                    .is_err()
-                {
-                    eprintln!("[stream] topology self-heal could not enqueue a rebuild (loop is shutting down)");
+            // PINNED (StartStream `steer_on_lid` off): only the stream's own
+            // screen at its own index, never what took that index, and never
+            // its own screen at a new one (`heal_plan`).
+            let pinned = is_pinned(steer_on_lid, current_monitor);
+            let differs = crate::topology::topology_differs(&built_output_sig, &sig);
+            match heal_plan(current_monitor, current_output, &outs, pinned) {
+                _ if !differs => {}
+                // Its screen is not at its index, and nothing is rebuilt: by
+                // index it would be another screen. A capture still in hand
+                // goes on until it shows anything else, which ends the stream
+                // (`screen_pin`), or fails (`capture_failed_end`). With none
+                // in hand nothing else would ever end it, so it ends here.
+                Heal::End if capture.is_none() => {
+                    let code = changed_end(lid_watch.lid_changed_recently(now), false);
+                    eprintln!(
+                        "[stream] display topology changed and {}, the screen this stream shows, is not at its \
+                         index any more; with no capture left, the stream ends ({code}) (steer_on_lid)",
+                        screen_name(current_monitor)
+                    );
+                    return Err(code.to_string());
+                }
+                Heal::End => {
+                    if !heal_held_back_said {
+                        heal_held_back_said = true;
+                        eprintln!(
+                            "[stream] display topology changed under the capture and {}, the screen this stream \
+                             shows, is not at its index any more; not rebuilding it onto another screen (steer_on_lid)",
+                            screen_name(current_monitor)
+                        );
+                    }
+                }
+                Heal::Rebuild(target) => {
+                    heal_held_back_said = false;
+                    eprintln!(
+                        "[stream] display topology changed under the capture ({} -> {} outputs); self-rebuilding for monitor {target}",
+                        built_output_sig.len(),
+                        sig.len()
+                    );
+                    // The baseline is deliberately NOT advanced here: only a
+                    // SUCCESSFUL rebuild (its arm below) refreshes it. So if the
+                    // rebuild fails — the desktop still recomposing, the target
+                    // briefly unavailable — the next 2 s check sees the same
+                    // mismatch and tries again, instead of one shot then a frozen
+                    // picture until the human intervenes (the whole bug). The 2 s
+                    // clock bounds this to one attempt per interval, never a storm.
+                    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+                    if self_tx
+                        .send(StreamCommand::RebuildCapture {
+                            generation,
+                            deadline: now + Duration::from_secs(5),
+                            cancelled: Arc::new(AtomicBool::new(false)),
+                            monitor: target,
+                            reply_tx,
+                            why: RebuildFor::SelfHeal,
+                        })
+                        .is_err()
+                    {
+                        eprintln!("[stream] topology self-heal could not enqueue a rebuild (loop is shutting down)");
+                    }
+                }
+            }
+        }
+
+        // --- the lid, mid-session --------------------------------------------
+        //
+        // A session start steers off a built-in panel behind a closed lid and
+        // asks for the virtual screen when nothing else is lit
+        // (virtual_screen.rs). A lid shut DURING the session got none of
+        // that: the panel stays an active output Windows never presents to,
+        // and the picture froze for the rest of the session (2026-10-26, 193 s
+        // into a 60 fps session). So the stream watches the lid itself, with
+        // the same rules (`lid_step`) and the same `prepare` a start polls,
+        // and moves through the one rebuild path there is (RebuildCapture,
+        // which it already self-sends for the topology self-heal).
+        //
+        // The lid's state is one atomic load per pass; the displays are
+        // enumerated only when a look is due: after the lid has settled, and
+        // then every couple of seconds while it stays closed. Everything it
+        // sends is bounded: a move that keeps failing backs off and gives up,
+        // a request for a screen that never answers is given up, and a
+        // capture that stays lost ends the stream (`LidWatch`).
+        if mode == StreamMode::Video {
+            use crate::virtual_screen::{Flight, LidAction, ScreenState};
+            let all = crate::composite::ALL_DISPLAYS;
+            let lid = crate::lid::closed();
+            if lid_watch.observe(lid, now) {
+                // A new situation: the next request for a screen starts afresh.
+                lid_asking = false;
+                lid_virtual_asked = false;
+            }
+            let capture_ok = capture.is_some() && !capture_loss_said;
+            lid_watch.note_capture(capture_ok, now);
+
+            // The move it sent: its RebuildCapture ran in this pass's command
+            // drain above, so the reply is normally already here.
+            if let Some(m) = &lid_move {
+                let answer = match m.reply.try_recv() {
+                    Ok(answer) => Some(answer),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => (lid_watch.flight_expired(now) == Some(Flight::Move))
+                        .then(|| Err(StreamCommandError::ConstructionFailed("no answer".to_string()))),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err(StreamCommandError::ConstructionFailed("the move was dropped".to_string())))
+                    }
+                };
+                if let Some(answer) = answer {
+                    let m = lid_move.take().expect("matched above");
+                    match answer {
+                        Ok(()) => {
+                            eprintln!("[lid] the picture is on screen {} now", m.target);
+                            // What it is asked for now, unless the viewer
+                            // chose a screen since: that choice stands.
+                            if m.switches == switch_count {
+                                lid_watch.asked = m.asked;
+                            }
+                            lid_watch.moved(now);
+                            lid_asking = false;
+                        }
+                        // THE VIEWER'S CHOICE WINS: a switch it made after this
+                        // move was decided (RebuildCapture's arm).
+                        Err(StreamCommandError::Cancelled) => {
+                            eprintln!(
+                                "[lid] not moving the picture to screen {}: the viewer chose a screen since",
+                                m.target
+                            );
+                            lid_watch.landed(now, Duration::ZERO);
+                        }
+                        Err(e) => {
+                            let last = lid_watch.move_failed(m.target, now);
+                            if lid_watch.failures() == 1 {
+                                eprintln!(
+                                    "[lid] could not move the picture to screen {} ({e:?}); trying again, less often \
+                                     each time, and not on that screen for {} s",
+                                    m.target,
+                                    crate::virtual_screen::LID_AVOID_FOR.as_secs()
+                                );
+                            }
+                            if last && lid == Some(true) && is_pinned(steer_on_lid, current_monitor) {
+                                // PINNED: its move is a rebuild of its own lit screen
+                                // in place, and a lid shut all session (a dock) is not
+                                // why it failed. Restartable while that screen is still
+                                // at its index, else the end names the lid only when the
+                                // lid is the reason (`capture_failed_end`).
+                                let end = capture_failed_end(
+                                    true,
+                                    current_monitor,
+                                    current_output,
+                                    &puca_capture::outputs(),
+                                    lid_watch.lid_changed_recently(now),
+                                    &format!("could not rebuild the capture in {} tries", lid_watch.failures()),
+                                );
+                                eprintln!(
+                                    "[lid] could not rebuild the capture of {} in {} tries; ending the stream ({end})",
+                                    screen_name(current_monitor),
+                                    lid_watch.failures()
+                                );
+                                return Err(end);
+                            }
+                            if last && lid == Some(true) {
+                                // NOTHING TO SHOW WITH THE LID SHUT: end with the
+                                // code a start gives, never hold a frozen picture.
+                                let reason = crate::virtual_screen::lid_end(m.to_virtual || lid_virtual_asked);
+                                eprintln!(
+                                    "[lid] could not move the picture in {} tries with the lid closed; ending the \
+                                     stream ({})",
+                                    lid_watch.failures(),
+                                    reason.code()
+                                );
+                                return Err(reason.code().to_string());
+                            }
+                            if last {
+                                // The lid is open and the picture still works
+                                // where it is: it stays there.
+                                eprintln!(
+                                    "[lid] could not move the picture in {} tries; it stays on screen \
+                                     {current_monitor} until the lid changes",
+                                    lid_watch.failures()
+                                );
+                                lid_watch.give_up();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The `prepare` it started: the same answer a session start polls.
+            if let Some(rx) = &lid_prepare {
+                let answer = match rx.try_recv() {
+                    Ok(state) => Some(Some(state)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                };
+                match answer {
+                    Some(Some(state)) => {
+                        lid_prepare = None;
+                        if lid_prepare_said != Some(state) {
+                            eprintln!("[lid] asked for a screen: {}", state.wire());
+                            lid_prepare_said = Some(state);
+                        }
+                        match state {
+                            // NO SCREEN, AND NONE COMING: end with the named
+                            // reason a start gives, which the viewer turns into
+                            // "<PC>'s screen is off — is its lid closed?…"
+                            // (noScreen.ts). The agent reports it as this
+                            // session's `stream_end` (session.rs).
+                            ScreenState::Off(reason) if lid == Some(true) => {
+                                eprintln!(
+                                    "[lid] no screen to show with the lid closed ({}); ending the stream",
+                                    reason.code()
+                                );
+                                return Err(reason.code().to_string());
+                            }
+                            // Off, for a lid that has opened since: look again.
+                            ScreenState::Off(_) => lid_watch.landed(now, Duration::ZERO),
+                            // A screen is lit: look again at once and move to it.
+                            ScreenState::Ready => lid_watch.landed(now, Duration::ZERO),
+                            ScreenState::Waking | ScreenState::Starting => {
+                                lid_virtual_asked |= state == ScreenState::Starting;
+                                lid_watch.screen_coming(now);
+                                lid_watch.landed(now, crate::virtual_screen::LID_POLL);
+                            }
+                        }
+                    }
+                    Some(None) => {
+                        lid_prepare = None;
+                        lid_watch.landed(now, crate::virtual_screen::LID_POLL);
+                    }
+                    // NEVER ANSWERED: the service exchange behind `prepare` has
+                    // no timeout of its own, and a stream must not wait on it
+                    // for ever. With the lid shut that is no screen.
+                    None if lid_watch.flight_expired(now) == Some(Flight::Prepare) => {
+                        lid_prepare = None;
+                        let limit = crate::virtual_screen::LID_PREPARE_LIMIT.as_secs();
+                        if lid == Some(true) {
+                            let reason = crate::virtual_screen::lid_end(true);
+                            eprintln!(
+                                "[lid] asked for a screen and nothing answered in {limit} s; ending the stream ({})",
+                                reason.code()
+                            );
+                            return Err(reason.code().to_string());
+                        }
+                        eprintln!("[lid] asked for a screen and nothing answered in {limit} s; the lid is open again");
+                        lid_watch.landed(now, crate::virtual_screen::LID_POLL);
+                    }
+                    None => {}
+                }
+            }
+
+            // A CAPTURE THAT STAYS LOST after the lid changed the displays, with
+            // nothing in flight to bring it back: the picture would stay frozen
+            // for the rest of the session (a rebuild that failed leaves no
+            // capture, and nothing then pumps or fails). End it instead.
+            if lid_watch.capture_lost_too_long(now) {
+                let grace = crate::virtual_screen::LID_TRANSITION_GRACE.as_secs();
+                // A STEERING stream with the lid shut has nothing left to show:
+                // the lid's code. A pinned one ends below, by its own screen.
+                if lid == Some(true) && !is_pinned(steer_on_lid, current_monitor) {
+                    let reason = crate::virtual_screen::lid_end(lid_virtual_asked);
+                    eprintln!(
+                        "[lid] the capture has had no screen for {grace} s with the lid closed; ending the stream ({})",
+                        reason.code()
+                    );
+                    return Err(reason.code().to_string());
+                }
+                eprintln!("[lid] the capture has had no screen for {grace} s since the lid changed the displays; ending the stream");
+                // Restartable, unless the stream is PINNED and its screen is
+                // not at its index any more (`capture_failed_end`).
+                return Err(capture_failed_end(
+                    is_pinned(steer_on_lid, current_monitor),
+                    current_monitor,
+                    current_output,
+                    &puca_capture::outputs(),
+                    lid_watch.lid_changed_recently(now),
+                    &format!("no screen for {grace} s after the lid changed the displays"),
+                ));
+            }
+
+            if lid_watch.due(now) {
+                let d = crate::virtual_screen::displays();
+                lid_watch.on_virtual = d.is_virtual(current_monitor);
+                // Never a screen another session's stream (or a raw capture)
+                // holds, nor one that refused a move just now.
+                let mut avoid = held_screens.others(&session_id);
+                avoid.extend(lid_watch.refused(now));
+                // STEERING OR PINNED: the host app says whether it can follow a
+                // move to another screen and ask the person at the host about
+                // it (StartStream `steer_on_lid`). Not, and the stream keeps
+                // its own screen or ends (`pinned_step`).
+                match crate::virtual_screen::lid_action(
+                    steer_on_lid,
+                    lid_watch.asked,
+                    current_monitor,
+                    current_output,
+                    &d,
+                    lid,
+                    capture_ok,
+                    &avoid,
+                    all,
+                ) {
+                    LidAction::Stay => {
+                        lid_watch.idle(now);
+                        lid_prepare_said = None;
+                        lid_watch.asked = crate::virtual_screen::after_other_rebuild(lid_watch.asked, current_monitor, &d, all);
+                    }
+                    LidAction::MoveTo(target) => {
+                        // The same screen at another index (its handle) is not
+                        // a screen the lid took: nothing to go back to.
+                        let same_screen = target != all && current_output.is_some() && d.handle_of(target) == current_output;
+                        // Said once per move, not once per try (see the reply).
+                        if lid_watch.failures() == 0 {
+                            eprintln!("[lid] {}", lid_move_line(current_monitor, target, &d, lid == Some(true), same_screen));
+                        }
+                        if let Some(reply) = send_lid_move(&self_tx, generation, target, switch_count, now) {
+                            lid_move = Some(LidMove {
+                                target,
+                                to_virtual: d.is_virtual(target),
+                                asked: crate::virtual_screen::after_lid_move(
+                                    lid_watch.asked,
+                                    current_monitor,
+                                    target,
+                                    &d,
+                                    lid == Some(true),
+                                    same_screen,
+                                    all,
+                                ),
+                                switches: switch_count,
+                                reply,
+                            });
+                            lid_watch.acted(now, Flight::Move);
+                        } else {
+                            lid_watch.idle(now);
+                        }
+                        lid_prepare_said = None;
+                    }
+                    LidAction::NeedScreen => {
+                        // The first request of this lid episode starts afresh:
+                        // whatever an earlier one left (the virtual screen
+                        // asked for, then let go when the lid opened) is not
+                        // its answer (virtual_screen.rs `Preps`).
+                        let anew = !lid_asking;
+                        if anew {
+                            eprintln!(
+                                "[lid] the lid is closed and no screen is lit (the picture is on screen \
+                                 {current_monitor}; outputs {:?}, dark {:?}); asking for one as a session start does",
+                                d.outputs, d.dark
+                            );
+                        }
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let sid = session_id.clone();
+                        let spawned = std::thread::Builder::new()
+                            .name("lid-prepare".into())
+                            .spawn(move || {
+                                let state = if anew {
+                                    crate::virtual_screen::prepare_anew(&sid)
+                                } else {
+                                    crate::virtual_screen::prepare(&sid)
+                                };
+                                let _ = tx.send(state);
+                            });
+                        match spawned {
+                            Ok(_) => {
+                                lid_prepare = Some(rx);
+                                lid_asking = true;
+                                lid_watch.acted(now, Flight::Prepare);
+                            }
+                            Err(e) => {
+                                eprintln!("[lid] could not ask for a screen ({e}); trying again shortly");
+                                lid_watch.landed(now, crate::virtual_screen::LID_POLL);
+                            }
+                        }
+                    }
+                    // PINNED, AND ITS SCREEN IS DARK OR GONE: no other screen
+                    // is the viewer's to see. The lid's code when it is shut,
+                    // the one a start with no screen gives; a restartable end
+                    // otherwise, which a restart answers through a start the
+                    // host app checks.
+                    LidAction::End => {
+                        let what = if current_monitor == all {
+                            "left with no screen lit"
+                        } else if current_output.is_some_and(|h| d.handle_of(current_monitor) == Some(h)) {
+                            "dark behind the lid"
+                        } else if current_output.and_then(|h| d.index_of(h)).is_some() {
+                            "at another index now"
+                        } else {
+                            "gone, or replaced at its index"
+                        };
+                        // Never restarted: by index, a restart could land on a
+                        // screen nobody shared (`changed_end`). The lid's code
+                        // only when the lid is why: it just changed, or the
+                        // stream's own screen is the panel dark behind it.
+                        let code = changed_end(
+                            lid_watch.lid_changed_recently(now),
+                            crate::virtual_screen::own_screen_dark(current_monitor, current_output, &d, all),
+                        );
+                        eprintln!(
+                            "[lid] {}, the screen this stream shows, is {what}; ending the stream ({code}): the host \
+                             app did not let it show another screen (steer_on_lid)",
+                            screen_name(current_monitor)
+                        );
+                        return Err(code.to_string());
+                    }
                 }
             }
         }
@@ -2393,7 +3035,11 @@ fn run(
         // change (latency.rs) — a new picture or nothing, never the held one
         // re-sent, and the clock is touched only if it found one.
         let due = now >= next_frame;
+        // Not while a capture that lost its screen is being ridden out (the
+        // lid, above): like a blocked one, every look would ask DXGI to
+        // rebuild it, hundreds of times a second while input arrives.
         let early = !due
+            && !capture_loss_said
             && early_look_allowed(now, watching_until, next_frame, last_frame_at, frame_interval, blocked_since);
         if capture.is_some() && (due || early) {
             if due {
@@ -2418,10 +3064,17 @@ fn run(
             } else {
                 PumpFor::Tick
             };
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, why) {
+            // A stream pinned to its screen never sends a picture of another
+            // one, whatever renumbered the outputs (`screen_pin`).
+            let pin = screen_pin(steer_on_lid, current_monitor, current_output);
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, why, draw_host_cursor, pin) {
                 Ok(pumped) => {
                     let sent = pumped.sent;
                     last_frame_at = Some(now);
+                    if capture_loss_said {
+                        capture_loss_said = false;
+                        eprintln!("[lid] the capture has its screen again");
+                    }
                     if early {
                         // Caught as it appeared: the clock carries on from
                         // this frame, and the watch is over.
@@ -2506,6 +3159,11 @@ fn run(
                     blocked_since.get_or_insert(now);
                 }
                 Err(PumpError::NoChange) => {
+                    // The capture answered: whatever it lost, it has again.
+                    if capture_loss_said {
+                        capture_loss_said = false;
+                        eprintln!("[lid] the capture has its screen again");
+                    }
                     skipped += 1;
                     if skipped == 30 || skipped == 150 {
                         eprintln!("[stream] {skipped} consecutive skips (still screen)");
@@ -2668,11 +3326,20 @@ fn run(
                     }
                     if should_report_secure_desktop(Some(start), blocked_reported, now) {
                         blocked_reported = true;
-                        eprintln!(
-                            "[stream] a Windows security screen owns the display (lock screen, \
-                            sign-in screen, or an administrator prompt) — capture is blocked \
-                            until it closes; the viewer is holding the last frame"
-                        );
+                        if lid_watch.rides_out_capture_loss(now) {
+                            // The same AccessLost, for another reason: the lid
+                            // just changed the displays under the capture.
+                            eprintln!(
+                                "[stream] the capture is blocked while the lid changes the displays; \
+                                 the viewer is holding the last frame"
+                            );
+                        } else {
+                            eprintln!(
+                                "[stream] a Windows security screen owns the display (lock screen, \
+                                sign-in screen, or an administrator prompt) — capture is blocked \
+                                until it closes; the viewer is holding the last frame"
+                            );
+                        }
                     }
                 }
                 Err(PumpError::EncoderFilling) => {
@@ -2692,6 +3359,47 @@ fn run(
                     if skipped == 30 || skipped == 150 {
                         eprintln!("[stream] {skipped} consecutive skips (encoder filling)");
                     }
+                }
+                // THE SCREENS ARE BEING RE-ARRANGED FOR THE LID: the panel
+                // leaving, the virtual screen arriving or going, and for a
+                // moment the index this capture names can be missing, which
+                // the capture reports as a failure. It retries itself on every
+                // tick and the topology rebuild remaps it, so the last
+                // picture is held instead of ending the session, for a
+                // bounded window (LID_TRANSITION_GRACE). Past it, or with the
+                // lid nowhere near, this ends the stream exactly as before.
+                Err(PumpError::CaptureFailed(e)) if lid_watch.rides_out_capture_loss(now) => {
+                    skipped += 1;
+                    if !capture_loss_said {
+                        capture_loss_said = true;
+                        eprintln!(
+                            "[lid] the capture lost its screen while the lid changed the displays ({e}); \
+                             holding the last picture while Windows re-arranges them"
+                        );
+                    }
+                }
+                // NOTHING OF ANOTHER SCREEN: the pinned stream's capture now
+                // shows a screen other than its own, and nothing of it went
+                // out. Ended with a code no restart answers (`changed_end`).
+                Err(PumpError::ScreenChanged) => {
+                    let code = changed_end(lid_watch.lid_changed_recently(now), false);
+                    eprintln!(
+                        "[stream] the capture of {} is showing another screen now (the outputs were renumbered); \
+                         nothing of it was sent, and the stream ends ({code}): it shows no screen but its own \
+                         (steer_on_lid)",
+                        screen_name(current_monitor)
+                    );
+                    return Err(code.to_string());
+                }
+                Err(PumpError::CaptureFailed(e)) => {
+                    return Err(capture_failed_end(
+                        is_pinned(steer_on_lid, current_monitor),
+                        current_monitor,
+                        current_output,
+                        &puca_capture::outputs(),
+                        lid_watch.lid_changed_recently(now),
+                        &e,
+                    ))
                 }
                 Err(PumpError::Fatal(e)) => return Err(e),
             }
@@ -2725,7 +3433,9 @@ fn run(
         // of milliseconds rather than at the next tick — once the floor under
         // early frames has passed; before that a look would only be refused.
         let wait = match (capture.as_ref(), watching_until) {
-            (Some(_), Some(_)) if watching_for_change(Instant::now(), watching_until, blocked_since) => {
+            (Some(_), Some(_))
+                if !capture_loss_said && watching_for_change(Instant::now(), watching_until, blocked_since) =>
+            {
                 let floor_ends = last_frame_at.map_or_else(Instant::now, |t| t + frame_interval);
                 wait.min(floor_ends.saturating_duration_since(Instant::now()).max(crate::latency::WATCH_POLL))
             }
@@ -2825,10 +3535,37 @@ fn run(
         }
 
         if !sender.rtc_mut().is_alive() {
+            // The VIEWER closed the connection (a Disconnect or Reconnect on
+            // the controller): a clean end, which used to leave no line here.
+            eprintln!("[stream] {}", clean_end_line(CleanEnd::ViewerClosed, started_at.elapsed(), frames_sent));
             return Ok(());
         }
     }
+    // The stop flag: the HOST stopped this stream (StopStream from the app,
+    // or the agent dropped with the app's connection, session.rs and pipe.rs
+    // say which). A clean end, which used to leave no line at all.
+    eprintln!("[stream] {}", clean_end_line(CleanEnd::Stopped, started_at.elapsed(), frames_sent));
     Ok(())
+}
+
+/// Why a stream ended cleanly (run() returning Ok).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanEnd {
+    /// Its stop flag: the host stopped it.
+    Stopped,
+    /// The peer connection is no longer alive: the viewer closed it.
+    ViewerClosed,
+}
+
+/// The line a clean end writes, with how long the stream ran and how much
+/// it sent: the two numbers that tell a session that never showed anything
+/// from one that ran for an hour. Nothing about the viewer or its network.
+fn clean_end_line(why: CleanEnd, ran: Duration, frames_sent: u64) -> String {
+    let what = match why {
+        CleanEnd::Stopped => "stopped by the host",
+        CleanEnd::ViewerClosed => "ended: the viewer closed the connection",
+    };
+    format!("{what} after {:.1}s, {frames_sent} frame(s) sent", ran.as_secs_f64())
 }
 
 enum PumpError {
@@ -2848,6 +3585,14 @@ enum PumpError {
     /// and the viewer sat on a frozen picture with no error for as long as the
     /// prompt was open.
     SecureDesktop,
+    /// The capture itself failed (`CaptureError::Failed`): ends the stream
+    /// as `Fatal` does, as "capture: …", except while the lid is moving the
+    /// desktop under it (`LidWatch::rides_out_capture_loss`).
+    CaptureFailed(String),
+    /// A PINNED stream's capture shows another screen than the stream's own,
+    /// or one it cannot name (`screen_pin`): nothing of it went out, and the
+    /// stream ends with a code no restart answers (`changed_end`).
+    ScreenChanged,
     Fatal(String),
 }
 
@@ -2867,6 +3612,10 @@ struct PumpStats {
     send: SpanStats,
     /// Frames the encoder swallowed without emitting, since the last report.
     filling: u32,
+    /// Frames sent because only the host-drawn pointer moved over a still
+    /// screen (`still_tick`), since the last report: what a moving mouse
+    /// costs on a desktop that is otherwise not changing.
+    pointer: u32,
 }
 
 #[derive(Default)]
@@ -2904,7 +3653,7 @@ impl SpanStats {
 impl PumpStats {
     fn report_and_reset(&mut self, elapsed: Duration) -> String {
         let n = self.samples;
-        let line = format!(
+        let mut line = format!(
             "[stream] +{:.1}s timing over {n} frame(s): capture {} fit {} encode {} send {} (encoder held {})",
             elapsed.as_secs_f64(),
             self.capture.report(n),
@@ -2913,6 +3662,11 @@ impl PumpStats {
             self.send.report(n),
             self.filling,
         );
+        // Only when there were any, so every line from a stream that never
+        // redrew the pointer reads exactly as it did.
+        if self.pointer > 0 {
+            line.push_str(&format!(" pointer-only {}", self.pointer));
+        }
         *self = PumpStats::default();
         line
     }
@@ -2926,6 +3680,53 @@ impl PumpStats {
 /// should cost nothing, which is the whole point of change-driven capture.
 fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
     want_keyframe && have_last_frame
+}
+
+/// What a still tick (the capture said Timeout: nothing was presented) does
+/// with the picture the stream holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StillTick {
+    /// Nothing to send. Free.
+    NoChange,
+    /// Send the held picture again. `pointer`: the HOST draws the pointer,
+    /// it moved or changed shape, and the capture has just drawn it into the
+    /// held picture where it is now, so this is a new picture.
+    Resend { pointer: bool },
+}
+
+/// THE STILL TICK, decided. `redraw` is the capture bringing the pointer up
+/// to date on the held picture (`ScreenCapture::redraw_cursor`, or
+/// `VirtualCapture::redraw_cursors` for All Displays): true when that
+/// changed its pixels.
+///
+/// WHY. DXGI reports a moved pointer as no new picture (puca-capture
+/// windows_impl.rs, `LastPresentTime == 0`), and this tick used to answer it
+/// with nothing, so while the host draws the pointer — Game mode, paused
+/// control, touch mode, "Draw the pointer here" off, and every agent older
+/// than the shape report — the pointer in the picture stood still for as
+/// long as the screen did. Measured on 2026-10-26: about 25 s of 80 to 120
+/// moves a second, with clicks and the wheel, against 150 consecutive still
+/// skips and no frame sent.
+///
+/// The pointer is asked about only when the host draws it (`host_draws`)
+/// and a picture is held. Drawing off, nothing is asked and nothing changes
+/// (the viewer draws its own pointer); an unchanged pointer changes nothing
+/// either, so an idle mouse costs no encode at all. A moving one costs at
+/// most one encode per frame interval, because this runs only on the
+/// clock's tick and on the early look, which `latency::may_capture_early`
+/// keeps a whole interval after the last frame sent.
+fn still_tick(
+    need_picture: bool,
+    holding: bool,
+    host_draws: bool,
+    redraw: impl FnOnce() -> bool,
+) -> StillTick {
+    let pointer = host_draws && holding && redraw();
+    if should_resend_still(need_picture || pointer, holding) {
+        StillTick::Resend { pointer }
+    } else {
+        StillTick::NoChange
+    }
 }
 
 /// The bookkeeping for a stream that has just been handed a NEW capture of
@@ -3005,6 +3806,207 @@ fn is_same_screen(from: usize, from_output: Option<isize>, to: usize, to_output:
     from == to
         && (from == crate::composite::ALL_DISPLAYS
             || (from_output.is_some() && from_output == to_output))
+}
+
+/// The lid watch's move to `target`, sent to this stream's own loop
+/// (`RebuildFor::Lid`): its reply, or None when the loop is going away.
+fn send_lid_move(
+    self_tx: &std::sync::mpsc::Sender<StreamCommand>,
+    generation: u64,
+    target: usize,
+    switches: u64,
+    now: Instant,
+) -> Option<std::sync::mpsc::Receiver<Result<(), StreamCommandError>>> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    self_tx
+        .send(StreamCommand::RebuildCapture {
+            generation,
+            deadline: now + Duration::from_secs(5),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            monitor: target,
+            reply_tx,
+            why: RebuildFor::Lid { switches },
+        })
+        .ok()?;
+    Some(reply_rx)
+}
+
+/// "screen 2", or "All Displays" for the composite.
+fn screen_name(i: usize) -> String {
+    if i == crate::composite::ALL_DISPLAYS {
+        "All Displays".to_string()
+    } else {
+        format!("screen {i}")
+    }
+}
+
+/// What the lid watch says when it moves the picture, once per move.
+fn lid_move_line(
+    current: usize,
+    target: usize,
+    d: &crate::virtual_screen::Displays,
+    lid_closed: bool,
+    same_screen: bool,
+) -> String {
+    let (from, to) = (screen_name(current), screen_name(target));
+    if target == current {
+        format!("the capture lost {from} while the lid changed the displays; building it again")
+    } else if same_screen {
+        format!("{from} is {to} now (the lid changed the displays); following it there")
+    } else if lid_closed && current == crate::composite::ALL_DISPLAYS {
+        format!("the lid is closed and {to} is the only screen lit; showing it instead of All Displays")
+    } else if lid_closed && d.dark.contains(&current) {
+        format!(
+            "the lid is closed and {from} is a built-in panel behind it (dark: {:?}); moving the picture to {to}",
+            d.dark
+        )
+    } else if lid_closed && !d.outputs.contains(&current) {
+        format!("the lid is closed and {from} is gone; moving the picture to {to}")
+    } else if d.is_virtual(current) {
+        format!("a real screen is lit; moving the picture off the virtual screen to {to} before it is let go")
+    } else {
+        format!("the lid is open again; moving the picture back to {to}, the one asked for")
+    }
+}
+
+//// Is this stream PINNED to the screen it shows? A single screen, and a host
+/// app that has not said it can follow a move and ask about it (StartStream
+/// `steer_on_lid` off, the default). All Displays shows every screen, so it
+/// has none to keep.
+fn is_pinned(steer_on_lid: bool, current: usize) -> bool {
+    !steer_on_lid && current != crate::composite::ALL_DISPLAYS
+}
+
+/// The screen every picture of a PINNED stream must be of: its own, by the
+/// handle its capture reported (`refresh_picture`). Checked always, lid or no
+/// lid: the lid's state arrives on its own clock (a panel can leave the
+/// desktop first) or not at all, and a capture can sit on another screen long
+/// after the lid stopped moving. A handle that is not known pins to 0, which
+/// no capture reports, so nothing goes out. None, any picture, for a stream
+/// that may steer, and for All Displays.
+fn screen_pin(steer_on_lid: bool, current: usize, current_output: Option<isize>) -> Option<isize> {
+    is_pinned(steer_on_lid, current).then(|| current_output.unwrap_or(0))
+}
+
+/// What the topology self-heal does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Heal {
+    /// Rebuild the capture at this index.
+    Rebuild(usize),
+    /// The pinned stream's screen is not at its index any more: end it.
+    End,
+}
+
+/// The topology self-heal's plan. By index, as ever (`remap_monitor_for`),
+/// unless the stream is PINNED: then only its own screen, at its own index,
+/// with the handle it had. A screen that is gone, renumbered to another
+/// index, or replaced at this one ends the stream: by index, a panel that
+/// left the desktop as the lid shut put an external monitor in its place and
+/// the self-heal rebuilt onto it, and following its own screen to a new index
+/// reports an index the host app never agreed to. A renumbering that leaves
+/// the stream's screen where it was (a dock adding a monitor after it)
+/// rebuilds it in place.
+fn heal_plan(current: usize, current_output: Option<isize>, outs: &[puca_capture::OutputInfo], pinned: bool) -> Heal {
+    if !pinned {
+        let present: Vec<usize> = outs.iter().map(|o| o.index).collect();
+        return Heal::Rebuild(crate::topology::remap_monitor_for(current, &present));
+    }
+    let own = current_output.is_some_and(|h| outs.iter().any(|o| o.index == current && o.hmonitor == h));
+    if own {
+        Heal::Rebuild(current)
+    } else {
+        Heal::End
+    }
+}
+
+/// May a PINNED stream adopt the capture a rebuild just built? Only of its
+/// own screen at its own index: the build goes by index, and the outputs can
+/// be renumbered between the decision and the build, so the capture's own
+/// answer (`screen`) is what decides, never a fresh enumeration. A stream
+/// that may steer adopts what it built, as before.
+fn rebuilt_capture_accepted(
+    pinned: bool,
+    current: usize,
+    current_output: Option<isize>,
+    target: usize,
+    built_screen: Option<isize>,
+) -> bool {
+    !pinned || (target == current && current_output.is_some() && built_screen == current_output)
+}
+
+/// The end of a PINNED stream with nothing of its own left to show. Neither
+/// code is answered with a restart (session.rs `stream_end_code`):
+/// restarted by index, the stream could land on a screen nobody shared.
+///
+/// `no-screen:lid` only when the lid is why: it changed within the grace
+/// (`LidWatch::lid_changed_recently`), or the stream's own screen is the
+/// built-in panel dark behind it (`own_screen_dark`). Otherwise
+/// `no-screen:changed`. Being shut was enough until now, so a laptop DOCKED
+/// with its lid closed all session, whose screens a monitor plugged in
+/// renumbered, was told to connect again with the lid open: wrong advice,
+/// since the lid had nothing to do with it.
+fn changed_end(lid_changed_recently: bool, own_screen_dark: bool) -> &'static str {
+    if lid_changed_recently || own_screen_dark {
+        crate::virtual_screen::NO_SCREEN_LID
+    } else {
+        crate::virtual_screen::NO_SCREEN_CHANGED
+    }
+}
+
+/// How a stream ends when its capture fails for good: "capture: …", which
+/// the host app answers with a restart, unless the stream is PINNED and its
+/// screen is no longer the one at its index (gone, moved, or replaced), when
+/// a restart by index could land on another screen (`changed_end`).
+fn capture_failed_end(
+    pinned: bool,
+    current: usize,
+    current_output: Option<isize>,
+    outs: &[puca_capture::OutputInfo],
+    lid_changed_recently: bool,
+    error: &str,
+) -> String {
+    let still_there = current_output.is_some_and(|h| outs.iter().any(|o| o.index == current && o.hmonitor == h));
+    if pinned && !still_there {
+        changed_end(lid_changed_recently, false).to_string()
+    } else {
+        format!("capture: {error}")
+    }
+}
+
+/// Is a rebuild still wanted when its turn comes? Every one is, but a lid
+/// move decided before the viewer's latest switch (`RebuildFor::Lid`): the
+/// viewer's choice wins over a move decided on the screen it has left.
+fn rebuild_still_wanted(why: RebuildFor, switches_now: u64) -> bool {
+    match why {
+        RebuildFor::Lid { switches } => switches == switches_now,
+        RebuildFor::App | RebuildFor::SelfHeal => true,
+    }
+}
+
+/// Must a lid rebuild onto `target` let go of the capture the stream holds
+/// before it builds? Capture duplication is exclusive per output, so yes
+/// whenever the build may need a screen the held capture duplicates: All
+/// Displays (it opens every output), a held composite (it holds every
+/// output), the same screen (by HMONITOR), or a screen whose identity is
+/// unknown on either side. Any other build goes first, and the capture held
+/// is let go only once it worked, so one that fails changes nothing. `held`
+/// is None when the stream holds no capture, else whether it is the composite.
+fn lid_rebuild_releases_first(
+    target: usize,
+    target_output: Option<isize>,
+    held: Option<bool>,
+    current_output: Option<isize>,
+) -> bool {
+    match held {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            target == crate::composite::ALL_DISPLAYS
+                || target_output.is_none()
+                || current_output.is_none()
+                || target_output == current_output
+        }
+    }
 }
 
 /// A keyframe was asked for: by the peer's PLI, or by the controller
@@ -3518,6 +4520,149 @@ struct Pumped {
     still_blocked: bool,
 }
 
+/// What the capture half of a pump found: there is a picture to encode, and
+/// which kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Picture {
+    /// The capture is blocked (AccessLost) and the held picture goes out
+    /// anyway, for something waiting on one.
+    still_blocked: bool,
+    /// Nothing was presented, and the held picture goes out because the
+    /// pointer the HOST draws into it moved (`still_tick`).
+    pointer_only: bool,
+}
+
+/// THE CAPTURE HALF OF A PUMP: bring the picture up to date, or say why
+/// there is nothing to send. On `Ok` the picture to encode is the composite's
+/// surface or, for a single screen, `last_frame`.
+///
+/// Generic over the screen (`ScreenSource`) and separate from `pump_frame`,
+/// whose other half needs a real encoder and a peer connection, so every
+/// decision in here is exercised with scripted screens.
+fn refresh_picture<C: crate::composite::ScreenSource>(
+    capture: &mut AnyCapture<C>,
+    last_frame: &mut Option<puca_capture::Frame>,
+    // Something WAITING for a picture (`needs_picture`).
+    need_picture: bool,
+    // The host draws the pointer into the picture (no controller owns it).
+    host_draws: bool,
+    acquire_ms: u32,
+    session_cold: bool,
+    // A switch is still holding out for its whole first picture
+    // (switch_awaits_whole_picture). Only the composite's rule reads it.
+    switch_waiting: bool,
+    // The screen a single-screen picture must be of, by handle, or None for
+    // any (`screen_pin`).
+    pin: Option<isize>,
+) -> Result<Picture, PumpError> {
+    let blocked = Picture { still_blocked: true, pointer_only: false };
+    match capture {
+        AnyCapture::Virtual(v) => {
+            // What counts as "holding a picture": `canvas_is_a_picture`,
+            // which asks which tiles have one. Never a canvas no tile has
+            // painted: COLD, re-sending that birth zero-fill encoded a BLACK
+            // keyframe that counted as delivery and disabled the
+            // sleeping-display wake escalation exactly when it was needed;
+            // WARM, it used to be sent anyway (a constant `true`), and a
+            // switch into All Displays on a still screen showed black where
+            // the screen just left should be. That screen now brings its
+            // held picture into the composite (VirtualCapture::adopt), and
+            // while a switch waits for the whole picture a partly painted
+            // canvas is not re-sent either; the stranded-switch net fetches
+            // the screens still missing.
+            let holding = v.holds_picture(session_cold, switch_waiting);
+            match v.refresh(acquire_ms) {
+                Ok(()) => {
+                    // Some screen presented. The pointer may be over one that
+                    // did not, whose tile `refresh` left as it was.
+                    if host_draws {
+                        v.redraw_cursors();
+                    }
+                    Ok(Picture::default())
+                }
+                // NO SCREEN PRESENTED, AND ONE IS LOST: a security screen
+                // over all of them, or ONE screen in exclusive fullscreen or
+                // showing protected content beside screens that are merely
+                // still. The pointer over a still one still moves (its capture
+                // folds the pointer-only update in), and it used to stand
+                // frozen there, since only a Timeout brought it up to date.
+                // A moved pointer re-sends the canvas still marked blocked, so
+                // the blockage's clock keeps running. Behind a security screen
+                // nothing moves (no duplication reports a pointer), and this
+                // is the blockage it always was.
+                Err(CaptureError::AccessLost) => {
+                    let pointer = host_draws && holding && v.redraw_cursors();
+                    if should_resend_still(need_picture || pointer, holding) {
+                        Ok(Picture { still_blocked: true, pointer_only: pointer })
+                    } else {
+                        Err(PumpError::SecureDesktop)
+                    }
+                }
+                // STILL SCREEN — see the long note on the Single arm below.
+                // Same rules, same functions: an inline copy of a condition
+                // meant the test covered one arm of two.
+                Err(CaptureError::Timeout) => {
+                    match still_tick(need_picture, holding, host_draws, || v.redraw_cursors()) {
+                        StillTick::NoChange => Err(PumpError::NoChange),
+                        StillTick::Resend { pointer } => Ok(Picture { still_blocked: false, pointer_only: pointer }),
+                    }
+                }
+                Err(e) => Err(PumpError::CaptureFailed(e.to_string())),
+            }
+        }
+        AnyCapture::Single(c) => {
+            let got = c.next_frame(acquire_ms);
+            // ANOTHER SCREEN, IN THE CAPTURE THIS STREAM HOLDS: it rebuilds a lost
+            // duplication by index, and anything that renumbers the outputs (a
+            // panel leaving the desktop as its lid shuts, a monitor unplugged)
+            // can put another screen at that index (`ScreenCapture::screen`). For
+            // a stream PINNED to its screen that ends it, before anything of it
+            // goes out: not its picture, not the held one re-sent, not a pointer
+            // it moved. Asked after every poll, whatever it answered, because the
+            // duplication is rebuilt inside the poll; and always, not only around
+            // the lid, whose state arrives on its own clock or not at all.
+            if pin.is_some_and(|want| c.screen() != Some(want)) {
+                return Err(PumpError::ScreenChanged);
+            }
+            match got {
+                Ok(f) => {
+                    *last_frame = Some(f);
+                    Ok(Picture::default())
+                }
+                // A STILL SCREEN PRODUCES NOTHING, and that used to mean the
+                // stream produced nothing either — which is fine while a picture
+                // is already on the wire and disastrous straight after the
+                // encoder is rebuilt. A monitor switch or a quality change drops
+                // the encoder, and the replacement needs frames before it emits
+                // anything; if the destination screen happens to be static, the
+                // only frames it can ever get are the ones the user creates by
+                // moving something on it. That is the ten-second monitor switch,
+                // the composite that never appears, and every unanswered keyframe
+                // request: the agent was waiting for the desktop, and the desktop
+                // was waiting for the user.
+                //
+                // So while a keyframe is outstanding, re-send the last picture we
+                // captured. It is the same image, which is exactly what a still
+                // screen means. And while the host draws the pointer, a pointer
+                // that moved over it makes it a new picture (`still_tick`).
+                Err(CaptureError::AccessLost) if should_resend_still(need_picture, last_frame.is_some()) => {
+                    Ok(blocked)
+                }
+                Err(CaptureError::AccessLost) => Err(PumpError::SecureDesktop),
+                Err(CaptureError::Timeout) => {
+                    let holding = last_frame.is_some();
+                    let redraw = || last_frame.as_mut().is_some_and(|f| c.redraw_cursor(f));
+                    match still_tick(need_picture, holding, host_draws, redraw) {
+                        StillTick::NoChange => Err(PumpError::NoChange),
+                        StillTick::Resend { pointer } => Ok(Picture { still_blocked: false, pointer_only: pointer }),
+                    }
+                }
+                Err(e) => Err(PumpError::CaptureFailed(e.to_string())),
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pump_frame(
     capture: &mut AnyCapture,
@@ -3540,88 +4685,30 @@ fn pump_frame(
     // What this pump is for: the clock's tick, the tick a latency probe is
     // waiting on, or an early look for an input's change (PumpFor).
     why: PumpFor,
+    // The host draws the pointer into the picture: no controller owns it.
+    host_draws: bool,
+    // The screen a single-screen picture must be of (`screen_pin`).
+    pin: Option<isize>,
 ) -> Result<Pumped, PumpError> {
     let t_capture = Instant::now();
     // Something WAITING for a picture: a keyframe (a rebuilt encoder, a peer's
     // request), the viewer fit (a stage change, a step settling) or a latency
     // probe. Each is a reason to re-send the held picture of a still screen —
-    // on the clock's tick. An early look takes a NEW picture or nothing.
+    // on the clock's tick. An early look takes a NEW picture or nothing (and
+    // a pointer the host draws, moved, is a new picture).
     let need_picture = needs_picture(why, *want_keyframe, fit.needs_frame());
-    let acquire_ms = why.acquire_ms();
-    // The capture answered AccessLost and the held picture is re-sent anyway.
-    let mut still_blocked = false;
+    let picture = refresh_picture(
+        capture, last_frame, need_picture, host_draws, why.acquire_ms(), session_cold, switch_waiting, pin,
+    )?;
+    let still_blocked = picture.still_blocked;
     // BORROWED, not owned. The composite path used to hand back a cloned
     // canvas every tick — 56 MB per frame on a three-screen desktop, competing
     // for memory bandwidth with the encoder that is about to read it.
     let owned;
     let (fw, fh, fstride, fbytes): (u32, u32, usize, &[u8]) = match capture {
-        AnyCapture::Virtual(v) => {
-            // What counts as "holding a picture": `canvas_is_a_picture`,
-            // which asks which tiles have one. Never a canvas no tile has
-            // painted: COLD, re-sending that birth zero-fill encoded a BLACK
-            // keyframe that counted as delivery and disabled the
-            // sleeping-display wake escalation exactly when it was needed;
-            // WARM, it used to be sent anyway (a constant `true`), and a
-            // switch into All Displays on a still screen showed black where
-            // the screen just left should be. That screen now brings its
-            // held picture into the composite (VirtualCapture::adopt), and
-            // while a switch waits for the whole picture a partly painted
-            // canvas is not re-sent either; the stranded-switch net fetches
-            // the screens still missing.
-            let holding = v.holds_picture(session_cold, switch_waiting);
-            match v.refresh(acquire_ms) {
-                Ok(()) => {}
-                // STILL SCREEN — see the long note on the Single arm below.
-                // Same rule, same function: an inline copy of this condition
-                // meant the test covered one arm of two.
-                Err(CaptureError::AccessLost) if !should_resend_still(need_picture, holding) => {
-                    return Err(PumpError::SecureDesktop)
-                }
-                Err(CaptureError::Timeout) if !should_resend_still(need_picture, holding) => {
-                    return Err(PumpError::NoChange)
-                }
-                Err(CaptureError::AccessLost) => still_blocked = true,
-                Err(CaptureError::Timeout) => {}
-                Err(e) => return Err(PumpError::Fatal(format!("capture: {e}"))),
-            }
-            let (w, h, s, b) = v.surface();
-            (w, h, s, b)
-        }
-        AnyCapture::Single(c) => {
-            match c.next_frame(acquire_ms) {
-                Ok(f) => {
-                    *last_frame = Some(f);
-                }
-                Err(ref err @ (CaptureError::Timeout | CaptureError::AccessLost)) => {
-                    let secure = matches!(err, CaptureError::AccessLost);
-                    // A STILL SCREEN PRODUCES NOTHING, and that used to mean
-                    // the stream produced nothing either — which is fine while
-                    // a picture is already on the wire and disastrous straight
-                    // after the encoder is rebuilt. A monitor switch or a
-                    // quality change drops the encoder, and the replacement
-                    // needs frames before it emits anything; if the destination
-                    // screen happens to be static, the only frames it can ever
-                    // get are the ones the user creates by moving something on
-                    // it. That is the ten-second monitor switch, the composite
-                    // that never appears, and every unanswered keyframe
-                    // request: the agent was waiting for the desktop, and the
-                    // desktop was waiting for the user.
-                    //
-                    // So while a keyframe is outstanding, re-send the last
-                    // picture we captured. It is the same image, which is
-                    // exactly what a still screen means.
-                    if !should_resend_still(need_picture, last_frame.is_some()) {
-                        return Err(if secure {
-                            PumpError::SecureDesktop
-                        } else {
-                            PumpError::NoChange
-                        });
-                    }
-                    still_blocked = secure;
-                }
-                Err(e) => return Err(PumpError::Fatal(format!("capture: {e}"))),
-            }
-            owned = last_frame.as_ref().expect("set or returned above");
+        AnyCapture::Virtual(v) => v.surface(),
+        AnyCapture::Single(_) => {
+            owned = last_frame.as_ref().expect("refresh_picture holds a picture whenever it answers Ok");
             (owned.width, owned.height, owned.stride, &owned.bgra)
         }
     };
@@ -3700,6 +4787,7 @@ fn pump_frame(
                 .send_frame(&encoded, now)
                 .map_err(|e| PumpError::Fatal(format!("send: {e}")))?;
             stats.samples += 1;
+            stats.pointer += u32::from(picture.pointer_only);
             stats.capture.add(capture_took);
             stats.fit.add(fit_took);
             if fitted_now.step > 1 {
@@ -4537,7 +5625,7 @@ mod tests {
     #[test]
     fn a_malformed_offer_does_not_start_a_thread() {
         let (tx, _rx) = std::sync::mpsc::channel();
-        assert!(start("not an sdp", 0, 30, 2_000_000, (0, 0), StreamMode::Video, &[], tx, "s".into(), 1, None).is_err());
+        assert!(start("not an sdp", 0, None, 30, 2_000_000, (0, 0), StreamMode::Video, &[], tx, "s".into(), 1, None, false, HeldScreens::default()).is_err());
     }
 
     struct DropTrackedResource {
@@ -4881,8 +5969,8 @@ mod tests {
     /// used to start black, the warm pump re-sent that canvas as the switch's
     /// keyframe (its holding rule was a constant `true`), and the send ended
     /// the switch. Walked with the loop's own functions over a scripted
-    /// one-screen composite, in the loop's order: the build reads the held
-    /// frame, then adopt_new_capture drops it.
+    /// one-screen composite, in the loop's order: the build takes the held
+    /// frame in, and adopt_new_capture finds nothing left to drop.
     #[test]
     fn a_switch_into_all_displays_on_a_still_screen_is_answered_with_its_held_picture() {
         use crate::composite::testing::{composite, output, picture, Scripted};
@@ -4898,7 +5986,7 @@ mod tests {
 
         let mut capture = AnyCapture::Virtual(composite(
             vec![(output(0, 0, 0, 4, 2), Scripted::still())],
-            last_frame.as_ref().map(|f| (current_monitor, f)),
+            last_frame.take().map(|f| (current_monitor, f)),
         ));
         adopt_new_capture(
             &mut current_monitor, &mut current_output, ALL_DISPLAYS, None,
@@ -4951,7 +6039,7 @@ mod tests {
                 (output(0, 0, 0, 4, 2), Scripted::polls(vec![None, Some(picture(4, 2, 0x80))])),
                 (output(1, 4, 0, 4, 2), Scripted::polls(vec![Some(picture(4, 2, 0x20))])),
             ],
-            last_frame.as_ref().map(|f| (current_monitor, f)),
+            last_frame.take().map(|f| (current_monitor, f)),
         ));
         adopt_new_capture(
             &mut current_monitor, &mut current_output, ALL_DISPLAYS, None,
@@ -5002,7 +6090,7 @@ mod tests {
         let held = picture(4, 2, 0x80);
         let v = composite(
             vec![(output(0, 0, 0, 4, 2), Scripted::still()), (output(1, 4, 0, 4, 2), Scripted::still())],
-            Some((1, &held)),
+            Some((1, held.clone())),
         );
         let waiting = switch_awaits_whole_picture(Some(t0), t0);
         assert!(waiting);
@@ -5347,6 +6435,197 @@ mod tests {
         );
     }
 
+    // ---- the host-drawn pointer over a still screen -----------------------
+
+    /// THE 2026-10-26 FIELD CASE, decided. The host draws the pointer, the
+    /// screen presents nothing, the mouse moves: the held picture, with the
+    /// pointer redrawn where it is now, goes out.
+    #[test]
+    fn a_pointer_the_host_draws_moving_over_a_still_screen_is_a_new_picture() {
+        let mut asked = 0;
+        let mut moved = || {
+            asked += 1;
+            true
+        };
+        assert_eq!(still_tick(false, true, true, &mut moved), StillTick::Resend { pointer: true });
+        assert_eq!(asked, 1);
+    }
+
+    /// NEGATIVE CONTROLS: what must still cost nothing.
+    #[test]
+    fn a_still_tick_sends_nothing_for_a_pointer_it_does_not_draw_or_that_did_not_move() {
+        // Drawing off (the viewer draws its own pointer): the capture is not
+        // even asked, and the tick is free.
+        let mut asked = 0;
+        assert_eq!(still_tick(false, true, false, || { asked += 1; true }), StillTick::NoChange);
+        assert_eq!(asked, 0, "drawing off: the pointer is not asked about");
+        // Drawing on, the pointer did not move: free.
+        assert_eq!(still_tick(false, true, true, || false), StillTick::NoChange);
+        // Nothing held to draw it on: not asked, nothing sent.
+        assert_eq!(still_tick(false, false, true, || { asked += 1; true }), StillTick::NoChange);
+        assert_eq!(asked, 0, "no picture held: the pointer is not asked about");
+        // The old reasons still re-send, the pointer unmoved or not drawn.
+        assert_eq!(still_tick(true, true, true, || false), StillTick::Resend { pointer: false });
+        assert_eq!(still_tick(true, true, false, || true), StillTick::Resend { pointer: false });
+        assert_eq!(still_tick(true, false, true, || true), StillTick::NoChange, "never with nothing held");
+    }
+
+    /// The capture half of the pump, on ONE scripted screen: the screen
+    /// presents once, then stands still while the pointer the host draws
+    /// moves, stops, and moves again.
+    #[test]
+    fn a_still_screen_sends_its_held_picture_exactly_when_the_host_pointer_moves() {
+        use crate::composite::testing::{picture, Scripted};
+        let screen = Scripted::polls(vec![Some(picture(4, 2, 0x40))]).pointer(vec![Some(0xEE), None, Some(0xEF)]);
+        let mut capture = AnyCapture::Single(screen);
+        let mut held = None;
+        let pump = |c: &mut AnyCapture<Scripted>, held: &mut Option<puca_capture::Frame>, draws: bool| {
+            refresh_picture(c, held, false, draws, 5, false, false, None)
+        };
+        assert_eq!(pump(&mut capture, &mut held, true).ok(), Some(Picture::default()), "the present");
+        // Moved: a pointer-only picture, drawn into the held frame.
+        assert_eq!(
+            pump(&mut capture, &mut held, true).ok(),
+            Some(Picture { still_blocked: false, pointer_only: true }),
+        );
+        assert_eq!(held.as_ref().unwrap().bgra[..3], [0xEE; 3], "the held picture carries the moved pointer");
+        // NEGATIVE CONTROL: it stood still: nothing to send.
+        assert!(matches!(pump(&mut capture, &mut held, true), Err(PumpError::NoChange)));
+        // NEGATIVE CONTROL: drawing handed to the viewer: nothing asked,
+        // nothing sent, though the script has a move left.
+        assert!(matches!(pump(&mut capture, &mut held, false), Err(PumpError::NoChange)));
+        let AnyCapture::Single(s) = &capture else { unreachable!() };
+        assert_eq!(s.redraws, 2, "drawing off asked nothing");
+        // Back to the host: the move that was waiting is drawn.
+        assert_eq!(
+            pump(&mut capture, &mut held, true).ok(),
+            Some(Picture { still_blocked: false, pointer_only: true }),
+        );
+        assert_eq!(held.as_ref().unwrap().bgra[..3], [0xEF; 3]);
+    }
+
+    /// The same on All Displays, both ways round: nothing presents and the
+    /// pointer moves on a screen; and a screen presents while the pointer
+    /// moves on ANOTHER one, which `refresh` alone would leave as it was.
+    #[test]
+    fn all_displays_sends_the_host_pointer_moving_over_a_still_screen() {
+        use crate::composite::testing::{composite, output, picture, Scripted};
+        let (screen0, screen1) = (output(0, 0, 0, 4, 2), output(1, 4, 0, 4, 2));
+        // Screen 0's script, poll by poll: the first pump's pass presents;
+        // the second pump's pass and its blocking wait, and the third pump's
+        // pass, find nothing (its wait goes to screen 1); the fourth pump's
+        // pass presents again. Screen 1 presents once. Its pointer, redraw by
+        // redraw: unmoved (pump 1, after the presents), unmoved (pump 2),
+        // moved (pump 3), moved again (pump 4), then unmoved.
+        let mut capture = AnyCapture::Virtual(composite(
+            vec![
+                (
+                    screen0,
+                    Scripted::polls(vec![Some(picture(4, 2, 0x20)), None, None, None, Some(picture(4, 2, 0x21))]),
+                ),
+                (
+                    screen1,
+                    Scripted::polls(vec![Some(picture(4, 2, 0x40))]).pointer(vec![None, None, Some(0xEE), Some(0xEF)]),
+                ),
+            ],
+            None,
+        ));
+        let mut held = None;
+        let pump = |c: &mut AnyCapture<Scripted>, held: &mut Option<puca_capture::Frame>| {
+            refresh_picture(c, held, false, true, 5, false, false, None)
+        };
+        // Screen 1's first pixel, and screen 0's: an 8x2 canvas of 4-byte
+        // pixels, screen 1 from x = 4.
+        let px = |c: &AnyCapture<Scripted>, x: usize| match c {
+            AnyCapture::Virtual(v) => {
+                let b = v.surface().3;
+                [b[x * 4], b[x * 4 + 1], b[x * 4 + 2]]
+            }
+            AnyCapture::Single(_) => unreachable!(),
+        };
+        assert_eq!(pump(&mut capture, &mut held).ok(), Some(Picture::default()), "both present");
+        // NEGATIVE CONTROL: still, and the pointer did not move: free.
+        assert!(matches!(pump(&mut capture, &mut held), Err(PumpError::NoChange)));
+        // Still, and it moved on screen 1: the canvas is a new picture.
+        assert_eq!(
+            pump(&mut capture, &mut held).ok(),
+            Some(Picture { still_blocked: false, pointer_only: true }),
+        );
+        assert_eq!(px(&capture, 4), [0xEE; 3]);
+        // Screen 0 presents while the pointer moves on still screen 1: the
+        // frame that goes out has both.
+        assert_eq!(pump(&mut capture, &mut held).ok(), Some(Picture::default()));
+        assert_eq!(px(&capture, 0), [0x21; 3], "screen 0's new picture");
+        assert_eq!(px(&capture, 4), [0xEF; 3], "and screen 1's pointer where it is now");
+        assert!(matches!(pump(&mut capture, &mut held), Err(PumpError::NoChange)), "then still again");
+        assert!(held.is_none(), "All Displays keeps its pictures in the composite, not in the stream's still");
+    }
+
+    /// AT MOST ONE ENCODE PER FRAME INTERVAL, and none for an idle mouse.
+    /// One simulated second at 60 fps, the loop's own pacing (the clock's
+    /// tick and the early look after an input, `early_look_allowed`), input
+    /// every 8 ms, and a screen that never presents. The pointer moving on
+    /// every look is the worst case a mouse can make.
+    #[test]
+    fn a_moving_host_pointer_costs_at_most_the_frame_rate_and_an_idle_one_nothing() {
+        let run = |moving: bool| {
+            let t0 = Instant::now();
+            let interval = Duration::from_micros(16_667);
+            let mut next_frame = t0;
+            let mut last_frame_at: Option<Instant> = None;
+            let mut watching: Option<Instant> = None;
+            let mut sent = 0u32;
+            for ms in 0..1000u64 {
+                let now = t0 + Duration::from_millis(ms);
+                if ms % 8 == 0 {
+                    watching = Some(now + crate::latency::WATCH_FOR);
+                }
+                let due = now >= next_frame;
+                let early = !due && early_look_allowed(now, watching, next_frame, last_frame_at, interval, None);
+                if !(due || early) {
+                    continue;
+                }
+                if due {
+                    next_frame += interval;
+                }
+                if let StillTick::Resend { .. } = still_tick(false, true, true, || moving) {
+                    sent += 1;
+                    last_frame_at = Some(now);
+                    if early {
+                        next_frame = now + interval;
+                        watching = None;
+                    }
+                }
+            }
+            sent
+        };
+        let moving = run(true);
+        assert!(moving <= 61, "{moving} pointer frames in a second at 60 fps");
+        assert!(moving >= 55, "a moving pointer must be shown at the frame rate: {moving}");
+        assert_eq!(run(false), 0, "an idle pointer costs nothing");
+    }
+
+    /// A stream the HOST stops, or the viewer closes, says so, with how long
+    /// it ran and what it sent: on 2026-10-26 those ends left no line on
+    /// either side, and the timeline had to be pieced together without them.
+    /// Pinned at both of run()'s clean ways out as well.
+    #[test]
+    fn a_clean_end_says_who_ended_it_how_long_it_ran_and_what_it_sent() {
+        assert_eq!(
+            clean_end_line(CleanEnd::Stopped, Duration::from_millis(263_440), 11_340),
+            "stopped by the host after 263.4s, 11340 frame(s) sent",
+        );
+        assert_eq!(
+            clean_end_line(CleanEnd::ViewerClosed, Duration::from_secs(5), 0),
+            "ended: the viewer closed the connection after 5.0s, 0 frame(s) sent",
+        );
+        let src = include_str!("stream.rs").replace('\r', "");
+        let run = src.split("\nfn run(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(run.contains("clean_end_line(CleanEnd::ViewerClosed, started_at.elapsed(), frames_sent)"));
+        let tail = run.rsplit_once("clean_end_line(CleanEnd::Stopped, started_at.elapsed(), frames_sent)");
+        assert!(tail.is_some_and(|(_, after)| after.trim() == ");\n    Ok(())".trim()), "the stop flag's way out says so");
+    }
+
     #[test]
     fn a_still_screen_and_a_secure_desktop_are_not_the_same_thing() {
         // The regression this pair exists to catch. `should_resend_still`
@@ -5363,5 +6642,294 @@ mod tests {
         let mut fit = crate::composite::FitState::new();
         fit.stage_changed();
         assert!(should_resend_still(false || fit.needs_frame(), true), "a changed stage re-sends the held picture");
+    }
+
+    /// REVIEW FINDING 5 (one screen lost). All Displays with one screen in
+    /// exclusive fullscreen (AccessLost) beside a still one: `refresh` answers
+    /// AccessLost, and the pointer the host draws over the still screen used
+    /// to stand frozen, since only a Timeout brought it up to date. It moves,
+    /// re-sent still marked blocked so the blockage's clock runs on.
+    #[test]
+    fn all_displays_moves_the_host_pointer_while_another_screen_is_lost() {
+        use crate::composite::testing::{composite, output, picture, Scripted};
+        let (screen0, screen1) = (output(0, 0, 0, 4, 2), output(1, 4, 0, 4, 2));
+        let mut capture = AnyCapture::Virtual(composite(
+            vec![
+                (screen0, Scripted::still().lost()),
+                (screen1, Scripted::polls(vec![Some(picture(4, 2, 0x40))]).pointer(vec![None, Some(0xEE), None])),
+            ],
+            None,
+        ));
+        let mut held = None;
+        let pump = |c: &mut AnyCapture<Scripted>, held: &mut Option<puca_capture::Frame>, draws: bool| {
+            refresh_picture(c, held, false, draws, 5, false, false, None)
+        };
+        assert_eq!(pump(&mut capture, &mut held, true).ok(), Some(Picture::default()), "screen 1 presents");
+        assert_eq!(
+            pump(&mut capture, &mut held, true).ok(),
+            Some(Picture { still_blocked: true, pointer_only: true }),
+            "the pointer moved over the still screen while the other is lost",
+        );
+        let AnyCapture::Virtual(v) = &capture else { unreachable!() };
+        assert_eq!(v.surface().3[16..19], [0xEE; 3], "and it is on the canvas");
+        // NEGATIVE CONTROLS: unmoved, or drawn by the viewer, it is the
+        // blockage it always was.
+        assert!(matches!(pump(&mut capture, &mut held, true), Err(PumpError::SecureDesktop)));
+        assert!(matches!(pump(&mut capture, &mut held, false), Err(PumpError::SecureDesktop)));
+    }
+
+    // ---- a stream pinned to its screen (StartStream `steer_on_lid` off) -------
+
+    const PANEL: isize = 0x10;
+    const EXTERNAL: isize = 0x20;
+
+    /// Outputs by index, each with its handle.
+    fn outs(handles: &[isize]) -> Vec<puca_capture::OutputInfo> {
+        use crate::composite::testing::output;
+        handles
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| puca_capture::OutputInfo { hmonitor: h, ..output(i, i as i32 * 4, 0, 4, 2) })
+            .collect()
+    }
+
+    /// REVIEW, ROUND 3 (a). The panel leaves the desktop BEFORE the lid's
+    /// state arrives (the power callback has its own clock, and may never
+    /// come), and the capture, rebuilt by index, now delivers the external
+    /// monitor. The check was armed only around the lid, so that first
+    /// picture went out. Now every picture of a pinned stream is checked:
+    /// nothing of the external monitor is sent or kept, and the stream ends
+    /// `no-screen:changed`.
+    #[test]
+    fn a_screen_renumbered_before_the_lid_says_anything_sends_nothing_and_ends_changed() {
+        use crate::composite::testing::{picture, Scripted};
+        // No lid state at all: the pin does not ask for one.
+        let pin = screen_pin(false, 0, Some(PANEL));
+        assert_eq!(pin, Some(PANEL));
+        let mut capture = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]).on_screen(EXTERNAL));
+        let mut held = None;
+        assert!(matches!(
+            refresh_picture(&mut capture, &mut held, true, true, 5, false, false, pin),
+            Err(PumpError::ScreenChanged),
+        ));
+        assert!(held.is_none(), "nothing of it is kept");
+        assert_eq!(changed_end(false, false), crate::virtual_screen::NO_SCREEN_CHANGED);
+        assert_eq!(changed_end(true, false), crate::virtual_screen::NO_SCREEN_LID, "with the lid just changed, its code");
+        // CONTROL: its own screen goes out.
+        let mut own = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]).on_screen(PANEL));
+        assert!(refresh_picture(&mut own, &mut held, true, true, 5, false, false, pin).is_ok());
+    }
+
+    /// REVIEW, ROUND 3 (b). Twenty seconds after the lid changed, the check
+    /// lapsed while the capture still sat on another screen: a still screen
+    /// answered NoChange, which read as a working capture, and its next
+    /// picture went out. Now nothing is sent once the capture shows another
+    /// screen, however long after the lid: not its picture, not the held
+    /// picture re-sent, not a pointer moved over it.
+    #[test]
+    fn a_capture_left_on_another_screen_sends_nothing_however_long_after_the_lid() {
+        use crate::composite::testing::{picture, Scripted};
+        let t = Instant::now();
+        let mut watch = crate::virtual_screen::LidWatch::new(t, Some(false), None);
+        watch.observe(Some(true), t);
+        watch.observe(Some(false), t + Duration::from_secs(1));
+        let late = t + Duration::from_secs(60);
+        assert!(!watch.lid_changed_recently(late), "precondition: long past the lid's window");
+        let pin = screen_pin(false, 0, Some(PANEL));
+        // A still screen, a picture of the panel held, a keyframe wanted, the
+        // pointer moving: every way a picture could go out.
+        let mut still = AnyCapture::Single(Scripted::still().pointer(vec![Some(0xEE)]).on_screen(EXTERNAL));
+        let mut held = Some(picture(4, 2, 0x30));
+        assert!(matches!(
+            refresh_picture(&mut still, &mut held, true, true, 5, false, false, pin),
+            Err(PumpError::ScreenChanged),
+        ));
+        assert_eq!(held.as_ref().unwrap().bgra[..3], [0x30; 3], "the held picture is not touched");
+        let mut presenting = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]).on_screen(EXTERNAL));
+        assert!(matches!(
+            refresh_picture(&mut presenting, &mut held, false, true, 5, false, false, pin),
+            Err(PumpError::ScreenChanged),
+        ));
+        // A screen that cannot be named is not the stream's either.
+        let mut nameless = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]));
+        assert!(matches!(
+            refresh_picture(&mut nameless, &mut held, false, true, 5, false, false, pin),
+            Err(PumpError::ScreenChanged),
+        ));
+        assert_eq!(screen_pin(false, 0, None), Some(0), "no handle known pins to none");
+    }
+
+    /// REVIEW, ROUND 3 (c). A rebuild decided by handle is BUILT by index one
+    /// pass later, and the stream used to take the new capture's identity
+    /// from a fresh enumeration: renumbered in between, it adopted the other
+    /// screen, and its check from then on protected THAT screen. The capture's
+    /// own answer decides now, and another screen is never adopted; nor is
+    /// the stream's own screen at another index.
+    #[test]
+    fn a_renumbering_between_deciding_a_rebuild_and_building_it_is_rejected() {
+        // Decided on screen 1, the external monitor; built, it is the panel.
+        assert!(!rebuilt_capture_accepted(true, 1, Some(EXTERNAL), 1, Some(PANEL)));
+        assert!(!rebuilt_capture_accepted(true, 1, Some(EXTERNAL), 1, None), "or no screen it can name");
+        assert!(!rebuilt_capture_accepted(true, 1, Some(EXTERNAL), 0, Some(EXTERNAL)), "never to another index");
+        assert!(!rebuilt_capture_accepted(true, 1, None, 1, Some(EXTERNAL)), "nothing to prove it by");
+        // CONTROLS: its own screen at its own index; and a steering stream
+        // adopts what it built, as before.
+        assert!(rebuilt_capture_accepted(true, 1, Some(EXTERNAL), 1, Some(EXTERNAL)));
+        assert!(rebuilt_capture_accepted(false, 1, Some(EXTERNAL), 0, Some(PANEL)));
+    }
+
+    /// REVIEW, ROUND 3 (the dock). With the lid shut all session, a monitor
+    /// added or removed AFTER the stream's screen renumbers nothing it shows:
+    /// same handle, same index. The stream keeps going: the self-heal rebuilds
+    /// it in place, the rebuilt capture is adopted, and its pictures go out.
+    /// What it does not do any more is follow its screen to a NEW index
+    /// (the host app's consent is by index): that ends it.
+    #[test]
+    fn a_renumbering_that_leaves_the_pinned_screen_in_place_keeps_the_stream() {
+        use crate::composite::testing::{picture, Scripted};
+        let docked = outs(&[PANEL, EXTERNAL, 0x30]);
+        assert_eq!(heal_plan(1, Some(EXTERNAL), &docked, true), Heal::Rebuild(1));
+        assert!(rebuilt_capture_accepted(true, 1, Some(EXTERNAL), 1, Some(EXTERNAL)));
+        let mut capture = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]).on_screen(EXTERNAL));
+        let mut held = None;
+        assert!(refresh_picture(&mut capture, &mut held, true, true, 5, false, false, screen_pin(false, 1, Some(EXTERNAL))).is_ok());
+        assert!(capture_failed_end(true, 1, Some(EXTERNAL), &docked, true, "x").starts_with("capture: "), "a failure there restarts");
+        // Its screen moved to index 0 (the panel left): not followed.
+        let left = outs(&[EXTERNAL]);
+        assert_eq!(heal_plan(1, Some(EXTERNAL), &left, true), Heal::End);
+        // Another screen at its index: not rebuilt onto.
+        assert_eq!(heal_plan(0, Some(PANEL), &left, true), Heal::End);
+        assert_eq!(capture_failed_end(true, 0, Some(PANEL), &left, false, "x"), crate::virtual_screen::NO_SCREEN_CHANGED);
+        assert_eq!(capture_failed_end(true, 0, Some(PANEL), &left, true, "x"), crate::virtual_screen::NO_SCREEN_LID);
+    }
+
+    /// REVIEW (after round 3, LOW). A laptop DOCKED with its lid shut all
+    /// session: plugging a monitor in renumbers the outputs and takes the
+    /// pinned screen's place. That end was labelled the lid's, since being
+    /// shut counted, and the host app told the user to connect again with the
+    /// lid open: wrong advice for a docked laptop. It is `no-screen:changed`;
+    /// the stream's own rebuilds do not make it the lid's either. CONTROL: the
+    /// panel the stream shows going dark at a lid close is the lid's.
+    #[test]
+    fn a_docked_laptops_end_is_not_the_lids() {
+        use crate::virtual_screen::{own_screen_dark, Displays, Flight, LidWatch, NO_SCREEN_CHANGED, NO_SCREEN_LID};
+        const ALL: usize = crate::composite::ALL_DISPLAYS;
+        let t = Instant::now();
+        // Shut before the stream began; an hour on, a monitor plugged in has
+        // taken index 1, where the external monitor the stream shows was.
+        let mut docked = LidWatch::new(t, Some(true), None);
+        let later = t + Duration::from_secs(3600);
+        docked.acted(later, Flight::Move);
+        let renumbered = Displays {
+            outputs: vec![0, 1],
+            dark: vec![0],
+            builtin: vec![0],
+            virtual_screen: vec![],
+            handles: vec![(0, PANEL), (1, 0x30)],
+        };
+        let own_dark = own_screen_dark(1, Some(EXTERNAL), &renumbered, ALL);
+        assert_eq!(changed_end(docked.lid_changed_recently(later), own_dark), NO_SCREEN_CHANGED);
+        let lid_recent = docked.lid_changed_recently(later);
+        assert_eq!(capture_failed_end(true, 1, Some(EXTERNAL), &outs(&[PANEL, 0x30]), lid_recent, "x"), NO_SCREEN_CHANGED);
+        // CONTROL: the lid shuts during the session, and the panel the stream
+        // shows goes dark behind it.
+        let mut session = LidWatch::new(t, Some(false), None);
+        session.observe(Some(true), later);
+        let behind = Displays {
+            outputs: vec![0],
+            dark: vec![0],
+            builtin: vec![0],
+            virtual_screen: vec![],
+            handles: vec![(0, PANEL)],
+        };
+        let at_close = later + Duration::from_secs(2);
+        let own_dark = own_screen_dark(0, Some(PANEL), &behind, ALL);
+        assert_eq!(changed_end(session.lid_changed_recently(at_close), own_dark), NO_SCREEN_LID);
+        // A panel dark behind a lid shut all session is the lid's too.
+        assert_eq!(changed_end(docked.lid_changed_recently(later), own_dark), NO_SCREEN_LID);
+    }
+
+    /// The run loop uses the checks above as they are: the pin of every
+    /// picture gated on nothing else (around the lid only, it missed (a) and
+    /// (b)), every rebuild judged by the capture's own answer, and every
+    /// identity the stream adopts read from the capture itself, never from an
+    /// enumeration (which is how (c) adopted the other screen).
+    #[test]
+    fn the_loop_checks_every_picture_and_every_rebuild_by_the_capture() {
+        let src = include_str!("stream.rs").replace('\r', "");
+        let run = src.split("\nfn run(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(run.contains("let pin = screen_pin(steer_on_lid, current_monitor, current_output);\n"));
+        assert!(run.contains("if !rebuilt_capture_accepted("));
+        assert!(run.contains("let mut current_output: Option<isize> = capture.as_ref().and_then(|c| c.screen());"));
+        assert_eq!(run.matches("capture.as_ref().and_then(|c| c.screen()),").count(), 2, "a switch and a rebuild");
+        assert!(!run.contains("screen_identity(&outs, target_monitor),"), "never an enumeration's answer");
+        // A pinned end names the lid only when the lid is why (docked is not):
+        // the lid watch's end asks about the stream's own screen, and the two
+        // ends that name the lid outright are a steering stream's only.
+        assert!(run.contains("crate::virtual_screen::own_screen_dark(current_monitor, current_output, &d, all)"));
+        assert!(run.contains("if last && lid == Some(true) && is_pinned(steer_on_lid, current_monitor) {"));
+        assert!(run.contains("if lid == Some(true) && !is_pinned(steer_on_lid, current_monitor) {"));
+    }
+
+    /// THE CONTROL. A stream the host app lets steer keeps today's
+    /// behaviour: no screen check on its pictures, the self-heal by index,
+    /// and a capture that fails ends it restartably.
+    #[test]
+    fn a_steering_stream_still_restarts_normally() {
+        use crate::composite::testing::{picture, Scripted};
+        const ALL: usize = crate::composite::ALL_DISPLAYS;
+        assert_eq!(screen_pin(true, 0, Some(PANEL)), None);
+        assert_eq!(screen_pin(false, ALL, None), None, "All Displays shows every screen");
+        let mut other = AnyCapture::Single(Scripted::polls(vec![Some(picture(4, 2, 0x40))]).on_screen(EXTERNAL));
+        let mut held = None;
+        assert!(refresh_picture(&mut other, &mut held, true, true, 5, false, false, screen_pin(true, 0, Some(PANEL))).is_ok());
+        let left = outs(&[EXTERNAL]);
+        assert_eq!(heal_plan(0, Some(PANEL), &left, false), Heal::Rebuild(0), "by index, as ever");
+        assert_eq!(heal_plan(3, Some(PANEL), &left, false), Heal::Rebuild(0));
+        assert_eq!(
+            capture_failed_end(false, 0, Some(PANEL), &left, false, "no monitor at index 0"),
+            "capture: no monitor at index 0",
+        );
+    }
+
+    /// REVIEW POINT 7 (the viewer wins). A lid move queued just before the
+    /// viewer's switch was decided on the screen the viewer then left; it is
+    /// dropped when its turn comes. Every other rebuild still runs.
+    #[test]
+    fn a_lid_move_decided_before_the_viewers_switch_is_dropped() {
+        assert!(rebuild_still_wanted(RebuildFor::Lid { switches: 3 }, 3));
+        assert!(!rebuild_still_wanted(RebuildFor::Lid { switches: 3 }, 4));
+        assert!(rebuild_still_wanted(RebuildFor::App, 9));
+        assert!(rebuild_still_wanted(RebuildFor::SelfHeal, 9));
+    }
+
+    /// REVIEW FINDING 4 (the cost). A lid move releases the capture it holds
+    /// only when the build needs a screen that capture duplicates, so a move
+    /// that fails leaves the stream as it was.
+    #[test]
+    fn a_lid_rebuild_lets_go_first_only_of_a_capture_in_its_way() {
+        const ALL: usize = crate::composite::ALL_DISPLAYS;
+        // Another screen: built first, the old capture kept until it worked.
+        assert!(!lid_rebuild_releases_first(1, Some(0x20), Some(false), Some(0x10)));
+        // In its way: the same screen, All Displays, a held composite, and a
+        // screen whose identity is not known on either side.
+        assert!(lid_rebuild_releases_first(1, Some(0x10), Some(false), Some(0x10)));
+        assert!(lid_rebuild_releases_first(ALL, None, Some(false), Some(0x10)));
+        assert!(lid_rebuild_releases_first(1, Some(0x20), Some(true), None));
+        assert!(lid_rebuild_releases_first(1, None, Some(false), Some(0x10)));
+        assert!(lid_rebuild_releases_first(1, Some(0x20), Some(false), None));
+        // Nothing held, nothing to let go.
+        assert!(!lid_rebuild_releases_first(1, Some(0x10), None, Some(0x10)));
+    }
+
+    /// The screens other captures hold, as a stream reads them: everything
+    /// but its own session's.
+    #[test]
+    fn a_stream_passes_over_the_screens_others_hold() {
+        let held = HeldScreens::default();
+        assert!(held.others("s1").is_empty());
+        held.set(vec![(0, Some("s1".to_string())), (1, Some("s2".to_string())), (2, None)]);
+        assert_eq!(held.others("s1"), vec![1, 2]);
+        assert_eq!(held.others("s2"), vec![0, 2]);
     }
 }

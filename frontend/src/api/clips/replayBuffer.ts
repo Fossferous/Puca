@@ -15,6 +15,7 @@ import { isTauri } from '../platform';
 import { hideCaptureBar, releaseCaptureBar } from '../captureBar';
 import { webrtcManager } from '../webrtc';
 import { loadSettings } from '../../components/settingsStore';
+import { trackUpload } from '../workInFlight';
 import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB, ringSecondsFor } from './clipPresets';
 import { isNativeCaptureSupported, preferredLoopbackDeviceName, startNativeSystemAudioTrack, startNativeVideo, type NativeCaptureTarget } from './nativeCapture';
 import type { ArmConfig, FromWorker, SealedInfo, ToWorker, WorkerStatus } from './clipTypes';
@@ -780,10 +781,12 @@ export function uploadAndBuild(token: string, baseUrl: string, proposalId: strin
     const s = session;
     if (!s || !state.sealed) return Promise.reject(new Error('nothing sealed'));
     emit({ phase: 'uploading', upload: { done: 0, total: state.sealed.partCount, bytesDone: 0 } });
-    return new Promise((resolve, reject) => {
+    // Counted on THIS thread while the worker uploads (workInFlight.ts): a PC
+    // updating itself waits for a Clip rather than cutting it off.
+    return trackUpload(new Promise((resolve, reject) => {
         s.pending.set('upload', { resolve: resolve as (v: unknown) => void, reject });
         post(s, { t: 'upload', token, baseUrl, proposalId, onlyMissing });
-    });
+    }));
 }
 
 /** Drop the sealed clip (declined / expired / cancelled / discarded). The ring keeps running. */

@@ -258,6 +258,11 @@ impl ScreenCapture {
     pub fn redraw_cursor(&mut self, _frame: &mut Frame) -> bool {
         false
     }
+
+    /// Parity with Windows: one X screen, and no handle to compare.
+    pub fn screen(&self) -> isize {
+        0
+    }
 }
 
 /// Capturable outputs with their geometry, in capture-index order.

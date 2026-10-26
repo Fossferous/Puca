@@ -389,6 +389,19 @@ export const defaultSettings = {
      * mid-call) is gone either way.
      */
     autoInstallUpdates: false,
+    /**
+     * A PC set up for remote control (unattended access armed, or lock-screen
+     * access installed) installs a newer desktop release BY ITSELF and
+     * restarts — only while no device session is live or starting on it, no
+     * call or direct file transfer is running in Púca there, and nobody has
+     * used its keyboard or mouse for ten minutes, with a settle after each and
+     * after a reconnect (api/devices/hostUpdate.ts, components/HostAutoUpdate.tsx).
+     * ON by default because such a PC often has nobody at it to click the
+     * banner: one laptop host stayed on 0.9.844 for days. Does nothing on any other
+     * PC, and nothing in a Lite build (never a host). The switch is in
+     * Devices → This device, shown only on a host.
+     */
+    hostAutoUpdate: true,
 
     // Developer
     developerMode: false,

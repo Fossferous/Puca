@@ -3086,6 +3086,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                         version. Off by default: with this off you get a banner
                                                         instead, and an update never interrupts a call or a
                                                         conversation.
+                                                        {/* Full build only: a Lite build has no remote
+                                                            control, so it is never such a computer. */}
+                                                        {__RC_ENABLED__ && ' A computer set up for remote control also updates itself while nobody is connected to it or using it (Devices › This device).'}
                                                     </span>
                                                 </div>
                                                 <input

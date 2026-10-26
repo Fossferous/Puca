@@ -24,6 +24,10 @@ mod device_key;
 // NOT gated: `puca://invite/...` links from outside the app (the web invite
 // page's "Open in the Púca app", registered by the installer in both builds).
 mod deep_link;
+// A PC set up for remote control updating ITSELF (the page decides when):
+// quiet install, hidden relaunch, its records on disk. Hosts are RC-only.
+#[cfg(feature = "remote-control")]
+mod host_update;
 mod file_transfer;
 // HEIC photo -> JPEG through WIC, for the page (frontend/src/api/heif.ts).
 mod heif;
@@ -1356,7 +1360,12 @@ pub fn run() {
             // A second launch should surface the window that already exists
             // rather than doing nothing. Without this, clicking the shortcut
             // while the app sits hidden in the tray looks like a broken app.
-            show_main_window(app);
+            // Not a HIDDEN launch, though (a sign-in autostart while Púca
+            // already runs, any `--hidden`): that one leaves the window where
+            // it is, as it would have started in the tray.
+            if deep_link::second_launch_shows_window(&argv) {
+                show_main_window(app);
+            }
             // A WARM start: a `puca://` invite link clicked while the app runs
             // arrives as that second launch's argv. Only a link that parses
             // reaches the page, rebuilt from its parts (deep_link.rs).
@@ -1464,6 +1473,7 @@ pub fn run() {
             app.manage(Arc::new(ClipDesktopAudioState::default()));
             #[cfg(feature = "remote-control")]
             {
+                app.manage(Arc::new(host_update::HostUpdateState::default()));
                 app.manage(Arc::new(display_power::DisplayPower::default()));
                 let topology = Arc::new(display_topology::DisplayTopology::default());
                 app.manage(topology.clone());
@@ -1516,7 +1526,15 @@ pub fn run() {
 
             // Honour --hidden. The window is created visible (so an ordinary
             // launch has no flash), and only an OS-started instance hides it.
-            if started_hidden() {
+            // And a host update's relaunch, whose installer passes on only the
+            // arguments the updated app had: one closed to the tray had none,
+            // and must not come back on the screen (host_update.rs). Read
+            // first, whatever the command line says: the marker is one-shot.
+            #[cfg(feature = "remote-control")]
+            let relaunched_hidden = host_update::take_relaunch_hidden(&app.package_info().version.to_string());
+            #[cfg(not(feature = "remote-control"))]
+            let relaunched_hidden = false;
+            if started_hidden() || relaunched_hidden {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
@@ -1658,6 +1676,22 @@ pub fn run() {
             service_cmd::service_state,
             #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_state,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_offer,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_download,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_status,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_cancel,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_install,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_record,
+            #[cfg(feature = "remote-control")]
+            host_update::host_update_note_seen,
+            #[cfg(feature = "remote-control")]
+            host_update::host_presence,
             #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_begin_enrol,
             #[cfg(all(windows, feature = "remote-control"))]

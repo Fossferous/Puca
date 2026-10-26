@@ -78,7 +78,8 @@ import { appIsBackgrounded } from '../pagePainting';
 import { linkRefusalPersistent } from './linkHealth';
 import { logRcConnect } from './connectLog';
 import {
-    noScreenEndReason, noScreenMessage, NO_SCREEN_NO_FRAME_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON,
+    noScreenCode, noScreenCodeForShared, noScreenCodeForStreamEnd, noScreenEndReason, noScreenMessage,
+    NO_SCREEN_SHARED_OFF_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON,
 } from './noScreen';
 import {
     AUDIO_HUB_ACK_TIMEOUT_MS,
@@ -259,6 +260,20 @@ export function monitorWithinConsent(consented: number | null, wanted: number): 
     return wanted === consented;
 }
 
+/**
+ * HOST: does what the person at this machine agreed to cover EVERY screen —
+ * "All displays", or nobody was asked (an armed host)? Then, and only then,
+ * may the agent move the picture to another screen by itself when a lid
+ * shuts on the one it shows (`steer_on_lid` in start_stream). Its rule is
+ * "the first lit screen", which can be an external monitor a person who
+ * shared one screen deliberately kept out (review, 2026-10-26). Without it
+ * the agent ends the stream with the lid code, and this side says why
+ * (noScreen.ts NO_SCREEN_SHARED_OFF_REASON).
+ */
+export function consentCoversEveryScreen(consented: number | null): boolean {
+    return consented === null || consented === ALL_DISPLAYS;
+}
+
 /** May this session's peer blank (privacy-overlay) or otherwise act on the
  *  host machine itself? The share vocabulary is `control | view_only | files`
  *  with no separate privacy capability, so `control` is the line — the same
@@ -418,6 +433,12 @@ export interface DeviceControlSession {
      *  'pointer', 'none', …), reported by the agent while this end draws the
      *  pointer itself (pointer_shape.rs). Null until the host says. */
     remoteCursor: string | null;
+    /** CONTROLLER: the agent's direct 'caret' channel is open. The pointer
+     *  shape rides it, so the stage counts a silent host's 3 s only from here
+     *  (DeviceStage SHAPE_WAIT_MS): counted from the picture, a channel still
+     *  opening read as "that computer runs an older Púca" (review
+     *  2026-10-26). Changes when the channel opens or closes, nothing more. */
+    caretOpen: boolean;
     /** CONTROLLER: transient display-power outcome line ("Turned off 2 of
      *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
      *  a session error. */
@@ -434,6 +455,9 @@ export interface DeviceControlSession {
 }
 
 interface Internal extends DeviceControlSession {
+    /** CONTROLLER: when this session went active (Date.now()), for how long
+     *  it was up when its end is logged. Undefined while it never did. */
+    activeAt?: number;
     /** CONTROLLER: Audio Hub requests sent on this session and not yet
      *  answered, by request id. Resolved by the host's `audio-hub-result`, by
      *  a deadline, or by teardown — never left hanging. */
@@ -719,8 +743,27 @@ interface Internal extends DeviceControlSession {
      *  controller's restart mute threw away) must not delay the first report
      *  about the new one by up to 30 s. */
     streamDiedAt: number;
-    /** HOST: which screen to capture, chosen at consent time. */
+    /** HOST: the screen ASKED for: chosen at consent time (or the armed
+     *  every-screen default), then moved only by a switch the viewer asked
+     *  for and this side honoured, or by this side re-asking (the composite
+     *  fallback, a vanished screen). NEVER the screen the agent moved the
+     *  picture to by itself (a lid): that is `shownMonitor`. Holding the
+     *  agent's choice here made a media restart ask for that screen
+     *  explicitly, and an explicit ask is one the agent no longer gives back
+     *  when the lid opens again. */
     monitor: number | null;
+    /** HOST: the screen the agent says the live stream SHOWS (its start_stream
+     *  reply, its status poll), null until it has said. Differs from
+     *  `monitor` while a lid keeps the picture elsewhere. */
+    shownMonitor: number | null;
+    /** HOST: the screen the viewer was last told it is looking at
+     *  (`monitor-active`, or the `active` of a screen list); null when that
+     *  may not have arrived: never told, a send that failed, or a relay
+     *  interruption since. The status poll tells it again whenever this and
+     *  `shownMonitor` differ, so one lost frame no longer leaves the viewer's
+     *  picker, caret filter and every-screen fallback on the wrong screen for
+     *  the rest of the session. The `secureDesktopSent` pattern. */
+    monitorTold: number | null;
     /** HOST: `monitor` was not chosen by anyone — it is the every-screen
      *  default this side applied for an armed multi-monitor agent host. What
      *  licenses answerOffer to fall back to output 0 if the composite cannot
@@ -890,6 +933,7 @@ function emit(): void {
         inputBlocked: s.inputBlocked,
         pointerCaptured: s.pointerCaptured,
         remoteCursor: s.remoteCursor,
+        caretOpen: s.caretOpen,
         powerNotice: s.powerNotice,
         peerName: s.peerName,
         hostScreen: s.hostScreen,
@@ -968,6 +1012,22 @@ function drainPreKeyFrames(s: Internal): void {
     }
 }
 
+/** HOST: tell the viewer which screen its picture shows, and note that it was
+ *  told (`monitorTold`). A send that fails un-notes it, so the status poll
+ *  tells again. Never rejects. */
+function tellMonitorActive(s: Internal, active: number): Promise<void> {
+    s.monitorTold = active;
+    return sendSignal(s, { kind: 'monitor-active', active }).catch(() => {
+        if (s.monitorTold === active) s.monitorTold = null;
+    });
+}
+
+/** HOST: the screen the picture shows, as far as this side knows: what the
+ *  agent said, else what was asked for (`?? 0`: never asked is the first). */
+function monitorShown(s: Internal): number {
+    return s.shownMonitor ?? s.monitor ?? 0;
+}
+
 /**
  * HOST: tell the controller which screens it can switch between.
  *
@@ -1005,6 +1065,12 @@ async function announceMonitors(s: Internal, opts?: { evenIfSingle?: boolean }):
         // (the switcher, the edge-hop chips and the zoom-follow maths all
         // read that list).
         if (monitors.length > 1 || narrowed || (opts?.evenIfSingle && monitors.length === 1)) {
+            // What the picture shows NOW (a lid can have moved it), read at
+            // the send and noted as told in the same step: frames leave in
+            // the order sendSignal is called, so a monitor-active queued
+            // after this one also notes after it.
+            const active = monitorShown(s);
+            s.monitorTold = active;
             await sendSignal(s, {
                 kind: 'monitors',
                 monitors: monitors.map((m, i) => ({
@@ -1019,7 +1085,10 @@ async function announceMonitors(s: Internal, opts?: { evenIfSingle?: boolean }):
                         ? { left: m.left, top: m.top, width: m.width, height: m.height }
                         : {}),
                 })),
-                active: s.monitor ?? 0,
+                active,
+            }).catch((e: unknown) => {
+                if (s.monitorTold === active) s.monitorTold = null;
+                throw e;
             });
         }
     } catch { /* a host that cannot enumerate simply offers no switcher */ }
@@ -1161,7 +1230,12 @@ async function prepareHostScreen(s: Internal): Promise<boolean> {
         if ((s.phase as SessionPhase) === 'ended' || sessions.get(s.id) !== s) return false;
         if (screen.state === 'ready') return true;
         if (screen.state === 'off') {
-            teardown(s, noScreenEndReason(screen.reason), true);
+            // A person here who shared ONE screen is told so rather than
+            // to turn on the lid option: with one screen shared the picture
+            // may not move to any other, the virtual one included, so the
+            // option would not help (noScreenCodeForShared).
+            const code = noScreenCodeForShared(screen.reason, consentCoversEveryScreen(s.consentedMonitor));
+            teardown(s, noScreenEndReason(code), true);
             return false;
         }
         if (screen.state === 'starting' && !toldStarting) {
@@ -1213,12 +1287,24 @@ async function answerOffer(
         // — as this did until the dialog existed — means the agent captures
         // output 0 whatever they chose, so a host that deliberately selected
         // Display 2 shares Display 1 while BOTH ends display "Display 2".
+        //
+        // And never a screen outside what they agreed to. Every way `monitor`
+        // moves is checked against the consent where it moves, so this is the
+        // last line rather than the only one: a restart must not be the way a
+        // screen they kept out gets asked for.
+        if (!s.filesOnly && !monitorWithinConsent(s.consentedMonitor, s.monitor ?? 0)) {
+            teardown(s, noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON), true);
+            return;
+        }
         const opts = {
             dataOnly: s.filesOnly,
             fps: quality?.fps,
             bitrateKbps: quality?.bitrate_kbps,
             inputAuth: attendedInputAuth(s),
             viewSize: s.viewSize,
+            // The agent may follow a lid to another screen only when every
+            // screen was agreed to (consentCoversEveryScreen).
+            steerOnLid: consentCoversEveryScreen(s.consentedMonitor),
         };
         let answerSdp: string;
         try {
@@ -1248,20 +1334,34 @@ async function answerOffer(
             // getting. After the answer below? No — ordering on the sealed
             // channel is by sequence, and this must land with the answer's
             // picture, not behind it.
-            void sendSignal(s, { kind: 'monitor-active', active: 0 });
+            void tellMonitorActive(s, 0);
         }
+        // What the viewer believes before anything told it otherwise: the
+        // screen it asked for, which is what a screen list announced and
+        // what a single-screen host never needs to say. Set once, for the
+        // session's first stream; a restart keeps whatever it was last told.
+        if (s.agentStreamGen === 0 && s.monitorTold === null) s.monitorTold = s.monitor ?? 0;
         // STEERED OFF A DARK PANEL. The agent captures another screen than
         // the one asked for when that one is a built-in panel behind a closed
         // lid (crates/puca-agent virtual_screen.rs steer_monitor). The viewer
         // must be told, as for the every-screen fallback above, or it maps the
         // pointer onto the screen it asked for rather than the one it gets.
+        //
+        // Unless that screen is one the person here did not share. An agent
+        // that knows `steer_on_lid` does not steer without it; one from before
+        // it steers whatever it is told, to the FIRST lit screen, which can be
+        // the external monitor they kept out. So this side checks what it got,
+        // and a picture of a screen nobody agreed to is never answered: no
+        // answer, no media, and the session ends saying why. The asked-for
+        // screen stays asked for (`monitor`); the steer is what it SHOWS.
         const { agentSteeredMonitor } = await import('./hostAgent');
         const steered = agentSteeredMonitor(s.id);
-        if (steered !== null && steered !== s.monitor) {
-            s.monitor = steered;
-            s.monitorDefaulted = false;
-            void sendSignal(s, { kind: 'monitor-active', active: steered });
+        if (steered !== null && !monitorWithinConsent(s.consentedMonitor, steered)) {
+            teardown(s, noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON), true);
+            return;
         }
+        s.shownMonitor = steered ?? (s.monitor ?? 0);
+        if (!s.filesOnly && s.monitorTold !== s.shownMonitor) void tellMonitorActive(s, s.shownMonitor);
         // The stream exists from here, so queued candidates have somewhere to
         // go. Set BEFORE draining: a candidate arriving during the drain must
         // take the direct path rather than being appended to a list nobody will
@@ -1409,14 +1509,22 @@ function armMediaDeadline(s: Internal, message?: string, deferredMs = 0): void {
         }
         // Name the causes, because the symptom cannot distinguish them and the
         // user has no other way to tell them apart.
+        //
+        // A no-screen CODE (noScreen.ts) is shown as its sentence, which
+        // names the PC, and logged as the code: the [rc-connect] line goes
+        // into Send diagnostics, which names no device (connectLog.ts).
+        const code = message !== undefined ? noScreenCode(message) : null;
         teardown(
             s,
-            message
+            (code ? noScreenMessage(code, s.peerName) : null)
+            ?? message
             ?? ('No screen arrived from that device. Its screens may be asleep '
             + 'and unable to wake (try again — or move its mouse), it may be '
             + 'waiting for someone to approve screen sharing on it, or it may '
             + 'be running an older version of Púca.'),
             true,
+            false,
+            code ?? undefined,
         );
     }, MEDIA_DEADLINE_MS);
 }
@@ -1518,6 +1626,16 @@ function armPcDisconnectWatchdog(s: Internal, pc: RTCPeerConnection, deferredMs 
     }, PC_DISCONNECT_GRACE_MS);
 }
 
+/** "42 s", "7 min 12 s", "1 h 3 min" — how long a session was up, for its
+ *  end's log line. */
+export function sessionAge(ms: number): string {
+    const secs = Math.max(0, Math.round(ms / 1000));
+    if (secs < 60) return `${secs} s`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins} min ${secs % 60} s`;
+    return `${Math.floor(mins / 60)} h ${mins % 60} min`;
+}
+
 /**
  * End a session.
  *
@@ -1527,20 +1645,36 @@ function armPcDisconnectWatchdog(s: Internal, pc: RTCPeerConnection, deferredMs 
  * the controller must not be shown a red banner about it, because "you
  * disconnected" is not news to the person who clicked Disconnect.
  */
-function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = false): void {
+function teardown(
+    s: Internal,
+    reason: string,
+    tellPeer: boolean,
+    deliberate = false,
+    /** What the [rc-connect] line says instead of `reason`, when `reason`
+     *  is a sentence that names the other computer (a no-screen end: its
+     *  code). Send diagnostics carries those lines, and they name no device. */
+    logAs?: string,
+): void {
     // Does this object still OWN its id? Everything keyed by id rather than by
     // object — closing tunnels, stopping the host backend, the map delete — must
     // be skipped when it does not, or a stale session tearing down late (the UA
     // deadline timer, a 'failed' connection state) reaches into whichever
     // session holds that id now and closes ITS ports and capture.
     const owns = sessions.get(s.id) === s;
-    // A controller attempt that ended without anyone meaning it to is the
-    // thing "Send diagnostics" must be able to explain (connectLog.ts).
-    if (s.role === 'controller' && !deliberate && s.phase !== 'ended') {
+    // EVERY controller attempt's end leaves one line (connectLog.ts). One that
+    // ended without anyone meaning it to is what "Send diagnostics" must be
+    // able to explain; the DELIBERATE ones — Disconnect, connecting again
+    // over a live session, the other computer's own stop, a sign-out — are
+    // what a timeline is built from, and the 2026-10-26 laptop one had to be
+    // guessed without them. The reason is this code's own words (or, for a
+    // deliberate end the peer sent, its fixed "the session ended"); how long
+    // it was up says when it started.
+    if (s.role === 'controller' && s.phase !== 'ended') {
         const kind = s.audioHub ? 'audio-hub' : s.filesOnly ? 'files' : 'control';
-        logRcConnect(`${kind} ended while ${s.phase}: ${reason}`
+        const upFor = s.activeAt ? `, up ${sessionAge(Date.now() - s.activeAt)}` : '';
+        logRcConnect(`${kind} ended${deliberate ? ' by choice' : ''} while ${s.phase}: ${logAs ?? reason}`
             + ` (socket ${wsClient.isConnected ? 'up' : 'down'}`
-            + `${appIsBackgrounded() ? ', app backgrounded' : ''})`);
+            + `${appIsBackgrounded() ? ', app backgrounded' : ''}${upFor})`);
     }
     // Before anything that can fail: a kill-switch hook and an idle timer that
     // outlive their session would fire into whatever holds that id next, and
@@ -1658,6 +1792,7 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     }
     s.caretTracking = false;
     s.caretChannel = null;
+    s.caretOpen = false;
     clearMediaDeadline(s);
     s.phase = 'ended';
     // A deliberate end must not LEAVE an error either: a transient one latched
@@ -1770,12 +1905,6 @@ function reportStreamDied(s: Internal): void {
     s.streamDiedAt = Date.now();
     void sendSignal(s, { kind: 'stream-died' }).catch(() => undefined);
 }
-
-/** The agent's `stream_end` for a stream that ended because the display never
- *  produced a first frame (crates/puca-agent protocol.rs STREAM_END_NO_FRAME).
- *  The viewer's own media deadline already names that cause ("its screens may
- *  be asleep"); a restart would replace it with RESTART_FAILED_MSG. */
-const AGENT_STREAM_END_NO_FRAME = 'no_frame';
 
 /** HOST: is this machine's session detached from an interactive desktop the
  *  owner is sitting at? Driven by the Windows events session_events.rs maps
@@ -1917,13 +2046,26 @@ async function buildControllerPc(s: Internal): Promise<RTCPeerConnection> {
         s.caretChannel = caretDc;
         // Covers both ask-before-open and the media-restart rebuild.
         if (s.caretTracking) writeCaretTrack(caretDc, true);
+        // The one edge the stage reads (`caretOpen`): the host's pointer shape
+        // can arrive from now on.
+        if (sessions.get(s.id) === s && s.phase !== 'ended') {
+            s.caretOpen = true;
+            emit();
+        }
     };
     caretDc.onclose = () => {
-        if (s.caretChannel === caretDc) s.caretChannel = null;
+        if (s.caretChannel === caretDc) {
+            s.caretChannel = null;
+            if (s.caretOpen) {
+                s.caretOpen = false;
+                emit();
+            }
+        }
     };
     caretDc.onmessage = e => handleCaretMessage(s, e.data);
-    // No emit() in any of these, unlike filesDc: filesChannel is public and the
-    // file UI gates on it. Nothing renders from this one.
+    // No emit() per MESSAGE, unlike filesDc's state: caret reports arrive
+    // ten times a second while someone types (see the caretChannel field).
+    // The open and the close are the only emits, and they are once each.
 
     // Receive-only: the controller sends input over the sealed WS channel,
     // never media.
@@ -1994,6 +2136,7 @@ async function restartMedia(s: Internal): Promise<void> {
         // onopen re-asserts it. Missing this would make caret-follow silently
         // die after any network blip: the "worked yesterday" class of bug.
         s.caretChannel = null;
+        s.caretOpen = false;
 
         // Host-acked state describes the OLD stream: the fresh capture is
         // born compositing its own cursor and unblanked. Remember what the
@@ -2265,6 +2408,7 @@ export async function pollSecureDesktop(): Promise<void> {
                 s.cursorClippedSent = null;
                 s.inputBlockedSent = undefined;
                 s.pointerCapturedSent = undefined;
+                s.monitorTold = null;
                 continue;
             }
             let up = false;
@@ -2272,11 +2416,14 @@ export async function pollSecureDesktop(): Promise<void> {
             let blocked: string | null = null;
             let captured = false;
             // Captured BEFORE the await: which stream this poll is asking
-            // about. See the stream-died check below.
+            // about (see the stream-died check below), and which screen was
+            // asked for when it asked (see the moved-stream check).
             const gen = s.agentStreamGen;
             const started = s.agentOwnsTransport && s.agentStreamStarted;
+            const monitorAsked = s.monitor;
             let streamLive: boolean | undefined;
             let streamEnd: string | undefined;
+            let shows: number | undefined;
             try {
                 const status = await backend.sessionStatus(s.id);
                 up = status.secureDesktop;
@@ -2285,6 +2432,7 @@ export async function pollSecureDesktop(): Promise<void> {
                 captured = status.pointerCaptured === true;
                 streamLive = status.streamLive;
                 streamEnd = status.streamEnd;
+                shows = status.monitor;
             } catch {
                 // sessionStatus swallows its own errors; this is belt and
                 // braces so one bad tick can never reach the caller.
@@ -2324,9 +2472,10 @@ export async function pollSecureDesktop(): Promise<void> {
             // side's 30 s throttle, so it does not delay a report about the
             // new stream.
             //
-            // NOT for 'no_frame': the display never produced a first frame,
-            // and a restart cannot wake it. That case ends the session with
-            // a reason the phone names, just below.
+            // NOT for a stream that ended for want of a screen ('no_frame',
+            // and the lid's codes): a restart cannot wake a dark display or
+            // open a lid. Those end the session with a reason the phone
+            // names, just below.
             //
             // `!s.filesOnly` is NOT what keeps a files session out of here in
             // the ordinary case — the `hosts` filter above is. It is re-read
@@ -2339,27 +2488,91 @@ export async function pollSecureDesktop(): Promise<void> {
             // A SHARE while the console is locked, or just unlocked, stays
             // frozen: reportStreamDied applies that for every detector (see
             // shareFrozenByLock).
+            const screenEnd = noScreenCodeForStreamEnd(streamEnd);
             if (streamLive === false
-                && streamEnd !== AGENT_STREAM_END_NO_FRAME
+                && screenEnd === null
                 && started && s.agentStreamStarted && s.agentStreamGen === gen
                 && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
                 && !s.transportDown && !s.peerReconnecting) {
                 reportStreamDied(s);
             }
-            // THE DISPLAY NEVER PRODUCED A PICTURE ('no_frame'), so say so and
-            // end. This used to stay silent and leave it to the viewer's own
-            // 30 s wait for video, but the agent's stream (and its socket)
-            // ends after 12 s, and the phone's connection timed out first:
-            // "could not connect to the device", on a laptop whose screen was
-            // simply dark (0.9.842 field report). Ended HERE, by the side that
-            // knows why, with the same gates as the restart above.
+            // NO SCREEN TO SHOW, so say so and end.
+            //  - 'no_frame': the display never produced a picture. This used
+            //    to stay silent and leave it to the viewer's own 30 s wait for
+            //    video, but the agent's stream (and its socket) ends after
+            //    12 s, and the phone's connection timed out first: "could not
+            //    connect to the device", on a laptop whose screen was simply
+            //    dark (0.9.842 field report).
+            //  - 'no-screen:lid' / 'no-screen:virtual-failed': the lid shut
+            //    MID-SESSION with no screen to move the picture to, or the
+            //    virtual screen it went to never came (the agent's
+            //    virtual_screen.rs). Restarted, the new stream's own screen
+            //    check ended with the same code a round trip later.
+            //  - the lid code on a session whose person shared ONE screen is
+            //    said as 'no-screen:shared-off': its agent was not let move
+            //    the picture (steer_on_lid), so the lid closed on the screen
+            //    they shared, and the lid option the lid code points at is
+            //    not the fix (noScreenCodeForShared).
+            // Ended HERE, by the side that knows why, with the same gates as
+            // the restart above.
             if (streamLive === false
-                && streamEnd === AGENT_STREAM_END_NO_FRAME
+                && screenEnd !== null
                 && started && s.agentStreamStarted && s.agentStreamGen === gen
                 && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
                 && !s.transportDown && !s.peerReconnecting) {
-                teardown(s, noScreenEndReason(NO_SCREEN_NO_FRAME_REASON), true);
+                const code = noScreenCodeForShared(screenEnd, consentCoversEveryScreen(s.consentedMonitor));
+                teardown(s, noScreenEndReason(code), true);
                 continue;
+            }
+            // A SCREEN NOBODY HERE AGREED TO. Whatever moved the picture there
+            // (an agent from before `steer_on_lid` following a lid, a topology
+            // rebuild's remap of a screen that went away), a person who shared
+            // ONE screen did not share the others, and their pixels are
+            // leaving now: end, saying why, rather than follow. The asked-for
+            // check below is not needed here, because every asked-for screen
+            // is inside the consent; a reply read across a switch cannot trip
+            // this.
+            if (streamLive === true && typeof shows === 'number'
+                && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && !monitorWithinConsent(s.consentedMonitor, shows)) {
+                teardown(s, noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON), true);
+                continue;
+            }
+            // THE AGENT MOVED THE STREAM ITSELF — off a built-in panel behind
+            // a lid shut mid-session and back when it opens, or a topology
+            // rebuild's remap — so input already lands on the new screen (the
+            // agent re-aims it), and the VIEWER is the one left behind: its
+            // screen picker, its caret filter and its every-screen fallback
+            // keep the screen this side last told it. Told the way a switch
+            // or a steer at the start is, and the new layout with it (the
+            // virtual screen appears, the panel goes dark) — only when every
+            // screen was agreed to: a list of one screen is theirs to narrow.
+            //
+            // WHAT IT SHOWS, NOT WHAT WAS ASKED: `monitor` keeps the screen
+            // asked for, so a restart asks for that one again and the agent
+            // can still bring the picture back when the lid opens.
+            //
+            // TOLD UNTIL IT LANDS: compared against `monitorTold`, which a
+            // failed send and every relay interruption clear, so a lost
+            // `monitor-active` is said again on the next poll instead of
+            // never (it used to be one send, then nothing).
+            //
+            // The same stream gates as above, and one more: `s.monitor` must
+            // still be what it was when the poll asked. A switch the viewer
+            // asked for commits while this request waits on the agent's pipe;
+            // a reply read before it would otherwise put the OLD screen back.
+            if (streamLive === true && typeof shows === 'number'
+                && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && s.monitor === monitorAsked) {
+                s.shownMonitor = shows;
+                if (s.monitorTold !== shows) {
+                    void tellMonitorActive(s, shows);
+                    if (consentCoversEveryScreen(s.consentedMonitor) && !(s.uaRequired && !s.uaVerified)) {
+                        void announceMonitors(s, { evenIfSingle: true });
+                    }
+                }
             }
             if (up !== s.secureDesktop) {
                 s.secureDesktop = up;
@@ -3583,13 +3796,13 @@ export async function connectToDevice(
         stream: null, captureSize: null, error: null,
         pc: null, eph: generateControlEphemeral(), key: null,
         sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
+        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         agentStreamGen: 0, agentQuality: null,
         filesChannel: null,
         inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
         lastRelayInputAt: 0, inputAliveSentAt: 0,
-        caretChannel: null, caretTracking: false, caretCapable: false,
+        caretChannel: null, caretOpen: false, caretTracking: false, caretCapable: false,
         caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
         fileRoot: null,
         fileScopeKind: null,
@@ -4310,13 +4523,13 @@ export function installDeviceSessions(): void {
                 stream: null, captureSize: null, error: null,
                 pc: null, eph: generateControlEphemeral(), key: null,
                 sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
+                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 agentStreamGen: 0, agentQuality: null,
                 filesChannel: null,
                 inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
         lastRelayInputAt: 0, inputAliveSentAt: 0,
-        caretChannel: null, caretTracking: false, caretCapable: false,
+        caretChannel: null, caretOpen: false, caretTracking: false, caretCapable: false,
                 caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
                 fileRoot: null,
         fileScopeKind: null,
@@ -4789,6 +5002,7 @@ export function installDeviceSessions(): void {
                 if (!stillConnecting(s)) return;
                 clearConnectDeadline(s);
                 s.phase = 'active';
+                s.activeAt = Date.now();
                 // Any cursor-ownership request the stage made while this was
                 // still connecting goes out now that it can.
                 flushPendingCursorOwner(s);
@@ -5035,10 +5249,13 @@ export function installDeviceSessions(): void {
         // this side writes, because the sentence names the PC and only this
         // side knows what the person calls it. Replaces the generic "could
         // not connect" the closed lid used to end in.
-        const named = p?.reason && s.role === 'controller' ? noScreenMessage(p.reason, s.peerName) : null;
-        if (named) {
+        // Logged as the CODE: the sentence names the PC, and the [rc-connect]
+        // line goes into Send diagnostics, which names no device.
+        const screenCode = p?.reason && s.role === 'controller' ? noScreenCode(p.reason) : null;
+        const named = screenCode ? noScreenMessage(screenCode, s.peerName) : null;
+        if (screenCode && named) {
             s.error = named;
-            teardown(s, named, false);
+            teardown(s, named, false, false, screenCode);
             return;
         }
         // TRUNCATED: this string is chosen by the peer and RELAYED BY THE
@@ -5940,6 +6157,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     const backend = await getHostBackend();
                     await backend.setMonitor(s.id, wanted);
                     s.monitor = wanted;
+                    // The agent shows what it was just switched to (a lid can
+                    // move it again later; the status poll follows that).
+                    s.shownMonitor = wanted;
                     // CONFIRMED, since the agent's switch_monitor_sync:
                     // setMonitor blocks (2s deadline) until the capture
                     // thread has actually swapped to the new monitor, and
@@ -5953,8 +6173,10 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     // reported as success too, not as a failure: the agent
                     // answers CommittedLate for that case precisely so this
                     // side does not tell the viewer a switch failed while the
-                    // picture is already showing the new screen.
-                    await sendSignal(s, { kind: 'monitor-active', active: wanted });
+                    // picture is already showing the new screen. (Nor does a
+                    // confirmation that could not be SENT: the switch
+                    // happened, and the poll says so again — tellMonitorActive.)
+                    await tellMonitorActive(s, wanted);
                 } catch (e) {
                     await sendSignal(s, {
                         kind: 'monitor-failed',
@@ -6207,11 +6429,18 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                             // then is the new screen list announced. An old
                             // agent answers "bad request" to the poke; it
                             // heals slowly instead, and the announce is still
-                            // honest.
+                            // honest. So does a stream PINNED to the one
+                            // screen that was shared, when the change moved
+                            // that screen to another index: the agent will
+                            // not rebuild it there (that index may be a
+                            // screen nobody shared), and its own picture
+                            // check ends the stream with no-screen:changed,
+                            // which the status poll turns into the session's
+                            // end. Nothing to do here but carry on.
                             try {
                                 await backend.displayTopologyChanged?.();
                             } catch (e) {
-                                console.warn('[device-session] topology poke failed (old agent?)', e);
+                                console.warn('[device-session] topology poke refused (an old agent, or a pinned stream whose screen moved):', e);
                             }
                             // The session record must follow the agent's own
                             // remap rule: a single monitor that no longer
@@ -6226,8 +6455,22 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                                 if (s.monitor !== null && s.monitor !== ALL_DISPLAYS
                                     && !fresh.some((m, i) => (m.id ?? i) === s.monitor)) {
                                     s.monitor = 0;
+                                    s.shownMonitor = 0;
                                 }
                             } catch { /* the announce below degrades the same way */ }
+                            // ...and output 0 may be a screen the person here
+                            // did not share. Detaching keeps the PRIMARY, so a
+                            // viewer given one other screen could otherwise
+                            // detach that one and be shown the primary. Ended,
+                            // like every other way the picture can leave the
+                            // consent. (A screen is its index here, and the
+                            // indices can shift in a detach: a shared primary
+                            // that was not output 0 ends too. Ending is the
+                            // side to err on.)
+                            if (!s.filesOnly && !monitorWithinConsent(s.consentedMonitor, s.monitor ?? 0)) {
+                                teardown(s, noScreenEndReason(NO_SCREEN_SHARED_OFF_REASON), true);
+                                return;
+                            }
                             // A files-only session has no screen to switch,
                             // so it is not told the new layout.
                             if (!s.filesOnly) void announceMonitors(s, { evenIfSingle: true });
@@ -6328,7 +6571,8 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // counted against the 30 s wait for video. Start that clock again,
             // with the sentence that is true if it never shows.
             if (s.awaitingMedia) {
-                armMediaDeadline(s, noScreenMessage(NO_SCREEN_VIRTUAL_FAILED_REASON, s.peerName) ?? undefined);
+                // The code, not its sentence: shown named, logged as the code.
+                armMediaDeadline(s, NO_SCREEN_VIRTUAL_FAILED_REASON);
             }
             emit();
             return;

@@ -277,6 +277,15 @@ pub fn serve(
             let _ = writer.flush();
         }
 
+        // The app's connection closed, and this Agent goes with it at the end
+        // of this iteration, every stream it holds stopped as it drops (a
+        // fresh Agent serves the next client). That stop used to leave no line
+        // anywhere; each stream adds how long it ran ("[stream] stopped by the
+        // host after …").
+        let streams = agent.stream_count();
+        if streams > 0 {
+            eprintln!("[agent] the app's connection to this agent closed; stopping its {streams} stream(s)");
+        }
         // A client that vanishes mid-session must not leave keys held down in
         // whatever application had focus.
         puca_input::release_all();

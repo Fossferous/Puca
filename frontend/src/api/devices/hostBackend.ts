@@ -45,6 +45,10 @@ export interface HostSessionStatus {
     streamEnd?: string;
     inputBlocked?: string | null;
     pointerCaptured?: boolean;
+    /** The screen this session's LIVE stream shows now, by the agent's books
+     *  (it moves itself off a panel behind a lid shut mid-session). Absent
+     *  from an agent older than the field, and while no stream is live. */
+    monitor?: number;
 }
 
 export interface HostCapabilities {
@@ -161,7 +165,12 @@ export interface HostBackend {
      *  input and that Windows will not let the agent reach (it runs as
      *  administrator; see the agent's input_reach.rs). `pointerCaptured` says a
      *  game has hidden and confined the pointer. Both optional for the same
-     *  skew reason: absent reads as "input lands". */
+     *  skew reason: absent reads as "input lands".
+     *
+     *  `monitor` is the screen the live stream shows, which the agent changes
+     *  by itself when a lid shuts or opens mid-session; the host tells the
+     *  viewer when it differs from the screen it last told it. Absent means
+     *  "cannot tell" and changes nothing. */
     sessionStatus?(sessionId: string): Promise<HostSessionStatus>;
     /** Blank this machine's screen behind an overlay while it is controlled.
      *

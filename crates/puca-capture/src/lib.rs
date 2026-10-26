@@ -30,7 +30,8 @@
 //!     timeouts, so callers must repeat the previous frame rather than treating
 //!     a timeout as a dropped connection. A pointer-only update is a timeout
 //!     too: a caller that repeats the frame and wants the pointer current
-//!     calls `redraw_cursor` on it.
+//!     calls `redraw_cursor` on it (the clip loops, and the remote-control
+//!     stream whenever the host draws the pointer).
 //!   * Duplication is EXCLUSIVE PER OUTPUT. A second `DuplicateOutput` on the
 //!     same monitor gets E_ACCESSDENIED while the first lives — so the agent
 //!     must hold ONE `ScreenCapture` per monitor and share its frames between
@@ -207,6 +208,11 @@ mod stub {
 
         pub fn redraw_cursor(&mut self, _frame: &mut Frame) -> bool {
             false
+        }
+
+        /// Parity with Windows: no screen handle here.
+        pub fn screen(&self) -> isize {
+            0
         }
     }
 

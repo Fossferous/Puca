@@ -90,6 +90,7 @@ vi.mock('../api/keyboardInset', () => ({
 
 const { DeviceStage } = await import('../components/DeviceStage');
 const { useStreamStore } = await import('../stores/streamStore');
+const { recentRcConnectLines } = await import('../api/devices/connectLog');
 
 const BOX = { left: 0, top: 0, width: 1280, height: 720 };
 beforeEach(() => {
@@ -144,6 +145,7 @@ function session(over: Snapshot = {}): Snapshot {
         privacyActive: false, cursorOwned: false, reconnecting: false,
         awaitingMedia: false, mediaRestarting: false, secureDesktop: false,
         shareUser: null, viewOnly: false, unattended: false, powerNotice: null, peerName: 'Work Laptop',
+        caretOpen: true,
         ...over,
     };
 }
@@ -187,6 +189,8 @@ async function key(type: 'keydown' | 'keyup', code: string, mods: Partial<Keyboa
 }
 
 const frames = () => h.sendInput.mock.calls.map(c => (c as unknown[])[1] as { t: string; code?: string; down?: boolean; text?: string });
+/** The stage's "<PC> runs an older Púca" line, or null. */
+const olderLine = () => host?.querySelector('.device-stage-older-host span')?.textContent ?? null;
 const keyFrames = () => frames().filter(f => f.t === 'key').map(f => `${f.code}${f.down ? '↓' : '↑'}`);
 
 describe('keys on the desktop stage', () => {
@@ -612,6 +616,122 @@ describe('the pointer drawn here, with no delay', () => {
             act(() => { vi.advanceTimersByTime(10_000); });
             expect(lastOwnership()).toEqual(['ds-1', true]);
             expect(surface().style.cursor).toBe('pointer');
+            expect(olderLine(), 'a current agent is not called older').toBeNull();
+        });
+
+        // THE STAGE SAYS WHY (2026-10-26, a laptop host on 0.9.844): the pointer
+        // lagged and froze, the fix was on the other computer, and nothing on
+        // the stage said so.
+        it('no shape within 3 s: one line on the stage says that computer runs an older Púca, by its name', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(2_900); });
+            expect(olderLine(), 'not before the wait is up').toBeNull();
+            act(() => { vi.advanceTimersByTime(200); });
+            expect(olderLine()).toBe('Work Laptop runs an older Púca: the pointer is drawn there and can lag. Update Púca on Work Laptop.');
+            expect(host!.querySelector('.device-stage-older-host')?.getAttribute('role')).toBe('status');
+        });
+
+        it('…and the controller log says it, once', async () => {
+            // After the last line there now (the log keeps 40, so a count
+            // would stop working once it is full).
+            const marker = recentRcConnectLines().at(-1) ?? null;
+            const since = () => {
+                const all = recentRcConnectLines();
+                return all.slice(marker === null ? 0 : all.lastIndexOf(marker) + 1);
+            };
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            const added = since().filter(l => l.includes('no pointer shape'));
+            expect(added).toHaveLength(1);
+            expect(added[0]).toContain('that computer sent no pointer shape within 3 s of handing the pointer over (an older Púca there); it draws its own pointer again');
+            expect(added[0], 'no name or id in a line Send diagnostics carries').not.toMatch(/Work Laptop|dev-host|ds-1/);
+        });
+
+        it('the silence counts only while the picture arrives: an awaited picture holds the clock', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            // The ack came over the relay before the media path was up.
+            await emitSession({ cursorOwned: true, remoteCursor: null, awaitingMedia: true });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership(), 'not handed back before the host could have said a shape').toEqual(['ds-1', true]);
+            expect(olderLine()).toBeNull();
+            await emitSession({ cursorOwned: true, remoteCursor: null, awaitingMedia: false });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            expect(lastOwnership(), 'from the picture, 3 s and no shape').toEqual(['ds-1', false]);
+            expect(olderLine()).toContain('runs an older Púca');
+        });
+
+        // Review 2026-10-26: the shape rides the caret channel, which can open
+        // after the picture. Counted from the picture, a current agent whose
+        // channel was still opening lost the pointer for the session.
+        it('…nor before the channel the shape rides is open', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null, caretOpen: false });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership(), 'kept: nothing could have said a shape yet').toEqual(['ds-1', true]);
+            expect(olderLine()).toBeNull();
+            await emitSession({ cursorOwned: true, remoteCursor: null, caretOpen: true });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            expect(lastOwnership(), 'CONTROL: open, 3 s and no shape').toEqual(['ds-1', false]);
+            expect(olderLine()).toContain('runs an older Púca');
+        });
+
+        it('…nor behind a security screen', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null, secureDesktop: true });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership()).toEqual(['ds-1', true]);
+            expect(olderLine()).toBeNull();
+        });
+
+        it('it yields to a security screen\'s banner, and comes back after it', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            expect(olderLine()).not.toBeNull();
+            await emitSession({ cursorOwned: false, remoteCursor: null, secureDesktop: true });
+            expect(olderLine(), 'the security screen is the bigger story').toBeNull();
+            expect(host!.textContent).toContain('Windows security screen');
+            await emitSession({ cursorOwned: false, remoteCursor: null, secureDesktop: false });
+            expect(olderLine()).not.toBeNull();
+        });
+
+        it('put away, it stays away for that computer this run — and its press clicks nothing over there', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            const close = host!.querySelector<HTMLButtonElement>('.device-stage-older-host button');
+            expect(close?.getAttribute('aria-label')).toBe('Dismiss');
+            h.sendInput.mockClear();
+            await act(async () => {
+                close!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 600, clientY: 20 }));
+                close!.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 600, clientY: 20 }));
+                close!.click();
+            });
+            expect(frames().filter(f => f.t === 'down' || f.t === 'up'), 'the press stopped at the button').toEqual([]);
+            expect(olderLine()).toBeNull();
+            // CONTROL: the rig sees a press on the picture itself.
+            await act(async () => {
+                surface().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 600, clientY: 300 }));
+                surface().dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 600, clientY: 300 }));
+            });
+            expect(frames().some(f => f.t === 'down'), 'a press on the picture does go over').toBe(true);
+            // A new session to the same computer: still put away.
+            await emitSession({ id: 'ds-2', cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            expect(olderLine(), 'the same computer, so still away').toBeNull();
+            // CONTROL: another computer gets its own line.
+            await emitSession({ id: 'ds-3', peerDevice: 'dev-other', peerName: 'Den PC', cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(3_100); });
+            expect(olderLine()).toContain('Den PC runs an older Púca');
         });
     });
 

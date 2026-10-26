@@ -191,6 +191,31 @@
    underneath it. The bottom is taken by the paused banner, so: top. */
 .device-stage-secure { top: 16px; }
 
+/* "<PC> runs an older Púca": the top band above, with a way to put it away.
+   It is true for the whole session, and the top of the picture is where the
+   remote's title bars are, so the band itself lets presses through to the
+   picture (as the phone's feedback strip does) and only the button is a
+   control. Its width is the line's own, up to the band's 90%. */
+.device-stage-older-host {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: max-content;
+    padding: 6px 6px 6px 14px;
+    pointer-events: none;
+}
+.device-stage-older-host > span { flex: 1 1 auto; min-width: 0; text-align: left; }
+/* 32 px square with a mouse (the stage button's own min-height); a coarse
+   pointer's 44 px floor (mobile.css) applies untouched, so no min-width here. */
+.device-stage-older-host-close {
+    flex: none;
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+}
+
 /* Game-mode "click to capture" hint — same treatment as the paused banner,
    parked higher so the two can coexist. */
 .device-stage-fps-hint {

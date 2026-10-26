@@ -633,8 +633,8 @@ needs no picker).
   pointer drawn at its new spot; restore before save, never
   undo-by-redraw. Cost: the pointer's rectangle (4 KB at 32x32), and one
   conversion per slot while the pointer moves over a still screen. The
-  remote-control stream never calls it, so a pointer-only update still
-  sends nothing there.
+  remote-control stream calls it too (since 2026-10-26) whenever the host
+  draws the pointer: docs/REMOTE_CONTROL.md, *The pointer drawn here*.
 - **A/V anchoring (2026-09-21).** The video timestamps count from the
   capture loop's own start (never 0 at the first chunk); the AudioData
   timestamps are on another clock entirely (~30 h at the first sample).

@@ -18,7 +18,12 @@
 //      banner's own Resume is on screen and hit;
 //   5. the pointer is drawn here once the host hands it over, in the host's
 //      shape, and the elevated-window banner is on screen, unclipped, parked
-//      at the top.
+//      at the top;
+//   6. an agent too old to send shapes gets the pointer back, and one line
+//      says that computer runs an older Púca — on screen, unclipped, at the
+//      top, at both window sizes, its close button what a real press hits
+//      and that press clicking nothing over there (CONTROL: none for a
+//      current agent).
 //
 // Usage: node e2e/device-stage-desktop-real-browser.mjs [outdir]
 // Builds the harness itself; no server needed. Silent (--mute-audio).
@@ -300,9 +305,30 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
 
     // 6b. An agent too old to report pointer shapes: the stage takes the
     // pointer, hears no shape within 3 s, and hands it back to the host for
-    // the session (the default above, a current agent, keeps it).
-    if (w === 1280) {
-        await page.evaluate(() => { window.__stage.knobs.sendsShapes = false; window.__stage.state.remoteCursor = null; window.__stage.emit(); });
+    // the session (the default above, a current agent, keeps it) — and says,
+    // in one line at the top, that that computer runs an older Púca: on
+    // screen, unclipped, its close button what a real press hits, and that
+    // press clicking nothing over there.
+    {
+        const olderBanner = () => page.evaluate(() => {
+            const el = document.querySelector('.device-stage-older-host');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            const btn = el.querySelector('button');
+            const b = btn?.getBoundingClientRect();
+            const hit = b ? document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) : null;
+            const span = el.querySelector('span');
+            return {
+                text: span?.textContent ?? '',
+                top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+                W: document.documentElement.clientWidth, H: document.documentElement.clientHeight,
+                clipped: !!span && (span.scrollWidth > span.clientWidth + 1 || span.scrollHeight > span.clientHeight + 1),
+                btn: b ? { x: b.left + b.width / 2, y: b.top + b.height / 2, w: b.width, h: b.height } : null,
+                btnHit: !!btn && !!hit && (hit === btn || btn.contains(hit)),
+            };
+        });
+        ck(`${label}: CONTROL — a current agent gets no "older Púca" line`, (await olderBanner()) === null);
+        await page.evaluate(() => { window.__stage.state.peerName = 'Study PC'; window.__stage.knobs.sendsShapes = false; window.__stage.state.remoteCursor = null; window.__stage.emit(); });
         const toggleDraw = async () => {
             await press(page, page.locator('.dsb-menu-btn', { hasText: 'Mouse' }).first());
             await page.waitForTimeout(100);
@@ -319,6 +345,23 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
         const after = await page.evaluate(() => ({ owned: window.__stage.state.cursorOwned, cursor: getComputedStyle(document.querySelector('.device-stage-surface')).cursor }));
         ck(`${label}: an agent that sends no shapes gets the pointer back within 3 s`, tookIt === true && after.owned === false && after.cursor === 'crosshair',
             `took it ${tookIt}; after 3.5 s owned ${after.owned}, cursor ${after.cursor}`);
+        const older = await olderBanner();
+        ck(`${label}: …and one line says that computer runs an older Púca, by its name`,
+            !!older && older.text === 'Study PC runs an older Púca: the pointer is drawn there and can lag. Update Púca on Study PC.',
+            older?.text ?? 'missing');
+        if (older) {
+            ck(`${label}: the line is on screen, unclipped, parked at the top`,
+                older.left >= 0 && older.right <= older.W && older.top >= 0 && older.top < 160 && !older.clipped,
+                `top ${Math.round(older.top)}, ${Math.round(older.left)}..${Math.round(older.right)} of ${older.W}${older.clipped ? ', CLIPPED' : ''}`);
+            ck(`${label}: its close button is what a real press there hits`, older.btnHit && !!older.btn && older.btn.w >= 24 && older.btn.h >= 24,
+                older.btn ? `${Math.round(older.btn.w)}x${Math.round(older.btn.h)} at ${Math.round(older.btn.x)},${Math.round(older.btn.y)}` : 'no button');
+            await page.screenshot({ path: join(outdir, `older-host-${w}.png`) });
+            await clearSent(page);
+            await page.mouse.click(older.btn.x, older.btn.y);
+            await page.waitForTimeout(150);
+            const pressed = (await sentOf(page, 'down')).length + (await sentOf(page, 'up')).length;
+            ck(`${label}: closing it puts it away and clicks nothing over there`, (await olderBanner()) === null && pressed === 0, `buttons sent=${pressed}`);
+        }
         await page.evaluate(() => { window.__stage.knobs.sendsShapes = true; });
     }
 

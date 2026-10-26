@@ -190,3 +190,37 @@ describe('the input-reach half of the same poll', () => {
         expect((await reply({ pointer_captured: 1 })).pointerCaptured).toBeUndefined();
     });
 });
+
+/**
+ * `monitor` — the screen the session's live stream shows now. The agent moves
+ * the stream itself when a lid shuts or opens mid-session, and the host tells
+ * the viewer from this (session.ts, the moved-stream check). Pinned on the Rust
+ * side too (protocol.rs `session_state_serialises_to_what_the_app_reads`, the
+ * `"monitor":1` case). Anything but a screen index reads as "cannot tell",
+ * which changes nothing: a garbled number must not retarget the viewer.
+ */
+describe('the moved-stream half of the same poll', () => {
+    beforeEach(() => { invokeMock.mockReset(); });
+
+    const reply = async (body: Record<string, unknown>) => {
+        invokeMock.mockResolvedValue(JSON.stringify({ ok: 'session_state', secure_desktop: false, ...body }));
+        return agentHostBackend().sessionStatus!('s1');
+    };
+
+    test('POSITIVE CONTROL: the screen the agent names arrives, the composite (255) too', async () => {
+        expect((await reply({ stream_live: true, monitor: 1 })).monitor).toBe(1);
+        expect((await reply({ stream_live: true, monitor: 0 })).monitor).toBe(0);
+        expect((await reply({ stream_live: true, monitor: 255 })).monitor).toBe(255);
+    });
+
+    test('an agent that predates the field, or no live stream, says nothing', async () => {
+        expect((await reply({ stream_live: true })).monitor).toBeUndefined();
+        expect((await reply({ stream_live: false })).monitor).toBeUndefined();
+    });
+
+    test('a negative, a fraction, a string or null is not a screen', async () => {
+        for (const bad of [-1, 1.5, '1', null, true, Number.NaN]) {
+            expect((await reply({ stream_live: true, monitor: bad })).monitor, String(bad)).toBeUndefined();
+        }
+    });
+});

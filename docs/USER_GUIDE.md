@@ -641,6 +641,22 @@ signed in to; **Connect** on one shows its screen and lets you drive it with
 your mouse and keyboard. How it works and what it cannot reach is in
 [Remote screen control](REMOTE_CONTROL.md).
 
+A computer set up to be controlled with nobody at it (unattended access, or
+access to its lock screen, in **Devices → This device**) keeps Púca up to
+date by itself: when a new version is out it installs it and restarts, but
+only while nobody is connected to it, no call is going on in Púca there, no
+file is being sent to or from it directly or uploaded from it, no message is
+written there and not sent, nothing is shown full screen there (a film, a
+game, a presentation), and nobody has used its keyboard or mouse for 10
+minutes — and not in the first 2 minutes after it comes online or wakes up, so
+you can connect to it first. It waits until it has been behind for a day and
+the version it takes has been out for two hours, nothing appears on its screen
+while it installs, and Púca comes back in the tray. To install updates
+yourself instead, turn off **Keep Púca up to date on this computer while
+nobody is connected** on that computer. Its sign-in-screen service is not
+updated this way: Windows asks permission for that, so someone at the
+computer has to click **Update the service** when Púca offers it.
+
 ### From a computer
 The bar above the picture:
 
@@ -680,6 +696,18 @@ The picture also tells you when your input cannot land:
 - **"A game on … has taken the mouse pointer"**: a game is using the mouse
   to look around, which ordinary pointer moves cannot do. **Use Game mode**
   captures your mouse and sends its movement instead.
+- **"… runs an older Púca: the pointer is drawn there and can lag"**: that
+  computer's Púca is too old to let yours draw the pointer, so it draws it
+  into the picture itself, a round trip behind your hand (and over a screen
+  that is not changing, it may not move at all). Update Púca on that
+  computer. **Dismiss** puts the line away for that computer until Púca
+  restarts. A phone shows it too.
+- **"… shared screen went dark — is its lid closed?"**: the person at that
+  computer shared one screen, and it went dark (its lid closed, most often)
+  or was disabled. The picture never moves to a screen they did not share, so
+  the session ends instead. Connect again with the lid open, or ask them to
+  share another screen, or **All displays**. On a laptop with no other screen
+  the picture follows a closed lid only with unattended access.
 - A Windows security screen (the lock screen, an administrator prompt), a
   fullscreen app holding the pointer on another screen, and a laptop with its
   lid closed each have their own message.

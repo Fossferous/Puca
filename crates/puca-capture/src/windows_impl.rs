@@ -61,6 +61,8 @@ pub struct ScreenCapture {
     /// The pixels under the pointer in the frame `copy_out` returned last,
     /// so a repeat of that frame can move it (`redraw_cursor`).
     overlay: CursorOverlay,
+    /// The screen the duplication in hand shows, by HMONITOR (`screen`).
+    screen: isize,
 }
 
 /// The pointer as DXGI last described it.
@@ -112,7 +114,7 @@ struct CursorState {
 /// of the preference — the preference only picks the DEFAULT.
 fn open_duplication(
     monitor: usize,
-) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutputDuplication, String), CaptureError> {
+) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutputDuplication, String, isize), CaptureError> {
     let target = outputs()
         .into_iter()
         .find(|o| o.index == monitor)
@@ -172,7 +174,7 @@ fn open_duplication(
                     continue;
                 };
                 match output1.DuplicateOutput(&device) {
-                    Ok(dup) => return Ok((device, context, dup, name)),
+                    Ok(dup) => return Ok((device, context, dup, name, target)),
                     Err(e) if e.code() == E_ACCESSDENIED || is_transient_display_state(e.code()) => {
                         // The secure desktop, a sleeping panel, or another
                         // duplication of this output. Not this adapter's fault
@@ -294,7 +296,7 @@ pub fn outputs() -> Vec<OutputInfo> {
 fn reduplicate_on(
     device: &ID3D11Device,
     monitor: usize,
-) -> Result<IDXGIOutputDuplication, CaptureError> {
+) -> Result<(IDXGIOutputDuplication, isize), CaptureError> {
     let target = outputs()
         .into_iter()
         .find(|o| o.index == monitor)
@@ -312,7 +314,7 @@ fn reduplicate_on(
             Some(output.cast::<IDXGIOutput1>())
         });
         match found {
-            Some(Ok(output1)) => output1.DuplicateOutput(device).map_err(|e| {
+            Some(Ok(output1)) => output1.DuplicateOutput(device).map(|dup| (dup, target)).map_err(|e| {
                 if e.code() == E_ACCESSDENIED || is_transient_display_state(e.code()) {
                     // The secure desktop, a sleeping panel, or another
                     // duplication of this output. Nothing about a different
@@ -378,7 +380,7 @@ impl ScreenCapture {
         // The error this returns names every adapter it tried and why each
         // refused: this crate deliberately has no logging dependency, and when
         // duplication fails the first question is always which GPU was asked.
-        let (device, context, duplication, _adapter) = open_duplication(monitor)?;
+        let (device, context, duplication, _adapter, screen) = open_duplication(monitor)?;
         let rotation = rotation_of(monitor);
         Ok(Self {
             device,
@@ -400,6 +402,7 @@ impl ScreenCapture {
             draw_cursor: true,
             shape_gen: 0,
             overlay: CursorOverlay::default(),
+            screen,
         })
     }
 
@@ -425,14 +428,28 @@ impl ScreenCapture {
     /// `frame` must be the frame `next_frame` returned last; any other is
     /// left untouched. True only when the pixels changed, so a caller that
     /// caches work per picture (the clip loops' `encode_bgra_picture`)
-    /// redoes it exactly when it must. The remote-control stream does not
-    /// call this: a pointer-only update still sends nothing there.
+    /// redoes it exactly when it must, and the remote-control stream
+    /// (puca-agent stream.rs `still_tick`) encodes the repeat exactly when
+    /// the pointer it shows moved: an idle pointer costs it nothing.
     ///
     /// After a rebuild that changed the output's rotation, a repeat of the
     /// pre-rebuild frame is redrawn with new-orientation coordinates until
     /// the next present (clipped, never out of bounds).
     pub fn redraw_cursor(&mut self, frame: &mut Frame) -> bool {
         self.overlay.on_repeat(frame, &self.cursor, self.shape_gen, self.draw_cursor)
+    }
+
+    /// The screen this capture's duplication shows NOW, by HMONITOR.
+    ///
+    /// Not necessarily the one it was opened on: `next_frame` rebuilds a lost
+    /// duplication by INDEX, so once a display change renumbers the outputs
+    /// (a laptop's panel leaving the desktop as its lid shuts moves an
+    /// external monitor into the panel's index), the same capture can go on
+    /// delivering pictures of ANOTHER screen. A caller that must show no
+    /// screen but the one it opened compares this with that one (puca-agent
+    /// stream.rs, `steer_on_lid`).
+    pub fn screen(&self) -> isize {
+        self.screen
     }
 
     /// How many outputs are available across all adapters.
@@ -534,13 +551,16 @@ impl ScreenCapture {
             // nothing; the walk happens only when that device turns out to be
             // the wrong one for this screen, which is a MUX switch, not a lock.
             match reduplicate_on(&self.device, self.monitor) {
-                Ok(dup) => self.duplication = Some(dup),
+                Ok((dup, screen)) => {
+                    self.duplication = Some(dup);
+                    self.screen = screen;
+                }
                 // "Not right now" is the lock screen and the sleeping panel.
                 // Re-opening cannot help, and must not be attempted 60 times a
                 // second.
                 Err(CaptureError::AccessLost) => return Err(CaptureError::AccessLost),
                 Err(_) => {
-                    let (device, context, dup, _adapter) = open_duplication(self.monitor)?;
+                    let (device, context, dup, _adapter, screen) = open_duplication(self.monitor)?;
                     // Adopt the rebuilt device. A texture belongs to the device
                     // that created it, so the staging buffer cannot outlive a
                     // swap — it is reallocated on the next frame.
@@ -548,6 +568,7 @@ impl ScreenCapture {
                     self.context = context;
                     self.staging = None;
                     self.duplication = Some(dup);
+                    self.screen = screen;
                 }
             }
             // RE-READ THE ROTATION WITH THE NEW DUPLICATION.
@@ -612,9 +633,12 @@ impl ScreenCapture {
         // screen did not change, repeat the previous frame" path, and the
         // cursor news above has already been folded in. It only reaches the
         // picture if the caller calls `redraw_cursor` on the frame it
-        // repeats (the clip loops do). This comment used to say the pointer
-        // "still moves for the viewer" without that; it did not: a repeated
-        // frame carried the pointer where it was at the last present.
+        // repeats (the clip loops do, and so does the remote-control stream
+        // while the host draws the pointer). This comment used to say the
+        // pointer "still moves for the viewer" without that; it did not: a
+        // repeated frame carried the pointer where it was at the last
+        // present, and on 2026-10-26 a host-drawn pointer stood still for
+        // 25 s of mouse movement over a still screen.
         if info.LastPresentTime == 0 {
             unsafe {
                 let _ = dup.ReleaseFrame();
@@ -1678,6 +1702,57 @@ mod overlay_tests {
             let mut direct = desktop(8, 6);
             draw_cursor(&mut direct, &c, c.x, c.y);
             assert_eq!(via.bgra, direct.bgra);
+        }
+    }
+
+    /// THE REMOTE-CONTROL STREAM'S USE OF IT. One present, then the pointer
+    /// walks across the still frame tick after tick: standing still on some
+    /// ticks, crossing its own last spot, changing shape where it stands,
+    /// hanging off both corners. After every repeat the frame must be exactly
+    /// the picture a present at that spot would give (no trail, no ghost),
+    /// and `on_repeat` must say "new picture" exactly when the pointer moved
+    /// or changed shape. The stream encodes on that answer: a "true" for a
+    /// pointer that stood still is an encode on every tick of an idle mouse,
+    /// and a "false" for one that moved is the frozen pointer of the
+    /// 2026-10-26 field report.
+    #[test]
+    fn a_pointer_walking_over_a_still_frame_is_redrawn_exactly_when_it_moves() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        ov.on_present(&mut f, &arrow(0, 0), 0, true);
+        // (x, y, shape generation): generation 1 is the inverting shape, the
+        // others the arrow. The real capture bumps the generation on every
+        // shape DXGI hands over, so a shape change always moves it.
+        let walk: [(i32, i32, u64); 12] = [
+            (1, 0, 0),
+            (1, 0, 0), // stood still
+            (2, 1, 0),
+            (3, 1, 0), // overlaps the last spot
+            (3, 1, 1), // a new shape where it stands
+            (4, 2, 1),
+            (4, 2, 1), // stood still
+            (7, 5, 1), // hangs off the bottom-right corner
+            (-1, -1, 1), // and off the top-left one
+            (5, 3, 2),
+            (5, 3, 2), // stood still
+            (0, 0, 2),
+        ];
+        let mut last = (0, 0, 0u64);
+        for (step, &(x, y, gen)) in walk.iter().enumerate() {
+            let c = if gen == 1 { inverter(x, y) } else { arrow(x, y) };
+            let before = f.clone();
+            let redrawn = ov.on_repeat(&mut f, &c, gen, true);
+            if (x, y, gen) == last {
+                assert!(!redrawn, "step {step}: a pointer that stood still is not a new picture");
+                assert_eq!(f.bgra, before.bgra, "step {step}: and nothing was written");
+            } else {
+                assert!(redrawn, "step {step}: a pointer that moved to ({x},{y}) gen {gen} is a new picture");
+            }
+            let mut direct = clean.clone();
+            draw_cursor(&mut direct, &c, x, y);
+            assert_eq!(f.bgra, direct.bgra, "step {step}: the repeat must be exactly a present at ({x},{y})");
+            last = (x, y, gen);
         }
     }
 

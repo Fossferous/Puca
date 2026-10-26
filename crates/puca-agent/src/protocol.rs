@@ -184,6 +184,22 @@ pub enum Request {
         view_width: u32,
         #[serde(default)]
         view_height: u32,
+        /// May the stream move ITSELF to another screen when the lid shuts on
+        /// the one it shows (a lit screen, else the virtual screen), and back
+        /// when it opens? Only a host app that follows such a move and asks
+        /// the person at the host about the screen it lands on says yes.
+        ///
+        /// FALSE BY DEFAULT, and for every app older than the field: in an
+        /// attended session that person may have shared ONE screen, and a
+        /// stream that moved itself onto an external monitor handed the viewer
+        /// a screen nobody shared, to see and to control. Unset, the stream
+        /// never leaves its screen; the screen dark behind the lid, or gone,
+        /// ends it with `no-screen:lid` (virtual_screen.rs `pinned_step`).
+        /// The steer at the START of a session is not this field's: the host
+        /// app is told where a start landed (`Streaming.monitor`) and checks
+        /// it there.
+        #[serde(default)]
+        steer_on_lid: bool,
     },
     /// One ICE candidate trickled by the controller.
     ///
@@ -571,6 +587,23 @@ pub enum Response {
     /// program has hidden AND confined the pointer — a game in mouse-look,
     /// which absolute moves cannot steer. Both ADDITIVE and absent in the
     /// ordinary case, so the bytes above stay exactly as they were.
+    ///
+    /// `stream_end` has two more values, for a lid shut mid-session with no
+    /// screen to move the picture to: the codes a session start ends with,
+    /// `"no-screen:lid"` and `"no-screen:virtual-failed"`
+    /// (`virtual_screen::NO_SCREEN_*`), which the host can end the session
+    /// with as they are. An app that knows only `"no_frame"` restarts the
+    /// stream, and the restart's own `prepare_screen` ends it with the same
+    /// code, one round trip later.
+    ///
+    /// `monitor` is the screen this session's LIVE stream shows now, as the
+    /// agent's books have it: present whenever a stream with a screen is
+    /// live, and it changes on its own when the stream moves itself — off a
+    /// built-in panel behind a lid that closed mid-session (and back once
+    /// the lid opens), or a topology rebuild's remap. The host compares it
+    /// with the screen it last told the viewer and sends `monitor-active`
+    /// when they differ, as it does for a screen StartStream steered to.
+    /// ADDITIVE: an old app never reads it, and an old agent never writes it.
     SessionState {
         secure_desktop: bool,
         cursor_clipped: bool,
@@ -582,6 +615,8 @@ pub enum Response {
         input_blocked: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
         pointer_captured: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<usize>,
     },
     /// Answer to `PrepareScreen`. `state` is `ready` (answer the offer now),
     /// `waking` / `starting` (ask again shortly; `starting` means the virtual
@@ -674,6 +709,25 @@ mod tests {
         }
     }
 
+    /// An app older than `steer_on_lid` never says it, and its stream must
+    /// read as PINNED (never moved to another screen for the lid): that app
+    /// can neither follow such a move nor ask the person at the host about
+    /// it. No protocol bump: an OLDER agent ignoring the field never steers
+    /// mid-session at all, the less invasive way to be wrong.
+    #[test]
+    fn a_start_stream_without_steer_on_lid_is_pinned() {
+        let old = r#"{"cmd":"start_stream","session_id":"s1","offer_sdp":"v=0"}"#;
+        match serde_json::from_str::<Request>(old).expect("an older app's frame must parse") {
+            Request::StartStream { steer_on_lid, .. } => assert!(!steer_on_lid, "absent means pinned"),
+            other => panic!("wrong arm: {other:?}"),
+        }
+        let new = r#"{"cmd":"start_stream","session_id":"s1","offer_sdp":"v=0","steer_on_lid":true}"#;
+        match serde_json::from_str::<Request>(new).expect("the new frame must parse") {
+            Request::StartStream { steer_on_lid, .. } => assert!(steer_on_lid),
+            other => panic!("wrong arm: {other:?}"),
+        }
+    }
+
     #[test]
     fn session_status_parses_from_the_frame_the_app_writes() {
         let line = r#"{"cmd":"session_status","session_id":"s1"}"#;
@@ -718,6 +772,7 @@ mod tests {
                 stream_end: None,
                 input_blocked: None,
                 pointer_captured: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
@@ -730,6 +785,7 @@ mod tests {
                 stream_end: None,
                 input_blocked: None,
                 pointer_captured: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
@@ -745,6 +801,7 @@ mod tests {
                 stream_end: None,
                 input_blocked: None,
                 pointer_captured: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false}"#,
@@ -757,6 +814,7 @@ mod tests {
                 stream_end: Some(STREAM_END_NO_FRAME.to_string()),
                 input_blocked: None,
                 pointer_captured: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no_frame"}"#,
@@ -773,9 +831,39 @@ mod tests {
                 stream_end: None,
                 input_blocked: Some("valheim.exe".into()),
                 pointer_captured: true,
+                monitor: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"input_blocked":"valheim.exe","pointer_captured":true}"#,
+        );
+        // The screen a live stream shows (`reply.monitor`, for the host's
+        // `monitor-active`), and the lid's end codes in `stream_end`, spelt
+        // as noScreen.ts matches them.
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(true),
+                stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
+                monitor: Some(1),
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":1}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(false),
+                stream_end: Some(crate::virtual_screen::NO_SCREEN_LID.to_string()),
+                input_blocked: None,
+                pointer_captured: false,
+                monitor: None,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no-screen:lid"}"#,
         );
         // The skew direction this side cannot test: an OLD agent omitting
         // `cursor_clipped` entirely. Response is Serialize-only here — the one

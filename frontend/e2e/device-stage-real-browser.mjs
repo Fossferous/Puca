@@ -20,7 +20,12 @@
 //      desktop point in the middle, when the new screen's frames arrive
 //      before the confirmation, and keeps a pinch that carried on meanwhile;
 //   4. the trackpad pointer crosses with it: the first nudge after the switch
-//      moves from the same desktop point.
+//      moves from the same desktop point;
+//   5. an agent too old to send pointer shapes (2026-10-26, a laptop host on
+//      0.9.844): one line says that computer runs an older Púca, inside the
+//      window and clear of the toolbar, with a 44 px close button a tap
+//      reaches and that presses nothing over there (CONTROL: a current agent
+//      gets no line).
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -65,10 +70,13 @@ const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${deta
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--mute-audio'] });
 
-async function open() {
+/** `knobs`: the stand-in host's knobs from its very first hand-over (an
+ *  agent too old to send shapes, say) — fakeSession.ts reads them at load. */
+async function open(knobs = null) {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     page.on('pageerror', e => { fail++; console.log('[pageerror]', String(e).slice(0, 300)); });
+    if (knobs) await page.addInitScript(k => { window.__stageKnobsInit = k; }, knobs);
     const cdp = await ctx.newCDPSession(page);
     await page.goto(base);
     await page.waitForSelector('.device-stage-surface', { timeout: 15000 });
@@ -95,6 +103,27 @@ async function open() {
     const focused = () => page.evaluate(() => document.activeElement?.className || document.activeElement?.tagName);
     return { ctx, page, tap, drag, pinch, focused };
 }
+
+/** The stage's "<PC> runs an older Púca" line, measured where it is drawn. */
+const olderBanner = page => page.evaluate(() => {
+    const el = document.querySelector('.device-stage-older-host');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const span = el.querySelector('span');
+    const btn = el.querySelector('button');
+    const b = btn?.getBoundingClientRect();
+    const hit = b ? document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) : null;
+    const bar = document.querySelector('.device-stage-mobile-toolbar, .mobile-toolbar')?.getBoundingClientRect() ?? null;
+    return {
+        text: span?.textContent ?? '',
+        top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width,
+        W: document.documentElement.clientWidth, H: document.documentElement.clientHeight,
+        clipped: !!span && (span.scrollWidth > span.clientWidth + 1 || span.scrollHeight > span.clientHeight + 1),
+        btn: b ? { x: b.left + b.width / 2, y: b.top + b.height / 2, w: b.width, h: b.height } : null,
+        btnHit: !!btn && !!hit && (hit === btn || btn.contains(hit)),
+        barTop: bar ? bar.top : null,
+    };
+});
 
 /** The desktop point under the middle of the stage, from what is on screen. */
 const centreDesktop = page => page.evaluate(() => {
@@ -316,6 +345,43 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
         const pressed = await page.evaluate(() => window.__stage.inputs.filter(e => e.t === 'down' || e.t === 'tap').length);
         ck('a tap on Resume resumes, and presses nothing over there',
             !(await page.locator('.device-stage-paused').count()) && pressed === 0, `${pressed} presses`);
+    }
+    await ctx.close();
+}
+
+// ---- 5: the other computer runs an older Púca --------------------------------
+// The phone's trackpad takes the pointer; an agent from before 0.9.847 hands
+// it over and never says its shape. One line at the top says so: inside the
+// 390 px window, unclipped, clear of the toolbar, its close button a 44 px
+// target that a tap reaches — and the tap presses nothing over there.
+// CONTROL first: a current agent says its shape, and there is no line.
+{
+    const { ctx, page } = await open();
+    await page.waitForTimeout(3_500);
+    ck('CONTROL: a current agent gets no "older Púca" line on the phone', (await olderBanner(page)) === null);
+    await ctx.close();
+}
+{
+    const { ctx, page } = await open({ sendsShapes: false });
+    await page.evaluate(() => { window.__stage.state.peerName = 'Study PC'; window.__stage.emit(); });
+    const owned = await page.evaluate(() => window.__stage.state.cursorOwned);
+    ck('precondition: the phone\'s trackpad took the pointer', owned === true, String(owned));
+    await page.waitForTimeout(3_500);
+    const r = await olderBanner(page);
+    ck('an agent that sends no shapes: one line says that computer runs an older Púca',
+        !!r && r.text === 'Study PC runs an older Púca: the pointer is drawn there and can lag. Update Púca on Study PC.', r?.text ?? 'missing');
+    if (r) {
+        ck('…inside the window, unclipped, parked at the top and clear of the toolbar',
+            r.left >= 0 && r.right <= r.W && r.top >= 0 && r.top < 200 && !r.clipped && (r.barTop === null || r.bottom <= r.barTop),
+            `${Math.round(r.left)}..${Math.round(r.right)} of ${r.W}, top ${Math.round(r.top)}, bottom ${Math.round(r.bottom)}${r.barTop !== null ? ` (toolbar at ${Math.round(r.barTop)})` : ''}${r.clipped ? ', CLIPPED' : ''}`);
+        ck('…its close button a 44 px target that a tap reaches', !!r.btn && r.btn.w >= 44 && r.btn.h >= 44 && r.btnHit,
+            r.btn ? `${Math.round(r.btn.w)}x${Math.round(r.btn.h)}, hit ${r.btnHit}` : 'no button');
+        await page.screenshot({ path: join(outdir, 'phone-older-host.png') });
+        await page.evaluate(() => { window.__stage.inputs.length = 0; });
+        await page.touchscreen.tap(r.btn.x, r.btn.y);
+        await page.waitForTimeout(300);
+        const pressed = await page.evaluate(() => window.__stage.inputs.filter(e => e.t === 'down' || e.t === 'tap' || e.t === 'up').length);
+        ck('a tap on it puts it away, and presses nothing over there', (await olderBanner(page)) === null && pressed === 0, `${pressed} presses`);
     }
     await ctx.close();
 }

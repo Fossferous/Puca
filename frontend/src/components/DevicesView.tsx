@@ -115,6 +115,8 @@ import {
     type IncomingShare,
 } from '../api/devices/shares';
 import { wsClient } from '../api/websocket';
+import { HOST_UPDATE_BEHIND_MS, HOST_UPDATE_FRESH_MS, HOST_UPDATE_IDLE_SECS, isRemoteControlHost } from '../api/devices/hostUpdate';
+import { loadSettings, saveSettings } from './settingsStore';
 import { DeviceShareModal } from './DeviceShareModal';
 import { DeviceAudioHubPanel } from './DeviceAudioHubPanel';
 import { BanIcon, CloseIcon, Icon, MonitorIcon, SettingsIcon, ShieldCheckIcon, TrashIcon, WarningIcon, type IconName } from './Icons';
@@ -385,6 +387,9 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     const [autostart, setAutostartState] = useState<boolean | null>(null);
     const [forwarding, setForwardingState] = useState<boolean | null>(null);
     const [unattended, setUnattendedState] = useState<boolean | null>(null);
+    /** "Keep Púca up to date on this computer while nobody is connected" — a
+     *  device-local setting (settingsStore `hostAutoUpdate`), on by default. */
+    const [hostUpdates, setHostUpdates] = useState(() => loadSettings().hostAutoUpdate !== false);
     const [uaPass, setUaPass] = useState('');
     const [uaOpen, setUaOpen] = useState(false);
     // Whether the server has told this machine it was signed out. Read on every
@@ -677,6 +682,19 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         }
         setUnattendedState((await unattendedState()).armed);
     };
+
+    /** Stored at once and read back, like every switch on this tab. */
+    const toggleHostUpdates = (next: boolean) => {
+        saveSettings({ ...loadSettings(), hostAutoUpdate: next });
+        setHostUpdates(loadSettings().hostAutoUpdate !== false);
+    };
+
+    /** This PC is set up for remote control — the same rule the updater
+     *  itself uses (api/devices/hostUpdate.ts), from the same two switches. */
+    const isHost = isRemoteControlHost(
+        unattended,
+        lockScreen && !lockScreen.problem ? lockScreen.installed : null,
+    ) === true;
 
     const toggleForwarding = async (next: boolean) => {
         const err = await setTunnelForwarding(next);
@@ -1671,6 +1689,50 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                     checked={autostart ?? false}
                                     disabled={autostart === null}
                                     onChange={e => void toggleAutostart(e.target.checked)}
+                                />
+                            </div>
+                        )}
+
+                        {/* UPDATES WITH NOBODY HERE. Shown only on a computer set
+                            up to be controlled with nobody at it (unattended
+                            access armed, or lock-screen access installed) —
+                            the only computers it does anything on, so anywhere
+                            else it would be a dead control. Says what it will
+                            and will not do before it ever does it: a restart
+                            the owner did not expect is the whole risk. */}
+                        {isHost && (
+                            <div className="dv-card device-option">
+                                <div className="option-info">
+                                    <label htmlFor="device-host-updates">
+                                        Keep Púca up to date on this computer while nobody is connected
+                                    </label>
+                                    <span className="option-hint">
+                                        This computer is set up to be controlled with nobody at it, so
+                                        there may be nobody here to install an update. With this on,
+                                        Púca installs a new version by itself and restarts, but only
+                                        while nobody is connected to this computer, no call is going on
+                                        in Púca here, and nobody has used its keyboard or mouse for
+                                        {` ${HOST_UPDATE_IDLE_SECS / 60} `}minutes. It waits until this
+                                        computer has been behind for
+                                        {` ${HOST_UPDATE_BEHIND_MS / 3_600_000} `}hours and the new version
+                                        has been out for{` ${HOST_UPDATE_FRESH_MS / 3_600_000} `}hours, so a
+                                        problem with a release can show first. Turn it off to install
+                                        updates yourself, from the banner at the top of the window.
+                                        {lockScreen?.installed && (
+                                            <>
+                                                <br /><br />
+                                                It does not update the sign-in-screen service: that needs
+                                                Windows&rsquo; permission prompt, so someone at this computer
+                                                has to approve it when Púca asks.
+                                            </>
+                                        )}
+                                    </span>
+                                </div>
+                                <input
+                                    id="device-host-updates"
+                                    type="checkbox"
+                                    checked={hostUpdates}
+                                    onChange={e => toggleHostUpdates(e.target.checked)}
                                 />
                             </div>
                         )}

@@ -206,6 +206,7 @@ import { SmartAvatar } from './SmartAvatar';
 import { repinOnGrowth } from './repinOnGrowth';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
+import { useUnsentWork } from '../api/workInFlight';
 
 /** A file that may be a HEIC (its type or name says so, or it has no type:
  *  what Windows gives a .heic); its first bytes decide (api/heif.ts). */
@@ -971,6 +972,10 @@ export function Chat({ onLogout }: ChatProps) {
      *  updater carries side effects (StrictMode double-invokes them). */
     const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
     useEffect(() => { pendingAttachmentsRef.current = pendingAttachments; }, [pendingAttachments]);
+    // A message written but not sent lives only here, in React state, so a
+    // restart drops it: a PC updating itself waits while the composer holds
+    // one (workInFlight.ts, HostAutoUpdate).
+    useUnsentWork('chat-composer', input.trim().length > 0 || pendingAttachments.length > 0);
     /** The original File per chip, kept for retry. A ref: files aren't render data. */
     const pendingFilesRef = useRef(new Map<string, File>());
     /** Chips abandoned WHILE their upload was still in flight (X mid-spinner,

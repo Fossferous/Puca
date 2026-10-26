@@ -10,6 +10,14 @@
  * now leaves one line: what kind of session, how far it got, the reason it
  * was given, and whether the app was backgrounded or the socket down.
  *
+ * And so does every DELIBERATE end since 2026-10-26 ("ended by choice":
+ * Disconnect, connecting again over a live session, the other computer's own
+ * stop, a sign-out), with how long the session was up. The laptop timeline
+ * that day had to be rebuilt from the other computer's offsets because a
+ * reconnect left nothing here. The stage adds the one inference worth a line:
+ * that computer running an older Púca (no pointer shape while it could have
+ * said one; olderHost.ts).
+ *
  * Kept in memory as well as logged: the phone has no app log file, and
  * Send diagnostics on a phone sends only the report — which now carries
  * these lines (diagnosticsReport.ts). On desktop they also reach puca.log

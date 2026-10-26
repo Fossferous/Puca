@@ -44,8 +44,10 @@ const { useLatencyProbe } = await import('../api/devices/useLatencyProbe');
 type FrameCb = (now: number, meta: { rtpTimestamp?: number; expectedDisplayTime?: number }) => void;
 
 /** A <video> whose `requestVideoFrameCallback` is answered every 16 ms while
- *  pictures arrive, and left pending (as a browser does) while none do. */
-function presentingVideo() {
+ *  pictures arrive, and left pending (as a browser does) while none do.
+ *  `timed: false` is a browser whose frame metadata carries no RTP timestamp,
+ *  so no answer could ever be matched to a frame there, whatever the agent. */
+function presentingVideo(opts: { timed?: boolean } = {}) {
     const el = document.createElement('video');
     const pending = new Map<number, FrameCb>();
     let next = 1;
@@ -60,7 +62,10 @@ function presentingVideo() {
         const due = [...pending.values()];
         pending.clear();
         rtp += 3_000;
-        for (const cb of due) cb(performance.now(), { rtpTimestamp: rtp, expectedDisplayTime: performance.now() });
+        const meta = opts.timed === false
+            ? { expectedDisplayTime: performance.now() }
+            : { rtpTimestamp: rtp, expectedDisplayTime: performance.now() };
+        for (const cb of due) cb(performance.now(), meta);
     }, 16);
     return { el, state };
 }
@@ -119,15 +124,44 @@ describe('the probe clock', () => {
         await advance(6_500);
         expect(h.sent, 'one in flight at a time, each expiring after 2 s').toBe(3);
         expect(latest()?.unavailable, 'an older agent never answers: said so').toBe(true);
+        // Silence is a timeout, not a refusal: a current agent's answers can
+        // be late or dropped too (review 2026-10-26), so nothing here says
+        // which Púca is there, only that nothing was answered.
+        expect(latest()?.answered).toBe(false);
         const before = h.sent;
         await advance(20_000);
         expect(h.sent, 'quiet while backed off — not a refused frame a second in that log').toBe(before);
         await advance(12_000);
         expect(h.sent, 'and asks again').toBe(before + 1);
+        await advance(32_100);
         answer(37);
         await advance(100);
         expect(latest()?.unavailable, 'an answer ends it').toBe(false);
+        expect(latest()?.answered, 'and says a current agent is there').toBe(true);
         expect(latest()?.totalMs).toBe(37);
+    });
+
+    // What olderHost.ts takes as proof that computer is NOT older: kept for
+    // the session, through a back-off, once anything was answered.
+    it('an answer is kept as "answered" when later probes go unanswered and it backs off', async () => {
+        const { el } = presentingVideo();
+        await render(() => el);
+        await advance(300);
+        answer(40);
+        await advance(100);
+        expect(latest()?.answered).toBe(true);
+        // A busy loop or a full channel: the next three go unanswered.
+        await advance(8_000);
+        expect(latest()?.unavailable, 'backed off').toBe(true);
+        expect(latest()?.answered, 'still answered, earlier in this session').toBe(true);
+    });
+
+    it('NEGATIVE CONTROL: frames with no RTP timestamp — unanswerable here, so "unavailable" and nothing answered', async () => {
+        const { el } = presentingVideo({ timed: false });
+        await render(() => el);
+        await advance(6_500);
+        expect(latest()?.unavailable, 'nothing can be measured').toBe(true);
+        expect(latest()?.answered).toBe(false);
     });
 
     it('NO picture arriving: an unanswered probe is no evidence, and nothing is said about the other end', async () => {

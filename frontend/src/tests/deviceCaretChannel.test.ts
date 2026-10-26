@@ -204,6 +204,44 @@ describe('the channel itself', () => {
     });
 });
 
+// The pointer shape rides this channel, and the stage counts a silent host's
+// 3 s only once it is open (review 2026-10-26): `caretOpen`, the one public
+// edge of it, set on open and taken away on close and on a media restart.
+describe('the stage can see that it is open', () => {
+    async function caretOpenOf(id: string): Promise<boolean | undefined> {
+        const { activeSessions } = await import('../api/devices/session');
+        return activeSessions().find(s => s.id === id)?.caretOpen;
+    }
+
+    it('false until the channel opens, true from then, false again once it closes', async () => {
+        const { id } = await activeController();
+        const { subscribeSessions } = await import('../api/devices/session');
+        expect(await caretOpenOf(id), 'connecting: not open yet').toBe(false);
+        const seen: Array<boolean | undefined> = [];
+        const off = subscribeSessions(list => { seen.push(list.find(s => s.id === id)?.caretOpen); });
+        open(caret());
+        expect(await caretOpenOf(id)).toBe(true);
+        expect(seen.at(-1), 'and the stage is told (an emit)').toBe(true);
+        caret().readyState = 'closed';
+        caret().onclose?.();
+        expect(await caretOpenOf(id)).toBe(false);
+        expect(seen.at(-1)).toBe(false);
+        off();
+    });
+
+    it('a media restart\'s new channel starts closed again', async () => {
+        const { id, key } = await activeController();
+        open(caret());
+        expect(await caretOpenOf(id)).toBe(true);
+        await hostSignal(id, key, { kind: 'stream-died' });
+        await settle();
+        expect(caretChannels(), 'premise: a new channel was built').toHaveLength(2);
+        expect(await caretOpenOf(id), 'the old one went with the old connection').toBe(false);
+        open(caret());
+        expect(await caretOpenOf(id)).toBe(true);
+    });
+});
+
 describe('asking for caret reports', () => {
     it('THE RACE: a request made before the channel opens is replayed on open', async () => {
         const { id } = await activeController();

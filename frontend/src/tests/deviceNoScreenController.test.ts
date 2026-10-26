@@ -190,6 +190,73 @@ describe('a session that ended because that PC has no screen on', () => {
     });
 });
 
+/**
+ * REVIEW 2026-10-26: the [rc-connect] line for such an end was the sentence
+ * itself, so it carried the PC's name into Send diagnostics, whose lines name
+ * no device (connectLog.ts). Shown named; logged as the code.
+ */
+describe('a no-screen end in the [rc-connect] log', () => {
+    async function endLine(run: () => Promise<void>): Promise<string> {
+        const { recentRcConnectLines } = await import('../api/devices/connectLog');
+        const before = recentRcConnectLines().at(-1) ?? null;
+        await run();
+        const all = recentRcConnectLines();
+        const fresh = all.slice(before === null ? 0 : all.lastIndexOf(before) + 1);
+        const ended = fresh.filter(l => / control ended /.test(l));
+        expect(ended, 'there is a line to look at (not vacuous)').toHaveLength(1);
+        return ended[0];
+    }
+
+    it('the host\'s code: shown with the name, logged as the code', async () => {
+        const { id } = await activeController();
+        let error: string | null | undefined;
+        const line = await endLine(async () => {
+            error = await endedErrorOf(id, async () => {
+                handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: noScreenEndReason('no-screen:lid') } });
+                await settle();
+            });
+        });
+        expect(error, 'CONTROL: the screen names the PC').toMatch(/^Work Laptop’s screen is off/);
+        expect(line).toContain(': no-screen:lid (');
+        expect(line).not.toContain('Work Laptop');
+    });
+
+    it('the shared screen that changed: its own sentence on screen, its code in the log', async () => {
+        const { id } = await activeController();
+        let error: string | null | undefined;
+        const line = await endLine(async () => {
+            error = await endedErrorOf(id, async () => {
+                handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: noScreenEndReason('no-screen:changed') } });
+                await settle();
+            });
+        });
+        expect(error).toBe('Work Laptop’s shared screen changed or was turned off. Connect again to choose a screen.');
+        expect(line).toContain(': no-screen:changed (');
+        expect(line).not.toContain('Work Laptop');
+    });
+
+    it('the virtual screen that never came: shown with the name, logged as the code', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            const { id, key } = await activeController();
+            await hostSignal(id, key, { kind: 'screen-state', state: 'virtual-starting' });
+            let error: string | null | undefined;
+            const line = await endLine(async () => {
+                error = await endedErrorOf(id, async () => {
+                    await vi.advanceTimersByTimeAsync(31_000);
+                    await settle();
+                });
+            });
+            expect(error, 'CONTROL: the screen names the PC')
+                .toMatch(/^Work Laptop’s screen is off, and its virtual screen did not start/);
+            expect(line).toContain(': no-screen:virtual-failed (');
+            expect(line).not.toContain('Work Laptop');
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
 describe('the host says it is starting its virtual screen', () => {
     it('POSITIVE CONTROL: the notice reaches the stage, with the name to say it with', async () => {
         const { id, key } = await activeController();

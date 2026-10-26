@@ -196,12 +196,231 @@ built-in panel (embedded DisplayPort, LVDS) behind a closed lid as DARK. A PC
 whose only screens are dark has no screen, at once: no wake grace, because a
 lid is not a sleeping monitor. When another screen is lit beside a dark panel
 (the virtual screen, or an external monitor), StartStream captures that one
-instead and the host tells the viewer which screen it got (`monitor-active`).
+instead, and the host tells the viewer which screen it got (`monitor-active`)
+or, when the person at the PC shared one screen and this is another, ends the
+session (*What the host app does with it*, below).
 A stream that still never shows a picture is ended by the host with its own
 reason ("<PC>'s screen did not show anything — it may be asleep, or its lid
 closed"). Before this, the phone's connection timed out first and said "could
 not connect to the device". An unknown lid state (a desktop PC, or no
 notification) changes nothing.
+
+**A lid shut DURING a session.** All of the above runs when a session
+starts. On 2026-10-26 a session streaming the built-in panel had its lid shut
+193 s in, and the picture froze for the rest of it: the panel stayed an active
+output Windows never presented to, and nothing asked for the virtual screen,
+though it was installed and had streamed 79 minutes on that machine the night
+before. Each live stream now watches the lid itself
+(`crates/puca-agent/src/virtual_screen.rs`, "mid-session", and `stream.rs`).
+What it may do about it is the host app's to say.
+
+**It never shows a screen nobody shared, unless the host app lets it.** In an
+attended session the person at the host may have shared ONE screen, say the
+built-in display. A stream that moved itself onto an external monitor when the
+lid shut would hand the viewer a screen that person declined, to see and to
+control; a host app notices a second or two later at best, and an old one never
+does. So `StartStream` carries `steer_on_lid` (`protocol.rs`, additive,
+`#[serde(default)]` = false):
+
+- **`steer_on_lid` false (the default, and every older host app): PINNED.** The
+  stream shows its own screen and no other, lid or no lid. It never moves to
+  another screen mid-session: not to a lit one, not to the virtual screen, not
+  back to the panel when the lid opens, and not after its own screen to a new
+  index either, because the host app's consent is by index (`pinned_step`).
+  - **Every picture is checked.** A capture rebuilds a lost duplication by
+    index, and anything that renumbers the outputs (a panel leaving the
+    desktop as its lid shuts, a monitor unplugged or added before it) can put
+    another screen at that index; `ScreenCapture::screen` says which screen a
+    capture shows now. A picture of any screen but the stream's own (by the
+    handle its capture reported), or of one it cannot name, is never sent,
+    and the stream ends. This runs on every picture, not only around the
+    lid: the lid's state arrives on its own clock (a panel can leave the
+    desktop first), may not arrive at all, and a capture can sit on another
+    screen long after the lid stopped moving.
+  - **Every rebuild is checked the same way.** A rebuild decided by handle is
+    built by index, and the outputs can be renumbered in between, so the new
+    capture's own answer decides, never a fresh enumeration: another screen
+    at its index ends the stream and is never adopted. A rebuild at any other
+    index is refused, whoever asks (the topology self-heal, the lid, the
+    agent's own remap after `display_topology_changed`).
+  - **A dock keeps working.** A renumbering that leaves the stream's screen at
+    its index with the same handle (a monitor added or removed after it)
+    changes nothing: it is rebuilt in place.
+  - **How it ends.** Its own screen dark behind the closed lid, gone, moved to
+    another index, or replaced at its own, ends the stream. The code names the
+    lid, `no-screen:lid` (the one a start with no screen gives), only when the
+    lid is why: it changed in the last 20 s, or the stream's own screen is the
+    built-in panel dark behind it. Otherwise it is **`no-screen:changed`**,
+    a laptop docked with its lid shut all session included: plugging a
+    monitor in there is not the lid, and "connect again with the lid open"
+    would be the wrong advice. Both are `stream_end` codes in
+    `SessionStatus`, and neither may be answered with a restart: a restart
+    goes by index and could land on a screen nobody shared. A capture that
+    simply fails while its screen is still the one at its index ends
+    restartably (`capture: …`), as before.
+- **`steer_on_lid` true: STEERING**, for a host app that follows a move
+  (`SessionStatus.monitor`) and asks the person at the host about the screen
+  it lands on. The rules a start uses, below.
+- **The start of a session is not this field's.** StartStream's steer off a
+  dark panel is unchanged; the host app is told where it landed
+  (`Streaming.monitor`) and checks it then.
+- **No protocol bump.** An agent older than the field ignores it and never
+  steers mid-session at all, which is the less invasive way to be wrong.
+- **`no-screen:changed` is new**, a `stream_end` code beside `no_frame`,
+  `no-screen:lid` and `no-screen:virtual-failed`. A host app must end the
+  session on every `no-screen:*` code and restart on none: an app from before
+  it restarts on any code it does not know, and a restart by index lands on
+  whatever screen has that index now. So the agent half ships only with a
+  host app that knows it.
+
+**What pinning does not settle.** Consent is by screen index on both sides:
+the host app asks the person at the host about a screen by its index, and
+the start of a stream names one the same way. So a restart that follows a
+restartable end, if a renumbering falls in between, can open whatever screen
+has that index by then. And pinning rests on the screens' HMONITOR handles
+surviving display changes, which has not been verified on real hardware: if
+Windows re-issues them (a screen that detaches and comes back, say), a
+one-screen session ends even though its screen is back, which fails safe but
+ends a session that could have gone on. The real fix for both is a stable
+identity for each screen, its DisplayConfig target or its device path,
+carried from the consent prompt to the start of the stream, with the agent
+refusing any other screen.
+
+A steering stream decides with the rules a start uses:
+
+- **Closed, on the built-in panel.** Once the lid has said "closed" for a
+  second (the switch bounces), a stream whose screen is a dark panel, or is
+  gone, moves to a lit screen if there is one: a real one first, the virtual
+  screen only when nothing real is lit. With nothing lit, NO OUTPUT AT ALL
+  included (a laptop that takes the panel out of the desktop), it asks for a
+  screen through the same `prepare` a start polls (wake, then the virtual
+  screen), and moves once one is lit. Without one it ends with the start's own
+  code, `no-screen:lid` (or `no-screen:virtual-failed`), which `SessionStatus`
+  reports as the stream's `stream_end`; an app that knows only `no_frame`
+  restarts the stream, and the restart's `prepare_screen` ends the session with
+  the same code. The move goes through the stream's one rebuild path
+  (`RebuildCapture`), input is re-aimed at once, and `SessionStatus.monitor`
+  says which screen the stream now shows, so the host can tell the viewer
+  (`monitor-active`). All Displays follows the start's rule: one lit screen
+  left becomes that screen.
+- **A second close in the same session works like the first.** The first
+  request for a screen after each lid change starts a fresh preparation
+  (`Preps`). It used to reuse the one from the close before, whose ask for the
+  virtual screen was long past its start window, and end with
+  `no-screen:virtual-failed` without asking anyone; a preparation nobody has
+  asked about for 5 s is forgotten as well.
+- **Opened again.** The picture goes back to what the stream was asked for:
+  the built-in panel, found by WHAT IT IS (a panel can come back at another
+  index; another screen at the old index is not it), or All Displays. Only a
+  lid move remembers anything: a desktop whose screen was renumbered by a
+  monitor detaching never moves back by itself, and a stream with no lid never
+  moves at all. Staying on the virtual screen is not an option: the holder lets
+  the virtual screen go once a real screen has been back for two of its 2 s
+  ticks, and a stream on it moves to a real screen first (it looks every half
+  second while it shows it). The same holds with the lid still shut: a monitor
+  plugged in takes the stream off the virtual screen before it goes.
+- **Never someone else's screen, and never for ever.** A move passes over
+  every screen another session's stream (or a raw capture) holds, as
+  StartStream would refuse it, and any screen that refused a move in the last
+  30 s. A move that fails waits 1 s, then 2 s, then 4 s before the next try;
+  after four in a row the stream ends with the named code while the lid is
+  shut, and stays where it is (resting until the lid changes) while it is open.
+  A move is one capture build with no wait, releasing the stream's own capture
+  first only when the build needs that screen. It used to be three builds and
+  a 250 ms sleep on the stream's thread every half second, for as long as the
+  screen refused.
+- **The viewer's choice wins.** A move the lid decided just before a switch
+  the viewer asked for is dropped when its turn comes, rather than taking the
+  picture off the screen the viewer just chose.
+
+Both kinds of stream:
+
+- **While the screens are re-arranged.** For a moment around each lid change
+  Windows removes one screen and adds another, and an output index can be
+  missing. A capture that fails within 20 s of a lid change, or of the stream
+  acting on one, holds the last picture and retries rather than ending the
+  session. A capture still lost 20 s after the last sign of progress (a screen
+  on its way restarts the clock) ends the stream: with the named code while the lid
+  is shut, a restartable end while it is open. A request for a screen that never
+  answers (the service exchange has no timeout of its own) is given up after
+  25 s, a move after 10 s. Away from the lid, a capture failure ends the
+  stream as it always did. For a PINNED stream every restartable end
+  becomes `no-screen:changed` once its screen is no longer the one at its
+  index, because a restart would go by index.
+- **Nothing else moves.** A stream showing an external monitor, a desktop PC,
+  and a stream the lid never darkened carry on as before. On any PC, a
+  pinned stream whose screen is renumbered away ends, rather than show the
+  screen that took its index.
+
+**What the host app does with it** (`frontend/src/api/devices/session.ts`):
+
+- **`steer_on_lid` is true only when every screen was shared**
+  (`consentCoversEveryScreen`): **All displays** in **Screen to share**, or
+  nobody was asked (unattended access, or a share on an armed PC). Any
+  one-screen consent sends false. "The first lit screen" can be a monitor the
+  person at the PC chose not to share: someone at a laptop on a desk shares
+  only the laptop's own screen, then closes its lid. A laptop with one screen
+  asks no "Screen to share" and records that one screen, so closing its lid
+  during an attended session ends it too; unattended access is what lets the
+  picture follow the lid there.
+- **A pinned stream's end is said as what it is, and never restarted.** Its
+  `no-screen:lid` ends the session at once as `no-screen:shared-off` ("Work
+  Laptop's shared screen went dark — is its lid closed? Only that screen was
+  shared, so the picture could not move to another. Connect again with the
+  lid open, or share another screen."): the lid code's advice, turning the lid
+  option on, would not help a stream that moves to no other screen, the
+  virtual one included (`noScreenCodeForShared`; a start whose
+  `prepare_screen` says "off" on a one-screen session is said the same way).
+  Its `no-screen:changed` (its capture showed another screen than the one it
+  was pinned to: Windows renumbered the screens, or that one went away) ends
+  the session too, as "Work Laptop's shared screen changed or was turned off.
+  Connect again to choose a screen.": the consent here is a screen index, and
+  a restart by index could land on a screen nobody shared. The capture ends
+  that are not codes (the screen the stream showed is gone, a steering
+  stream's capture showing another screen, no screen 20 s after the lid
+  changed the displays) are restarted like any other stream death.
+- **What the agent says it shows is checked against what was shared,**
+  wherever the host app learns it, and the session ends with that code when
+  it is outside: the start's reply (`Streaming.monitor`: StartStream still
+  steers off a dark panel whatever `steer_on_lid` says, so the answer is then
+  never sent, and no picture leaves), the status poll's `monitor`, a restart's
+  request, and the remap after **Disable other displays** (it keeps the main
+  display, so a viewer given one other screen would otherwise be shown the
+  main one).
+- **The viewer follows a move.** The 1 Hz status poll compares
+  `SessionStatus.monitor` with the screen the viewer was last told
+  (`monitorTold`, forgotten after a send that failed and after any relay
+  interruption, so a lost frame is said again on the next poll) and, when
+  they differ, sends `monitor-active`, and the new screen list when every
+  screen was shared, so the viewer's picker, caret filter and every-screen
+  fallback follow the move. What the agent moved to is what the stream SHOWS
+  (`shownMonitor`); the screen asked for (`monitor`) is kept, so a media
+  restart asks for that one again and the agent can still bring the picture
+  back when the lid opens (an explicit request for the screen it moved to is
+  one it would keep). A reply read while a switch the viewer asked for was
+  committing is not acted on: the poll acts only if the screen asked for did
+  not change while it waited.
+- **Where it can be wrong, it ends.** Screens are told apart by their index
+  here, and indices can shift when displays are disabled, so a shared main
+  display that was not output 0 ends at **Disable other displays** too. A
+  pinned stream knows its screen by its handle (HMONITOR); when Windows
+  issues a new one (a screen that detaches and comes back: a monitor that
+  drops off as it goes to sleep, a lid change), the stream ends although its
+  screen is still there. Both are false ends, never a screen nobody shared.
+  So is **Disable other displays** under a pinned stream whose screen it
+  renumbers: the agent refuses `display_topology_changed`'s rebuild to the
+  new index (an error the host app logs and carries on from), and the
+  stream's own picture check then ends it with `no-screen:changed`.
+- **The consent is a screen INDEX here too.** Every check above compares the
+  index the person at the PC picked with the one the agent reports; *What
+  pinning does not settle* (above) has what that leaves open, and the stable
+  screen identity that would close it. Not built yet.
+
+On a laptop that takes the panel out of the desktop once the virtual screen
+appears (the owner's does: with the lid shut, the virtual screen becomes the
+only output and takes the panel's index), a steering stream's capture also
+follows by index without a move, in both directions. A pinned stream does not:
+the virtual screen is another screen, and the stream ends.
 
 **The PC can have a screen in software.** "Allow remote control with the lid
 closed" (Devices, on the PC itself, below the remote-access service it needs)
@@ -266,7 +485,30 @@ on a real laptop, with its owner's permission. Look for the agent log's
 `[virtual-screen]` lines (`%LOCALAPPDATA%\Púca\agent.log`) and the service
 log's (`C:\ProgramData\Sovereign\service.log`). The first `holding …; active
 display adapters: …` line is the field check that the virtual screen's adapter
-is recognised as its own.
+is recognised as its own. A lid shut or opened during a session is in the
+stream's `[lid]` lines: what it decided, the screen it moved to, and an end
+with its code. Neither the mid-session move nor the pinned end was run on a
+real lid either; their decisions are unit-tested, and they are verified on
+the owner's laptop with his permission. A panel leaving the desktop and an
+external monitor taking its index (what the pinned stream's picture check
+exists for) is not reproducible without one.
+
+Every line of `agent.log` starts with the UTC time it was written, to the
+millisecond (`crates/puca-agent/src/file_log.rs`, "agent.log times"): the
+agent's stderr is a pipe that a thread reads and stamps line by line, so
+every crate's lines carry it. Lines the desktop app appends itself
+(`[host] …`, the `agent_log` command in `frontend/src-tauri/src/agent_ipc.rs`)
+are written straight into the file, stamped the same way by the app, byte for
+byte the agent's format. Nothing in the app or the web code reads agent.log
+lines back (searched on 2026-10-26: no reader outside the agent's own tests;
+the sign-in-screen service only rotates the file by size), so a reader written
+later must allow the time in front of each line. An exit waits up to 500 ms
+for the pipe to empty, through a numbered marker the reading thread
+recognises anywhere in a line, so one marker lost costs only its own wait. A
+process KILLED from outside (Task Manager, an installer) loses what was still
+in the pipe: normally microseconds of lines, since the reading thread runs at
+the highest normal priority, and the end of a line whose newline had not been
+written. Before the pipe a kill lost nothing written.
 
 ## My Devices file browser — big folders
 
@@ -469,9 +711,95 @@ the next capture → encode → network → jitter buffer → decode → the sta
   so does pausing control: watching, the host's own pointer is the one to
   see. An agent too old to report shapes (it still gives the pointer up when
   asked) is found by its silence: no shape within 3 s of the hand-over, and
-  the pointer goes back to the host for the rest of the session. Such an
-  agent reports no captured pointer either, so the Game mode hint never
-  appears for it; the Mouse menu's Game mode still works.
+  the pointer goes back to the host for the rest of the session. The 3 s are
+  counted only while that computer could have said one — its picture
+  arriving, the `caret` channel the shape rides open (`caretOpen`; it can
+  open after the picture), no security screen up, the relay not
+  reconnecting — because the hand-over's ack rides the relay and can beat
+  the media path by seconds. And never once that computer has answered a
+  latency probe: the probe came in the same release as the shape, so that
+  agent can say it, and a slow one (its write refused while a file transfer
+  fills the channel) is waited for; an answer after the wait gave up brings
+  the pointer back here. Such an agent reports no captured pointer either, so
+  the Game mode hint never appears for it; the Mouse menu's Game mode still
+  works.
+- **The host's pointer over a still screen.** Whenever the HOST draws the
+  pointer (all the cases above where the viewer does not), the agent puts
+  the pointer into the picture itself, and DXGI reports a pointer that
+  moved over a screen that did not change as no new picture at all
+  (`LastPresentTime == 0`). Until 2026-10-26 the stream answered that with
+  nothing, so the pointer in the picture stood still for as long as the
+  screen did: measured that day, about 25 s of 80 to 120 moves a second
+  against 150 consecutive still-screen skips. The pump's still tick now asks
+  the capture to redraw the pointer on the picture it holds
+  (`ScreenCapture::redraw_cursor`, the save-under the clip loops use), and
+  sends that picture when the pointer moved or changed shape
+  (`crates/puca-agent/src/stream.rs` `still_tick`; on All Displays,
+  `VirtualCapture::redraw_cursors`, which also runs on ticks where another
+  screen presented). A pointer that is not moving costs nothing (two
+  comparisons a tick, no encode); a moving one at most one encode per frame
+  interval, the pace of the clock's tick and of the early look after an
+  input. The timing line counts these frames (`pointer-only N`). In bytes,
+  measured on an AMD hardware encoder at 1920x1080, 60 fps and 10 Mbps
+  (`crates/puca-encode/tests/live_encode.rs`,
+  `bench_a_pointer_moving_over_a_still_picture`), with the pointer moving on
+  every frame: about 2 Mbps over a desktop-like screen, settling towards
+  1.5, and 2.9 Mbps over one textured everywhere, against 9.9 Mbps for a
+  picture changing everywhere. Nothing is padded; it is the encoder spending
+  a still picture's unused budget on refining it.
+- **Saying that computer runs an older Púca**
+  (`frontend/src/api/devices/olderHost.ts`). The fix for all of the above is
+  on the other computer, so the stage says so in one line at the top of the
+  picture — "Study PC runs an older Púca: the pointer is drawn there and can
+  lag. Update Púca on Study PC." — on the desktop stage and the phone's (whose
+  trackpad takes the pointer the same way). The evidence is what that computer
+  DID: no shape while it held the pointer and could have said one (above). A
+  shape that did arrive outweighs it, and so does a latency probe answered.
+  An unanswered probe is not evidence (review, 2026-10-26): a current agent's
+  answer can be late or lost (a busy stream loop, a channel full of a file
+  transfer), and an older agent refuses the probe only in its own log, so all
+  this side can ever see is silence, which is a timeout, not a refusal. No
+  version is named:
+  none reaches this side — the device list, the sealed LAN details and the
+  session's hello carry none. The line yields to the security-screen, elevated
+  window and pointer-clip banners, lets presses through to the picture, and
+  its close button puts it away for that computer until Púca restarts. The
+  controller's `[rc-connect]` log gets the shape verdict, once a session.
+
+## Keeping a host up to date
+
+Every gain above lives in the HOST's agent, and a host is exactly the PC
+nobody sits at to click an update. A PC set up for remote control — unattended
+access armed, or lock-screen access installed — therefore installs a newer
+desktop release by itself and restarts, silently and back in the tray
+(`frontend/src/components/HostAutoUpdate.tsx`, decisions in
+`frontend/src/api/devices/hostUpdate.ts`, the install in
+`frontend/src-tauri/src/host_update.rs`), once it has been behind for a day and
+the version on offer has been out for 2 hours (people who update by hand meet a
+release with a problem first, and a burst of releases does not keep it behind),
+and only while no
+device session is live or starting on it (either role), no call is active in
+Púca there and no direct file transfer is running, none of those ended in the
+last 2 minutes, its Púca has been connected to the server (and the PC awake)
+for 2 minutes — Wake & connect's moment — and nobody has used its keyboard or
+mouse for 10 minutes, nothing is shown full screen there (a film, a game on a
+controller, a presentation: the shell's notification state), no file is
+uploading from it and no message is written there and not sent; all of it is
+judged again every 2 s while the update
+downloads (a session that starts stops the download) and once more before the
+installer. On by default there; **Keep Púca up to date on
+this computer while nobody is connected** in Devices → This device turns it
+off. Its `[host-update]` lines in `puca.log` say what it is waiting for. It
+updates the app and the agent beside it — the one a session to the signed-in
+desktop uses — and never the sign-in-screen service, whose update is an
+elevated `runas` with a UAC prompt nobody would be there to answer
+([AUTO_UPDATER.md](AUTO_UPDATER.md), step 4); a session at the lock screen
+keeps meeting the older agent until someone at the PC updates the service.
+On a PC with several Windows accounts and lock-screen access, every account's
+Púca counts as a host (the service is the machine's): a remote sign-in through
+the lock screen lands in whichever account signs in, and the session then runs
+on that account's own Púca and agent. Each account updates only its own
+per-user install, judged in its own session.
 
 ## Testing note
 

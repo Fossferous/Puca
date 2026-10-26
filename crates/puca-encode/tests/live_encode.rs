@@ -495,3 +495,146 @@ fn update_size_reconfigures_without_a_rebuild() {
     }
     assert!(ok_any, "the rebuild path must still work after a refusal");
 }
+
+/// WHAT A POINTER MOVING OVER A STILL SCREEN COSTS THE STREAM.
+///
+/// While the host draws the pointer, puca-agent's still tick (stream.rs
+/// `still_tick`) re-encodes the held picture with the pointer redrawn, at
+/// most once per frame interval: a picture that differs from the last one
+/// sent only where the pointer was and is. This measures those frames at the
+/// stream's own settings on a LAN (1920x1080, 60 fps, 10 Mbps, High), against
+/// the CBR budget of a frame (bitrate / fps) and against a picture that
+/// changes everywhere (the control). An encoder that padded every frame up to
+/// its budget would make a moving pointer cost the full bitrate; that is the
+/// failure this exists to see. Synthetic frames: no display is touched.
+#[test]
+#[ignore = "needs a working H.264 encoder; run with --ignored --nocapture --test-threads=1"]
+fn bench_a_pointer_moving_over_a_still_picture() {
+    use puca_encode::H264Profile;
+    use std::time::{Duration, Instant};
+    let (w, h, fps, bitrate) = (1920u32, 1080u32, 60u32, 10_000_000u32);
+    let stride = w as usize * 4;
+    // A still "desktop" with real content: gradients, and a grid of dark
+    // strokes standing in for text, so the encoder has edges to spend bits on.
+    // `textured`: every pixel of the background differs from its neighbours
+    // (the hard case); otherwise flat panels, as most of a desktop is.
+    let desktop = |shift: u32, textured: bool| {
+        let mut b = vec![0u8; stride * h as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let at = y as usize * stride + x as usize * 4;
+                let ink = (x % 9 < 2 && y % 18 < 12) || (y % 18 == 13 && x % 40 < 30);
+                let panel = if (x / 640 + y / 360) % 2 == 0 { 235 } else { 200 };
+                let v = match (ink, textured) {
+                    (true, _) => 30,
+                    (false, true) => 200 + ((x + y + shift) % 40) as u8,
+                    (false, false) => panel,
+                };
+                b[at..at + 4].copy_from_slice(&[v, v.wrapping_sub((x + shift) as u8 / 8), v, 255]);
+            }
+        }
+        b
+    };
+    // A 24x32 pointer: white with a black edge, over `base` at (px, py).
+    let with_pointer = |base: &[u8], px: u32, py: u32| {
+        let mut f = base.to_vec();
+        for y in 0..32u32 {
+            for x in 0..24u32 {
+                let (dx, dy) = (px + x, py + y);
+                if dx >= w || dy >= h || x > y {
+                    continue;
+                }
+                let edge = x == 0 || x == y || y == 31;
+                let at = dy as usize * stride + dx as usize * 4;
+                f[at..at + 3].fill(if edge { 0 } else { 255 });
+            }
+        }
+        f
+    };
+    // Bytes per NAL unit type in an Annex-B frame: filler data (12) is the
+    // tell of an encoder padding up to its rate.
+    fn by_nal_type(data: &[u8], into: &mut [usize; 32]) {
+        let starts: Vec<usize> = (0..data.len().saturating_sub(3))
+            .filter(|&i| data[i..].starts_with(&[0, 0, 1]))
+            .collect();
+        for (k, &s) in starts.iter().enumerate() {
+            let end = starts.get(k + 1).copied().unwrap_or(data.len());
+            if let Some(&b) = data.get(s + 3) {
+                into[(b & 0x1f) as usize] += end - s;
+            }
+        }
+    }
+    // Ten seconds each, on a fresh encoder that has just sent the still
+    // picture's IDR, as a session does: CBR rate control spends a still
+    // picture's unused budget refining it, so the first second is not the
+    // steady state.
+    const FRAMES: u32 = 600;
+    let budget = bitrate as f64 / 8.0 / fps as f64;
+    let avg = |s: &[usize]| s.iter().sum::<usize>() as f64 / s.len().max(1) as f64;
+    let measure = |what: &str, still: &[u8], frame: &dyn Fn(u32) -> Vec<u8>| -> (f64, usize) {
+        let mut enc = H264Encoder::new_with_profile(w, h, fps, bitrate, H264Profile::High).expect("encoder");
+        let mut keyed = false;
+        for i in 0..60 {
+            match enc.encode_bgra(still, stride, i == 0) {
+                Ok(out) if out.keyframe => {
+                    keyed = true;
+                    break;
+                }
+                Ok(_) | Err(EncodeError::NeedMoreInput) => {}
+                Err(e) => panic!("warm-up encode failed: {e}"),
+            }
+        }
+        assert!(keyed, "{what}: no IDR of the still picture");
+        let (mut sizes, mut took, mut nal) = (Vec::new(), Duration::ZERO, [0usize; 32]);
+        for i in 0..FRAMES {
+            let f = frame(i);
+            let t = Instant::now();
+            match enc.encode_bgra(&f, stride, false) {
+                Ok(out) => {
+                    by_nal_type(&out.data, &mut nal);
+                    sizes.push(out.data.len());
+                }
+                Err(EncodeError::NeedMoreInput) => {}
+                Err(e) => panic!("{what}: encode failed: {e}"),
+            }
+            took += t.elapsed();
+        }
+        let b = avg(&sizes);
+        let per_second: Vec<String> =
+            sizes.chunks(fps as usize).map(|c| format!("{:.2}", avg(c) * 8.0 * fps as f64 / 1e6)).collect();
+        println!(
+            "{what}: {} frames out, {b:.0} B/frame = {:.2} Mbps at {fps} fps ({:.1}% of the {budget:.0} B CBR \
+             budget), {:.2} ms/encode; Mbps second by second: {}; filler bytes {}",
+            sizes.len(),
+            b * 8.0 * fps as f64 / 1e6,
+            b / budget * 100.0,
+            (took / FRAMES).as_secs_f64() * 1000.0,
+            per_second.join(" "),
+            nal[12],
+        );
+        assert!(sizes.len() > 500, "{what}: the encoder did not keep up");
+        (b, nal[12])
+    };
+    let walk = |i: u32| (200 + i * 11 % 1500, 150 + (i * 7) % 800);
+    let textured = desktop(0, true);
+    let flat = desktop(0, false);
+    let (on_textured, filler_t) = measure("a pointer moving over a textured still picture", &textured, &|i| {
+        let (x, y) = walk(i);
+        with_pointer(&textured, x, y)
+    });
+    let (on_flat, filler_f) = measure("a pointer moving over a desktop-like still picture", &flat, &|i| {
+        let (x, y) = walk(i);
+        with_pointer(&flat, x, y)
+    });
+    let (busy, _) = measure("control: a picture changing everywhere", &textured, &|i| desktop(i + 1, true));
+    // NOT PADDED: no filler, and well under the budget a frame has.
+    assert_eq!((filler_t, filler_f), (0, 0), "the encoder pads its frames with filler data");
+    for (what, b) in [("textured", on_textured), ("desktop-like", on_flat)] {
+        assert!(
+            b < budget * 0.5,
+            "a pointer moving over a {what} still picture costs {b:.0} B a frame, {:.0}% of the CBR budget",
+            b / budget * 100.0
+        );
+    }
+    assert!(busy > on_textured * 2.0, "control: a picture changing everywhere must cost far more, or this measures nothing");
+}

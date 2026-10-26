@@ -92,6 +92,10 @@ const knobs = {
     /** Follow the agent's viewer fit at all (false = always native). */
     fit: true,
 };
+// A driver that needs a knob from the very first hand-over (an agent too old
+// to send shapes, from the session's start) sets it before any page script:
+// `addInitScript(() => { window.__stageKnobsInit = { sendsShapes: false } })`.
+Object.assign(knobs, (window as unknown as { __stageKnobsInit?: Partial<typeof knobs> }).__stageKnobsInit ?? {});
 
 const state = {
     activeMonitor: ALL_DISPLAYS as number,
@@ -135,7 +139,9 @@ function session(): DeviceControlSession {
         filesChannel: null, fileRoot: null, fileScopeKind: null, filesOnly: false, audioHub: false,
         privacyActive: false, cursorOwned: state.cursorOwned, reconnecting: false,
         awaitingMedia: state.awaitingMedia, mediaRestarting: false, secureDesktop: false, cursorClipped: false,
-        remoteCursor: state.remoteCursor, inputBlocked: state.inputBlocked, pointerCaptured: false,
+        // The stand-in's caret channel is open from the start: the shape it
+        // says (or, with `sendsShapes` off, does not) rides that.
+        remoteCursor: state.remoteCursor, caretOpen: true, inputBlocked: state.inputBlocked, pointerCaptured: false,
         shareUser: null, viewOnly: false, powerNotice: null,
     } as unknown as DeviceControlSession;
 }
