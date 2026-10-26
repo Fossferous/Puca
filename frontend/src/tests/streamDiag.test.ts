@@ -21,8 +21,8 @@ vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics: meshDiagMock
 vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics: voiceDiagMock } }));
 
 import {
-    holdStreamDiag, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
-    setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs, MAX_SAMPLE_WINDOW_MS,
+    holdStreamDiag, holdStreamDiagWhile, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
+    setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs, MAX_SAMPLE_WINDOW_MS, WATCH_HOLDER,
 } from '../api/streamDiag';
 
 function logLines(): string[] {
@@ -195,6 +195,57 @@ describe('streamDiag: the viewer\'s side of a slow share', () => {
         } finally {
             setStreamDiagProbe(null);
         }
+    });
+
+    it('samples while a share is WATCHED too, and stops when it no longer is', () => {
+        // The viewers' reports of a stuttering share (2026-10-25) had nothing
+        // finer than the minute line: the sampler ran only while SHARING.
+        let watching = false;
+        const listeners = new Set<() => void>();
+        const notify = () => listeners.forEach(fn => fn());
+        const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+        const stop = holdStreamDiagWhile('voice-watch', () => watching, subscribe);
+        expect(streamDiagHolders(), 'not watching: not held').toEqual([]);
+        watching = true;
+        notify();
+        expect(streamDiagHolders()).toEqual(['voice-watch']);
+        expect(streamDiagIntervalMs()).toBe(5000);
+        watching = false;
+        notify();
+        expect(streamDiagHolders()).toEqual([]);
+        watching = true;
+        notify();
+        stop();
+        expect(streamDiagHolders(), 'the stop releases it').toEqual([]);
+        expect(listeners.size, 'and stops listening').toBe(0);
+    });
+
+    it('while a share is WATCHED, its row leads the sample, inside the 2000 characters the log keeps', async () => {
+        // A camera-heavy call: fourteen camera rows ahead of the share filled
+        // the 2000 characters the shell keeps (lib.rs log_stream_diag), and
+        // the share the sampler was held for was the fragment cut off.
+        const lat = { inbound: [inbound], outbound: [], pair: null, remoteInbound: [] };
+        const cams = Array.from({ length: 14 }, (_, i) => ({ userId: 20 + i, source: 'camera', latency: lat }));
+        voiceDiagMock.mockResolvedValue({ localRtp: [], remoteRtp: [...cams, { userId: 9, source: 'screen_share', latency: lat }] });
+        meshDiagMock.mockResolvedValue([
+            { userId: 4, rtp: [], latency: { inbound: [{ ...inbound, source: 'camera' }, { ...inbound, source: 'screen_share' }], outbound: [], pair, remoteInbound: [] } },
+        ]);
+        const sample = () => logLines().filter(l => l.includes('source=') || l.includes('mesh peer=')).at(-1) ?? '';
+        // CONTROL: held for SHARING only, the old order: the share far past the cut.
+        holdStreamDiag('voice-share');
+        await vi.waitFor(() => expect(sample()).not.toBe(''));
+        expect(sample().indexOf('peer=9 source=screen_share'), 'behind the cameras, past the cut').toBeGreaterThan(2000);
+        releaseStreamDiag('voice-share');
+        await streamDiagSettled();
+        invokeMock.mockClear();
+        holdStreamDiag(WATCH_HOLDER);
+        await vi.waitFor(() => expect(sample()).not.toBe(''));
+        const watched = sample();
+        expect(watched.startsWith('mesh peer=4 in fps=30'), 'the mesh peer\'s share first...').toBe(true);
+        expect(watched.indexOf('sfu peer=9 source=screen_share in fps=30'), '...then the SFU one, both well inside the cut').toBeLessThan(600);
+        expect(watched.indexOf('pair=tcp'), 'its connection beside it').toBeLessThan(watched.indexOf('sfu peer=9'));
+        expect(watched, 'the cameras still follow').toContain('sfu peer=20 source=camera');
+        releaseStreamDiag(WATCH_HOLDER);
     });
 
     it('a live remote-control holder samples every second; a bare capture every five', () => {

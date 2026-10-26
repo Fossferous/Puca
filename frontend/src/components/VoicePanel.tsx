@@ -20,10 +20,13 @@ import { LiveShareQualityModal } from './LiveShareQualityModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
 import {
-    createShareLoadWatch, starvedOffer, rememberedQuality,
-    shareDimensions, qualityLabel, SAMPLE_MS, type ShareQuality,
+    createShareLoadWatch, shareLoadLogLine, rememberedQuality,
+    shareDimensions, qualityLabel, SAMPLE_MS, type ShareLoadOffer,
 } from '../api/rtc/shareHealth';
-import { sampleShareEncode, applyShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT } from '../api/rtc/shareHealthLive';
+import { logRtcEvent } from '../api/rtc/rtcEventLog';
+import {
+    sampleShareEncode, applyShareQuality, liveShareOffer, liveShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT,
+} from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
@@ -69,7 +72,7 @@ const NO_MIC_CHOSEN_TITLE = 'You joined without a microphone — nobody can hear
 const CONNECT_DENIED_NOTICE = "You don't have permission to join this voice channel.";
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
-import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
+import { holdStreamDiag, holdStreamDiagWhile, releaseStreamDiag, WATCH_HOLDER } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
 import { SpeakGate, parseVoiceSpeakState } from '../api/rtc/speakGate';
 import { shouldTakeOver } from '../api/ownVoice';
@@ -211,7 +214,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     /** Set when the encoder has been CPU-starved for long enough to be sure.
      *  Carries the step-down it is offering. Cleared when the share ends, and
      *  re-offered only after a step the person actually took. */
-    const [loadOffer, setLoadOffer] = useState<{ text: string; to: ShareQuality } | null>(null);
+    const [loadOffer, setLoadOffer] = useState<ShareLoadOffer | null>(null);
     /** Set when DeepFilter settled on its RNNoise bridge for this call
      *  (deepFilter.ts): the text to show beside "Try DeepFilter again". */
     const [dfOffer, setDfOffer] = useDfSettledOffer();
@@ -848,8 +851,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // the app has only ever written it to a log file. On a machine encoding in
     // software — which, per every field log, is every machine — that answer is
     // the difference between "my game went choppy for no reason" and one click.
-    // See shareHealth.ts: once, then once more after each step actually
-    // taken, and never after a decline.
+    // And a share LOSING frames with nothing limited (captures jumping
+    // between 30 and 49 of 60, 26 sent) is asked about too, since 2026-10-26
+    // (shareHealth.ts), with a step for that share alone. Once, then once
+    // more after each step actually taken, and never after a decline.
     useEffect(() => {
         if (!isScreenSharing) { setLoadOffer(null); return; }
         const watch = createShareLoadWatch();
@@ -858,19 +863,37 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const timer = setInterval(() => {
             void sampleShareEncode().then(sample => {
                 if (stopped || !watch.add(sample)) return;
+                const why = watch.reason();
+                if (!why) return;
                 // Built from the size actually being captured: every quality
                 // here is a CEILING, so "Source" on a 1080p monitor is 1080p,
                 // and a step down chosen from the label alone would have
-                // offered a ceiling above it and changed nothing.
-                const offer = starvedOffer(rememberedQuality(loadSettings()), shareCaptureSize());
+                // offered a ceiling above it and changed nothing. And from
+                // the quality the share RUNS at: after a step for this share
+                // alone, the remembered one is not it (liveShareOffer).
+                const offer = liveShareOffer(why, rememberedQuality(loadSettings()), shareCaptureSize());
                 // Null = already at the smallest setting, so there is nothing
                 // to offer and saying so would be bad news with no action.
                 if (offer) setLoadOffer(offer);
-                console.warn(`[share] encoder CPU-limited (encoder=${watch.encoder() ?? 'unknown'})`);
+                // puca.log as well as the console: the report this answers
+                // had the numbers and no line saying the share ran short.
+                logRtcEvent(shareLoadLogLine(why, watch.encoder(), offer?.to ?? null), 'warn');
             });
         }, SAMPLE_MS);
         return () => { stopped = true; clearInterval(timer); shareWatchRef.current = null; };
     }, [isScreenSharing]);
+
+    // The 5 s sampler while WATCHING someone else's share as well as while
+    // sharing (streamDiag.ts): a viewer's freezes were only ever in the
+    // minute line. Desktop only, as the sampler is.
+    useEffect(() => {
+        if (!isInVoice) return;
+        return holdStreamDiagWhile(
+            WATCH_HOLDER,
+            () => [...globalSelectedStreams].some(id => id !== currentUserId),
+            subscribeToStreamState,
+        );
+    }, [isInVoice, currentUserId]);
 
     // Stream-audio capture health (events from appAudio.ts/ScreenShareModal):
     // a capture that dies mid-stream, or starts but never produces data
@@ -3685,16 +3708,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     <button
                         className="voice-load-offer-btn"
                         onClick={() => {
-                            const to = loadOffer.to;
+                            const { to, remember } = loadOffer;
                             // Read BEFORE the save, so the note can say what
-                            // actually changed rather than restating both axes.
-                            const from = rememberedQuality(loadSettings());
-                            // Remembered as well as applied: the next share
-                            // starts here instead of at 1080p again, which is
-                            // the whole reason the machine ended up starved.
-                            saveSettings({ ...loadSettings(), shareResolution: to.resolution, shareFps: to.fps });
+                            // actually changed rather than restating both axes
+                            // (and after a step for this share alone, what
+                            // the share runs at, which nothing saved).
+                            const from = liveShareQuality(rememberedQuality(loadSettings()));
+                            // The CPU step is remembered as well as applied:
+                            // the next share starts here instead of at 1080p
+                            // again, which is the whole reason the machine
+                            // ended up starved. A share short of frames is
+                            // stepped for itself alone (shareHealth.ts
+                            // framesOffer): kept, it would start the next
+                            // game share at 30 fps.
+                            if (remember) saveSettings({ ...loadSettings(), shareResolution: to.resolution, shareFps: to.fps });
                             setLoadOffer(null);
-                            void applyShareQuality(to).then(applied => {
+                            void applyShareQuality(to, { remember }).then(applied => {
                                 // An engine that refuses to re-cap a live
                                 // display track leaves the share exactly as it
                                 // was. Saying nothing there would be a button
@@ -3744,8 +3773,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 if (to.resolution !== from.resolution) changed.push(`${cap.width}x${cap.height} or smaller`);
                                 if (to.fps !== from.fps) changed.push(`${to.fps} fps`);
                                 setDiagNote(applied
-                                    ? `Screen share lowered to ${changed.join(', ') || qualityLabel(to)}.`
-                                    : `Couldn't change the share that's already running — your next one will start at ${qualityLabel(to)}.`);
+                                    ? `Screen share lowered to ${changed.join(', ') || qualityLabel(to)}${remember ? '' : ' for this share'}.`
+                                    : remember
+                                        ? `Couldn't change the share that's already running — your next one will start at ${qualityLabel(to)}.`
+                                        : 'Couldn\'t change the share that\'s already running.');
                             });
                         }}
                     >

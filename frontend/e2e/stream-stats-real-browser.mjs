@@ -10,6 +10,11 @@
 // drift), negotiates a loopback pair in a real browser, and runs the
 // reducer and the sampler on what that browser reports — both directions.
 //
+// The same real reports also go through statsSummary.ts, the reducer the
+// minute health line and the 5 s sampler read (2026-10-26): a viewer's line
+// must carry what a freeze came with (NACKs, PLIs, keyframes, bytes and the
+// RTP jitter), and those are only as real as the field names Chromium uses.
+//
 // SILENT: video only, from the fake camera; no audio track exists at all.
 //
 //   cd frontend && node e2e/stream-stats-real-browser.mjs
@@ -23,7 +28,11 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bundle = await build({
-    entryPoints: [join(here, '..', 'src', 'api', 'rtc', 'streamStats.ts')],
+    stdin: {
+        contents: "export * from './streamStats'; export { summariseRtcStatsDelta, formatLatencyLine } from './statsSummary';",
+        resolveDir: join(here, '..', 'src', 'api', 'rtc'),
+        loader: 'ts',
+    },
     bundle: true,
     write: false,
     format: 'iife',
@@ -58,7 +67,7 @@ await page.goto(origin);
 await page.addScriptTag({ content: moduleSrc });
 
 const r = await page.evaluate(async () => {
-    const { summariseStreamStats, StreamStatsSampler } = window.StreamStats;
+    const { summariseStreamStats, StreamStatsSampler, summariseRtcStatsDelta, formatLatencyLine } = window.StreamStats;
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const src = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false });
     const track = src.getVideoTracks()[0];
@@ -86,6 +95,9 @@ const r = await page.evaluate(async () => {
     const outbound = summariseStreamStats([{ direction: 'outbound', kind: 'video', prev: outPrev, now: outNow, ms: 1000 }]);
     // Negative control: a first read has no window, so no rate.
     const firstRead = summariseStreamStats([{ direction: 'inbound', kind: 'video', prev: null, now: inNow, ms: 0 }]);
+    // The health line's reducer on the same two reads (healthLog.ts videoInOf).
+    const health = summariseRtcStatsDelta(inPrev, inNow, 1000).inbound[0] ?? null;
+    const healthLine = health ? formatLatencyLine({ inbound: [health], outbound: [], pair: null, remoteInbound: [] }) : '';
 
     // The sampler, on the same endpoints: its first sample is unmeasured,
     // its second a real one-window rate.
@@ -126,7 +138,7 @@ const r = await page.evaluate(async () => {
         a.close(); b.close();
     }
     track.stop();
-    return { inbound, outbound, firstRead, s1, s2, none, h264, h264Available: h264Codecs.length > 0 };
+    return { inbound, outbound, firstRead, s1, s2, none, h264, h264Available: h264Codecs.length > 0, health, healthLine };
 });
 
 const i = r.inbound;
@@ -154,6 +166,14 @@ ck(r.firstRead && r.firstRead.measured === false && r.firstRead.videoKbps === nu
 ck(r.s1 && r.s1.measured === false, 'the sampler\'s first sample is unmeasured');
 ck(r.s2 && r.s2.measured === true && r.s2.videoKbps > 50, 'the sampler\'s second sample is a real rate', `${r.s2?.videoKbps} kbps`);
 ck(r.none === null, 'negative control: no video endpoint, no view');
+
+// What a freeze came with, in the health reducer, from a REAL inbound report.
+const hv = r.health;
+ck(hv && typeof hv.jitterMs === 'number' && hv.jitterMs >= 0, 'the RTP jitter is read (inbound-rtp jitter, ms)', String(hv?.jitterMs));
+ck(hv && typeof hv.nack === 'number' && typeof hv.pli === 'number' && typeof hv.keyFrames === 'number',
+    'NACKs, PLIs and keyframes are counted over the window', JSON.stringify({ nack: hv?.nack, pli: hv?.pli, keyFrames: hv?.keyFrames }));
+ck(hv && typeof hv.bytes === 'number' && hv.bytes * 8 / 1000 > 50, 'the window\'s bytes give a real rate (kbps in the health line)', `${hv ? Math.round(hv.bytes * 8 / 1000) : '?'} kbps`);
+ck(/ nack=\d+ pli=\d+ jit=\d+ms/.test(r.healthLine), 'the 5 s line prints them, as numbers', r.healthLine);
 
 if (r.h264Available) {
     ck(r.h264 && /^H264 (Constrained Baseline|Baseline|Main|High|Constrained High)$/.test(r.h264.codec ?? ''),

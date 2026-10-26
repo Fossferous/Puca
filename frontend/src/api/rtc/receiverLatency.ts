@@ -88,6 +88,14 @@ export function setScreenLatencyMinimised(userId: number, on: boolean): void {
     }
 }
 
+/** Is `userId`'s share being controlled right now (its receiver held at a
+ *  zero jitter buffer)? sfuManager's lossy-viewer step leaves such a share
+ *  alone: the buffer freezes more on purpose, and the controller's picture is
+ *  not the viewer's connection to judge. */
+export function isScreenLatencyMinimised(userId: number): boolean {
+    return minimisedUsers.has(userId);
+}
+
 /**
  * Restore EVERY minimised receiver and forget the lot. The reset paths call
  * this unconditionally: control-state teardown has several ways to null its

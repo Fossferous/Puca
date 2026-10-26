@@ -416,10 +416,26 @@ there.
 
 If your computer cannot keep up with the share while it is running, the voice
 panel offers to drop it a step — one click, applied to the share already going
-out, so nobody watching is interrupted. Taking that step is also remembered. It
-asks once, and will only ask again after you have taken a step and it is still
-struggling. Lowering the frame rate saves more than lowering the resolution if
-you need a bigger reduction; both are in the Screen Share dialog.
+out, so nobody watching is interrupted. It offers in two cases:
+
+- **The encoder is short of CPU.** It offers a smaller picture first, and
+  taking that step is also remembered for your next share.
+- **The share keeps losing frames**, for about half a minute: frames it
+  captures do not go out (it sends under about 70% of them). Viewers see that
+  as stutter even when nothing says your computer is busy.
+  It offers 30 fps, which sends about as many frames as the share was
+  managing, more evenly (and in a channel that uses SFU mode, with less data
+  for everyone watching), then a smaller picture once it is at 30. This step
+  is for that share only: your next share starts at your own settings again,
+  and **Stream quality** shows what the running share is really at.
+
+Fewer frames on their own are not counted, however unevenly they come: a film
+at 24 or a game capped at 30 under a 60 fps setting, scrolling a document, a
+video, or a screen where little changes (someone typing) loses none, because
+every frame captured is sent. It asks once, and will only ask again after you
+have taken a step and it is still struggling. Lowering the frame rate saves more than lowering
+the resolution if you need a bigger reduction; both are in the Screen Share
+dialog.
 
 1. Join a voice channel
 2. Click **Share Screen** in the voice panel. The picker opens straight away
@@ -512,6 +528,19 @@ connection carries it. Someone on an older version of Púca gets the middle
 size in the grid view until they update (Focus view still shows them the full
 picture).
 
+A connection can have the bandwidth and still lose packets (busy Wi-Fi, say),
+and then the full picture freezes. So when a stream you watch keeps losing
+more than about 1% of its packets, or freezes twice in a minute while it is
+losing them (half a percent or more) or has to ask for a fresh picture, your
+Púca asks for the next smaller size (the middle one, from a share at three
+sizes), and goes back to the full picture once it has gone about a minute
+without losing them. If it has to step down again soon after, it waits twice
+as long before the next try, up to eight minutes, so the picture does not keep
+switching. Other freezes change nothing: one with no real loss behind it comes
+from the sharer's side or from a picture that simply stopped changing (slides,
+code), and a smaller size would freeze too. Nor does anything change for a
+share sent at one size, or one you are controlling.
+
 In a channel that does not use SFU mode, each viewer is sent their own copy
 of your share, at up to 8 Mbps each, whatever the quality.
 
@@ -543,13 +572,17 @@ small player shows the next stream you are watching instead of a second copy,
 and hides when every stream you watch is popped out.
 
 If a stream keeps freezing for you while it plays fine for others, your
-connection is slower than what the stream sends (see
+connection is slower than what the stream sends, or is losing its packets (see
 [How much a share sends](#how-much-a-share-sends)). In a channel that uses
-SFU mode, a share sent at several sizes gives you a smaller copy by itself
+SFU mode, a share sent at several sizes gives you a smaller copy by itself,
+for either reason
 (see [Several sizes](#several-sizes-for-viewers-on-slower-connections)); if
 the sharer's computer sends one size, they can choose **Always** under
 **Settings → Voice & Video → Screen Sharing → Send my screen at several
-sizes**, or lower the stream's **Resolution** or **Frame Rate**.
+sizes**, or lower the stream's **Resolution** or **Frame Rate**. If it
+stutters for everyone watching, the cause is on the sharer's side: their
+voice panel offers them a lower **Frame Rate** when their share keeps losing
+frames (see [Start Sharing](#start-sharing)).
 
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:

@@ -10,7 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { FPS_OPTIONS, RESOLUTION_OPTIONS, rememberedQuality, shareDimensions, type LiveCapture } from '../api/rtc/shareHealth';
-import { changeLiveShareQuality, shareCaptureSize, type LiveQualityOutcome } from '../api/rtc/shareHealthLive';
+import { changeLiveShareQuality, liveShareQuality, shareCaptureSize, type LiveQualityOutcome } from '../api/rtc/shareHealthLive';
 import { loadSettings, saveSettings } from './settingsStore';
 import { CloseIcon, InfoIcon } from './Icons';
 import './ScreenShareModal.css';
@@ -46,7 +46,7 @@ function currentText(): string | null {
 }
 
 export function LiveShareQualityModal({ isOpen, onClose }: Props) {
-    const [{ resolution, fps }, setQuality] = useState(() => rememberedQuality(loadSettings()));
+    const [{ resolution, fps }, setQuality] = useState(() => liveShareQuality(rememberedQuality(loadSettings())));
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
     const [current, setCurrent] = useState<string | null>(null);
@@ -55,8 +55,9 @@ export function LiveShareQualityModal({ isOpen, onClose }: Props) {
     useEffect(() => {
         if (!isOpen) return;
         // The open edge is when the panel must catch up with the settings
-        // (the dialog or the step-down offer may have written them).
-        setQuality(rememberedQuality(loadSettings()));
+        // (the dialog or the step-down offer may have written them), or with
+        // a step taken for this share alone, which writes none.
+        setQuality(liveShareQuality(rememberedQuality(loadSettings())));
         setStatus(null);
         setCurrent(currentText());
     }, [isOpen]);

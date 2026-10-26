@@ -10,7 +10,10 @@
  * transports on a timer and writes each sample to the app's own log file via
  * a Tauri command, unattended, for the whole life of any WATCHED capture
  * (same lifecycle as streamBoost.ts's priority boost — voice screen share,
- * device-control host capture). Recoverable afterward from
+ * device-control host capture), and since 2026-10-26 while you WATCH someone
+ * else's share too ('voice-watch', holdStreamDiagWhile): two viewers' reports
+ * of a stuttering share had nothing finer than the minute health line.
+ * Recoverable afterward from
  * %LOCALAPPDATA%\com.sovereign.chat\logs\puca.log — no focus required
  * at the moment that matters.
  *
@@ -137,6 +140,13 @@ async function sampleOnceInner(): Promise<void> {
         sfuManager.voiceDiagnostics(win),
     ]);
 
+    // WATCHING A SHARE, its rows come next, before anything else: in a call
+    // with many cameras the camera rows filled the 2000 characters the sink
+    // keeps (lib.rs log_stream_diag) and the share this sampler was held for
+    // was the fragment cut off.
+    const watching = holders.has(WATCH_HOLDER);
+    const shares: string[] = [];
+
     for (const peer of mesh) {
         const userId = (peer as { userId?: unknown }).userId;
         for (const r of (peer as { rtp?: Record<string, unknown>[] }).rtp ?? []) {
@@ -148,7 +158,15 @@ async function sampleOnceInner(): Promise<void> {
         // what a "control feels a second behind" report is about, and the
         // sender-only line above had nothing to say about it.
         const lat = latencyOf(peer);
-        if (lat) lines.push(`mesh peer=${userId} ${formatLatencyLine(lat)}`);
+        if (!lat) continue;
+        const shareIn = watching ? lat.inbound.filter(i => (i as { source?: unknown }).source === 'screen_share') : [];
+        if (shareIn.length === 0) {
+            lines.push(`mesh peer=${userId} ${formatLatencyLine(lat)}`);
+            continue;
+        }
+        shares.push(`mesh peer=${userId} ${formatLatencyLine({ inbound: shareIn, outbound: [], pair: lat.pair, remoteInbound: [] })}`);
+        const rest = formatLatencyLine({ ...lat, inbound: lat.inbound.filter(i => !shareIn.includes(i)), pair: null });
+        if (rest) lines.push(`mesh peer=${userId} ${rest}`);
     }
 
     for (const r of (sfu as { localRtp?: Record<string, unknown>[] }).localRtp ?? []) {
@@ -170,14 +188,19 @@ async function sampleOnceInner(): Promise<void> {
     }
     for (const r of (sfu as { remoteRtp?: Record<string, unknown>[] }).remoteRtp ?? []) {
         const lat = latencyOf(r);
-        if (lat) lines.push(`sfu peer=${r.userId} source=${r.source} ${formatLatencyLine(lat)}`);
+        if (!lat) continue;
+        const row = `sfu peer=${r.userId} source=${r.source} ${formatLatencyLine(lat)}`;
+        if (watching && r.source === 'screen_share') shares.push(row);
+        else lines.push(row);
     }
 
-    // Log the empty tick too — silence here is itself informative: it means
-    // neither transport sees an outbound video track at all, which would
-    // point away from encode starvation and toward the capture never having
-    // started.
-    send(lines.length > 0 ? lines.join(' | ') : '(no outbound video track)');
+    // The probe (already first in `lines`), then the watched shares, then
+    // the rest. Log the empty tick too — silence here is itself informative:
+    // it means neither transport sees an outbound video track at all, which
+    // would point away from encode starvation and toward the capture never
+    // having started.
+    const all = extra ? [lines[0], ...shares, ...lines.slice(1)] : [...shares, ...lines];
+    send(all.length > 0 ? all.join(' | ') : '(no outbound video track)');
 }
 
 function wantedMs(): number {
@@ -212,6 +235,32 @@ export function releaseStreamDiag(holder: string): void {
     if (holders.size > 0) { retime(); return; }
     if (timer) { clearInterval(timer); timer = null; timerMs = 0; }
     send('=== stream-diag session end ===');
+}
+
+/** The holder VoicePanel holds the sampler under while a share is watched;
+ *  while it is held, the watched shares' rows lead every sample. */
+export const WATCH_HOLDER = 'voice-watch';
+
+/**
+ * Hold the sampler under `holder` for as long as `active()` says so, asked
+ * again on every `subscribe` notification (VoicePanel: while any share but
+ * your own is being watched). Returns the stop, which releases it.
+ */
+export function holdStreamDiagWhile(
+    holder: string,
+    active: () => boolean,
+    subscribe: (onChange: () => void) => () => void,
+): () => void {
+    const sync = () => {
+        if (active()) holdStreamDiag(holder);
+        else releaseStreamDiag(holder);
+    };
+    sync();
+    const off = subscribe(sync);
+    return () => {
+        off();
+        releaseStreamDiag(holder);
+    };
 }
 
 /** Test hook: the cadence the sampler is currently running at (0 = off). */

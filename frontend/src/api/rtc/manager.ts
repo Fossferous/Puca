@@ -8,7 +8,10 @@ import { MediaManager, type MicReacquireOptions } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
-import { outboundTrackId, receiverHints, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
+import {
+    outboundTrackId, receiverHints, shareSendReading, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta,
+    type InboundAudioHealth, type RtcLatencySummary, type SendEncoding,
+} from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample, LiveCapture } from './shareHealth';
 import type { RtpEndpoint } from './streamStats';
@@ -118,6 +121,10 @@ interface HeldSender {
     swaps: number;
     since: number;
 }
+
+/** The share's frame reading stays on the last reading's peer while that one
+ *  sent at least this share of the most any peer sent (shareEncodeSample). */
+const KEEP_SHARE_PEER = 0.8;
 
 export class WebRTCManager {
     public media: MediaManager;
@@ -1269,12 +1276,21 @@ export class WebRTCManager {
      * Senders are matched by TRACK IDENTITY, never by kind, the same way
      * stopScreenShare finds them: matching on kind would pick up the camera
      * and report its encoder as the share's.
+     *
+     * The frames (set, captured, sent) come from the peer sent the MOST: every
+     * peer's encoder is fed the same capture, so one that keeps up means the
+     * machine does, and the others are short of their own link. And from the
+     * SAME peer as the last reading while it is still there and sent nearly as
+     * much (KEEP_SHARE_PEER of the most): the frame watch compares a sender's
+     * counters between readings, and a new peer each reading was a new sender
+     * each reading, so most readings went without a verdict.
      */
     async shareEncodeSample(): Promise<EncodeSample | null> {
         const screen = this.media.getScreenShareStreamSync();
         if (!screen) return null;
         const screenTracks = new Set<MediaStreamTrack>(screen.getTracks());
         let sample: EncodeSample | null = null;
+        const readings: Array<{ sender: RTCRtpSender; reading: Pick<EncodeSample, 'setFps' | 'captureFps' | 'sent'> }> = [];
         for (const [, peer] of this.peers) {
             for (const sender of peer.connection.getSenders()) {
                 const track = this.trackOf(sender);
@@ -1291,11 +1307,24 @@ export class WebRTCManager {
                         };
                         if (!sample || (row.limit === 'cpu' && sample.limit !== 'cpu')) sample = row;
                     });
+                    let encodings: SendEncoding[] | undefined;
+                    try { encodings = sender.getParameters?.().encodings; } catch { /* peer closing */ }
+                    readings.push({ sender, reading: shareSendReading(stats, track.getSettings?.().frameRate, encodings) });
                 } catch { /* peer closed mid-read */ }
             }
         }
-        return sample;
+        const fps = (x: { reading: Pick<EncodeSample, 'sent'> }) => x.reading.sent?.fps ?? 0;
+        const sending = readings.filter(x => x.reading.sent);
+        const best = sending.reduce<(typeof readings)[number] | null>((b, x) => (!b || fps(x) > fps(b) ? x : b), null);
+        const kept = sending.find(x => x.sender === this.shareReadingSender);
+        const pick = kept && best && fps(kept) >= KEEP_SHARE_PEER * fps(best) ? kept : (best ?? readings[0] ?? null);
+        this.shareReadingSender = pick?.sender ?? null;
+        const found = sample as EncodeSample | null;
+        return found ? { ...found, ...(pick?.reading ?? {}) } : null;
     }
+
+    /** The sender the last share reading's frames came from (shareEncodeSample). */
+    private shareReadingSender: RTCRtpSender | null = null;
 
     /** Re-cap the live share (see MediaManager.applyShareQuality). The senders
      *  keep the same track, so nothing renegotiates and no viewer is dropped —

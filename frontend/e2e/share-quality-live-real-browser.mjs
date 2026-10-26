@@ -36,6 +36,19 @@
 // Frames now have to flow at the starting cap first, and the down step needs
 // a floor as well as a ceiling.
 //
+// THE FRAME WATCH, second half (2026-10-26). shareHealth.ts now tells a share
+// SHORT OF FRAMES (captured 30 of 60) from a STILL picture by what the encoder
+// makes of its frames (MOVING_BPP, MOVING_TARGET_SHARE), read through
+// statsSummary.ts shareSendReading. Both rest on what a real report carries
+// and what a real encoder makes of real content, which no vitest can see, and
+// the first threshold tried (0.01 bits a pixel) failed here: a repainted
+// square measured 0.013-0.02. So the same own-tab capture, at 640x360 and 30
+// fps, is shown five pictures: full-frame motion at the set rate (never "short
+// at the capture": the negative control), the same motion at a third of it
+// (short: the positive control), nothing changing, one small square changing
+// a dozen times a second like a cursor, and text typed at ten characters a
+// second (the last three still: what must never be offered a step down).
+//
 //   cd frontend && node e2e/share-quality-live-real-browser.mjs
 //
 // No server and no build needed.
@@ -47,7 +60,13 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bundle = await build({
-    entryPoints: [join(here, '..', 'src', 'api', 'rtc', 'shareHealth.ts')],
+    // The real helpers, as the app runs them: the capture's re-size and the
+    // frame watch (shareHealth.ts), and the reading it is fed (statsSummary.ts).
+    stdin: {
+        contents: "export * from './shareHealth'; export { shareSendReading } from './statsSummary';",
+        resolveDir: join(here, '..', 'src', 'api', 'rtc'),
+        loader: 'ts',
+    },
     bundle: true, write: false, format: 'iife', globalName: 'ShareHealth', platform: 'browser',
 });
 
@@ -63,7 +82,60 @@ const page = `<!doctype html><meta charset=utf-8><title>${TITLE}</title>
 <body style="margin:0;overflow:hidden"><canvas id=c width=1920 height=1080></canvas>
 <script>const x=document.getElementById('c').getContext('2d');let f=0;
 setInterval(()=>{x.fillStyle='hsl('+(f++%360)+',70%,50%)';x.fillRect(0,0,1920,1080);},16)</script>`;
-const server = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page); });
+// The frame watch's pictures (same title, so the same auto-selected tab):
+// noise shifted every frame is motion no encoder can skip; a still canvas is
+// nothing to send; one 40 px square repainted, or a character typed onto a
+// page of text, is a few hundred bytes a frame.
+const framesPage = `<!doctype html><meta charset=utf-8><title>${TITLE}</title>
+<body style="margin:0;overflow:hidden;background:#222"><canvas id=c width=640 height=360 style="width:100vw;height:100vh;display:block"></canvas>
+<script>
+const c = document.getElementById('c'), x = c.getContext('2d');
+const noise = [0, 1, 2, 3].map(() => {
+    const n = document.createElement('canvas'); n.width = 704; n.height = 424;
+    const g = n.getContext('2d'), d = g.createImageData(704, 424);
+    for (let i = 0; i < d.data.length; i += 4) { const v = Math.random() * 255; d.data[i] = v; d.data[i + 1] = 255 - v; d.data[i + 2] = (v * 7) % 255; d.data[i + 3] = 255; }
+    g.putImageData(d, 0, 0); return n;
+});
+let t = null, f = 0, col = 0;
+const drawNoise = () => x.drawImage(noise[f++ % 4], -Math.floor(Math.random() * 64), -Math.floor(Math.random() * 64));
+const drawBox = () => { x.fillStyle = 'hsl(' + ((f++ * 47) % 360) + ',70%,50%)'; x.fillRect(24, 24, 40, 40); };
+const page = () => {
+    x.fillStyle = '#f3f3f3'; x.fillRect(0, 0, 640, 360); x.fillStyle = '#222'; x.font = '14px sans-serif';
+    for (let y = 20; y < 360; y += 18) x.fillText('The quick brown fox jumps over the lazy dog, line ' + y, 10, y);
+};
+const type = () => { x.fillStyle = '#222'; x.font = '14px monospace'; x.fillText(String.fromCharCode(97 + (f++ % 26)), 10 + (col % 60) * 9, 40 + (Math.floor(col / 60) % 18) * 18); col++; };
+drawNoise();
+let s = null, yoff = 0;
+// A page of code, scrolled a line at a time.
+const scrollStep = () => {
+    yoff += 12;
+    x.fillStyle = '#f3f3f3'; x.fillRect(0, 0, 640, 360); x.fillStyle = '#222'; x.font = '13px monospace';
+    for (let k = 0; k < 24; k++) { const n = Math.floor((yoff + k * 16) / 16); x.fillText('line ' + n + ': const value = compute(alpha, beta) + offset * ' + (n % 97) + ';', 8, k * 16 - (yoff % 16) + 14); }
+};
+window.setPicture = (kind, fps, other) => {
+    clearInterval(t); clearInterval(s); clearTimeout(s); t = null; s = null;
+    if (kind === 'type') page();
+    // 'jumping': noise at fps, then at other, four seconds each, over and over.
+    if (kind === 'jumping') {
+        let at = fps;
+        t = setInterval(drawNoise, 1000 / at);
+        s = setInterval(() => { clearInterval(t); at = at === fps ? other : fps; t = setInterval(drawNoise, 1000 / at); }, 4000);
+        return;
+    }
+    // 'scroll': the page scrolled at fps for half a second, every two seconds.
+    if (kind === 'scroll') {
+        const on = () => { t = setInterval(scrollStep, 1000 / fps); s = setTimeout(off, 500); };
+        const off = () => { clearInterval(t); t = null; s = setTimeout(on, 1500); };
+        on();
+        return;
+    }
+    if (kind !== 'still') t = setInterval(kind === 'noise' ? drawNoise : kind === 'type' ? type : drawBox, 1000 / fps);
+};
+</script>`;
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(req.url === '/frames' ? framesPage : page);
+});
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 
 const CHANNEL = process.env.CHANNEL || 'msedge';
@@ -152,6 +224,147 @@ ck(r.beyond && r.beyondTrack && r.beyond.width === r.beyondTrack.width && r.beyo
     'a cap past the source reports what the track produces, read back', `${JSON.stringify(r.beyond)} vs track ${JSON.stringify(r.beyondTrack)}`);
 ck(r.sameTrack, 'no new track: the share never restarted');
 ck(r.afterStop === null || (r.afterStop.height === 0 || r.afterStop.height <= 480), 'a stopped track reports no new size', JSON.stringify(r.afterStop));
+
+// ---- the frame watch on a real capture and a real encoder ----------------
+await tab.goto(`http://127.0.0.1:${server.address().port}/frames`);
+await tab.addScriptTag({ content: bundle.outputFiles[0].text });
+const w = await tab.evaluate(async () => {
+    const {
+        shareVideoConstraints, shareSendReading, frameVerdict, bitsPerPixel, sentKbps, createShareLoadWatch,
+        MOVING_BPP, MOVING_TARGET_SHARE, STILL_FPS, FRAMES_WINDOW,
+    } = window.ShareHealth;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: shareVideoConstraints(640, 360, 30), audio: false, preferCurrentTab: true, selfBrowserSurface: 'include',
+    });
+    const track = stream.getVideoTracks()[0];
+    const surface = track.getSettings().displaySurface;
+    if (surface !== 'browser') { track.stop(); return { surface }; } // privacy: own tab only
+    const pc1 = new RTCPeerConnection();
+    const pc2 = new RTCPeerConnection();
+    pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+    pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+    const sender = pc1.addTrack(track, stream);
+    await pc1.setLocalDescription(await pc1.createOffer());
+    await pc2.setRemoteDescription(pc1.localDescription);
+    await pc2.setLocalDescription(await pc2.createAnswer());
+    await pc1.setRemoteDescription(pc2.localDescription);
+    // One reading, exactly as sfuManager.shareEncodeSample builds it.
+    const read = async () => ({
+        atMs: performance.now(),
+        ...shareSendReading(await sender.getStats(), track.getSettings().frameRate, sender.getParameters().encodings),
+    });
+    const phase = async (kind, fps) => {
+        window.setPicture(kind, fps);
+        await sleep(2500);
+        let prev = await read();
+        const out = [];
+        for (let i = 0; i < 4; i++) {
+            await sleep(2000);
+            const s = await read();
+            const kbps = sentKbps(s, prev);
+            const target = s.sent?.targetKbps ?? null;
+            out.push({
+                verdict: frameVerdict(s, prev), capture: s.captureFps ?? null, sent: s.sent?.fps ?? null, bpp: bitsPerPixel(s, prev),
+                share: kbps !== null && target ? kbps / target : null,
+            });
+            prev = s;
+        }
+        return out;
+    };
+    await sleep(3000); // the encoder and the bandwidth estimate settle on the noise
+    const out = { surface, MOVING_BPP, MOVING_TARGET_SHARE, STILL_FPS, first: await read() };
+    out.motion = await phase('noise', 30);
+    out.motionThird = await phase('noise', 10);
+    out.still = await phase('still', 0);
+    out.small = await phase('box', 12);
+    out.typing = await phase('type', 10);
+    // The WATCH, fed exactly as VoicePanel feeds it, under a 60 fps setting:
+    // a film's steady 24 and a page scrolled in bursts must never be offered
+    // a step (each reading is "short at the capture", and every frame
+    // captured is sent); a capture jumping between 20 and 40 whose frames are
+    // also dropped at the send must. (Jumping on its own sits at the line: at
+    // a 40-to-20 switch the encoder sent 21.5 of 30 frames captured in the
+    // same two seconds, measured, so it is no fixture for either side.)
+    const watched = async (kind, fps, other) => {
+        window.setPicture(kind, fps, other);
+        await sleep(2500);
+        const watch = createShareLoadWatch();
+        let prev = null;
+        const verdicts = [];
+        const offers = [];
+        for (let i = 0; i <= FRAMES_WINDOW + 2; i++) {
+            if (i > 0) await sleep(2000);
+            const s = await read();
+            if (prev) verdicts.push(`${frameVerdict(s, prev)}(cap ${s.captureFps}, sent ${s.sent?.fps})`);
+            if (watch.add(s)) offers.push({ at: i, why: watch.reason() });
+            prev = s;
+        }
+        return { verdicts, offers };
+    };
+    await track.applyConstraints(shareVideoConstraints(640, 360, 60));
+    out.set60 = track.getSettings().frameRate;
+    out.film = await watched('noise', 24);
+    out.scroll = await watched('scroll', 60);
+    // POSITIVE CONTROL: a capture jumping between 20 and 40 with its frames
+    // DROPPED at the send, the encoder held to a bitrate they do not fit.
+    const squeeze = async (bps) => {
+        const p = sender.getParameters();
+        for (const e of p.encodings) { if (bps) e.maxBitrate = bps; else delete e.maxBitrate; }
+        await sender.setParameters(p);
+    };
+    await squeeze(150_000);
+    out.squeezed = await watched('jumping', 20, 40);
+    await squeeze(0);
+    pc1.close(); pc2.close();
+    track.stop();
+    return out;
+});
+
+if (w.surface !== 'browser') {
+    console.log(`ABORT: the capture was "${w.surface}", not this tab — refusing to measure anything else.`);
+    await browser.close(); server.close();
+    process.exit(2);
+}
+const { MOVING_BPP, MOVING_TARGET_SHARE, STILL_FPS } = w;
+const median = (xs) => { const s = xs.filter((x) => typeof x === 'number').sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+const count = (p, v) => p.filter((x) => x.verdict === v).length;
+const fix = (x, d) => (typeof x === 'number' ? x.toFixed(d) : '?');
+const show = (p) => p.map((x) => `${x.verdict}(cap ${x.capture}, sent ${x.sent}, bpp ${fix(x.bpp, 4)}, of target ${fix(x.share, 2)})`).join(' ');
+const f = w.first;
+ck(f.setFps === 30 && typeof f.captureFps === 'number' && typeof f.sent?.frames === 'number' && typeof f.sent?.bytes === 'number'
+    && f.sent?.height > 0 && typeof f.sent?.ssrc === 'number' && typeof f.sent?.targetKbps === 'number',
+'a real sender report carries every field the frame watch reads (set, captured, sent, counters, size, ssrc, target)', JSON.stringify(f));
+// Every reading ok, not merely "never short at the capture": a reading short
+// at the SEND, or with no verdict at all, would pass that and prove nothing.
+ck(w.motion.length === 4 && w.motion.every((x) => x.verdict === 'ok'), 'negative control: motion captured and sent at the rate set reads ok, every reading', show(w.motion));
+ck((median(w.motion.map((x) => x.bpp)) ?? 0) >= MOVING_BPP && (median(w.motion.map((x) => x.share)) ?? 0) >= MOVING_TARGET_SHARE,
+    `full-frame motion is moving by both measures (${MOVING_BPP} bits a pixel, ${MOVING_TARGET_SHARE} of the target)`, show(w.motion));
+ck(count(w.motionThird, 'capture') >= 2, 'positive control: the same motion at a third of the rate set IS short at the capture', show(w.motionThird));
+ck(count(w.still, 'capture') + count(w.still, 'send') === 0 && count(w.still, 'still') >= 3,
+    'a picture where nothing changes is still, never short', show(w.still));
+for (const [name, p] of [['a small square repainted (a cursor)', w.small], ['text being typed', w.typing]]) {
+    ck(count(p, 'capture') + count(p, 'send') === 0 && count(p, 'still') >= 3, `${name} is still, never short`, show(p));
+    // Decided by the frames, not the floor: it captures more than STILL_FPS.
+    ck((median(p.map((x) => x.capture)) ?? 0) > STILL_FPS && (median(p.map((x) => x.bpp)) ?? 1) < MOVING_BPP
+        && (median(p.map((x) => x.share)) ?? 1) < MOVING_TARGET_SHARE,
+    `${name}: over ${STILL_FPS} fps captured, and still by what the encoder made of it`, show(p));
+}
+ck(Math.round(w.set60) === 60, 'the capture re-capped to 60 fps for the watch\'s phases', String(w.set60));
+// The film: short at the capture reading after reading (24 of 60), and the
+// watch, which wants frames LOST, never speaks.
+ck(w.film.verdicts.filter((v) => v.startsWith('capture')).length >= 6, 'a film\'s steady 24 under 60 reads short at the capture, reading after reading', w.film.verdicts.join(' '));
+ck(w.film.offers.length === 0, 'and the watch never offers it a step: that is the content\'s own rate', JSON.stringify(w.film.offers));
+// A page scrolled in bursts: fewer frames, unevenly, and every one of them
+// sent. Nothing is lost, so nothing is offered (the docs promise a document
+// loses none).
+ck(w.scroll.offers.length === 0, 'a page of code scrolled in bursts is never offered a step', `${JSON.stringify(w.scroll.offers)} ${w.scroll.verdicts.join(' ')}`);
+// POSITIVE CONTROL: frames really dropped at the send.
+const sentOf = (v) => Number(/ sent (\d+)/.exec(v)?.[1] ?? NaN);
+const capOf = (v) => Number(/cap (\d+)/.exec(v)?.[1] ?? NaN);
+ck(w.squeezed.verdicts.filter((v) => sentOf(v) < 0.5 * capOf(v)).length >= 6,
+    'fixture: held to 150 kbps, the encoder sends under half of what it captures', w.squeezed.verdicts.join(' '));
+ck(w.squeezed.offers.length === 1, 'a jumping capture whose frames are dropped at the send IS offered a step', `${JSON.stringify(w.squeezed.offers)} ${w.squeezed.verdicts.join(' ')}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 await browser.close();

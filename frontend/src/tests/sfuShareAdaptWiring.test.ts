@@ -545,6 +545,25 @@ describe('sending a share at several sizes when it helps (shareLadder.ts)', () =
         ]);
     });
 
+    it('a share short of frames stepped from 60 to 30 fps keeps its sizes, the full picture on the 30 fps budget', async () => {
+        // The step the frame watch offers (shareHealth.ts framesStepDown):
+        // the capture re-capped to 30 fps in place, then retuneShare. The
+        // laddered 1080p60 share of 2026-10-25 sent ~9.4 Mb/s; at 30 fps its
+        // full picture may send 6, its rungs unchanged, nobody re-subscribed.
+        hardware(true);
+        await join();
+        const { stream, cap } = shareStream(1080, 60);
+        await m.startScreenShare(stream);
+        await flush();
+        const s = senders.at(-1)!;
+        cap.fps = 30;
+        await m.retuneShare();
+        expect(published.length, 'in place: no re-publish').toBe(1);
+        expect((s.params.encodings as Array<{ rid: string; maxBitrate: number }>).map(e => [e.rid, e.maxBitrate])).toEqual([
+            ['q', 600_000], ['h', 2_500_000], ['f', SHARE_KBPS_TABLE[1080][30] * 1000],
+        ]);
+    });
+
     it('re-publishes, audio included, when a live change moves between one size and several', async () => {
         hardware(true);
         await join();
