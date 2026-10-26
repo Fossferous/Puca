@@ -4,7 +4,8 @@
  *
  * The owner, 2026-10-26: "Add a volume button." A touch screen (iPhone, iPad,
  * Android: a coarse pointer) has no right-click, so the stage's menu, the one
- * place a stream's volume could be set, could not open there at all. With a
+ * place a stream's volume could be set, was hard to reach there (a long press
+ * at best, which not every browser turns into one). With a
  * mouse nothing changes (the one-click mute, the right-click menu); the
  * keyboard reaches the same panel from the tile.
  *
@@ -294,5 +295,83 @@ describe('it goes away when it should', () => {
         open(ALICE);
         open(ALICE);
         expect(panel()).toBeNull();
+    });
+});
+
+describe('with a tile in element fullscreen (Android, an iPad, a desktop)', () => {
+    // Only the element in fullscreen, and what is inside it, is painted: an
+    // overlay anywhere else opens under the fullscreen layer, out of sight and
+    // out of reach. Where it lands on screen is the real browser's
+    // (e2e/stream-volume-button-real-browser.mjs); this is where it goes.
+    let fsTarget: Element | null = null;
+    function fullscreen(el: Element | null, prefixed = false) {
+        fsTarget = el;
+        Object.defineProperty(document, prefixed ? 'webkitFullscreenElement' : 'fullscreenElement', {
+            configurable: true, get: () => fsTarget,
+        });
+        act(() => { document.dispatchEvent(new Event(prefixed ? 'webkitfullscreenchange' : 'fullscreenchange')); });
+    }
+    const menu = () => document.querySelector<HTMLElement>('.stream-context-menu');
+    const rightClick = (id: number) => act(() => {
+        tileOf(id).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    afterEach(() => {
+        fsTarget = null;
+        delete (document as unknown as Record<string, unknown>).fullscreenElement;
+        delete (document as unknown as Record<string, unknown>).webkitFullscreenElement;
+    });
+
+    it('out of fullscreen the panel opens on <body>, as before (the control)', async () => {
+        await renderStage();
+        open(ALICE);
+        expect(panel()!.parentElement).toBe(document.body);
+        expect(tileOf(ALICE).contains(panel())).toBe(false);
+    });
+
+    it('the panel opens INSIDE the fullscreen tile, backdrop and all, and sets that stream', async () => {
+        await renderStage();
+        fullscreen(tileOf(ALICE));
+        open(ALICE);
+        expect(tileOf(ALICE).contains(panel()), 'inside the element in fullscreen').toBe(true);
+        expect(tileOf(ALICE).contains(backdrop()), 'its backdrop too').toBe(true);
+        slide(55);
+        expect(levels()[ALICE]).toBe(55);
+        expect(stageGain(ALICE)).toBeCloseTo(at(55), 9);
+    });
+
+    it('leaving fullscreen with it open closes it, so nothing is stranded in the tile; it opens again on <body>', async () => {
+        await renderStage();
+        fullscreen(tileOf(ALICE));
+        open(ALICE);
+        expect(document.activeElement, 'the slider has the keyboard').toBe(panelRange());
+        fullscreen(null);
+        expect(panel()).toBeNull();
+        expect(backdrop()).toBeNull();
+        // Escape there was the browser's (it left fullscreen): the keyboard
+        // goes back to the button, as the panel's own Escape gives it.
+        expect(document.activeElement).toBe(speakerOf(ALICE));
+        open(ALICE);
+        expect(panel()!.parentElement).toBe(document.body);
+    });
+
+    it('the prefixed API (an older iPad Safari) is followed too', async () => {
+        await renderStage();
+        fullscreen(tileOf(BOB), true);
+        open(BOB);
+        expect(tileOf(BOB).contains(panel())).toBe(true);
+    });
+
+    it('the right-click menu opens inside the fullscreen tile too, and goes when fullscreen ends', async () => {
+        pointer(false);
+        await renderStage();
+        rightClick(ALICE);
+        expect(menu()).not.toBeNull();
+        expect(tileOf(ALICE).contains(menu()), 'out of fullscreen: in the stage, as before (the control)').toBe(false);
+        fullscreen(tileOf(ALICE));
+        expect(menu(), 'entering fullscreen closes one opened outside it').toBeNull();
+        rightClick(ALICE);
+        expect(tileOf(ALICE).contains(menu()), 'inside the element in fullscreen').toBe(true);
+        fullscreen(null);
+        expect(menu()).toBeNull();
     });
 });

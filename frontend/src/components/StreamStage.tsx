@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { onUserGesture } from '../utils/onUserGesture';
 import {
@@ -75,7 +75,8 @@ const MOBILE = isMobile();
 // SHARED with DeviceStage so the two viewers cannot drift.
 
 /** A touch screen: the primary pointer is coarse (iPhone, iPad, Android), so
- *  there is no right-click to open a stream's menu. An iPad with a trackpad
+ *  a stream's menu is hard to reach (no right-click; a long press at best,
+ *  which not every browser turns into one). An iPad with a trackpad
  *  reads fine, and keeps the menu. Followed live (a tablet detached from its
  *  keyboard). */
 const COARSE_POINTER = '(pointer: coarse)';
@@ -95,6 +96,16 @@ function subscribeCoarsePointer(onChange: () => void): () => void {
 }
 function useCoarsePointer(): boolean {
     return useSyncExternalStore(subscribeCoarsePointer, () => coarsePointerQuery()?.matches === true, () => false);
+}
+
+/** The element in fullscreen, if any: a TILE goes fullscreen on Android, an
+ *  iPad and a desktop (mediaFullscreen.ts route 1; an iPad's Safari may only
+ *  have the prefixed API). Overlays must open inside it, or they open under
+ *  the fullscreen layer, out of sight and out of reach. */
+function fullscreenElement(): Element | null {
+    if (typeof document === 'undefined') return null;
+    const d = document as Document & { webkitFullscreenElement?: Element | null };
+    return document.fullscreenElement ?? d.webkitFullscreenElement ?? null;
 }
 
 /** One stream's Stream Volume slider: the right-click menu's and the touch
@@ -228,7 +239,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     );
     const [attenuation, setAttenuationState] = useState<AttenuationSettings>(() => getAttenuation());
     const [ctxMenu, setCtxMenu] = useState<StreamContextMenu | null>(null);
-    // Touch screens have no right-click to reach that menu: each tile's
+    // Touch screens have no right-click, so that menu is hard to reach: each tile's
     // speaker button opens THIS panel instead, the stream's own Stream Volume
     // and Mute (the owner, 2026-10-26: "Add a volume button"). A fine pointer
     // keeps its menu; the keyboard reaches the panel from the tile too.
@@ -239,6 +250,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // Open only while its stream is watched: one that stops goes with it.
     const openVol = volPanel && selectedStreams.includes(volPanel.userId) ? volPanel : null;
     const volOpen = openVol !== null;
+    // The element in fullscreen (a tile), where the panel and the menu must
+    // open instead of <body> / the stage. Followed live, and both close when
+    // it changes: a panel anchored to a button that just moved would float
+    // where it was, and one left in a tile that left fullscreen would be
+    // stranded under the stage.
+    const [fsEl, setFsEl] = useState<Element | null>(fullscreenElement);
     // Streams showing the stats overlay (right-click → Show Stream Stats).
     const [statsFor, setStatsFor] = useState<Set<number>>(() => new Set());
     const toggleStats = (userId: number) => setStatsFor(prev => {
@@ -553,6 +570,24 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         };
     }, [applyAllGains]);
 
+    useEffect(() => {
+        const onFullscreen = () => {
+            // Escape in fullscreen is the browser's (it leaves fullscreen and
+            // the page never sees the key): give the keyboard back to the
+            // panel's button here, as the panel's own Escape does.
+            if (volPanelRef.current?.contains(document.activeElement)) volOpenerRef.current?.focus({ preventScroll: true });
+            setFsEl(fullscreenElement());
+            setVolPanel(null);
+            setCtxMenu(null);
+        };
+        document.addEventListener('fullscreenchange', onFullscreen);
+        document.addEventListener('webkitfullscreenchange', onFullscreen);
+        return () => {
+            document.removeEventListener('fullscreenchange', onFullscreen);
+            document.removeEventListener('webkitfullscreenchange', onFullscreen);
+        };
+    }, []);
+
     // The volume panel: Escape closes it and gives the keyboard back to its
     // button (and goes no further: in the in-app fullscreen, Escape would
     // also leave that); turning the phone or resizing the window closes it,
@@ -772,6 +807,10 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         });
     };
     const toggleMute = (userId: number) => setMute(userId);
+
+    /** An overlay where it can be seen: inside the element in fullscreen
+     *  while there is one, else where it is rendered. */
+    const inFullscreen = (node: ReactNode) => (fsEl ? createPortal(node, fsEl) : node);
 
     // The slider's range and shown position, the same in the menu and the
     // panel. The shown % is the slider's position (whole steps of 1%; a level
@@ -1527,8 +1566,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                 a black frame over live video. See the grid's own comment. */}
             <CameraRail currentUserId={currentUserId} />
 
-            {/* Per-stream right-click context menu */}
-            {ctxMenu && (
+            {/* Per-stream right-click context menu. While a tile is in element
+                fullscreen it opens INSIDE that tile (out here it would open
+                under the fullscreen layer, out of sight); otherwise here, as
+                always. React events still bubble to the stage through the
+                portal, and onStageTap passes the menu by. */}
+            {ctxMenu && inFullscreen(
                 <div
                     ref={menuRef}
                     className="stream-context-menu"
@@ -1701,7 +1744,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                             ? <>Exit fullscreen <span className="scm-icon"><FullscreenExitIcon /></span></>
                             : <>Fullscreen <span className="scm-icon"><FullscreenIcon /></span></>}
                     </button>
-                </div>
+                </div>,
             )}
 
             {/* The touch volume panel: one stream's own Stream Volume and Mute,
@@ -1713,10 +1756,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                 const userId = openVol.userId;
                 const muted = mutedStreams.has(userId);
                 const name = getStreamData(userId)?.username ?? 'Stream';
-                // To <body>: inside the stage it would sit under the takeover's
-                // floating voice bar (a stacking context of its own), and the
-                // backdrop would not cover it. React events still bubble to the
-                // stage, so every handler here stops them.
+                // Into the element in fullscreen (a tile on Android, an iPad, a
+                // desktop), else <body>: inside the stage it would sit under the
+                // fullscreen layer, or under the takeover's floating voice bar
+                // (a stacking context of its own), and the backdrop would not
+                // cover either. React events still bubble to the stage, so
+                // every handler here stops them.
                 return createPortal(
                     <>
                         {/* Closed on the CLICK, so the whole tap ends here: closed on
@@ -1752,7 +1797,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                             </button>
                         </div>
                     </>,
-                    document.body,
+                    fsEl ?? document.body,
                 );
             })()}
 

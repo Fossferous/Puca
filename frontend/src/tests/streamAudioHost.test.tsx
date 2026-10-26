@@ -537,9 +537,12 @@ describe('the element fallback: where Web Audio cannot play, the <audio> plays i
 
 describe('an iPhone or iPad: a page cannot set an element’s volume', () => {
     const real = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume')!;
+    /** Every volume the page asked an element for (iOS takes none of them). */
+    let asked: number[] = [];
     beforeEach(() => {
+        asked = [];
         Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
-            configurable: true, get: () => 1, set: () => { /* iOS ignores it */ },
+            configurable: true, get: () => 1, set: (v: number) => { asked.push(v); /* iOS ignores it */ },
         });
     });
     afterEach(() => { Object.defineProperty(HTMLMediaElement.prototype, 'volume', real); });
@@ -557,8 +560,11 @@ describe('an iPhone or iPad: a page cannot set an element’s volume', () => {
         setStreamVolume(1, 40);
         await renderHost();
         expect(audioFor(1)!.muted).toBe(false); // the element is what plays here
-        // The engine asked for 0.08 (40% on the curve x 50%); iOS plays 1.
-        expect(audioFor(1)!.volume, 'the override did not take: this test would prove nothing').toBe(1);
+        // The engine DID ask the element for the level (40% on the curve x
+        // 50% = 0.08): a fallback that stopped setting it fails here...
+        expect(asked.some(v => Math.abs(v - loud(40) * 0.5) < 1e-9), `asked for ${JSON.stringify(asked)}`).toBe(true);
+        // ...and the element plays at 1 regardless: the level is lost there.
+        expect(audioFor(1)!.volume).toBe(1);
     });
 });
 

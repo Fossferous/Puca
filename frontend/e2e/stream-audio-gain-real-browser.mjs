@@ -220,10 +220,12 @@ const harness = () => {
         return { a: peak(440), b: peak(1000), maxAbs };
     }
 
-    /** An iPhone: a page cannot set an element's volume. */
+    /** An iPhone: a page cannot set an element's volume. What the page asks
+     *  for is recorded (window.__volumeAsked), and none of it is taken. */
     function iosVolume() {
+        window.__volumeAsked = [];
         Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
-            configurable: true, get: () => 1, set: () => {},
+            configurable: true, get: () => 1, set: (v) => { window.__volumeAsked.push(v); },
         });
     }
 
@@ -354,6 +356,7 @@ async function runMain(engine, launch, { chromiumSink }) {
                     path: [h.ctl.path(1), h.ctl.path(2)],
                     muted: [h.el(1).muted, h.el(2).muted],
                     volume: [h.el(1).volume, h.el(2).volume],
+                    asked: window.__volumeAsked ?? [],
                 };
             }, { harnessSrc: harness.toString(), ios });
             if (!ios) {
@@ -362,8 +365,11 @@ async function runMain(engine, launch, { chromiumSink }) {
                 ck(near(f.volume[0], 0.09, 1e-6) && f.volume[1] === 1,
                     `${tag} ...at min(gain, 1) each: 30% -> 0.09, 150% -> 1 (an element cannot boost)`, JSON.stringify(f.volume));
             } else {
-                ck(f.path.every(p => p === 'element') && f.volume[0] === 1,
-                    `${tag} NEGATIVE CONTROL as an iPhone, the element path LOSES the level (30% plays at 1)`, JSON.stringify(f.volume));
+                // The engine asked the element for 30%'s 0.09 (a fallback that
+                // stopped asking fails here), and it plays at 1 regardless.
+                ck(f.path.every(p => p === 'element') && f.asked.some(v => near(v, 0.09, 1e-6)) && f.volume[0] === 1,
+                    `${tag} NEGATIVE CONTROL as an iPhone, the element path LOSES the level (asked for 0.09, plays at 1)`,
+                    JSON.stringify({ asked: f.asked, volume: f.volume }));
             }
         }
     } finally {

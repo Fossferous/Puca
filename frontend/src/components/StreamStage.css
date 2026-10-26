@@ -468,10 +468,20 @@
     outline-offset: 1px;
 }
 
-/* The keyboard can reach a tile's controls: they show while one has focus,
-   as they do on hover. */
-.stream-tile:focus-within .stream-tile-header {
+/* The keyboard can reach a tile's controls: they show while one has KEYBOARD
+   focus, as they do on hover. Not :focus-within: a mouse click on a tile
+   button leaves focus on it, and a control session's capture surface holds
+   focus inside the tile for the whole session, and either kept the header
+   up over the picture. The capture surface is left out by name: in a session
+   begun from the keyboard, the browser counts the page's focus on it as
+   keyboard focus. A browser without :has() keeps the old rule. */
+.stream-tile:has(:focus-visible:not(.control-capture)) .stream-tile-header {
     opacity: 1;
+}
+@supports not selector(:has(*)) {
+    .stream-tile:focus-within .stream-tile-header {
+        opacity: 1;
+    }
 }
 
 /* Touch: the speaker that opens the stream's own volume panel. A 44 px

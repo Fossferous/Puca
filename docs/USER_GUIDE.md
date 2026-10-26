@@ -557,7 +557,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | Control | Action |
 |---------|--------|
 | **Mute stream** / **Unmute stream** | Silence that stream's audio (the menu row is **Mute**) |
-| **Stream volume** (touch screens) | The speaker button on each stream, on a phone or tablet (where the right-click menu cannot open): opens that stream's own **Stream Volume** and **Mute**, and takes the place of **Mute stream** there. From the keyboard, Tab to a stream's buttons and press Enter on it |
+| **Stream volume** (touch screens) | The speaker button on each stream, on a phone or tablet (where the right-click menu is hard to reach): opens that stream's own **Stream Volume** and **Mute**, and takes the place of **Mute stream** there. From the keyboard, Tab to a stream's buttons and press Enter on it |
 | **Stream Volume** | In the menu, or behind the speaker button on a touch screen. That stream's own volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. The slider follows loudness, so quiet levels are as easy to set as loud ones; above 100% boosts it. Each stream you watch has its own, and moving one never moves another. Kept on this device for the person sharing and used every time you watch them, in the stream view and the small player. Someone you have never set starts at the last level you set on anyone (100% before you have set any) and keeps that as their own |
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
