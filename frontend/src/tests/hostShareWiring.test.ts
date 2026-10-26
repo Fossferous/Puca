@@ -89,7 +89,7 @@ const PINS: Pin[] = [
         src: 'vp',
         holds: (c) => inOrder(c,
             "onGoLive={async (audioChoice, apps) => {",
-            'const start = dialogStartRef.current;',
+            'const start = shareStarts.takeDialog();',
             'await goLive(audioChoice, apps, start);',
             'shareStarts.end(start);')
             && inOrder(body(c, 'const startHostShare = async (): Promise<EmbedResult> => {'),
@@ -104,7 +104,7 @@ const PINS: Pin[] = [
             ['the dialog goes its own way', replace('await goLive(audioChoice, apps, start);', 'void audioChoice; void apps;')],
             ["the dialog's Go Live takes whichever start runs now", (code) => {
                 const at = code.indexOf('onGoLive={async (audioChoice, apps) => {');
-                const carried = 'const start = dialogStartRef.current;';
+                const carried = 'const start = shareStarts.takeDialog();';
                 const i = at < 0 ? -1 : code.indexOf(carried, at);
                 return i < 0 ? code : code.slice(0, i) + "const start = shareStarts.active?.by === 'dialog' ? shareStarts.active : null;" + code.slice(i + carried.length);
             }],
@@ -125,20 +125,37 @@ const PINS: Pin[] = [
             'return null;',
             "const start = shareStarts.begin('dialog');",
             'if (!start) return null;',
-            'dialogStartRef.current = start;',
             'await captureFor(start, () => webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop }));')
             && /onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); \}\}/.test(c)
-            && inOrder(c, 'onCancelAfterCapture={() => {', 'const start = dialogStartRef.current;', 'dialogStartRef.current = null;', 'shareStarts.end(start);',
+            && inOrder(c, 'onCancelAfterCapture={() => {', 'const start = shareStarts.takeDialog();', 'shareStarts.end(start);',
                 'if (ownsCapture(start, webrtcManager.getScreenShareStreamForPreview())) {', 'webrtcManager.stopScreenShare();', 'onCaptureScreen={')
-            && /shareStarting\.end\(\);\s*shareStarts\.end\(start\);\s*if \(dialogStartRef\.current === start\) dialogStartRef\.current = null;\s*webrtcManager\.stopScreenShare\(\);\s*return null;/.test(c),
+            && /shareStarting\.end\(\);\s*shareStarts\.end\(start\);\s*webrtcManager\.stopScreenShare\(\);\s*return null;/.test(c),
         mutants: [
             ['the dialog captures over a start that runs', replace("const start = shareStarts.begin('dialog');\n                    if (!start) return null;", "const start = shareStarts.begin('dialog');")],
             ['the dialog captures over a live share', replace('if (isScreenSharingRef.current) {\n                        setShowStreamSettings(false);\n                        return null;\n                    }', '')],
             ['closing ends a start that still runs', replace('onClose={() => { setShowStreamSettings(false); shareStarting.end(); }}', 'onClose={() => { setShowStreamSettings(false); shareStarting.end(); shareStarts.end(shareStarts.active); }}')],
-            ["the dialog's start not carried", replace('dialogStartRef.current = start;\n', '')],
+            ["a Cancel ends nobody's start", replace('const start = shareStarts.takeDialog();\n                    shareStarts.end(start);', 'const start = null as ShareStart | null;\n                    shareStarts.end(start);')],
             ['a cancelled picker holds the start', replace('shareStarting.end();\n                        shareStarts.end(start);\n', 'shareStarting.end();\n')],
             ['a Cancel stops a capture that replaced it', replace('if (ownsCapture(start, webrtcManager.getScreenShareStreamForPreview())) {', 'if (true) {')],
             ["the dialog's picture not kept on its start", replace('await captureFor(start, () => webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop }));', 'await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });')],
+        ],
+    },
+    {
+        name: 'Share and the arrow ignore a press while the dialog is open, and a Stop still works behind it',
+        src: 'vp',
+        holds: (c) => {
+            const share = body(c, "data-testid={isScreenSharing ? 'voice-stop-share' : 'voice-share-screen'}");
+            const arrow = body(c, 'className="voice-btn vp-share-options"');
+            return share !== null && arrow !== null
+                && /onClick=\{async \(\) => \{\s*if \(shareStarting\.showing\) return;\s*if \(isScreenSharing\) \{/.test(share)
+                && inOrder(share, '} else {', 'if (showStreamSettings) return;', "setShareLaunch('quick');", 'setShowStreamSettings(true);')
+                && inOrder(arrow, 'if (shareStarting.showing) return;', 'if (isScreenSharing) { setShowLiveQuality(true); return; }',
+                    'if (showStreamSettings) return;', "setShareLaunch('settings');", 'setShowStreamSettings(true);');
+        },
+        mutants: [
+            ['Share restarts a quick launch on the open dialog', (code) => code.replace(/if \(showStreamSettings\) return;(\s*)setShareLaunch\('quick'\);/, "$1setShareLaunch('quick');")],
+            ['the arrow reopens the open dialog', replace("if (showStreamSettings) return;\n                                    setShareLaunch('settings');", "setShareLaunch('settings');")],
+            ['a Stop is blocked behind the dialog', replace('if (shareStarting.showing) return;\n                                    if (isScreenSharing) {\n                                        void sfuManager', 'if (shareStarting.showing || showStreamSettings) return;\n                                    if (isScreenSharing) {\n                                        void sfuManager')],
         ],
     },
     {

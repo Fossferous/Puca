@@ -246,8 +246,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // One share start at a time, the dialog's or a host's, and a Stop, or the
     // picture ending, that reaches it before it is live (shareStarts.ts).
     const [shareStarts] = useState(() => new ShareStarts());
-    // The Share dialog's own start, from its capture to its Go Live or Cancel.
-    const dialogStartRef = useRef<ShareStart | null>(null);
     const [isCameraOn, setIsCameraOn] = useState(false);
     const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>(() => getNoiseSuppressionMode());
     // Whether the DeepFilter option is offered — Settings → Advanced →
@@ -4043,6 +4041,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                         // Only OUR stream leaves the stage: what we are watching stays.
                                         dropOwnStream(currentUserId);
                                     } else {
+                                        // The dialog is open already: its overlay covers this
+                                        // button, but a key still reaches it. Pressing it then
+                                        // switched the open dialog to a quick launch: on its
+                                        // settings, a capture from behind it; on its app step,
+                                        // a start refused (its own is held), which closed the
+                                        // dialog with that start, its capture and its OS-bar
+                                        // hold still live, so later Shares did nothing.
+                                        if (showStreamSettings) return;
                                         // Straight to the picker with the remembered
                                         // settings: the dialog is the arrow's job now.
                                         setShareLaunch('quick');
@@ -4065,6 +4071,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     // Live: change the running share. Otherwise:
                                     // the settings the next share starts with.
                                     if (isScreenSharing) { setShowLiveQuality(true); return; }
+                                    // Already open (a key reaches this through the overlay):
+                                    // nothing to open, and switching a quick launch's status
+                                    // line to the settings view mid-picker only confuses.
+                                    if (showStreamSettings) return;
                                     setShareLaunch('settings');
                                     setShowStreamSettings(true);
                                 }}
@@ -4259,8 +4269,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // User backed out after the OS picker; drop the captured
                     // surface: this dialog's own, never a capture that replaced it.
                     shareStarting.end();
-                    const start = dialogStartRef.current;
-                    dialogStartRef.current = null;
+                    const start = shareStarts.takeDialog();
                     shareStarts.end(start);
                     if (ownsCapture(start, webrtcManager.getScreenShareStreamForPreview())) {
                         stopHidingCaptureBar();
@@ -4279,7 +4288,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // second capture would stop its picture (shareStarts.ts).
                     const start = shareStarts.begin('dialog');
                     if (!start) return null;
-                    dialogStartRef.current = start;
                     // One source of truth with the step-down offer: two copies
                     // of this ladder is how "lower it" ends up capturing a size
                     // the dialog never offered.
@@ -4351,7 +4359,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         goLiveEnd('cancelled');
                         shareStarting.end();
                         shareStarts.end(start);
-                        if (dialogStartRef.current === start) dialogStartRef.current = null;
                         webrtcManager.stopScreenShare();
                         return null;
                     }
@@ -4360,11 +4367,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // The start this dialog captured for, carried from
                     // onCaptureScreen: never whichever start runs NOW, which
                     // may be a host's that replaced it as stale (shareStarts.ts).
-                    const start = dialogStartRef.current;
+                    const start = shareStarts.takeDialog();
                     try {
                         await goLive(audioChoice, apps, start);
                     } finally {
-                        if (dialogStartRef.current === start) dialogStartRef.current = null;
                         shareStarts.end(start);
                     }
                 }}

@@ -239,7 +239,8 @@ describe('VoicePanel wiring (VoicePanel is not mountable under vitest)', () => {
         expect(shareButton).toMatch(/setShareLaunch\('quick'\);\s*setShowStreamSettings\(true\)/);
         // Not sharing: the arrow opens the settings the next share starts with
         // (while live it opens Stream quality — liveShareQuality.test.tsx).
-        expect(vp).toMatch(/vp-share-options"[\s\S]{0,700}setShareLaunch\('settings'\);\s*setShowStreamSettings\(true\)/);
+        // (The window spans the arrow's other guards: a share on its way, and the dialog open already.)
+        expect(vp).toMatch(/vp-share-options"[\s\S]{0,1100}setShareLaunch\('settings'\);\s*setShowStreamSettings\(true\)/);
         // ...and not while a share is on its way: a second dialog would start a second capture.
         expect(vp).toMatch(/vp-share-options"[\s\S]{0,300}if \(shareStarting\.showing\) return;[\s\S]{0,250}setShowLiveQuality\(true\)/);
         expect(vp).toMatch(/<ScreenShareModal[\s\S]{0,120}launch=\{shareLaunch\}/);

@@ -78,6 +78,54 @@ describe('one share start at a time', () => {
     });
 });
 
+// The dialog's Go Live (and its Cancel) act on the start THEIR capture began. They used to take
+// whichever start was active when they ran, so after a host's start replaced a dialog start as stale
+// the old flow got null (or the host's start) and ran on, uncancellable, beside the new one.
+describe("the dialog's own start, carried to its Go Live", () => {
+    const ended = () => ({ getVideoTracks: () => [{ readyState: 'ended' }] });
+
+    it('is handed over once, and only the dialog has one', () => {
+        const starts = new ShareStarts(() => 0);
+        expect(starts.takeDialog()).toBeNull();
+        const dialog = starts.begin('dialog');
+        expect(starts.takeDialog()).toBe(dialog);
+        expect(starts.takeDialog()).toBeNull();
+        starts.end(dialog);
+        const host = starts.begin('host');
+        expect(host).not.toBeNull();
+        expect(starts.takeDialog()).toBeNull();
+    });
+
+    it('is still its own after a host start replaced it as stale: cancelled, not null, never the host\'s', async () => {
+        let now = 0;
+        const starts = new ShareStarts(() => now);
+        const dialog = starts.begin('dialog')!;
+        await captureFor(dialog, async () => ended());
+        now += SHARE_START_STALE_MS;
+        const host = starts.begin('host')!;
+        expect(host.by).toBe('host');
+        expect(starts.active).toBe(host);
+        const carried = starts.takeDialog();
+        expect(carried).toBe(dialog);
+        expect(carried?.cancelled).toBe(true);
+        expect(host.cancelled).toBe(false);
+        // What the old flow then sees: nothing to go live with, and its end leaves the host's start alone.
+        expect(stillWanted(carried, ended())).toBe(false);
+        starts.end(carried);
+        expect(starts.active).toBe(host);
+    });
+
+    it('is gone once its start ended, and a newer dialog start is the one carried', () => {
+        const starts = new ShareStarts(() => 0);
+        const first = starts.begin('dialog');
+        starts.end(first);
+        expect(starts.takeDialog()).toBeNull();
+        const second = starts.begin('dialog');
+        expect(second).not.toBe(first);
+        expect(starts.takeDialog()).toBe(second);
+    });
+});
+
 describe("a start's picture", () => {
     it('is kept on the start once captured, and capturing clears either way', async () => {
         const start = new ShareStarts(() => 0).begin('host')!;

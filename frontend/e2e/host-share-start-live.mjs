@@ -23,7 +23,14 @@
 //   7. a host's Stop while it starts: it does not go live, nothing is announced, the dialog closes;
 //   8. the dialog left open while a host's share goes live: its Select Screen captures nothing over
 //      that share, whose picture stays live;
-//   9. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'.
+//   9. Share pressed (as a key can, through the overlay) behind the open dialog starts nothing: no second
+//      capture, the dialog stays, the arrow does not reopen it, and Share still works once it is closed;
+//  10. ONE real 61 s wait (SHARE_START_STALE_MS is 60 s) covers two rules. A start still waiting in the
+//      picker is never taken for stale, so a host's start is refused. Then, with the dialog's picture
+//      ended while its announcement awaits the server, the host's start replaces it as stale: it goes
+//      live, and the replaced start's ending takes nothing of the host's down (no ScreenShareStop, the
+//      host's picture live);
+//  11. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'.
 //
 // Silent: no microphone (joinWithoutMic), Output Volume 0, sounds off, a muted browser; the picture is a
 // drawn canvas from a stand-in host, no screen is captured.
@@ -75,12 +82,13 @@ try {
             },
         });
         // The stand-in host: a drawn picture, after `delayMs`.
-        const host = { delayMs: 0, tracks: [] };
+        const host = { delayMs: 0, gate: null, tracks: [] };
         window.__shareHost = host;
         window.__PUCA_EMBED_HOST__ = {
             apiVersion: 1,
             name: 'Share window test',
             async getDisplayMedia() {
+                if (host.gate) await host.gate;
                 await new Promise((r) => setTimeout(r, host.delayMs));
                 const gen = new MediaStreamTrackGenerator({ kind: 'video' });
                 const writer = gen.writable.getWriter();
@@ -293,12 +301,73 @@ try {
     await page.evaluate(() => window.pucaEmbed.stopShare());
     await settle();
 
-    // 9. A hang-up while the server answers (last: it leaves the call).
-    const r9 = await page.evaluate(async () => {
+    // 9. Share pressed behind the open dialog: a key reaches the button through the overlay (a click()
+    //    does the same). It used to flip the open dialog to a quick launch, which captured over it.
+    await page.evaluate(() => { window.__shareHost.delayMs = 0; });
+    await openDialog();
+    const tracks9 = await page.evaluate(() => window.__shareHost.tracks.length);
+    await page.evaluate(() => document.querySelector('[data-testid="voice-share-screen"]').click());
+    await sleep(1500);
+    check('9. Share pressed behind the open dialog starts no capture', (await page.evaluate(() => window.__shareHost.tracks.length)) === tracks9
+        && (await sharing()) === false, JSON.stringify({ tracks: await page.evaluate(() => window.__shareHost.tracks.length), was: tracks9 }));
+    check('...the dialog is still there, on its settings', (await dialogOpen()) === 1 && (await page.getByTestId('share-go-live').count()) === 1);
+    await page.evaluate(() => document.querySelector('.vp-share-options').click());
+    await sleep(300);
+    check('...and the arrow does not reopen it', (await dialogOpen()) === 1 && (await page.getByTestId('share-go-live').count()) === 1);
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    check('...Cancel closes it with nothing held', (await until(async () => (await dialogOpen()) === 0)) && (await sharing()) === false);
+    frames.length = 0;
+    await page.getByTestId('voice-share-screen').click();
+    check('...and Share works again: a click goes live', (await until(async () => (await sharing()) === true)) && frames.includes('ScreenShareStart'), JSON.stringify(frames));
+    await page.evaluate(() => window.pucaEmbed.stopShare());
+    await settle();
+
+    // 10. One real 61 s wait, two rules.
+    frames.length = 0;
+    await page.evaluate(() => {
+        window.__shareHost.delayMs = 0;
+        window.__shareHost.gate = new Promise((r) => { window.__releaseGate = r; });
+    });
+    const tracks10 = await page.evaluate(() => window.__shareHost.tracks.length);
+    await openDialog();
+    await page.getByTestId('share-go-live').click(); // the dialog's start, held in the host's picker
+    await sleep(61000);
+    const a10 = await page.evaluate(() => Promise.race([window.pucaEmbed.startShare(), new Promise((r) => setTimeout(() => r('pending'), 1500))]));
+    check("10. a start still waiting in the picker after 61 s is not taken for stale: a host's start is refused",
+        a10?.ok === false && a10.error === 'already starting', JSON.stringify(a10));
+    // The picker answers; the dialog's start announces, and its picture ends while the server's answer is held.
+    await page.evaluate(() => {
+        window.__holdIncoming = new Promise((r) => { window.__releaseIncoming = r; });
+        window.__onAnnounce = () => {
+            window.__p1 = window.__shareHost.tracks.at(-1);
+            window.__p1.writer.close().catch(() => {});
+        };
+        window.__shareHost.gate = null;
+        window.__releaseGate();
+    });
+    check("...the dialog's picture ended while its announcement awaits the server",
+        await until(() => page.evaluate(() => window.__p1?.gen.readyState === 'ended')));
+    await page.evaluate(() => { window.__s2 = window.pucaEmbed.startShare(); });
+    await sleep(800);
+    const tracksNow = await page.evaluate(() => window.__shareHost.tracks.length);
+    check("...the host's start replaced it as stale and captured a picture of its own", tracksNow === tracks10 + 2, JSON.stringify({ tracksNow, tracks10 }));
+    await page.evaluate(() => { window.__releaseIncoming(); window.__holdIncoming = null; });
+    const r10 = await page.evaluate(() => window.__s2);
+    await sleep(800);
+    check("...the host's start goes live", r10?.ok === true && (await sharing()) === true, JSON.stringify(r10));
+    // ITS picture and the announcement: the replaced start abandoning must take neither down.
+    check("...the replaced start's ending takes nothing of the host's down: its picture is live, no ScreenShareStop went out",
+        (await lastTrackState()) === 'live' && !frames.includes('ScreenShareStop'), JSON.stringify({ last: await lastTrackState(), frames }));
+    check('...and the dialog closed with it', (await dialogOpen()) === 0);
+    await page.evaluate(() => window.pucaEmbed.stopShare());
+    await settle();
+
+    // 11. A hang-up while the server answers (last: it leaves the call).
+    const r11h = await page.evaluate(async () => {
         window.__onAnnounce = () => { window.pucaEmbed.leaveVoice(); };
         return window.pucaEmbed.startShare();
     });
-    check("9. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'", r9?.ok === false && r9.error === 'left the call', JSON.stringify(r9));
+    check("11. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'", r11h?.ok === false && r11h.error === 'left the call', JSON.stringify(r11h));
 
     await page.evaluate(() => window.pucaEmbed.leaveVoice()).catch(() => {});
 } catch (e) {
