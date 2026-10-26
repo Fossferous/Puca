@@ -4,9 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.851 — 2026-10-26
 
-Controlling a PC: its own pointer moves over a still screen, closing its lid mid-session no longer freezes the picture, and a PC set up for remote control keeps itself up to date
+Remote control: the pointer moves over a still screen, a lid closed mid-session no longer freezes the picture, and only the screens you shared are ever shown; a PC you control keeps itself up to date
 ### Security
 
 - **Remote control no longer shows a screen the person at the computer did not share.** When someone at a laptop chose one screen in **Screen to share**, and that screen was the laptop's own with its lid closed, Púca moved the picture to the first other screen that was on, which could be a monitor they had chosen not to share. Now the picture moves to another screen only when they shared **All displays**, or when nobody was asked (unattended access); otherwise the session ends, and the computer you connect from says that the shared screen went dark and that you can connect again with the lid open, or have another screen shared. That includes a laptop with no other screen, where nobody is asked to pick one: with someone there to allow the session, closing its lid now ends it; with unattended access the picture still moves to its virtual screen. The same goes for **Disable other displays** while one screen other than the main one is shared: it keeps the main display, which nobody shared, so the session ends there too. And on any PC, laptop or not, a session that shares one screen now ends when that screen is turned off, unplugged or renumbered away during it, saying "the shared screen changed or was turned off", instead of showing whatever screen took its place; a monitor that drops off the PC when it goes to sleep ends such a session too. With the next desktop update on the computer you control.
