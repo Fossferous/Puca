@@ -169,6 +169,11 @@ const FAKE_SHELL = `(() => {
         device_key_ensure: () => { throw new Error('fake shell: this walk has no device key'); },
         autostart_enabled: () => false,
         service_state: () => ({ installed: false, running: false, available: false, problem: null }),
+        // HostAutoUpdate's look (components/HostAutoUpdate.tsx, readHost: 60 s
+        // after sign-in, then every 10 minutes) asks this beside service_state:
+        // is this PC armed for unattended access. Neither armed nor serviced is
+        // not a host, so no host_update_* or host_presence call ever follows.
+        unattended_state: () => ({ armed: false, salt: null }),
         attachment_save: (body, options) => {
             const headers = (options && options.headers) || {};
             const bytes = body instanceof Uint8Array ? body : null;
