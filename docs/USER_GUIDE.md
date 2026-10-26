@@ -420,21 +420,20 @@ out, so nobody watching is interrupted. It offers in two cases:
 
 - **The encoder is short of CPU.** It offers a smaller picture first, and
   taking that step is also remembered for your next share.
-- **The share keeps losing frames**, for about half a minute: it sends under
-  about 70% of the frames it captures, or the frames it gets keep jumping
-  about well under the **Frame Rate** you chose (say between 30 and 45 of 60).
-  Viewers see that as stutter even when nothing says your computer is busy.
+- **The share keeps losing frames**, for about half a minute: frames it
+  captures do not go out (it sends under about 70% of them). Viewers see that
+  as stutter even when nothing says your computer is busy.
   It offers 30 fps, which sends about as many frames as the share was
   managing, more evenly (and in a channel that uses SFU mode, with less data
   for everyone watching), then a smaller picture once it is at 30. This step
   is for that share only: your next share starts at your own settings again,
   and **Stream quality** shows what the running share is really at.
 
-Fewer frames on their own are not counted: a picture that has fewer to give,
-at a steady rate (a film at 24 or a game capped at 30 under a 60 fps
-setting), or a screen where little changes (a document, someone typing),
-loses none. It asks once, and will only ask again after you have taken a step
-and it is still struggling. Lowering the frame rate saves more than lowering
+Fewer frames on their own are not counted, however unevenly they come: a film
+at 24 or a game capped at 30 under a 60 fps setting, scrolling a document, a
+video, or a screen where little changes (someone typing) loses none, because
+every frame captured is sent. It asks once, and will only ask again after you
+have taken a step and it is still struggling. Lowering the frame rate saves more than lowering
 the resolution if you need a bigger reduction; both are in the Screen Share
 dialog.
 

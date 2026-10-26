@@ -142,16 +142,20 @@ export const SAMPLE_MS = 3000;
  * spends its spare bits on (measured up to 1.3 bits a pixel, and up to 44%
  * of the target), which would otherwise read as motion.
  *
- * A PICTURE AT ITS OWN STEADY RATE IS NOT SHORT EITHER. A film plays at 24,
- * 25 or 30 frames a second, and a game capped at 30 renders 30: under a 60
- * setting each reads "short at the capture" on every reading (measured: 24 fps
- * motion under 60, ten readings of ten), and offering them a step down would
- * be wrong advice. What the content's own rate never does is lose frames: the
- * capture is steady and what is sent keeps up with it. So the window speaks
- * only when frames are lost: SEND_NEEDED readings short at the send, or a
- * capture that keeps jumping (UNEVEN_SWINGS jumps of UNEVEN_SWING of its
- * median between readings). The sharer of 2026-10-25 had both: captures
- * swinging between 30 and 44-49, and 20-41 sent.
+ * FEWER FRAMES ARE NOT LOST FRAMES. A film plays at 24, 25 or 30 frames a
+ * second, and a game capped at 30 renders 30: under a 60 setting each reads
+ * "short at the capture" on every reading (measured: 24 fps motion under 60,
+ * ten readings of ten). Scrolling a document, a video, a game that renders in
+ * bursts: each makes the capture JUMP between readings, and still every frame
+ * captured is sent (measured on a real capture: scrolling text in bursts,
+ * random scrolling and noise-like bursts were each offered a step by a
+ * jumping-capture rule, at readings 6-8, with sent equal to captured and
+ * nothing lost). Offering any of those a step down is wrong advice. What
+ * none of them does is drop frames between the capture and the wire. So the
+ * window speaks only when SEND_NEEDED readings are short at the SEND. The
+ * sharer of 2026-10-25 was: captures of 30 and 44-49 with 20-41 sent, and
+ * every variant of that pattern drops frames there. How often the capture
+ * jumped (UNEVEN_SWING, counted per window) goes to the log line only.
  */
 
 /** A share is short of frames below this share of what it should manage. */
@@ -167,14 +171,13 @@ export const FRAMES_WINDOW = 8;
 /** ...and this many of them must be short. A level loading, a scene change
  *  or a moment of contention is a reading or two, not six. */
 export const FRAMES_NEEDED = 6;
-/** And frames must be LOST: this many readings short at the send... */
+/** And frames must be LOST: this many readings of the window short at the
+ *  SEND (captured, and not sent). */
 export const SEND_NEEDED = 2;
-/** ...or the capture jumping, between one reading and the next, by this
- *  share of its median... */
+/** For the log line only: a jump of the capture, from one judged reading to
+ *  the next, is this share of its median or more. Scrolling, a video and a
+ *  starved capture all jump, so it decides nothing. */
 export const UNEVEN_SWING = 0.25;
-/** ...this many times in the window. A content's own rate changing (a film
- *  starting after a game) is one jump, not three. */
-export const UNEVEN_SWINGS = 3;
 
 /** What one reading says about the share's frames. 'still' and 'unknown' are
  *  never short: no evidence is not evidence of starvation. */
@@ -279,11 +282,12 @@ export function frameVerdict(s: EncodeSample, prev: EncodeSample | null): FrameV
     return judge(s, prev).verdict;
 }
 
-/** The share is short of frames: where, and the typical numbers (medians of
+/** The share is losing frames: where, and the typical numbers (medians of
  *  the short readings), for the offer and the log. */
 export interface FrameShortfall {
-    /** 'capture': the capture keeps jumping well under the setting; 'send':
-     *  frames reach the encoder and do not go out. */
+    /** Frames are being lost at the send either way; 'capture': and most
+     *  short readings captured well under the setting too; 'send': the
+     *  capture kept up, and the frames did not go out. */
     kind: 'capture' | 'send';
     setFps: number;
     captureFps: number;
@@ -293,6 +297,9 @@ export interface FrameShortfall {
      *  the share of its bandwidth target it sent (null: not read). */
     bpp: number | null;
     targetShare: number | null;
+    /** For the log: how many times the capture jumped (UNEVEN_SWING) between
+     *  the window's judged readings. */
+    jumps: number;
 }
 
 function median(xs: number[]): number {
@@ -301,32 +308,32 @@ function median(xs: number[]): number {
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-/** Does the capture keep jumping? UNEVEN_SWINGS jumps, each of UNEVEN_SWING of
- *  the median or more, between one judged reading and the next. */
-function captureUneven(caps: readonly number[]): boolean {
-    if (caps.length < 2) return false;
+/** How many times the capture jumped by UNEVEN_SWING of its median or more,
+ *  from one judged reading to the next (for the log line). */
+function captureJumps(caps: readonly number[]): number {
+    if (caps.length < 2) return 0;
     const typical = median([...caps]);
-    if (!(typical > 0)) return false;
-    let swings = 0;
-    for (let i = 1; i < caps.length; i++) if (Math.abs(caps[i] - caps[i - 1]) >= UNEVEN_SWING * typical) swings++;
-    return swings >= UNEVEN_SWINGS;
+    if (!(typical > 0)) return 0;
+    let jumps = 0;
+    for (let i = 1; i < caps.length; i++) if (Math.abs(caps[i] - caps[i - 1]) >= UNEVEN_SWING * typical) jumps++;
+    return jumps;
 }
 
 /** FRAMES_NEEDED of the last FRAMES_WINDOW readings short, with frames being
- *  LOST (see the note above FRAME_SHORT_RATIO), or null. Like cpuStarved,
- *  nothing is said before there is a full window to judge on. */
+ *  LOST at the send (see the note above FRAME_SHORT_RATIO), or null. Like
+ *  cpuStarved, nothing is said before there is a full window to judge on. */
 function framesStarved(readings: readonly FrameReading[]): FrameShortfall | null {
     const window = readings.slice(-FRAMES_WINDOW);
     if (window.length < FRAMES_WINDOW) return null;
     const short = window.filter(r => r.captureShort || r.sendShort);
     if (short.length < FRAMES_NEEDED) return null;
-    const judged = window.filter(r => r.verdict === 'capture' || r.verdict === 'send' || r.verdict === 'ok');
-    const uneven = captureUneven(judged.map(r => r.capture).filter(finite));
     const sends = window.filter(r => r.sendShort);
-    // Steady, and keeping up with what it captures: the content's own rate.
-    if (sends.length < SEND_NEEDED && !uneven) return null;
+    // Everything captured was sent: the content's own rate, however it
+    // moves (a film, a capped game, scrolling, a video).
+    if (sends.length < SEND_NEEDED) return null;
+    const judged = window.filter(r => r.verdict === 'capture' || r.verdict === 'send' || r.verdict === 'ok');
     const atCapture = short.filter(r => r.captureShort);
-    const kind: FrameShortfall['kind'] = uneven && atCapture.length * 2 >= short.length ? 'capture' : 'send';
+    const kind: FrameShortfall['kind'] = atCapture.length * 2 >= short.length ? 'capture' : 'send';
     const of = kind === 'capture' ? atCapture : sends;
     const nums = (pick: (r: FrameReading) => number | null) => of.map(pick).filter(finite);
     const med = (xs: number[]) => (xs.length ? median(xs) : null);
@@ -340,6 +347,7 @@ function framesStarved(readings: readonly FrameReading[]): FrameShortfall | null
         sentFps: sent === null ? null : Math.round(sent),
         bpp: bpp === null ? null : Math.round(bpp * 1000) / 1000,
         targetShare: share === null ? null : Math.round(share * 100) / 100,
+        jumps: captureJumps(judged.map(r => r.capture).filter(finite)),
     };
 }
 
@@ -661,7 +669,7 @@ export function framesOffer(
     if (!to) return null;
     const what = short.kind === 'send' && short.sentFps !== null
         ? `Your screen share is sending only about ${short.sentFps} of the ${short.captureFps} frames a second it captures, so it stutters for viewers.`
-        : `Your screen share is getting only about ${short.captureFps} of the ${short.setFps} frames a second you chose, and unevenly, so it stutters for viewers.`;
+        : `Your screen share is getting only about ${short.captureFps} of the ${short.setFps} frames a second you chose, and sending fewer still, so it stutters for viewers.`;
     return { text: `${what} Lower this share to ${qualityLabel(to)}?`, to, remember: false };
 }
 
@@ -687,7 +695,7 @@ export function shareLoadLogLine(why: ShareLoadReason, encoder: string | undefin
     const enc = `encoder=${encoder ?? 'unknown'}`;
     if (why.kind === 'cpu') return `[share] encoder CPU-limited (${enc}); ${offer}`;
     return `[share] short of frames at the ${why.kind}: set ${why.setFps} fps, captured ${why.captureFps}, `
-        + `sent ${why.sentFps ?? '?'}, bpp ${why.bpp ?? '?'}, of target ${why.targetShare ?? '?'} (${enc}); ${offer}`;
+        + `sent ${why.sentFps ?? '?'}, bpp ${why.bpp ?? '?'}, of target ${why.targetShare ?? '?'}, capture jumps ${why.jumps} (${enc}); ${offer}`;
 }
 
 /**

@@ -95,6 +95,39 @@ describe('changeLiveShareQuality', () => {
         live.stream = null;
     });
 
+    it('builds every later offer from the share as it RUNS after a step for it alone (liveShareOffer)', async () => {
+        // The review, with the real functions: built from the remembered
+        // quality, a CPU offer after a 30 fps step read "Drop to 720p at 60
+        // fps" (it put a starved share back to 60, and saved it), and a third
+        // frames step read "1080p at 15 fps" (it sent the capture back up).
+        const { applyShareQuality, liveShareOffer } = await real();
+        const { shareLoadOffer } = await import('../api/rtc/shareHealth');
+        const remembered = { resolution: '1080', fps: 60 }; // nothing saved by a frames step
+        const at1080 = { width: 1920, height: 1080 };
+        const at720 = { width: 1280, height: 720 };
+        const losing = (setFps: number, captureFps: number) => ({
+            kind: 'capture' as const, setFps, captureFps, sentFps: Math.round(captureFps * 0.6), bpp: 0.2, targetShare: 0.9, jumps: 0,
+        });
+        const track = { readyState: 'live' };
+        live.stream = { getVideoTracks: () => [track] };
+        live.stepOk = true;
+        const first = liveShareOffer(losing(60, 32), remembered, at1080);
+        expect(first?.to).toEqual({ resolution: '1080', fps: 30 });
+        await applyShareQuality(first!.to, { remember: false });
+        // A CPU offer now steps DOWN from 1080p30.
+        expect(liveShareOffer({ kind: 'cpu' }, remembered, at1080)?.to).toEqual({ resolution: '720', fps: 30 });
+        expect(shareLoadOffer({ kind: 'cpu' }, remembered, at1080)?.to, 'CONTROL: from the remembered quality it rose to 60')
+            .toEqual({ resolution: '720', fps: 60 });
+        // A second frames step steps down from the live 1080p30...
+        const second = liveShareOffer(losing(30, 18), remembered, at1080);
+        expect(second?.to).toEqual({ resolution: '720', fps: 30 });
+        await applyShareQuality(second!.to, { remember: false });
+        // ...and a third from the live 720p30, never back up to 1080p.
+        expect(liveShareOffer(losing(30, 18), remembered, at720)?.to).toEqual({ resolution: '720', fps: 15 });
+        expect(shareLoadOffer(losing(30, 18), remembered, at720)?.to, 'CONTROL: from the remembered quality it went back to 1080p')
+            .toEqual({ resolution: '1080', fps: 15 });
+    });
+
     it('shows a step taken for this share alone while that share lasts, and nothing after', async () => {
         // The frame watch's step is NOT remembered (shareHealth.ts
         // framesOffer): without this the panel opened after it would

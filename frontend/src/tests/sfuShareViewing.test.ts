@@ -146,9 +146,13 @@ describe('a viewer whose connection keeps losing a share', () => {
         } finally {
             setScreenLatencyMinimised(7, false);
         }
-        // POSITIVE CONTROL: control over, the same loss steps it down.
+        // POSITIVE CONTROL: control over, the same loss steps it down, but
+        // only once the receiver has settled with its jitter buffer back: a
+        // read to start from, SETTLE_MS, then two lossy windows (without the
+        // settle: two windows after the first read).
         const down = await readsUntil(() => pub.asked.at(-1) === VideoQuality.MEDIUM, 20);
-        expect(down).toBeLessThan(Infinity);
+        expect(down).toBeGreaterThan(SETTLE_MS + VIEW_SAMPLE_MS);
+        expect(down).toBeLessThanOrEqual(SETTLE_MS + VIEW_SAMPLE_MS * 3);
         await m.disconnect();
     });
 

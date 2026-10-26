@@ -79,9 +79,21 @@ function offersFor(steps: Step[], watch = createShareLoadWatch(), next = share()
 const times = (n: number, s: Step): Step[] => Array.from({ length: n }, () => s);
 const healthy: Step = { set: 60, capture: 59, sent: 58 };
 /** A capture that keeps JUMPING under a 60 setting, everything captured sent:
- *  a starved capture, delivering irregularly. */
+ *  what scrolling, a video or a bursty game look like. Nothing is lost. */
 const jumping = (n: number, extra: Partial<Step> = {}, lo = 20, hi = 35): Step[] =>
     Array.from({ length: n }, (_, i) => ({ set: 60, capture: i % 2 ? hi : lo, sent: i % 2 ? hi : lo, ...extra }));
+/** The same jumping capture LOSING frames: only `keep` of each reading's
+ *  captured frames go out (the 2026-10-25 shape: 30 or 45 captured, fewer sent). */
+const losing = (n: number, extra: Partial<Step> = {}, lo = 30, hi = 45, keep = 0.6): Step[] =>
+    Array.from({ length: n }, (_, i) => {
+        const capture = i % 2 ? hi : lo;
+        return { set: 60, capture, sent: Math.round(capture * keep), ...extra };
+    });
+/** A seeded random number in [0, 1) (the review's generator, so its runs can
+ *  be repeated exactly). */
+function seeded(seed: number) {
+    return () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+}
 
 describe('a picture at its own steady rate is not short of frames', () => {
     it('never asks about a film at 24 or a game capped at 30 under a 60 setting', () => {
@@ -102,18 +114,54 @@ describe('a picture at its own steady rate is not short of frames', () => {
     it('never asks when the content\'s own rate changes once (a film starting after a game)', () => {
         expect(offersFor([...times(10, healthy), ...times(60, { set: 60, capture: 24, sent: 24 })])).toEqual([]);
     });
+
+    it('never asks about scrolling, a video or a bursty game: the capture jumps, and every frame captured is sent', () => {
+        // Measured by the review on a real capture: scrolling text in 0.5 s
+        // bursts every 2 s, random scrolling and noise-like bursts were each
+        // offered a step by the jumping-capture rule (at readings 6-8), with
+        // sent equal to captured and no packet lost. The docs promise a
+        // document loses none.
+        const bursts: Step[] = Array.from({ length: 60 }, (_, i) =>
+            (i % 2 ? { set: 60, capture: 1, sent: 1, bpp: 1.4 } : { set: 60, capture: 20, sent: 20, bpp: 0.35 }));
+        expect(offersFor(bursts), 'scrolling text in bursts').toEqual([]);
+        const rnd = seeded(7);
+        const scrolling = Array.from({ length: 60 }, () => { const c = 12 + Math.round(rnd() * 28); return { set: 60, capture: c, sent: c, bpp: 0.2 }; });
+        expect(offersFor(scrolling), 'random scrolling').toEqual([]);
+        const noisy = Array.from({ length: 60 }, () => { const c = 15 + Math.round(rnd() * 30); return { set: 60, capture: c, sent: c, bpp: 0.42 }; });
+        expect(offersFor(noisy), 'noise-like bursts (a video, a game)').toEqual([]);
+        expect(offersFor(jumping(200)), 'and the plainest jumping capture').toEqual([]);
+        // POSITIVE CONTROL: the same jumping capture with frames dropped at the send.
+        expect(offersFor(losing(20)).length).toBe(1);
+    });
 });
 
 describe('a share losing frames', () => {
-    it('is offered 30 fps, for this share only, once its capture has kept jumping for a full window', () => {
+    it('is offered 30 fps, for this share only, once it has lost frames at the send for a full window', () => {
+        // 30 captured of 60, and 18 of those sent.
         const watch = createShareLoadWatch();
-        expect(offersFor(jumping(40), watch)).toEqual([FRAMES_WINDOW - 1]);
+        expect(offersFor(losing(40, {}, 30, 30), watch)).toEqual([FRAMES_WINDOW - 1]);
         const why = watch.reason();
-        expect(why).toMatchObject({ kind: 'capture', setFps: 60 });
+        expect(why).toMatchObject({ kind: 'capture', setFps: 60, captureFps: 30, sentFps: 18 });
         const offer = shareLoadOffer(why!, { resolution: '1080', fps: 60 }, { width: W, height: H });
         expect(offer?.to, 'the frame rate it can reach, at the same size').toEqual({ resolution: '1080', fps: 30 });
         expect(offer?.remember, 'NOT kept as the setting for the next share').toBe(false);
-        expect(offer?.text).toMatch(/^Your screen share is getting only about \d+ of the 60 frames a second you chose, and unevenly, so it stutters for viewers\. Lower this share to 1080p at 30 fps\?$/);
+        expect(offer?.text).toBe('Your screen share is getting only about 30 of the 60 frames a second you chose, '
+            + 'and sending fewer still, so it stutters for viewers. Lower this share to 1080p at 30 fps?');
+    });
+
+    it('catches every variant of the 2026-10-25 pattern, all of which drop frames at the send', () => {
+        // The review's variants of the sharer's log: captures of 30 or 44-49
+        // with sent p25 20 / median 26 / p75 41; a long steady 30 captured
+        // with the same sent spread; 44-49 captured with 26 sent.
+        const rnd = seeded(7);
+        const pick = <T>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
+        const sentDraw = () => pick([20, 20, 24, 26, 26, 26, 30, 41, 41]);
+        const swing = Array.from({ length: 40 }, () => { const c = rnd() < 0.5 ? 30 : 44 + Math.floor(rnd() * 6); return { set: 60, capture: c, sent: Math.min(c, sentDraw()) }; });
+        expect(offersFor(swing).length, 'captures of 30 or 44-49, sent p25 20 / median 26 / p75 41').toBe(1);
+        const steady30 = Array.from({ length: 40 }, () => ({ set: 60, capture: 30, sent: pick([20, 24, 26, 26, 30]) }));
+        expect(offersFor(steady30).length, 'a long steady 30 captured, sent p25 20').toBe(1);
+        const high = Array.from({ length: 40 }, () => ({ set: 60, capture: 44 + Math.floor(rnd() * 6), sent: 26 }));
+        expect(offersFor(high).length, '44-49 captured, 26 sent').toBe(1);
     });
 
     it('is offered when frames reach the encoder and do not go out, steady capture or not', () => {
@@ -152,17 +200,17 @@ describe('a dip is not a shortfall', () => {
     it('lets a few short readings pass among good ones, however often', () => {
         // A level loading or a scene change starves the capture for a reading
         // or two. FRAMES_NEEDED - 1 in a row, again and again, never speaks.
-        const dip = jumping(FRAMES_NEEDED - 1);
+        const dip = losing(FRAMES_NEEDED - 1);
         const steps = [...times(10, healthy), ...dip, ...times(10, healthy), ...dip, ...times(10, healthy)];
         expect(offersFor(steps)).toEqual([]);
         // POSITIVE CONTROL: one more short reading in the run, and it does.
-        expect(offersFor([...times(10, healthy), ...jumping(FRAMES_NEEDED)]).length).toBe(1);
+        expect(offersFor([...times(10, healthy), ...losing(FRAMES_NEEDED)]).length).toBe(1);
     });
 
     it('needs a full window before it has an opinion', () => {
         // Every reading short, and still nothing until the window is full:
         // a share that has only just started has earned no verdict.
-        expect(offersFor(jumping(FRAMES_WINDOW - 1))).toEqual([]);
+        expect(offersFor(losing(FRAMES_WINDOW - 1))).toEqual([]);
     });
 });
 
@@ -177,24 +225,25 @@ describe('a still picture is not starved', () => {
         // desktop with one small thing moving, and unevenly. The frame rate
         // alone cannot tell that from a game the machine cannot keep up with;
         // the frames' size can: these are a few hundred bytes each.
-        expect(offersFor(jumping(200, { bpp: 0.002 }, 8, 18))).toEqual([]);
-        expect(offersFor(jumping(200, { bpp: 0.002, sent: 4 }, 8, 18)), 'nor its frames not all sent').toEqual([]);
-        // POSITIVE CONTROL: the same jumping capture of a MOVING picture is short.
-        expect(offersFor(jumping(20, { bpp: 0.15 }, 8, 18)).length).toBe(1);
+        // LOSING frames, so only the stillness can keep these quiet.
+        expect(offersFor(losing(200, { bpp: 0.002 }, 8, 18))).toEqual([]);
+        expect(offersFor(losing(200, { bpp: 0.002 }, 8, 18, 0.3)), 'nor with most of its frames not sent').toEqual([]);
+        // POSITIVE CONTROL: the same capture of a MOVING picture is short.
+        expect(offersFor(losing(20, { bpp: 0.15 }, 8, 18)).length).toBe(1);
         expect(MOVING_BPP).toBeGreaterThan(0.002);
         expect(MOVING_BPP).toBeLessThan(0.15);
     });
 
     it('counts a moving picture on a slow uplink as moving: few bits a pixel, but all the encoder may send', () => {
-        // 1080p at ~30 fps and 0.02 bits a pixel is ~1.2 Mbps. Against a
-        // 1.3 Mbps target that is an encoder sending all it may: motion.
-        // Against a 10 Mbps one it is a picture that barely changes.
+        // ~20 fps sent at 1080p and 0.02 bits a pixel is ~0.6-0.9 Mbps.
+        // Against a 1 Mbps target that is an encoder sending all it may:
+        // motion. Against a 10 Mbps one it is a picture that barely changes.
         const slow = { bpp: 0.02 };
-        expect(offersFor(jumping(20, { ...slow, target: 1300 }, 25, 35)).length).toBe(1);
-        expect(offersFor(jumping(200, { ...slow, target: 10_000 }, 25, 35))).toEqual([]);
-        expect(offersFor(jumping(200, slow, 25, 35)), 'no target read: the bits a pixel decide').toEqual([]);
-        expect(MOVING_TARGET_SHARE).toBeGreaterThan(0.12);
-        expect(MOVING_TARGET_SHARE).toBeLessThan(0.96);
+        expect(offersFor(losing(20, { ...slow, target: 1000 }, 25, 35)).length).toBe(1);
+        expect(offersFor(losing(200, { ...slow, target: 10_000 }, 25, 35))).toEqual([]);
+        expect(offersFor(losing(200, slow, 25, 35)), 'no target read: the bits a pixel decide').toEqual([]);
+        expect(MOVING_TARGET_SHARE).toBeGreaterThan(0.09);
+        expect(MOVING_TARGET_SHARE).toBeLessThan(0.62);
     });
 
     it('has no verdict without two readings of the same sender to measure the frames by', () => {
@@ -236,18 +285,18 @@ describe('one offer for either reason', () => {
     it('is silent after a decline, and speaks once more after a step only on fresh evidence', () => {
         const watch = createShareLoadWatch();
         const next = share();
-        expect(offersFor(jumping(FRAMES_WINDOW), watch, next).length).toBe(1);
-        expect(offersFor(jumping(50), watch, next), 'declined: an answer').toEqual([]);
+        expect(offersFor(losing(FRAMES_WINDOW), watch, next).length).toBe(1);
+        expect(offersFor(losing(50), watch, next), 'declined: an answer').toEqual([]);
         watch.rearm();
         expect(watch.reason(), 'the old reason goes with the old evidence').toBeNull();
         // Accepted, and still losing frames at 30: a full fresh window first.
-        expect(offersFor(jumping(FRAMES_WINDOW + 4, { set: 30 }, 12, 19), watch, next)).toEqual([FRAMES_WINDOW - 1]);
+        expect(offersFor(losing(FRAMES_WINDOW + 4, { set: 30 }, 12, 19), watch, next)).toEqual([FRAMES_WINDOW - 1]);
     });
 });
 
 describe('what it steps down to', () => {
     const short = (over: Partial<FrameShortfall>): FrameShortfall =>
-        ({ kind: 'capture', setFps: 60, captureFps: 30, sentFps: 26, bpp: null, targetShare: null, ...over });
+        ({ kind: 'capture', setFps: 60, captureFps: 30, sentFps: 26, bpp: null, targetShare: null, jumps: 0, ...over });
 
     it('spends the frame rate first, keeping the resolution', () => {
         expect(framesStepDown({ resolution: '1440', fps: 60 }, { width: 2560, height: 1440 })).toEqual({ resolution: '1440', fps: 30 });
@@ -272,9 +321,13 @@ describe('what it steps down to', () => {
             .toEqual({ resolution: '1080', fps: 30 });
     });
 
-    it('writes one log line: what ran short, what the encoder made of the frames, and what was offered', () => {
-        expect(shareLoadLogLine(short({ bpp: 0.162, targetShare: 0.94 }), 'H.264 Encoder MFT', { resolution: '1080', fps: 30 }))
-            .toBe('[share] short of frames at the capture: set 60 fps, captured 30, sent 26, bpp 0.162, of target 0.94 (encoder=H.264 Encoder MFT); offered 1080p at 30 fps');
+    it('writes one log line: what ran short, what the encoder made of the frames, how the capture jumped, and what was offered', () => {
+        expect(shareLoadLogLine(short({ bpp: 0.162, targetShare: 0.94, jumps: 5 }), 'H.264 Encoder MFT', { resolution: '1080', fps: 30 }))
+            .toBe('[share] short of frames at the capture: set 60 fps, captured 30, sent 26, bpp 0.162, of target 0.94, capture jumps 5 (encoder=H.264 Encoder MFT); offered 1080p at 30 fps');
+        // The jumps of a real window, as the watch counts them: 30 and 45 alternating.
+        const watch = createShareLoadWatch();
+        offersFor(losing(FRAMES_WINDOW), watch);
+        expect(watch.reason()).toMatchObject({ jumps: FRAMES_WINDOW - 2 });
         expect(shareLoadLogLine({ kind: 'cpu' }, undefined, null))
             .toBe('[share] encoder CPU-limited (encoder=unknown); nothing lower to offer');
     });

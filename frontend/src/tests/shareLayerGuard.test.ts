@@ -241,6 +241,39 @@ describe('counters from another receiver', () => {
         expect(g.state).toBe('full');
     });
 
+    it('lets a new receiver SETTLE before it is judged, as on first sight', () => {
+        // A new stream starts on a keyframe and can lose a burst doing it.
+        // Judged at once, that burst would be the second lossy window.
+        const { g, t, recv } = oneLossyBehind();
+        g.resetCounters();
+        expect(g.observe(read(t + VIEW_SAMPLE_MS, recv + 50_000, 0)), 'the new receiver\'s first read: a baseline').toBeNull();
+        expect(g.observe(read(t + 2 * VIEW_SAMPLE_MS, recv + 52_300, 100)), 'a lossy window inside the settle').toBeNull();
+        expect(g.state).toBe('full');
+        // ...and judged once the settle is over (POSITIVE CONTROL): a lossy
+        // window then, with the one from before the new receiver, is the step.
+        const after = t + VIEW_SAMPLE_MS + SETTLE_MS;
+        expect(g.observe(read(after, recv + 54_600, 200))?.to).toBe('reduced');
+    });
+
+    it('settles after reset() too: a share no longer remote-controlled gets its jitter buffer back', () => {
+        const g = new ShareLayerGuard();
+        let t = 0;
+        let recv = 0;
+        let lost = 0;
+        for (let i = 0; i < settleWindows + 2; i++) g.observe(read(t += VIEW_SAMPLE_MS, recv += 2400, lost));
+        g.reset(); // read after read while controlled; then control ends
+        expect(g.observe(read(t += VIEW_SAMPLE_MS, recv += 2400, lost))).toBeNull();
+        expect(g.observe(read(t += VIEW_SAMPLE_MS, recv += 2300, lost += 100))).toBeNull();
+        expect(g.observe(read(t += VIEW_SAMPLE_MS, recv += 2300, lost += 100)), 'two lossy windows, both inside the settle').toBeNull();
+        // POSITIVE CONTROL: the same windows once it has settled step it down.
+        const changes: string[] = [];
+        for (let i = 0; i < settleWindows; i++) {
+            const c = g.observe(read(t += VIEW_SAMPLE_MS, recv += 2300, lost += 100));
+            if (c) changes.push(c.to);
+        }
+        expect(changes).toEqual(['reduced']);
+    });
+
     it('takes a new baseline after resetCounters, even when the new counts are higher', () => {
         const { g, t, recv } = oneLossyBehind();
         g.resetCounters();

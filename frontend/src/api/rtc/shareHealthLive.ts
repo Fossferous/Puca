@@ -9,7 +9,10 @@
  */
 import { sfuManager } from './sfuManager';
 import { webrtcManager } from '../webrtc';
-import { shareDimensions, type EncodeSample, type LiveCapture, type ShareQuality } from './shareHealth';
+import {
+    shareDimensions, shareLoadOffer,
+    type EncodeSample, type LiveCapture, type ShareLoadOffer, type ShareLoadReason, type ShareQuality,
+} from './shareHealth';
 
 /**
  * Read the local share's encode health from whichever transport is carrying
@@ -91,6 +94,22 @@ export function liveShareQuality(remembered: ShareQuality): ShareQuality {
         return remembered;
     }
     return a.quality;
+}
+
+/**
+ * The offer for what the watch found (shareHealth.ts shareLoadOffer), stepping
+ * down from what the RUNNING share is at. After a step taken for this share
+ * alone the remembered quality is not that: an offer built from it raised
+ * what it meant to lower (a CPU offer after a 30 fps step read "Drop to 720p
+ * at 60 fps", put a starved share back to 60 and saved it; a third frames step
+ * read "1080p at 15 fps", sending the capture back up from 720p).
+ */
+export function liveShareOffer(
+    why: ShareLoadReason,
+    remembered: ShareQuality,
+    capture?: { width: number; height: number } | null,
+): ShareLoadOffer | null {
+    return shareLoadOffer(why, liveShareQuality(remembered), capture);
 }
 
 /** Window event asking VoicePanel to open the live Stream quality panel —

@@ -105,15 +105,28 @@ const page = () => {
 };
 const type = () => { x.fillStyle = '#222'; x.font = '14px monospace'; x.fillText(String.fromCharCode(97 + (f++ % 26)), 10 + (col % 60) * 9, 40 + (Math.floor(col / 60) % 18) * 18); col++; };
 drawNoise();
-let s = null;
+let s = null, yoff = 0;
+// A page of code, scrolled a line at a time.
+const scrollStep = () => {
+    yoff += 12;
+    x.fillStyle = '#f3f3f3'; x.fillRect(0, 0, 640, 360); x.fillStyle = '#222'; x.font = '13px monospace';
+    for (let k = 0; k < 24; k++) { const n = Math.floor((yoff + k * 16) / 16); x.fillText('line ' + n + ': const value = compute(alpha, beta) + offset * ' + (n % 97) + ';', 8, k * 16 - (yoff % 16) + 14); }
+};
 window.setPicture = (kind, fps, other) => {
-    clearInterval(t); clearInterval(s); t = null; s = null;
+    clearInterval(t); clearInterval(s); clearTimeout(s); t = null; s = null;
     if (kind === 'type') page();
     // 'jumping': noise at fps, then at other, four seconds each, over and over.
     if (kind === 'jumping') {
         let at = fps;
         t = setInterval(drawNoise, 1000 / at);
         s = setInterval(() => { clearInterval(t); at = at === fps ? other : fps; t = setInterval(drawNoise, 1000 / at); }, 4000);
+        return;
+    }
+    // 'scroll': the page scrolled at fps for half a second, every two seconds.
+    if (kind === 'scroll') {
+        const on = () => { t = setInterval(scrollStep, 1000 / fps); s = setTimeout(off, 500); };
+        const off = () => { clearInterval(t); t = null; s = setTimeout(on, 1500); };
+        on();
         return;
     }
     if (kind !== 'still') t = setInterval(kind === 'noise' ? drawNoise : kind === 'type' ? type : drawBox, 1000 / fps);
@@ -267,8 +280,12 @@ const w = await tab.evaluate(async () => {
     out.small = await phase('box', 12);
     out.typing = await phase('type', 10);
     // The WATCH, fed exactly as VoicePanel feeds it, under a 60 fps setting:
-    // a film's steady 24 must never be offered a step (every reading is
-    // still "short at the capture"); a capture that keeps jumping must.
+    // a film's steady 24 and a page scrolled in bursts must never be offered
+    // a step (each reading is "short at the capture", and every frame
+    // captured is sent); a capture jumping between 20 and 40 whose frames are
+    // also dropped at the send must. (Jumping on its own sits at the line: at
+    // a 40-to-20 switch the encoder sent 21.5 of 30 frames captured in the
+    // same two seconds, measured, so it is no fixture for either side.)
     const watched = async (kind, fps, other) => {
         window.setPicture(kind, fps, other);
         await sleep(2500);
@@ -288,7 +305,17 @@ const w = await tab.evaluate(async () => {
     await track.applyConstraints(shareVideoConstraints(640, 360, 60));
     out.set60 = track.getSettings().frameRate;
     out.film = await watched('noise', 24);
-    out.jumping = await watched('jumping', 20, 40);
+    out.scroll = await watched('scroll', 60);
+    // POSITIVE CONTROL: a capture jumping between 20 and 40 with its frames
+    // DROPPED at the send, the encoder held to a bitrate they do not fit.
+    const squeeze = async (bps) => {
+        const p = sender.getParameters();
+        for (const e of p.encodings) { if (bps) e.maxBitrate = bps; else delete e.maxBitrate; }
+        await sender.setParameters(p);
+    };
+    await squeeze(150_000);
+    out.squeezed = await watched('jumping', 20, 40);
+    await squeeze(0);
     pc1.close(); pc2.close();
     track.stop();
     return out;
@@ -328,9 +355,16 @@ ck(Math.round(w.set60) === 60, 'the capture re-capped to 60 fps for the watch\'s
 // watch, which wants frames LOST, never speaks.
 ck(w.film.verdicts.filter((v) => v.startsWith('capture')).length >= 6, 'a film\'s steady 24 under 60 reads short at the capture, reading after reading', w.film.verdicts.join(' '));
 ck(w.film.offers.length === 0, 'and the watch never offers it a step: that is the content\'s own rate', JSON.stringify(w.film.offers));
-// POSITIVE CONTROL: the same motion, captured at 20 then 40 then 20...
-ck(w.jumping.offers.length === 1 && w.jumping.offers[0].why?.kind === 'capture',
-    'a capture that keeps jumping (20 and 40 of 60) IS offered a step', `${JSON.stringify(w.jumping.offers)} ${w.jumping.verdicts.join(' ')}`);
+// A page scrolled in bursts: fewer frames, unevenly, and every one of them
+// sent. Nothing is lost, so nothing is offered (the docs promise a document
+// loses none).
+ck(w.scroll.offers.length === 0, 'a page of code scrolled in bursts is never offered a step', `${JSON.stringify(w.scroll.offers)} ${w.scroll.verdicts.join(' ')}`);
+// POSITIVE CONTROL: frames really dropped at the send.
+const sentOf = (v) => Number(/ sent (\d+)/.exec(v)?.[1] ?? NaN);
+const capOf = (v) => Number(/cap (\d+)/.exec(v)?.[1] ?? NaN);
+ck(w.squeezed.verdicts.filter((v) => sentOf(v) < 0.5 * capOf(v)).length >= 6,
+    'fixture: held to 150 kbps, the encoder sends under half of what it captures', w.squeezed.verdicts.join(' '));
+ck(w.squeezed.offers.length === 1, 'a jumping capture whose frames are dropped at the send IS offered a step', `${JSON.stringify(w.squeezed.offers)} ${w.squeezed.verdicts.join(' ')}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 await browser.close();

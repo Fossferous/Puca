@@ -20,11 +20,13 @@ import { LiveShareQualityModal } from './LiveShareQualityModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
 import {
-    createShareLoadWatch, shareLoadOffer, shareLoadLogLine, rememberedQuality,
+    createShareLoadWatch, shareLoadLogLine, rememberedQuality,
     shareDimensions, qualityLabel, SAMPLE_MS, type ShareLoadOffer,
 } from '../api/rtc/shareHealth';
 import { logRtcEvent } from '../api/rtc/rtcEventLog';
-import { sampleShareEncode, applyShareQuality, liveShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT } from '../api/rtc/shareHealthLive';
+import {
+    sampleShareEncode, applyShareQuality, liveShareOffer, liveShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT,
+} from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
@@ -866,8 +868,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // Built from the size actually being captured: every quality
                 // here is a CEILING, so "Source" on a 1080p monitor is 1080p,
                 // and a step down chosen from the label alone would have
-                // offered a ceiling above it and changed nothing.
-                const offer = shareLoadOffer(why, rememberedQuality(loadSettings()), shareCaptureSize());
+                // offered a ceiling above it and changed nothing. And from
+                // the quality the share RUNS at: after a step for this share
+                // alone, the remembered one is not it (liveShareOffer).
+                const offer = liveShareOffer(why, rememberedQuality(loadSettings()), shareCaptureSize());
                 // Null = already at the smallest setting, so there is nothing
                 // to offer and saying so would be bad news with no action.
                 if (offer) setLoadOffer(offer);

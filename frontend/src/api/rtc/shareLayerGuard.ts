@@ -123,14 +123,18 @@ export class ShareLayerGuard {
     /** The next read starts a settle (a new receiver). */
     private settleNext = false;
 
-    /** The share has no smaller copy (any more): nothing to step to. Back to
-     *  the full picture, evidence dropped; the wait is kept. */
+    /** Nothing to judge for now: the share has no smaller copy (any more), or
+     *  it is being remote-controlled. Back to the full picture, evidence
+     *  dropped, the wait kept, and the reads that follow settle first: once
+     *  control ends its receiver gets its jitter buffer back, and a ladder
+     *  that comes back is a new publication. */
     reset(): void {
         this.prev = null;
         this.stateV = 'full';
         this.lossy = [];
         this.freezes = [];
         this.cleanSince = null;
+        this.settleNext = true;
     }
 
     /** Feed one read. Returns the change it decided on, or null. */
