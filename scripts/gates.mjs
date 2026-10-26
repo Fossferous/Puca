@@ -249,6 +249,12 @@ const GATES = [
         ['e2e-iphone-stream', 'iphone-stream-real-browser.mjs e2e-artifacts/iphone-stream-shots'],
         // Full Chromium headless (the headless shell refuses notifications).
         ['e2e-web-push', 'web-push-real-browser.mjs'],
+        // Edge and Firefox (installed once). Silent by construction: tones start only once every
+        // stream plays through a muted sink, and any unmute fails the run.
+        ['e2e-stream-audio-gain', 'stream-audio-gain-real-browser.mjs'],
+        // Edge and WebKit. Rebuilds e2e-artifacts/iphone-stream-dist, as e2e-iphone-stream does:
+        // fine here, where the real-browser scripts run one at a time.
+        ['e2e-stream-volume-button', 'stream-volume-button-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],
