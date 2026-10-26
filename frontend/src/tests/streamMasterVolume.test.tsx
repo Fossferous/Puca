@@ -17,6 +17,11 @@
  * master at all, and never re-applied on a Settings change. That path is now
  * StreamAudioHost (2026-10-02: one element per watched stream; the float is
  * picture only), and the master rule moved with it.
+ *
+ * 2026-10-26: a level is a slider position on the loudness curve (80% plays
+ * at 0.64), and StreamAudioHost sounds through a Web Audio gain per stream,
+ * so the master reaches a gain there too, a boost included; its <audio> is
+ * the fallback where Web Audio cannot read the stream.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -185,9 +190,10 @@ describe('StreamStage — the Web Audio path', () => {
         gain.sent = [];
         slide(80);
         expect(gain.sent.length, 'the slider sent the gain nothing').toBeGreaterThan(0);
-        // Every value the gain was sent — not just where it ended up.
-        expect(gain.sent.filter(v => !close(v, 0.4)), 'a value that ignores Output Volume').toEqual([]);
-        expect(gain.effective).toBe(0.4);
+        // Every value the gain was sent — not just where it ended up. 80% on
+        // the loudness curve is 0.64; at 50% master, 0.32.
+        expect(gain.sent.filter(v => !close(v, 0.32)), 'a value that ignores Output Volume').toEqual([]);
+        expect(gain.effective).toBeCloseTo(0.32, 9);
     });
 
     it('unmuting returns to stream volume × master, never past it', () => {
@@ -235,8 +241,8 @@ describe('StreamStage — the element-audio fallback', () => {
         volumeWrites.set(el, []);
         slide(80);
         expect(writesOf(el).length, 'the slider set no volume').toBeGreaterThan(0);
-        expect(writesOf(el).filter(v => !close(v, 0.4)), 'a volume that ignores Output Volume').toEqual([]);
-        expect(el.volume).toBeCloseTo(0.4, 9);
+        expect(writesOf(el).filter(v => !close(v, 0.32)), 'a volume that ignores Output Volume').toEqual([]);
+        expect(el.volume).toBeCloseTo(0.32, 9);
     });
 });
 
@@ -244,26 +250,40 @@ describe('StreamAudioHost — the path everywhere the stage is not', () => {
     const audio = () => container.querySelector<HTMLAudioElement>('audio[data-stream-audio="1"]')!;
     async function renderHost() {
         await act(async () => { root.render(<StreamAudioHost />); });
-        await act(async () => { await Promise.resolve(); });
+        await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
     }
+    /** The small player's gain: the only graph built here (one stream). */
+    const hostGain = () => gains[gains.length - 1];
 
-    it('plays at stream volume × master', async () => {
+    it('plays at stream volume × master, through its own gain', async () => {
         await renderHost();
-        expect(audio().volume).toBeCloseTo(0.5, 9); // 100% × 50%
+        expect(hostGain().effective).toBeCloseTo(0.5, 9); // 100% × 50%
+        expect(audio().muted, 'the <audio> is its muted sink').toBe(true);
     });
 
-    it('a boosted stream is capped at full scale after the master is applied', async () => {
+    it('a boost stays a boost after the master is applied (the graph is not capped)', async () => {
         setStreamVolume(1, 150);
         await renderHost();
-        expect(audio().volume).toBeCloseTo(0.75, 9); // 150% × 50%
+        expect(hostGain().effective).toBeCloseTo(Math.SQRT2 * 0.5, 9); // 150% (+3 dB) × 50%
         master(100);
         await act(async () => { await Promise.resolve(); });
-        expect(audio().volume).toBe(1); // 150% × 100%, capped
+        expect(hostGain().effective).toBeCloseTo(Math.SQRT2, 9);
     });
 
     it('follows a Settings change to Output Volume', async () => {
         await renderHost();
         act(() => { master(20); });
-        expect(audio().volume).toBeCloseTo(0.2, 9);
+        expect(hostGain().effective).toBeCloseTo(0.2, 9);
+    });
+
+    it('where Web Audio cannot read the stream, its <audio> plays it at min(level × master, 1), as before', async () => {
+        webAudioBroken = true;
+        setStreamVolume(1, 150);
+        await renderHost();
+        expect(audio().muted).toBe(false);
+        expect(audio().volume).toBeCloseTo(Math.SQRT2 * 0.5, 9);
+        master(100);
+        await act(async () => { await Promise.resolve(); });
+        expect(audio().volume).toBe(1); // an element cannot boost
     });
 });

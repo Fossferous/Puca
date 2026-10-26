@@ -91,7 +91,9 @@ function render() {
     });
 }
 const html = () => document.documentElement.dataset;
-const fullscreenBtn = (i = 0) => container.querySelectorAll<HTMLButtonElement>('.tile-btn[aria-label]')[i];
+// By its label ("Fullscreen" / "Exit fullscreen"): other tile buttons carry
+// labels too (the volume button's names its stream).
+const fullscreenBtn = (i = 0) => container.querySelectorAll<HTMLButtonElement>('.tile-btn[aria-label$="ullscreen"]')[i];
 const tap = (el: Element) => act(() => { (el as HTMLElement).click(); });
 
 beforeEach(() => {

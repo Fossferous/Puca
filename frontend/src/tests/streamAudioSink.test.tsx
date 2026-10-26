@@ -18,6 +18,11 @@
  * <audio> per watched stream — StreamPip voiced only the first, and nothing
  * where it was not mounted); the float's <video> is picture only. The same
  * routing guarantees moved with it (more in streamAudioHost.test.tsx).
+ *
+ * 2026-10-26: the host sounds through a Web Audio graph of its own (its
+ * <audio>s are muted sinks), so its CONTEXT is routed as the stage's is, and
+ * its <audio>s keep their routing for the fallback where Web Audio cannot
+ * play.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -227,11 +232,44 @@ describe('StreamStage — the Web Audio path', () => {
     });
 });
 
-describe('StreamAudioHost — the path everywhere the stage is not', () => {
+describe('StreamAudioHost — its Web Audio graph (the path everywhere the stage is not)', () => {
+    function renderHost() {
+        act(() => { root.render(<StreamAudioHost />); });
+    }
+
+    it('routes its context to the chosen device, and a stream joins the speakers only once it is there', async () => {
+        choose('headset-1');
+        renderHost();
+        await act(async () => { await flushMicrotasks(); });
+        expect(contexts).toHaveLength(1);
+        const ctx = contexts[0];
+        expect(ctx.calls).toEqual(['headset-1']);
+        // Still on the OS default: connecting now is the leak.
+        expect(connected).toEqual([]);
+        await act(async () => { await ctx.settle(); });
+        expect(connected).toEqual(['speakers@headset-1']);
+    });
+
+    it('follows a Settings change to the live context', async () => {
+        choose('headset-1');
+        renderHost();
+        const ctx = contexts[0];
+        await act(async () => { await ctx.settle(); });
+        act(() => { choose('speakers-2'); });
+        expect(ctx.calls).toEqual(['headset-1', 'speakers-2']);
+        await act(async () => { await ctx.settle(); });
+        expect(ctx.sinkId).toBe('speakers-2');
+    });
+});
+
+describe('StreamAudioHost — its <audio> fallback, where Web Audio cannot play', () => {
     const audio = () => container.querySelector<HTMLAudioElement>('audio[data-stream-audio="1"]')!;
     function renderHost() {
         act(() => { root.render(<StreamAudioHost />); });
     }
+    beforeEach(() => {
+        vi.stubGlobal('AudioContext', class { constructor() { throw new Error('no Web Audio in this engine'); } });
+    });
 
     it('routes its <audio> to the chosen device and holds it muted until the switch lands', async () => {
         choose('headset-1');

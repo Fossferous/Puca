@@ -158,10 +158,12 @@ const PINS: Pin[] = [
         ],
     },
     {
+        // Not only 'suspended': Safari leaves a context 'interrupted' after a
+        // phone call, and that resumes at the next gesture too.
         name: 'stream audio refused by the autoplay policy starts at the next gesture (audio host and stage)',
         src: 'audioHost',
         holds: (c) => c.includes('const unsubGesture = onUserGesture(host.reconcile);') && c.includes('unsubGesture();')
-            && /useEffect\(\(\) => onUserGesture\(\(\) => \{\s*const ctx = audioCtxRef\.current;\s*if \(ctx && ctx\.state === 'suspended'\) ctx\.resume\(\)/.test(SRC.streamStage),
+            && /useEffect\(\(\) => onUserGesture\(\(\) => \{\s*const ctx = audioCtxRef\.current;\s*if \(ctx && ctx\.state !== 'running' && ctx\.state !== 'closed'\) ctx\.resume\(\)/.test(SRC.streamStage),
         mutants: [
             ['the host never retries', replace('const unsubGesture = onUserGesture(host.reconcile);', 'const unsubGesture = () => {};')],
         ],
