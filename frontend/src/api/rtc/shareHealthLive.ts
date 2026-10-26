@@ -18,12 +18,16 @@ import { shareDimensions, type EncodeSample, type LiveCapture, type ShareQuality
  * — asking in this order just avoids the pointless walk.
  */
 export async function sampleShareEncode(): Promise<EncodeSample | null> {
+    const stamped = (s: EncodeSample | null): EncodeSample | null =>
+        // Stamped as it is read: the frame watch turns two readings' counters
+        // into a rate over the time between them (shareHealth.ts).
+        s ? { ...s, atMs: s.atMs ?? performance.now() } : null;
     try {
         const viaSfu = await sfuManager.shareEncodeSample();
-        if (viaSfu) return viaSfu;
+        if (viaSfu) return stamped(viaSfu);
     } catch { /* not on an SFU call */ }
     try {
-        return await webrtcManager.shareEncodeSample();
+        return stamped(await webrtcManager.shareEncodeSample());
     } catch {
         return null;
     }

@@ -19,6 +19,7 @@
  * reports the pause, not the problem (devices/session.ts learned this the
  * hard way — see deviceDiagnosticsWindow).
  */
+import type { EncodeSample, SentRung } from './shareHealth';
 
 /** The receiver side of one video stream. */
 export interface InboundVideoSummary {
@@ -53,6 +54,12 @@ export interface InboundVideoSummary {
     pli: number | null;
     keyFrames: number | null;
     bytes: number | null;
+    /** RTP interarrival jitter (inbound-rtp `jitter`), ms: how unevenly the
+     *  packets arrive. It is the browser's running estimate, not a counter, so
+     *  a windowed read keeps the latest value. A freeze with packets lost or
+     *  jitter high is the network; a freeze with neither is the sender (its
+     *  frames never left) or a picture that stopped changing. */
+    jitterMs: number | null;
 }
 
 /** The sender side of one video stream. */
@@ -162,6 +169,7 @@ function inboundOf(r: Row): InboundVideoSummary {
         pli: num(r.pliCount),
         keyFrames: num(r.keyFramesDecoded),
         bytes: num(r.bytesReceived),
+        jitterMs: num(r.jitter) === null ? null : Math.round(1000 * (r.jitter as number)),
     };
 }
 
@@ -340,7 +348,10 @@ export function formatLatencyLine(s: RtcLatencySummary): string {
         parts.push(`out fps=${o.fps ?? '?'} size=${o.size ?? '?'} enc=${o.encodeMs ?? '?'}ms send=${o.sendDelayMs ?? '?'}ms gap=${o.encodeSentGap ?? '?'} limit=${o.limit ?? '?'} encoder=${o.encoder ?? '?'}${rid} target=${o.targetKbps ?? '?'}kbps${rtcp}`);
     }
     for (const i of s.inbound) {
-        parts.push(`in fps=${i.fps ?? '?'} size=${i.size ?? '?'} jb=${i.jitterBufferMs ?? '?'}ms(target ${i.jitterBufferTargetMs ?? '?'}) proc=${i.processingMs ?? '?'}ms dec=${i.decodeMs ?? '?'}ms drop=${i.framesDropped ?? '?'} freeze=${i.freezeCount ?? '?'} lost=${i.packetsLost ?? '?'} decoder=${i.decoder ?? '?'}`);
+        // nack/pli/jit after the decoder: what a freeze came with. Lost
+        // packets, NACKs and keyframe requests or high jitter are the network;
+        // a freeze with none of them is the sender or a still picture.
+        parts.push(`in fps=${i.fps ?? '?'} size=${i.size ?? '?'} jb=${i.jitterBufferMs ?? '?'}ms(target ${i.jitterBufferTargetMs ?? '?'}) proc=${i.processingMs ?? '?'}ms dec=${i.decodeMs ?? '?'}ms drop=${i.framesDropped ?? '?'} freeze=${i.freezeCount ?? '?'} lost=${i.packetsLost ?? '?'} decoder=${i.decoder ?? '?'} nack=${i.nack ?? '?'} pli=${i.pli ?? '?'} jit=${i.jitterMs ?? '?'}ms`);
     }
     if (s.pair) {
         parts.push(`pair=${s.pair.protocol ?? '?'} ${s.pair.local ?? '?'}->${s.pair.remote ?? '?'} rtt=${s.pair.rttMs ?? '?'}ms out=${s.pair.outKbps ?? '?'}kbps`);
@@ -403,6 +414,52 @@ export function videoSendExtras(
         ...(active !== undefined && { active }),
         ...(typeof outbound.ssrc === 'number' && { ssrc: outbound.ssrc }),
     };
+}
+
+/**
+ * One share sender's frames, for the share's frame-rate watch (shareHealth.ts
+ * frameVerdict): the rate chosen, what the capture delivered, and the rung
+ * that carries the LARGEST picture still switched on — what most viewers are
+ * sent. Not the first rung, not the fastest: a ladder's bottom rung is capped
+ * at 30 fps and keeps up when the top one does not, and a rung the SFU
+ * switched off (nobody asked for it) sends nothing by design.
+ */
+export function shareSendReading(
+    stats: RTCStatsReport,
+    setFps: unknown,
+    encodings?: readonly SendEncoding[],
+): Pick<EncodeSample, 'setFps' | 'captureFps' | 'sent'> {
+    let best: { row: Row; maxFps?: number } | null = null;
+    let captureFps: number | undefined;
+    stats.forEach((s) => {
+        const r = s as unknown as Row;
+        if (r.type !== 'outbound-rtp' || r.kind !== 'video') return;
+        const extras = videoSendExtras(stats, r, setFps, encodings);
+        if (captureFps === undefined && typeof extras.captureFps === 'number') captureFps = extras.captureFps;
+        if (extras.active === false) return;
+        const h = num(r.frameHeight) ?? 0;
+        const bh = best ? (num(best.row.frameHeight) ?? 0) : -1;
+        const faster = (num(r.framesPerSecond) ?? 0) > (best ? (num(best.row.framesPerSecond) ?? 0) : -1);
+        if (!best || h > bh || (h === bh && faster)) best = { row: r, maxFps: extras.maxFps };
+    });
+    const out: Pick<EncodeSample, 'setFps' | 'captureFps' | 'sent'> = {};
+    if (typeof setFps === 'number' && Number.isFinite(setFps) && setFps > 0) out.setFps = setFps;
+    if (captureFps !== undefined) out.captureFps = captureFps;
+    const b = best as { row: Row; maxFps?: number } | null;
+    if (b) {
+        const sent: SentRung = {};
+        const put = (k: keyof SentRung, v: unknown) => { const n = num(v); if (n !== null) sent[k] = n; };
+        put('fps', b.row.framesPerSecond);
+        put('maxFps', b.maxFps);
+        put('frames', b.row.framesEncoded);
+        put('bytes', b.row.bytesSent);
+        put('width', b.row.frameWidth);
+        put('height', b.row.frameHeight);
+        put('ssrc', b.row.ssrc);
+        if (num(b.row.targetBitrate) !== null) sent.targetKbps = Math.round((b.row.targetBitrate as number) / 1000);
+        out.sent = sent;
+    }
+    return out;
 }
 
 /** The id of the track an outbound-rtp entry is sending, via its media-source

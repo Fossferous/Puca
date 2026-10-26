@@ -28,6 +28,17 @@
  * videoSendExtras has the reading rules). `lim:` is adaptation (for a share,
  * lowering RESOLUTION to hold frame rate), not an explanation of drops.
  *
+ * WHAT YOU RECEIVE is `v=[...]`, one entry per incoming video: frame rate and
+ * size, drops, freezes, jitter buffer, decode time and loss, and since
+ * 2026-10-26 what a freeze came with — `nack`/`pli` (repair and keyframe
+ * requests), `kf` (keyframes decoded), the kbps received and `jit` (RTP
+ * jitter) — plus, on the SFU, the copy asked for (`ask:high`, `+step` when it
+ * is a step down for a lossy connection, shareLayerGuard.ts). Two viewers of
+ * one share on 2026-10-25: one froze with nothing lost (the sharer was short
+ * of frames), the other lost packets from everyone; the line could not tell
+ * them apart. A freeze beside lost packets, NACKs or high jitter is the
+ * viewer's connection; one beside none of them is the sender.
+ *
  * Both transports: the SFU room when there is one, else the peer-to-peer
  * connections. `?` means neither could be read, never "nothing".
  *
@@ -75,6 +86,20 @@ export interface VideoIn {
     jbMs: number | null;
     decodeMs: number | null;
     lost: number | null;
+    /** What came with a freeze, over the same window (2026-10-25: one viewer
+     *  froze with nothing lost, the other with loss from every sender, and the
+     *  line could not tell which was which): retransmission requests,
+     *  keyframe requests, keyframes decoded, the rate received, and the RTP
+     *  jitter (the browser's running estimate, ms). Absent fields print `?`. */
+    nack?: number | null;
+    pli?: number | null;
+    keyFrames?: number | null;
+    kbps?: number | null;
+    jitterMs?: number | null;
+    /** SFU: the copy asked for ('high' / 'medium' / 'low'), and whether that
+     *  is a step down for a lossy connection (shareLayerGuard.ts). */
+    asked?: string | null;
+    stepped?: boolean;
 }
 
 /** One outgoing video: one entry per simulcast rung (SFU) or per peer (mesh). */
@@ -173,7 +198,9 @@ export function formatSendLine(h: HealthInput): string | null {
 export function formatHealthLine(h: HealthInput): string {
     const video = h.video === null ? '?' : h.video.length === 0 ? 'none' : h.video.map(x => x.ended
         ? `${x.source}:off`
-        : `${x.source}:${v(x.fps, 'fps')}/${x.size ?? '?'} drop${v(x.dropped)} frz${v(x.freezes)}/${v(x.freezeMs, 'ms')} jb${v(x.jbMs, 'ms')} dec${v(x.decodeMs, 'ms')} lost${v(x.lost)}`,
+        : `${x.source}:${v(x.fps, 'fps')}/${x.size ?? '?'} drop${v(x.dropped)} frz${v(x.freezes)}/${v(x.freezeMs, 'ms')} jb${v(x.jbMs, 'ms')} dec${v(x.decodeMs, 'ms')} lost${v(x.lost)}`
+            + ` nack${v(x.nack)} pli${v(x.pli)} kf${v(x.keyFrames)} ${v(x.kbps)}kbps jit${v(x.jitterMs, 'ms')}`
+            + (x.asked ? ` ask:${x.asked}${x.stepped ? '+step' : ''}` : ''),
     ).join(';');
     // How many outgoing videos the health-send line details.
     const sendCount = h.sending === null ? '?' : h.sending.length === 0 ? 'none' : String(h.sending.length);
@@ -228,18 +255,25 @@ function probe(): void {
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
 
-function videoInOf(source: string, i: Record<string, unknown>): VideoIn {
+/** One incoming video over a window of `windowMs` (its `bytes` are the
+ *  window's, so the rate received is bytes x 8 / ms = kbps). */
+function videoInOf(source: string, i: Record<string, unknown>, windowMs: number): VideoIn {
+    const bytes = num(i.bytes);
     return {
         source,
         ...(i.ended === true && { ended: true }),
         fps: num(i.fps), size: typeof i.size === 'string' ? i.size : null,
         dropped: num(i.framesDropped), freezes: num(i.freezeCount), freezeMs: num(i.freezeMs),
         jbMs: num(i.jitterBufferMs), decodeMs: num(i.decodeMs), lost: num(i.packetsLost),
+        nack: num(i.nack), pli: num(i.pli), keyFrames: num(i.keyFrames),
+        kbps: bytes === null || !(windowMs > 0) ? null : Math.round((bytes * 8) / windowMs),
+        jitterMs: num(i.jitterMs),
     };
 }
 
 function videoFrom(diag: Record<string, unknown>): VideoIn[] {
     const rows = Array.isArray(diag.remoteRtp) ? (diag.remoteRtp as Array<Record<string, unknown>>) : [];
+    const windowMs = num(diag.windowMs) ?? VIDEO_WINDOW_MS;
     const out: VideoIn[] = [];
     for (const row of rows) {
         const lat = row.latency as { inbound?: Array<Record<string, unknown>> } | undefined;
@@ -249,7 +283,11 @@ function videoFrom(diag: Record<string, unknown>): VideoIn[] {
         // streamers watched one after the other otherwise print as ONE stream
         // that fell to 310x180 and recovered (2026-10-05).
         const from = typeof row.userId === 'number' || (typeof row.userId === 'string' && row.userId !== '') ? `<${row.userId}` : '';
-        out.push(videoInOf(`${String(row.source ?? 'video')}${from}`, i));
+        out.push({
+            ...videoInOf(`${String(row.source ?? 'video')}${from}`, i, windowMs),
+            ...(typeof row.asked === 'string' && row.asked !== '?' && { asked: row.asked }),
+            ...(row.stepped === true && { stepped: true }),
+        });
     }
     return out;
 }
@@ -344,7 +382,7 @@ function fromMesh(peers: Array<Record<string, unknown>>): { video: VideoIn[]; se
         }
         const lat = p.latency as { inbound?: Array<Record<string, unknown>> } | null | undefined;
         // `<peer`: received FROM that peer (s= uses `>peer`: sent TO it).
-        for (const i of lat?.inbound ?? []) video.push(videoInOf(`${typeof i.source === 'string' ? i.source : 'video'}<${peer}`, i));
+        for (const i of lat?.inbound ?? []) video.push(videoInOf(`${typeof i.source === 'string' ? i.source : 'video'}<${peer}`, i, VIDEO_WINDOW_MS));
     }
     pruneLimits(seen);
     return { video, sending };

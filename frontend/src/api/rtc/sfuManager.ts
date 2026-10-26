@@ -11,6 +11,7 @@
 import {
     BaseKeyProvider,
     ConnectionState,
+    DisconnectReason,
     ParticipantEvent,
     Room,
     RoomEvent,
@@ -38,10 +39,15 @@ import {
     type LadderRung, type ShareLadderMode,
 } from './shareLadder';
 import type { RtpEndpoint } from './streamStats';
+import { encryptionErrorLine, logRtcEvent } from './rtcEventLog';
+import { ShareLayerGuard, VIEW_SAMPLE_MS, lowerLayer, qualityName, shareLayers, type LayerChange } from './shareLayerGuard';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
-import { receiverHints, summariseInboundAudio, videoSendExtras, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
+import {
+    receiverHints, shareSendReading, summariseInboundAudio, videoSendExtras, summariseRtcStats, summariseRtcStatsDelta,
+    type InboundAudioHealth, type RtcLatencySummary, type SendEncoding,
+} from './statsSummary';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
 
 interface SfuTokenResponse {
@@ -577,6 +583,21 @@ export class SfuManager {
      *  subscribes share video/audio only for these users (mics and cameras are
      *  always subscribed — voice must flow and cameras render in the tiles). */
     private watchedVideo = new Set<number>();
+    /** Per watched share, by the sharer's user id: the guard that asks for a
+     *  smaller copy while this viewer's connection keeps losing it
+     *  (shareLayerGuard.ts), the receiver its counters come from, and the
+     *  size last received (logged when it changes). */
+    private viewWatch = new Map<number, {
+        guard: ShareLayerGuard;
+        receiver: RTCRtpReceiver;
+        size: string | null;
+        /** A new size seen once: logged when the next read agrees. */
+        pendingSize: string | null;
+    }>();
+    private viewTimer: ReturnType<typeof setInterval> | null = null;
+    private viewBusy = false;
+    /** When the room started reconnecting, for the "reconnected after" line. */
+    private reconnectingSince: number | null = null;
 
     // Callback surface mirroring api/rtc/manager.ts so VoicePanel wires both
     // transports identically.
@@ -850,6 +871,8 @@ export class SfuManager {
         this.shareStreams.clear();
         this.focusedUserId = null;
         this.watchedVideo.clear();
+        this.stopViewWatch();
+        this.reconnectingSince = null;
         this.localE2eeActive = false;
         this.cryptorEnabled.clear();
         this.encryptionErrorAt.clear();
@@ -1459,6 +1482,10 @@ export class SfuManager {
      * WITH A LADDER there is one outbound-rtp entry per rung. Any rung being
      * CPU-limited counts, because the rungs are encoded by the same machine —
      * a starved bottom rung is not a smaller problem than a starved top one.
+     *
+     * The frames (set, captured, sent) are read from the same report, on the
+     * rung carrying the largest picture that is switched on (shareSendReading):
+     * what the frame watch judges when nothing says 'cpu'.
      */
     async shareEncodeSample(): Promise<EncodeSample | null> {
         let sample: EncodeSample | null = null;
@@ -1468,16 +1495,24 @@ export class SfuManager {
             if (!sender) continue;
             try {
                 const stats = await sender.getStats();
+                let row: EncodeSample | null = null;
                 stats.forEach((s) => {
                     if (s.type !== 'outbound-rtp') return;
                     const r = s as unknown as Record<string, unknown>;
                     if (r.kind !== 'video') return;
-                    const row: EncodeSample = {
+                    const next: EncodeSample = {
                         limit: r.qualityLimitationReason as string | undefined,
                         encoder: r.encoderImplementation as string | undefined,
                     };
-                    if (!sample || (row.limit === 'cpu' && sample.limit !== 'cpu')) sample = row;
+                    if (!row || (next.limit === 'cpu' && row.limit !== 'cpu')) row = next;
                 });
+                if (!row) continue;
+                let encodings: SendEncoding[] | undefined;
+                try { encodings = sender.getParameters?.().encodings; } catch { /* sender detached */ }
+                const reading = shareSendReading(stats, pub.track?.mediaStreamTrack?.getSettings?.().frameRate, encodings);
+                const prev = sample as EncodeSample | null;
+                const found = row as EncodeSample;
+                if (!prev || (found.limit === 'cpu' && prev.limit !== 'cpu')) sample = { ...found, ...reading };
             } catch { /* sender detached mid-read */ }
         }
         return sample;
@@ -1699,6 +1734,12 @@ export class SfuManager {
                 // Only subscribed publications: with autoSubscribe off,
                 // setVideoQuality on an unsubscribed pub warn-logs uselessly.
                 if (pub.kind === 'video' && pub.isSubscribed) {
+                    if (pub.source === Track.Source.ScreenShare && uid !== null) {
+                        // A share keeps its step down for a lossy connection
+                        // through a focus change (shareQualityFor).
+                        pub.setVideoQuality(this.shareQualityFor(uid, pub));
+                        continue;
+                    }
                     const pinned = pub.source === Track.Source.Camera && uid !== null
                         ? this.pinnedCameras.get(uid)
                         : undefined;
@@ -1708,6 +1749,127 @@ export class SfuManager {
                 }
             }
         }
+    }
+
+    /** The copy the policy asks for of `uid`'s share (subscribedQuality). */
+    private sharePolicyQuality(uid: number): VideoQuality {
+        return subscribedQuality(Track.Source.ScreenShare, uid === this.focusedUserId, this.participantCount(), this.watchedVideo.size);
+    }
+
+    /**
+     * The copy of `uid`'s share to ask for: the policy's, or, while this
+     * viewer's connection keeps losing it, the next smaller copy the share has
+     * (shareLayerGuard.ts). A share sent at one size has none, and keeps the
+     * policy's.
+     */
+    private shareQualityFor(uid: number, pub: RemoteTrackPublication): VideoQuality {
+        const want = this.sharePolicyQuality(uid);
+        if (this.viewWatch.get(uid)?.guard.state !== 'reduced') return want;
+        const lower = lowerLayer(want, shareLayers(pub));
+        return lower === null ? want : (lower as VideoQuality);
+    }
+
+    /** The watched-share check (shareLayerGuard.ts), while any share is watched. */
+    private ensureViewWatch(): void {
+        if (this.viewTimer !== null) return;
+        this.viewTimer = setInterval(() => { void this.viewWatchTick(); }, VIEW_SAMPLE_MS);
+    }
+
+    private stopViewWatch(): void {
+        if (this.viewTimer !== null) clearInterval(this.viewTimer);
+        this.viewTimer = null;
+        this.viewWatch.clear();
+    }
+
+    /** One read of every subscribed share's receiver. */
+    private async viewWatchTick(): Promise<void> {
+        const room = this.room;
+        if (!room || this.viewBusy) return;
+        this.viewBusy = true;
+        try {
+            const seen = new Set<number>();
+            for (const participant of room.remoteParticipants.values()) {
+                const uid = userIdFromIdentity(participant.identity);
+                if (uid === null || uid === this.localUserId) continue;
+                for (const pub of participant.trackPublications.values()) {
+                    if (pub.source !== Track.Source.ScreenShare || pub.kind !== Track.Kind.Video || !pub.isSubscribed) continue;
+                    const receiver = pub.track?.receiver;
+                    if (!receiver) continue;
+                    seen.add(uid);
+                    await this.viewWatchRead(uid, pub, receiver);
+                }
+            }
+            // A share no longer watched forgets its history; one watched again
+            // starts at the full picture and earns its step afresh.
+            for (const uid of [...this.viewWatch.keys()]) if (!seen.has(uid)) this.viewWatch.delete(uid);
+        } finally {
+            this.viewBusy = false;
+        }
+    }
+
+    private async viewWatchRead(uid: number, pub: RemoteTrackPublication, receiver: RTCRtpReceiver): Promise<void> {
+        let st = this.viewWatch.get(uid);
+        if (!st) {
+            st = { guard: new ShareLayerGuard(), receiver, size: null, pendingSize: null };
+            this.viewWatch.set(uid, st);
+        }
+        if (st.receiver !== receiver) {
+            // Published again: a new receiver whose counters start over.
+            st.guard.resetCounters();
+            st.receiver = receiver;
+            st.pendingSize = null;
+        }
+        let row: Record<string, unknown> | null = null;
+        try {
+            (await receiver.getStats()).forEach((s) => {
+                const r = s as unknown as Record<string, unknown>;
+                if (r.type === 'inbound-rtp' && r.kind === 'video') row = r;
+            });
+        } catch { return; /* receiver detached mid-read */ }
+        const r = row as Record<string, unknown> | null;
+        if (!r || this.viewWatch.get(uid) !== st) return;
+        this.noteShareSize(uid, st, r, pub);
+        let change: LayerChange | null = null;
+        if (lowerLayer(this.sharePolicyQuality(uid), shareLayers(pub)) === null) {
+            // Only a share with a smaller copy can be helped this way.
+            st.guard.reset();
+        } else {
+            const n = (k: string) => (typeof r[k] === 'number' && Number.isFinite(r[k]) ? r[k] as number : null);
+            change = st.guard.observe({
+                atMs: performance.now(),
+                packetsReceived: n('packetsReceived'),
+                packetsLost: n('packetsLost'),
+                freezeCount: n('freezeCount'),
+                nackCount: n('nackCount'),
+                pliCount: n('pliCount'),
+            });
+        }
+        const ask = this.shareQualityFor(uid, pub);
+        if (change) {
+            logRtcEvent(change.to === 'reduced'
+                ? `[share-view] user ${uid}: asking for a smaller copy (${qualityName(ask)}): ${change.why}`
+                : `[share-view] user ${uid}: back to the full picture (${qualityName(ask)}), ${change.why}; next wait ${Math.round(st.guard.cleanWaitMs / 1000)} s`);
+        }
+        // Asked for anything else, it is put right: a step taken before this
+        // share's history was dropped (its receiver missing for a read) would
+        // otherwise hold the smaller copy with nothing left to give it back.
+        if (pub.videoQuality !== ask) {
+            try { pub.setVideoQuality(ask); } catch { /* unsubscribed mid-read */ }
+        }
+    }
+
+    /** Log the size a watched share arrives at: the first one, then each new
+     *  size once a second read agrees (a window being dragged is not a size). */
+    private noteShareSize(uid: number, st: NonNullable<ReturnType<SfuManager['viewWatch']['get']>>, r: Record<string, unknown>, pub: RemoteTrackPublication): void {
+        const w = r.frameWidth;
+        const h = r.frameHeight;
+        if (typeof w !== 'number' || typeof h !== 'number' || w <= 0 || h <= 0) return;
+        const size = `${w}x${h}`;
+        if (size === st.size) { st.pendingSize = null; return; }
+        if (st.size !== null && st.pendingSize !== size) { st.pendingSize = size; return; }
+        logRtcEvent(`[share-view] user ${uid}: receiving ${size}${st.size ? ` (was ${st.size})` : ''}, asked ${qualityName(pub.videoQuality)}`);
+        st.size = size;
+        st.pendingSize = null;
     }
 
     /**
@@ -1788,6 +1950,9 @@ export class SfuManager {
         // The rung a share asks for depends on how many are watched
         // (subscribedQuality): re-ask for the ones already subscribed.
         if (before !== this.watchedVideo.size) this.setFocusedRemote(this.focusedUserId);
+        // Read the watched shares while there are any (shareLayerGuard.ts).
+        if (this.watchedVideo.size === 0) this.stopViewWatch();
+        else if (this.room) this.ensureViewWatch();
     }
 
     /**
@@ -2035,6 +2200,12 @@ export class SfuManager {
                         userId: uid, identity: p.identity, source: String(pub.source),
                         latency: summarise(`remote:${pub.trackSid}`, stats),
                         receivers: receiverHints([receiver]),
+                        // The copy asked for, and whether that is a step down
+                        // for a lossy connection (shareLayerGuard.ts): the
+                        // minute line's `ask:` (healthLog.ts).
+                        asked: qualityName(pub.videoQuality),
+                        ...(pub.source === Track.Source.ScreenShare && uid !== null
+                            && this.viewWatch.get(uid)?.guard.state === 'reduced' && { stepped: true }),
                     });
                 } catch { /* receiver detached mid-iteration */ }
             }
@@ -2266,7 +2437,12 @@ export class SfuManager {
                 else this.syncSubscriptions();
             })
             .on(RoomEvent.EncryptionError, (error, participant) => {
-                console.error('[sfu] encryption error:', error);
+                // To puca.log as well as the console, with LiveKit's reason:
+                // a viewer's report once had nothing but the badge's
+                // "verification-failed" to say a sharer's frames would not
+                // open. LiveKit throttles these (5 a minute per sender and
+                // reason), so this is a handful of lines, never a flood.
+                logRtcEvent(encryptionErrorLine(error, participant ? userIdFromIdentity(participant.identity) : null), 'error');
                 if (participant) this.encryptionErrorAt.set(participant.identity, Date.now());
                 // Usually an epoch-key mismatch: refresh now instead of waiting
                 // out the 30 s poll. Idempotent; throttled upstream (~1/s).
@@ -2274,6 +2450,34 @@ export class SfuManager {
             })
             .on(RoomEvent.Disconnected, () => {
                 this.onDisconnected?.();
+            })
+            // The moments between the minute line's numbers (rtcEventLog.ts):
+            // the server pausing a watched share for this viewer, and the
+            // room dropping, reconnecting and how long that took. Our own
+            // leave removes these listeners first, so it logs nothing here.
+            .on(RoomEvent.TrackStreamStateChanged, (pub, streamState, participant) => {
+                if (pub.source !== Track.Source.ScreenShare) return;
+                const uid = userIdFromIdentity(participant.identity);
+                logRtcEvent(streamState === Track.StreamState.Paused
+                    ? `[share-view] user ${uid ?? '?'}: the server paused the share for this viewer (usually: the connection cannot carry even its smallest copy)`
+                    : `[share-view] user ${uid ?? '?'}: the server ${streamState === Track.StreamState.Active ? 'resumed the share' : `set the share ${streamState}`} for this viewer`);
+            })
+            .on(RoomEvent.SignalReconnecting, () => {
+                this.reconnectingSince ??= Date.now();
+                logRtcEvent('[sfu] signalling connection lost, reconnecting (media still flowing)', 'warn');
+            })
+            .on(RoomEvent.Reconnecting, () => {
+                this.reconnectingSince ??= Date.now();
+                logRtcEvent('[sfu] connection lost, reconnecting', 'warn');
+            })
+            .on(RoomEvent.Reconnected, () => {
+                const since = this.reconnectingSince;
+                this.reconnectingSince = null;
+                logRtcEvent(`[sfu] reconnected${since === null ? '' : ` after ${Date.now() - since} ms`}`);
+            })
+            .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+                this.reconnectingSince = null;
+                logRtcEvent(`[sfu] disconnected (${reason === undefined ? 'no reason given' : (DisconnectReason[reason] ?? `reason ${reason}`)})`, 'warn');
             })
             // autoSubscribe is off: every path that surfaces a new publication
             // (or rebuilds the session) must re-reconcile subscriptions.
@@ -2325,15 +2529,16 @@ export class SfuManager {
                 break;
             }
             case Track.Source.ScreenShare: {
-                pub.setVideoQuality(
-                    subscribedQuality(pub.source, uid === this.focusedUserId, this.participantCount(), this.watchedVideo.size),
-                );
+                // The policy's copy, or the smaller one this viewer's
+                // connection was already stepped down to (shareQualityFor).
+                pub.setVideoQuality(this.shareQualityFor(uid, pub));
                 // Remote control needs the receiver in hand to drop its
                 // jitter buffer while this share is being DRIVEN (and give it
                 // back after) — this subscription is the only moment the SFU
                 // path holds the RTCRtpReceiver.
                 if (track.kind === Track.Kind.Video) {
                     registerScreenReceiver(uid, track.receiver);
+                    this.ensureViewWatch();
                 }
                 const stream = this.shareStreams.get(uid) ?? new MediaStream();
                 stream.addTrack(track.mediaStreamTrack);

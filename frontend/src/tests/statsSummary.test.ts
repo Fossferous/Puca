@@ -169,6 +169,21 @@ describe('receiverHints and the log line', () => {
         expect(line).toContain('pair=tcp relay/udp/tcp->host/udp rtt=183ms out=2400kbps');
     });
 
+    // 2026-10-25: one viewer froze with nothing lost, another lost packets
+    // from everyone, and the 5 s line could not say which was which. The RTP
+    // jitter (a running estimate, so a windowed read keeps the LATEST value),
+    // NACKs and PLIs now ride beside each incoming stream.
+    it('an incoming stream carries its repair requests and RTP jitter, the jitter never differenced', () => {
+        const s = summariseRtcStats(report([inboundRow({ jitter: 0.0143 })]));
+        expect(s.inbound[0].jitterMs).toBe(14);
+        expect(formatLatencyLine(s)).toContain('lost=7 decoder=libvpx nack=5 pli=1 jit=14ms');
+        const w = summariseRtcStatsDelta(report([inboundRow({ jitter: 0.5 })]), report([inboundRow({ jitter: 0.004, nackCount: 9, pliCount: 3 })]), 1000);
+        expect(w.inbound[0].jitterMs, 'the latest estimate, not 4 - 500').toBe(4);
+        expect(w.inbound[0].nack, 'counters are windowed').toBe(4);
+        expect(w.inbound[0].pli).toBe(2);
+        expect(formatLatencyLine(summariseRtcStats(report([inboundRow()]))), 'not reported: unknown, never 0').toContain('jit=?ms');
+    });
+
     // 2026-10-05: a streamer's share sat at 310x180 for minutes, and the only
     // place that said WHY — the encoder's bandwidth target (118 kbps) and the
     // far end's RTCP view (519 ms round trip, 1.6% lost, against 28 ms on the

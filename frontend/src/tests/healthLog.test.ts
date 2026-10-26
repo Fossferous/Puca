@@ -335,6 +335,52 @@ describe('the sending side', () => {
     });
 });
 
+/**
+ * WHAT A FREEZE CAME WITH. Two viewers of one share on 2026-10-25: one froze
+ * for 1.4-2.3 s with nothing lost (the sharer was short of frames), the other
+ * lost packets from every sender. Their minute lines read alike. Now each
+ * incoming video also says what was asked again (NACK), what keyframes were
+ * asked for (PLI) and decoded, the rate it came at and the RTP jitter, and on
+ * the SFU which copy was asked for and whether that was a step down.
+ */
+describe('what came with a freeze', () => {
+    const shareIn = {
+        fps: 40, size: '1920x1080', framesDropped: 0, freezeCount: 2, freezeMs: 3700, jitterBufferMs: 60, decodeMs: 2.1,
+        packetsLost: 85, nack: 80, pli: 2, keyFrames: 3, bytes: 3_525_000, jitterMs: 14,
+    };
+    const latency = (i: Record<string, unknown>) => ({ inbound: [i], outbound: [], pair: null, remoteInbound: [] });
+
+    it('prints repair requests, keyframe requests, keyframes, the rate and the jitter beside each incoming video', () => {
+        const line = formatHealthLine({ ...base, video: [{
+            source: 'screen_share<1', fps: 40, size: '1920x1080', dropped: 0, freezes: 2, freezeMs: 3700, jbMs: 60, decodeMs: 2.1,
+            lost: 85, nack: 80, pli: 2, keyFrames: 3, kbps: 9400, jitterMs: 14, asked: 'medium', stepped: true,
+        }] });
+        expect(line).toContain('v=[screen_share<1:40fps/1920x1080 drop0 frz2/3700ms jb60ms dec2.1ms lost85 nack80 pli2 kf3 9400kbps jit14ms ask:medium+step]');
+        // Unknown is `?`, never a number; no copy asked (mesh) prints no ask.
+        const bare = formatHealthLine({ ...base, video: [{ source: 'camera<4', fps: 30, size: '640x360', dropped: 0, freezes: 0, freezeMs: 0, jbMs: 40, decodeMs: 1, lost: 0 }] });
+        expect(bare).toContain('camera<4:30fps/640x360 drop0 frz0/0ms jb40ms dec1ms lost0 nack? pli? kf? ?kbps jit?]');
+        expect(bare).not.toContain('ask:');
+    });
+
+    it('carries them from the SFU\'s window, the rate from its bytes, and the copy asked for', async () => {
+        voiceDiagnostics.mockResolvedValueOnce({ connected: true, windowMs: 3000, localRtp: [], remoteRtp: [
+            { userId: 1, identity: 'u1#a', source: 'screen_share', latency: latency(shareIn), asked: 'medium', stepped: true },
+            { userId: 4, identity: 'u4#b', source: 'camera', latency: latency({ ...shareIn, size: '640x360', bytes: 187_500 }), asked: 'medium' },
+        ] });
+        const line = await sampleHealth();
+        // 3,525,000 bytes in 3 s: 9,400 kbps.
+        expect(line).toContain('screen_share<1:40fps/1920x1080 drop0 frz2/3700ms jb60ms dec2.1ms lost85 nack80 pli2 kf3 9400kbps jit14ms ask:medium+step');
+        expect(line, 'a camera asked for its medium rung is no step').toContain('camera<4:40fps/640x360 drop0 frz2/3700ms jb60ms dec2.1ms lost85 nack80 pli2 kf3 500kbps jit14ms ask:medium]');
+    });
+
+    it('and from a peer-to-peer call\'s window, which has no copies to ask for', async () => {
+        voiceDiagnostics.mockResolvedValueOnce({ connected: false, localRtp: [], remoteRtp: [] });
+        meshDiagnostics.mockResolvedValueOnce([{ userId: 7, rtp: [], latency: latency({ ...shareIn, source: 'screen_share' }) }]);
+        const line = await sampleHealth();
+        expect(line).toContain('screen_share<7:40fps/1920x1080 drop0 frz2/3700ms jb60ms dec2.1ms lost85 nack80 pli2 kf3 9400kbps jit14ms]');
+    });
+});
+
 describe('sampling', () => {
     it('counts renders per minute and starts the next minute from zero', async () => {
         noteRender('chat'); noteRender('chat'); noteRender('voicePanel');

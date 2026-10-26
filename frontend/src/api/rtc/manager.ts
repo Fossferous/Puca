@@ -8,7 +8,10 @@ import { MediaManager, type MicReacquireOptions } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
-import { outboundTrackId, receiverHints, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
+import {
+    outboundTrackId, receiverHints, shareSendReading, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta,
+    type InboundAudioHealth, type RtcLatencySummary, type SendEncoding,
+} from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample, LiveCapture } from './shareHealth';
 import type { RtpEndpoint } from './streamStats';
@@ -1269,12 +1272,17 @@ export class WebRTCManager {
      * Senders are matched by TRACK IDENTITY, never by kind, the same way
      * stopScreenShare finds them: matching on kind would pick up the camera
      * and report its encoder as the share's.
+     *
+     * The frames (set, captured, sent) come from the peer sent the MOST: every
+     * peer's encoder is fed the same capture, so one that keeps up means the
+     * machine does, and the others are short of their own link.
      */
     async shareEncodeSample(): Promise<EncodeSample | null> {
         const screen = this.media.getScreenShareStreamSync();
         if (!screen) return null;
         const screenTracks = new Set<MediaStreamTrack>(screen.getTracks());
         let sample: EncodeSample | null = null;
+        let frames: Pick<EncodeSample, 'setFps' | 'captureFps' | 'sent'> | null = null;
         for (const [, peer] of this.peers) {
             for (const sender of peer.connection.getSenders()) {
                 const track = this.trackOf(sender);
@@ -1291,10 +1299,17 @@ export class WebRTCManager {
                         };
                         if (!sample || (row.limit === 'cpu' && sample.limit !== 'cpu')) sample = row;
                     });
+                    let encodings: SendEncoding[] | undefined;
+                    try { encodings = sender.getParameters?.().encodings; } catch { /* peer closing */ }
+                    const reading = shareSendReading(stats, track.getSettings?.().frameRate, encodings);
+                    const was = frames as Pick<EncodeSample, 'setFps' | 'captureFps' | 'sent'> | null;
+                    if (reading.sent && (!was?.sent || (reading.sent.fps ?? 0) > (was.sent.fps ?? 0))) frames = reading;
+                    else if (!was) frames = reading;
                 } catch { /* peer closed mid-read */ }
             }
         }
-        return sample;
+        const found = sample as EncodeSample | null;
+        return found ? { ...found, ...(frames ?? {}) } : null;
     }
 
     /** Re-cap the live share (see MediaManager.applyShareQuality). The senders

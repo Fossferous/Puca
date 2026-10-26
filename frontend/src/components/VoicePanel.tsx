@@ -20,9 +20,10 @@ import { LiveShareQualityModal } from './LiveShareQualityModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
 import {
-    createShareLoadWatch, starvedOffer, rememberedQuality,
+    createShareLoadWatch, shareLoadOffer, shareLoadLogLine, rememberedQuality,
     shareDimensions, qualityLabel, SAMPLE_MS, type ShareQuality,
 } from '../api/rtc/shareHealth';
+import { logRtcEvent } from '../api/rtc/rtcEventLog';
 import { sampleShareEncode, applyShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
@@ -69,7 +70,7 @@ const NO_MIC_CHOSEN_TITLE = 'You joined without a microphone — nobody can hear
 const CONNECT_DENIED_NOTICE = "You don't have permission to join this voice channel.";
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
-import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
+import { holdStreamDiag, holdStreamDiagWhile, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
 import { SpeakGate, parseVoiceSpeakState } from '../api/rtc/speakGate';
 import { shouldTakeOver } from '../api/ownVoice';
@@ -848,8 +849,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // the app has only ever written it to a log file. On a machine encoding in
     // software — which, per every field log, is every machine — that answer is
     // the difference between "my game went choppy for no reason" and one click.
-    // See shareHealth.ts: once, then once more after each step actually
-    // taken, and never after a decline.
+    // And a share short of FRAMES with nothing limited (captured 30 of 60,
+    // sent 26) is asked about too, since 2026-10-26 (shareHealth.ts).
+    // Once, then once more after each step actually taken, and never after a
+    // decline.
     useEffect(() => {
         if (!isScreenSharing) { setLoadOffer(null); return; }
         const watch = createShareLoadWatch();
@@ -858,19 +861,35 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const timer = setInterval(() => {
             void sampleShareEncode().then(sample => {
                 if (stopped || !watch.add(sample)) return;
+                const why = watch.reason();
+                if (!why) return;
                 // Built from the size actually being captured: every quality
                 // here is a CEILING, so "Source" on a 1080p monitor is 1080p,
                 // and a step down chosen from the label alone would have
                 // offered a ceiling above it and changed nothing.
-                const offer = starvedOffer(rememberedQuality(loadSettings()), shareCaptureSize());
+                const offer = shareLoadOffer(why, rememberedQuality(loadSettings()), shareCaptureSize());
                 // Null = already at the smallest setting, so there is nothing
                 // to offer and saying so would be bad news with no action.
                 if (offer) setLoadOffer(offer);
-                console.warn(`[share] encoder CPU-limited (encoder=${watch.encoder() ?? 'unknown'})`);
+                // puca.log as well as the console: the report this answers
+                // had the numbers and no line saying the share ran short.
+                logRtcEvent(shareLoadLogLine(why, watch.encoder(), offer?.to ?? null), 'warn');
             });
         }, SAMPLE_MS);
         return () => { stopped = true; clearInterval(timer); shareWatchRef.current = null; };
     }, [isScreenSharing]);
+
+    // The 5 s sampler while WATCHING someone else's share as well as while
+    // sharing (streamDiag.ts): a viewer's freezes were only ever in the
+    // minute line. Desktop only, as the sampler is.
+    useEffect(() => {
+        if (!isInVoice) return;
+        return holdStreamDiagWhile(
+            'voice-watch',
+            () => [...globalSelectedStreams].some(id => id !== currentUserId),
+            subscribeToStreamState,
+        );
+    }, [isInVoice, currentUserId]);
 
     // Stream-audio capture health (events from appAudio.ts/ScreenShareModal):
     // a capture that dies mid-stream, or starts but never produces data

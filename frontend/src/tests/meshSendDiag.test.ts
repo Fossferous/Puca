@@ -123,6 +123,28 @@ describe('outgoing video rows on a mesh call', () => {
         expect(row.setFps, 'an ended track\'s settings are not a choice').toBeUndefined();
     });
 
+    it('give the share\'s frame watch the frames of the peer that was sent the most (shareHealth.ts)', async () => {
+        // Every peer's encoder is fed the same capture: one keeping up means
+        // the machine does, and the slow one is short of its own link.
+        const mgr = new WebRTCManager();
+        const share = track('screen', 'live', 60);
+        (mgr as unknown as { media: { screenShareStream: unknown } }).media.screenShareStream =
+            { getTracks: () => [share], getVideoTracks: () => [share] };
+        const sender = (fps: number) => ({
+            track: share,
+            getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }),
+            getStats: async () => new Map([
+                ['o', { id: 'o', type: 'outbound-rtp', kind: 'video', mediaSourceId: 'm', framesPerSecond: fps, framesEncoded: 900, bytesSent: 1e6, frameWidth: 1920, frameHeight: 1080, ssrc: fps, qualityLimitationReason: 'none' }],
+                ['m', { id: 'm', type: 'media-source', kind: 'video', trackIdentifier: 'screen', framesPerSecond: 31 }],
+            ]),
+        });
+        addPeer(mgr, 7, fakePc([], [sender(12)]));
+        addPeer(mgr, 8, fakePc([], [sender(29)]));
+        expect(await mgr.shareEncodeSample()).toMatchObject({
+            limit: 'none', setFps: 60, captureFps: 31, sent: { fps: 29, maxFps: 60, frames: 900, height: 1080, ssrc: 29 },
+        });
+    });
+
     it('carry source, chosen and captured rates, cap and sender id for a live sender', async () => {
         const mgr = new WebRTCManager();
         const sender = { track: track('mycam', 'live', 24), getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }) };

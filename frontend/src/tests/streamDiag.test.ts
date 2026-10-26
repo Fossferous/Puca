@@ -21,7 +21,7 @@ vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics: meshDiagMock
 vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics: voiceDiagMock } }));
 
 import {
-    holdStreamDiag, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
+    holdStreamDiag, holdStreamDiagWhile, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
     setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs, MAX_SAMPLE_WINDOW_MS,
 } from '../api/streamDiag';
 
@@ -195,6 +195,29 @@ describe('streamDiag: the viewer\'s side of a slow share', () => {
         } finally {
             setStreamDiagProbe(null);
         }
+    });
+
+    it('samples while a share is WATCHED too, and stops when it no longer is', () => {
+        // The viewers' reports of a stuttering share (2026-10-25) had nothing
+        // finer than the minute line: the sampler ran only while SHARING.
+        let watching = false;
+        const listeners = new Set<() => void>();
+        const notify = () => listeners.forEach(fn => fn());
+        const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+        const stop = holdStreamDiagWhile('voice-watch', () => watching, subscribe);
+        expect(streamDiagHolders(), 'not watching: not held').toEqual([]);
+        watching = true;
+        notify();
+        expect(streamDiagHolders()).toEqual(['voice-watch']);
+        expect(streamDiagIntervalMs()).toBe(5000);
+        watching = false;
+        notify();
+        expect(streamDiagHolders()).toEqual([]);
+        watching = true;
+        notify();
+        stop();
+        expect(streamDiagHolders(), 'the stop releases it').toEqual([]);
+        expect(listeners.size, 'and stops listening').toBe(0);
     });
 
     it('a live remote-control holder samples every second; a bare capture every five', () => {

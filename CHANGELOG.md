@@ -4,6 +4,17 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **A screen share that runs short of frames now says so, and offers the fix.** Púca offered to lower a running share only when the browser said the encoder was short of CPU. A share can stutter for everyone watching without that: set to 60 frames a second, it can get 30 from the screen and send fewer still, with nothing reported as limited, and nobody told the person sharing. Now, when for about half a minute a share keeps getting under about 70% of the frame rate you chose, or sends under about 70% of what it captures, the voice panel says what is happening in numbers ("getting only about 30 of the 60 frames a second you chose") and asks whether to **Lower it** to 30 fps, which sends about as many frames as the share was managing, more evenly and with less data for everyone watching; at 30 already, it offers a smaller picture. A screen where little changes (a document, someone typing, a still desktop) sends few frames by nature and is never counted. As before, it asks once, and once more only after you have taken a step; the step applies to the share already going out and is remembered for your next one. Comes with the web app update and the next desktop update.
+- **Watching a stream on a connection that keeps losing packets: Púca asks for a smaller copy.** In a channel that uses SFU mode, a share sent at several sizes gave a viewer a smaller copy only when their connection's bandwidth ran short, so a connection that had the bandwidth but kept losing packets (busy Wi-Fi, say) stayed on the full picture, and froze. Now, when a stream you watch keeps losing more than about 1% of its packets, or freezes twice in a minute with packets lost, your Púca asks for the next smaller size (the middle one, from a share at three sizes) and goes back to the full picture once it has gone about a minute without losing them. If it has to step down again soon after, it waits twice as long before trying again, up to eight minutes, so the picture does not keep switching. A freeze with nothing lost comes from the sharer's side, where a smaller copy would freeze too, so it changes nothing; nor does anything change for a share sent at one size. Comes with the in-app update on Android and the web app, and with the next desktop update.
+
+### Changed
+
+- **The desktop app's log says much more about a stream that stutters.** For each stream you watch, the minute line in `puca.log` now also has what came with a freeze — packet repair and keyframe requests, keyframes, the rate the stream arrives at and the network jitter — and, in SFU mode, which size your Púca asked for and whether that was a step down. The 5-second samples now run while you watch a stream, not only while you share one. And these are written as they happen: a stream from someone that will not decrypt (with the reason), the server pausing a stream for your connection, the call reconnecting and how long that took, the size a watched stream arrives at, the step to a smaller copy and back, and your own share running short of frames. Nothing personal is added: people are logged by their number, as before. With the next desktop update.
+
 ## 0.9.849 — 2026-10-24
 
 Notifications for the web app and iPhone; calls encrypted in Safari and Firefox; one-tap iPhone install

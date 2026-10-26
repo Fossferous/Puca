@@ -10,7 +10,10 @@
  * transports on a timer and writes each sample to the app's own log file via
  * a Tauri command, unattended, for the whole life of any WATCHED capture
  * (same lifecycle as streamBoost.ts's priority boost — voice screen share,
- * device-control host capture). Recoverable afterward from
+ * device-control host capture), and since 2026-10-26 while you WATCH someone
+ * else's share too ('voice-watch', holdStreamDiagWhile): two viewers' reports
+ * of a stuttering share had nothing finer than the minute health line.
+ * Recoverable afterward from
  * %LOCALAPPDATA%\com.sovereign.chat\logs\puca.log — no focus required
  * at the moment that matters.
  *
@@ -212,6 +215,28 @@ export function releaseStreamDiag(holder: string): void {
     if (holders.size > 0) { retime(); return; }
     if (timer) { clearInterval(timer); timer = null; timerMs = 0; }
     send('=== stream-diag session end ===');
+}
+
+/**
+ * Hold the sampler under `holder` for as long as `active()` says so, asked
+ * again on every `subscribe` notification (VoicePanel: while any share but
+ * your own is being watched). Returns the stop, which releases it.
+ */
+export function holdStreamDiagWhile(
+    holder: string,
+    active: () => boolean,
+    subscribe: (onChange: () => void) => () => void,
+): () => void {
+    const sync = () => {
+        if (active()) holdStreamDiag(holder);
+        else releaseStreamDiag(holder);
+    };
+    sync();
+    const off = subscribe(sync);
+    return () => {
+        off();
+        releaseStreamDiag(holder);
+    };
 }
 
 /** Test hook: the cadence the sampler is currently running at (0 = off). */
