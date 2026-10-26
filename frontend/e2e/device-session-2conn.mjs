@@ -94,7 +94,7 @@ async function api(path, opts, token) {
 }
 
 function openSocket(token) {
-    const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(WS_URL, ['bearer', token]);
     const received = [];
     ws.addEventListener('message', ev => {
         try { received.push(JSON.parse(ev.data)); } catch { /* ignore */ }

@@ -123,7 +123,7 @@ async function api(path, opts = {}, token) {
  * what actually ARRIVED rather than on the absence of an exception.
  */
 function openSocket(token) {
-    const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(WS_URL, ['bearer', token]);
     const received = [];
     let closed = false;
     ws.addEventListener('message', (ev) => {
