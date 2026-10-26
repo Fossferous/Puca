@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.850 — 2026-10-26
 
+Each stream keeps its own volume, in 1% steps and on touch screens; a share that keeps losing frames says so; a smaller copy on a lossy connection
 ### Changed
 
 - **Stream Volume moves 1% at a time, shows its level, and follows loudness.** In the menu you get by right-clicking a stream, **Stream Volume** used to jump 5% at a time and showed no number, and everything from silence to fairly quiet was squeezed into the bottom tenth of the slider. It now moves 1% at a time and shows the level beside it as you move it; with the slider selected, the arrow keys move it 1%, Page Up and Page Down 10%, and Home and End to either end. The slider now follows loudness, so quiet levels are as easy to set as loud ones. A level you had already set plays exactly as loud as before; only the number it shows changes (30% now shows as 55%). Comes with the in-app update on Android and the web app, and with the next desktop update.
