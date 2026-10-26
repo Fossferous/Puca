@@ -1,4 +1,5 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { onUserGesture } from '../utils/onUserGesture';
 import {
     subscribeToStreamState,
@@ -72,6 +73,66 @@ const MOBILE = isMobile();
 
 // FPS-mode mouse sensitivity + toggle persistence live in utils/fpsSens,
 // SHARED with DeviceStage so the two viewers cannot drift.
+
+/** A touch screen: the primary pointer is coarse (iPhone, iPad, Android), so
+ *  there is no right-click to open a stream's menu. An iPad with a trackpad
+ *  reads fine, and keeps the menu. Followed live (a tablet detached from its
+ *  keyboard). */
+const COARSE_POINTER = '(pointer: coarse)';
+function coarsePointerQuery(): MediaQueryList | null {
+    try {
+        return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+            ? window.matchMedia(COARSE_POINTER) : null;
+    } catch {
+        return null;
+    }
+}
+function subscribeCoarsePointer(onChange: () => void): () => void {
+    const q = coarsePointerQuery();
+    if (!q || typeof q.addEventListener !== 'function') return () => {};
+    q.addEventListener('change', onChange);
+    return () => q.removeEventListener('change', onChange);
+}
+function useCoarsePointer(): boolean {
+    return useSyncExternalStore(subscribeCoarsePointer, () => coarsePointerQuery()?.matches === true, () => false);
+}
+
+/** One stream's Stream Volume slider: the right-click menu's and the touch
+ *  volume panel's, the same control writing the same per-person level. */
+function StreamVolumeSlider({ level, max, disabled, onLevel }: {
+    level: number;
+    max: number;
+    disabled: boolean;
+    onLevel: (level: number) => void;
+}) {
+    return (
+        <div className="scm-slider-block">
+            <span className="scm-label-row">
+                <span className="scm-label">Stream Volume</span>
+                <span className="scm-value">{level}%</span>
+            </span>
+            <input
+                type="range"
+                min={0}
+                max={max}
+                step={STREAM_VOLUME_STEP}
+                value={level}
+                aria-label="Stream Volume"
+                aria-valuetext={`${level}%`}
+                disabled={disabled}
+                onKeyDown={(e) => {
+                    const next = streamVolumeKeyStep(e, level, max);
+                    if (next === null) return;
+                    // Not the browser's step: its Page Up / Page Down is a
+                    // tenth of the range.
+                    e.preventDefault();
+                    if (next !== level) onLevel(next);
+                }}
+                onChange={(e) => onLevel(Number(e.target.value))}
+            />
+        </div>
+    );
+}
 
 /** The same remembered levels: the stage re-renders only when one changed. */
 function sameLevels(a: Record<number, number>, b: Record<number, number>): boolean {
@@ -167,6 +228,17 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     );
     const [attenuation, setAttenuationState] = useState<AttenuationSettings>(() => getAttenuation());
     const [ctxMenu, setCtxMenu] = useState<StreamContextMenu | null>(null);
+    // Touch screens have no right-click to reach that menu: each tile's
+    // speaker button opens THIS panel instead, the stream's own Stream Volume
+    // and Mute (the owner, 2026-10-26: "Add a volume button"). A fine pointer
+    // keeps its menu; the keyboard reaches the panel from the tile too.
+    const coarse = useCoarsePointer();
+    const [volPanel, setVolPanel] = useState<{ userId: number; anchor: { top: number; bottom: number; right: number } } | null>(null);
+    const volPanelRef = useRef<HTMLDivElement>(null);
+    const volOpenerRef = useRef<HTMLButtonElement | null>(null);
+    // Open only while its stream is watched: one that stops goes with it.
+    const openVol = volPanel && selectedStreams.includes(volPanel.userId) ? volPanel : null;
+    const volOpen = openVol !== null;
     // Streams showing the stats overlay (right-click → Show Stream Stats).
     const [statsFor, setStatsFor] = useState<Set<number>>(() => new Set());
     const toggleStats = (userId: number) => setStatsFor(prev => {
@@ -241,8 +313,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // too, because they run before the new volume/mute reaches state (so
     // targetGain would read the old one). Each used to re-derive it without
     // the master, aiming the gain at the un-mastered level until the next
-    // applyGain overwrote it. StreamAudioHost applies the same curve and the
-    // same ducking (streamAudioRouting.ts, streamAudioHostCore.ts).
+    // applyGain overwrote it. StreamAudioHost applies the same curve
+    // (streamAudioRouting.ts, streamAudioHostCore.ts); the ducking is this
+    // view's alone.
     const gainFor = useCallback((level: number, muted: boolean): number => {
         if (muted) return 0;
         const duck = duckedRef.current && attenuation.enabled ? (1 - attenuation.strength) : 1;
@@ -316,7 +389,8 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                 // does; without this it always played on the OS default.
                 sinkRoutedRef.current = applyOutputDeviceToContext(ctx);
             }
-            if (ctx.state === 'suspended') ctx.resume().catch(() => { /* resumes on the next gesture (below) */ });
+            // 'suspended' (autoplay policy) or Safari's 'interrupted' (a call).
+            if (ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => { /* resumes on the next gesture (below) */ });
 
             const existing = graphsRef.current.get(userId);
             if (existing?.trackId === track.id) {
@@ -479,6 +553,47 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         };
     }, [applyAllGains]);
 
+    // The volume panel: Escape closes it and gives the keyboard back to its
+    // button (and goes no further: in the in-app fullscreen, Escape would
+    // also leave that); turning the phone or resizing the window closes it,
+    // rather than leave it floating where its button was.
+    useEffect(() => {
+        if (!volOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            e.stopPropagation();
+            setVolPanel(null);
+            volOpenerRef.current?.focus({ preventScroll: true });
+        };
+        const onResize = () => setVolPanel(null);
+        document.addEventListener('keydown', onKey);
+        window.addEventListener('resize', onResize);
+        return () => {
+            document.removeEventListener('keydown', onKey);
+            window.removeEventListener('resize', onResize);
+        };
+    }, [volOpen]);
+
+    // Place it under its button, inside the window (above the button when
+    // there is no room below), before it is painted; then the slider takes
+    // the keyboard, so arrows move it at once.
+    useLayoutEffect(() => {
+        const el = volPanelRef.current;
+        if (!el || !openVol) return;
+        const EDGE = 8;
+        const w = el.offsetWidth;
+        const h = el.offsetHeight;
+        let left = openVol.anchor.right - w;
+        let top = openVol.anchor.bottom + 6;
+        if (top + h > window.innerHeight - EDGE) top = openVol.anchor.top - h - 6;
+        left = Math.max(EDGE, Math.min(left, window.innerWidth - w - EDGE));
+        top = Math.max(EDGE, Math.min(top, window.innerHeight - h - EDGE));
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+        el.dataset.placed = '';
+        el.querySelector<HTMLInputElement>('input[type="range"]')?.focus({ preventScroll: true });
+    }, [openVol]);
+
     // Close the context menu on outside click / Escape.
     useEffect(() => {
         if (!ctxMenu) return;
@@ -538,11 +653,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     }, [selectedStreams, streamers, ensureStreamAudio]);
 
     // The stage's graph context is born suspended when no click led here (a
-    // stream-only account's share, auto-watched): resume it at the first
-    // gesture, so its sound starts then rather than never.
+    // stream-only account's share, auto-watched), and on an iPhone a phone
+    // call leaves it 'interrupted': resume it at the next gesture, so its
+    // sound starts (again) then rather than never.
     useEffect(() => onUserGesture(() => {
         const ctx = audioCtxRef.current;
-        if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => { /* still not allowed */ });
+        if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => { /* still not allowed */ });
     }), []);
 
     // SAFETY NET (0.6.7). Layout is now expressed purely as CSS classes over a
@@ -657,6 +773,28 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     };
     const toggleMute = (userId: number) => setMute(userId);
 
+    // The slider's range and shown position, the same in the menu and the
+    // panel. The shown % is the slider's position (whole steps of 1%; a level
+    // converted to the loudness curve keeps its exact gain until moved). The
+    // element fallback cannot boost, so it shows (and goes) no higher than 100%.
+    const volumeMax = () => (audioFallback ? 100 : MAX_STREAM_VOLUME);
+    const shownLevel = (userId: number) =>
+        Math.round(Math.min(volumes[userId] ?? DEFAULT_STREAM_VOLUME, volumeMax()));
+
+    /** The tile's speaker button: open THAT stream's volume panel, or close
+     *  it if it is the one open. Never anything else on the tile: no focus
+     *  change, no fullscreen, no play or pause (the click stops here). */
+    const toggleVolPanel = (userId: number, opener: HTMLButtonElement) => {
+        if (openVol?.userId === userId) {
+            setVolPanel(null);
+            return;
+        }
+        setCtxMenu(null);
+        volOpenerRef.current = opener;
+        const r = opener.getBoundingClientRect();
+        setVolPanel({ userId, anchor: { top: r.top, bottom: r.bottom, right: r.right } });
+    };
+
     const updateAttenuation = (next: AttenuationSettings) => {
         setAttenuationState(next);
         setAttenuation(next);
@@ -704,7 +842,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     const onStageTap = (e: ReactMouseEvent) => {
         if (!takeover || controllingNow) return;
         const t = e.target as HTMLElement;
-        if (t.closest('button, a, input, select, textarea, .stream-context-menu, .control-capture, .quality-menu, .stream-stats-overlay, .is-thumb, .camera-rail')) return;
+        if (t.closest('button, a, input, select, textarea, .stream-context-menu, .stream-volume-panel, .stream-volume-backdrop, .control-capture, .quality-menu, .stream-stats-overlay, .is-thumb, .camera-rail')) return;
         setChromeHidden(h => !h);
     };
 
@@ -730,11 +868,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // turned sideways never shows a frame of the squashed chat layout.
     useLayoutEffect(() => publishTakeover(takeover, chromeOff, controllingNow), [takeover, chromeOff, controllingNow]);
 
-    // The controls hide themselves after a while — never while a menu is open,
-    // a control session needs its Stop button in reach, or the keyboard is on
-    // one of them (a hidden control would drop that focus to the page).
+    // The controls hide themselves after a while — never while a menu or the
+    // volume panel is open, a control session needs its Stop button in reach,
+    // or the keyboard is on one of them (a hidden control would drop that
+    // focus to the page).
     useEffect(() => {
-        if (!takeover || chromeHidden || ctxMenu || controllingNow) return;
+        if (!takeover || chromeHidden || ctxMenu || volOpen || controllingNow) return;
         const t = setTimeout(() => {
             const a = document.activeElement;
             let keyboardOnControl = false;
@@ -743,7 +882,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             else setChromeHidden(true);
         }, CHROME_HIDE_MS);
         return () => clearTimeout(t);
-    }, [takeover, chromeHidden, ctxMenu, controllingNow, chromeKick]);
+    }, [takeover, chromeHidden, ctxMenu, volOpen, controllingNow, chromeKick]);
 
     // Interaction anywhere in the takeover's controls keeps them up: a touch
     // (the voice bar is portaled outside the stage, so the document listens),
@@ -977,6 +1116,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                             onClick={() => focusMode && setFocusedStream(userId)}
                             onContextMenu={(e) => {
                                 e.preventDefault();
+                                setVolPanel(null);
                                 setCtxMenu({ x: e.clientX, y: e.clientY, userId, isOwn: isOwnStream });
                             }}
                         >
@@ -986,15 +1126,43 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     <span className="live-dot" /> {data.username}{isOwnStream ? ' (you)' : ''}
                                 </span>
                                 <div className="stream-tile-controls">
-                                    {!isOwnStream && (
+                                    {/* Touch: the speaker opens THIS stream's volume panel
+                                        (level and Mute; no right-click there to reach the
+                                        menu). A mouse keeps the one-click mute, and the
+                                        keyboard gets the panel's opener beside it, out of
+                                        sight until it has focus. */}
+                                    {!isOwnStream && (coarse ? (
                                         <button
-                                            className={`tile-btn ${isMuted ? 'active' : ''}`}
-                                            onClick={(e) => { e.stopPropagation(); toggleMute(userId); }}
-                                            title={isMuted ? 'Unmute stream' : 'Mute stream'}
+                                            className={`tile-btn tile-vol ${isMuted ? 'active' : ''}`}
+                                            onClick={(e) => { e.stopPropagation(); toggleVolPanel(userId, e.currentTarget); }}
+                                            title="Stream volume"
+                                            aria-label={`${data.username}: stream volume`}
+                                            aria-haspopup="dialog"
+                                            aria-expanded={openVol?.userId === userId}
                                         >
                                             {isMuted ? <SpeakerOffIcon /> : volume > 100 ? <MegaphoneIcon /> : <SpeakerIcon />}
                                         </button>
-                                    )}
+                                    ) : (
+                                        <>
+                                            <button
+                                                className={`tile-btn ${isMuted ? 'active' : ''}`}
+                                                onClick={(e) => { e.stopPropagation(); toggleMute(userId); }}
+                                                title={isMuted ? 'Unmute stream' : 'Mute stream'}
+                                            >
+                                                {isMuted ? <SpeakerOffIcon /> : volume > 100 ? <MegaphoneIcon /> : <SpeakerIcon />}
+                                            </button>
+                                            <button
+                                                className="tile-btn tile-vol tile-vol-kbd"
+                                                onClick={(e) => { e.stopPropagation(); toggleVolPanel(userId, e.currentTarget); }}
+                                                title="Stream volume"
+                                                aria-label={`${data.username}: stream volume`}
+                                                aria-haspopup="dialog"
+                                                aria-expanded={openVol?.userId === userId}
+                                            >
+                                                <SlidersIcon />
+                                            </button>
+                                        </>
+                                    ))}
                                     {/* Remote control of a viewed screen. RC_ENABLED, not just
                                         isTauri(): a lite build has no control transport at all, so
                                         rendering these would offer a button that silently does
@@ -1481,41 +1649,16 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                             {(() => {
                                 // THIS person's level, remembered per user id
                                 // (streamVolumeStore): every watched stream has
-                                // its own menu, slider and gain. The shown % is
-                                // the slider's position (whole steps of 1%; a
-                                // level converted to the loudness curve keeps
-                                // its exact gain until moved). The element
-                                // fallback cannot boost, so it shows (and goes)
-                                // no higher than 100%.
+                                // its own menu, slider and gain.
                                 const userId = ctxMenu.userId;
-                                const max = audioFallback ? 100 : MAX_STREAM_VOLUME;
-                                const level = Math.round(Math.min(volumes[userId] ?? DEFAULT_STREAM_VOLUME, max));
+                                const max = volumeMax();
                                 return (
-                                    <div className="scm-slider-block">
-                                        <span className="scm-label-row">
-                                            <span className="scm-label">Stream Volume</span>
-                                            <span className="scm-value">{level}%</span>
-                                        </span>
-                                        <input
-                                            type="range"
-                                            min={0}
-                                            max={max}
-                                            step={STREAM_VOLUME_STEP}
-                                            value={level}
-                                            aria-label="Stream Volume"
-                                            aria-valuetext={`${level}%`}
-                                            disabled={mutedStreams.has(userId)}
-                                            onKeyDown={(e) => {
-                                                const next = streamVolumeKeyStep(e, level, max);
-                                                if (next === null) return;
-                                                // Not the browser's step: its Page Up /
-                                                // Page Down is a tenth of the range.
-                                                e.preventDefault();
-                                                if (next !== level) handleVolumeChange(userId, next);
-                                            }}
-                                            onChange={(e) => handleVolumeChange(userId, Number(e.target.value))}
-                                        />
-                                    </div>
+                                    <StreamVolumeSlider
+                                        level={shownLevel(userId)}
+                                        max={max}
+                                        disabled={mutedStreams.has(userId)}
+                                        onLevel={(v) => handleVolumeChange(userId, v)}
+                                    />
                                 );
                             })()}
 
@@ -1560,6 +1703,58 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                     </button>
                 </div>
             )}
+
+            {/* The touch volume panel: one stream's own Stream Volume and Mute,
+                the same per-person level as the menu's. The backdrop takes the
+                tap that closes it, so that tap reaches nothing else (no tile
+                focus, no fullscreen, no chrome toggle); nothing here plays,
+                pauses or seeks a stream. */}
+            {openVol && (() => {
+                const userId = openVol.userId;
+                const muted = mutedStreams.has(userId);
+                const name = getStreamData(userId)?.username ?? 'Stream';
+                // To <body>: inside the stage it would sit under the takeover's
+                // floating voice bar (a stacking context of its own), and the
+                // backdrop would not cover it. React events still bubble to the
+                // stage, so every handler here stops them.
+                return createPortal(
+                    <>
+                        {/* Closed on the CLICK, so the whole tap ends here: closed on
+                            pointerdown, the backdrop would be gone before the tap's
+                            click, and that click would land on the tile or picture
+                            under it (a tile focused, the takeover's controls hidden). */}
+                        <div
+                            className="stream-volume-backdrop"
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); setVolPanel(null); }}
+                        />
+                        <div
+                            ref={volPanelRef}
+                            className="stream-volume-panel"
+                            role="dialog"
+                            aria-label={`${name}: stream volume`}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <span className="svp-name">{name}</span>
+                            <StreamVolumeSlider
+                                level={shownLevel(userId)}
+                                max={volumeMax()}
+                                disabled={muted}
+                                onLevel={(v) => handleVolumeChange(userId, v)}
+                            />
+                            <button
+                                className={`svp-mute ${muted ? 'active' : ''}`}
+                                aria-pressed={muted}
+                                onClick={() => setMute(userId)}
+                            >
+                                {muted ? <SpeakerOffIcon /> : <SpeakerIcon />}
+                                {muted ? 'Unmute' : 'Mute'}
+                            </button>
+                        </div>
+                    </>,
+                    document.body,
+                );
+            })()}
 
             {/* The focus-mode sidebar that used to live here is gone. It was a
                 TEXT list duplicating what the filmstrip now shows as live video,

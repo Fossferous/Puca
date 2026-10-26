@@ -463,6 +463,135 @@
     background: rgba(237, 66, 69, 0.6);
 }
 
+.tile-btn:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 1px;
+}
+
+/* The keyboard can reach a tile's controls: they show while one has focus,
+   as they do on hover. */
+.stream-tile:focus-within .stream-tile-header {
+    opacity: 1;
+}
+
+/* Touch: the speaker that opens the stream's own volume panel. A 44 px
+   target whatever size the other tile buttons are. */
+.tile-btn.tile-vol {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 auto;
+}
+
+/* A fine pointer keeps its menu (and the one-click mute): the panel's opener
+   is there for the keyboard only, out of sight until it has focus. */
+.tile-btn.tile-vol.tile-vol-kbd {
+    width: 28px;
+    height: 28px;
+}
+.tile-btn.tile-vol-kbd:not(:focus-visible) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* A narrow tile on a touch screen: the buttons wrap onto another row inside
+   it rather than run off its edge, and a long name gives way. */
+@media (pointer: coarse) {
+    .stream-tile-controls {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .streamer-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+}
+
+/* The touch volume panel (and the backdrop that takes the tap closing it).
+   Portaled to <body>, so it sits above the takeover's floating voice bar. It
+   is never hidden while it waits to be placed: a layout effect places it
+   before the first paint, and a hidden one could not take the keyboard. */
+.stream-volume-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: transparent;
+}
+
+.stream-volume-panel {
+    position: fixed;
+    z-index: 1001;
+    width: 260px;
+    max-width: calc(100vw - 16px);
+    box-sizing: border-box;
+    background: #111214;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: #dbdee1;
+}
+
+.svp-name {
+    padding: 0 10px;
+    font-size: 0.75rem;
+    color: #b5bac1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The whole row is the slider's touch target. */
+.stream-volume-panel .scm-slider-block input[type="range"] {
+    height: 44px;
+}
+
+.svp-mute {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border: none;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #dbdee1;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.svp-mute.active {
+    background: rgba(88, 101, 242, 0.6);
+    color: #fff;
+}
+
+.svp-mute:focus-visible,
+.stream-volume-panel input[type="range"]:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
+}
+
+[data-contrast="high"] .stream-volume-panel {
+    border-color: #fff;
+}
+
+[data-contrast="high"] .svp-mute,
+[data-contrast="high"] .tile-btn.tile-vol {
+    outline: 1px solid #fff;
+    outline-offset: -1px;
+}
+
 .stream-video {
     width: 100%;
     height: 100%;

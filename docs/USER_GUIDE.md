@@ -533,12 +533,14 @@ button. Several streams can be watched at once; **Switch to Grid View** /
 Opening a text channel or a DM while you watch keeps the stream in a small
 player over the chat (docked under the header on a phone). Every stream you
 watch stays audible wherever you are in the app, each at its own volume and
-mute, a boost above 100% and **Stream Attenuation** included, on an iPhone or
-iPad too. (In a browser that cannot run Web Audio, the small player plays a
-stream at most at 100% and does not lower it while people talk.) While a
-stream is popped out (**Pop out**, below), the small player
-shows the next stream you are watching instead of a second copy, and hides
-when every stream you watch is popped out.
+mute, a boost above 100% included, on an iPhone or iPad too; on Android it may
+keep sounding while the app is in the background, as a call's voices do.
+**Stream Attenuation** lowers streams in the stream view only. (In a browser
+that cannot run Web Audio, and in Firefox and Safari while an **Output
+Device** other than the default is chosen, the small player plays a stream at
+100% at most.) While a stream is popped out (**Pop out**, below), the
+small player shows the next stream you are watching instead of a second copy,
+and hides when every stream you watch is popped out.
 
 If a stream keeps freezing for you while it plays fine for others, your
 connection is slower than what the stream sends (see
@@ -555,7 +557,8 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | Control | Action |
 |---------|--------|
 | **Mute stream** / **Unmute stream** | Silence that stream's audio (the menu row is **Mute**) |
-| **Stream Volume** | Menu only. That stream's own volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. The slider follows loudness, so quiet levels are as easy to set as loud ones; above 100% boosts it. Each stream you watch has its own, and moving one never moves another. Kept on this device for the person sharing and used every time you watch them, in the stream view and the small player. Someone you have never set starts at the last level you set on anyone (100% before you have set any) and keeps that as their own |
+| **Stream volume** (touch screens) | The speaker button on each stream, on a phone or tablet (where the right-click menu cannot open): opens that stream's own **Stream Volume** and **Mute**, and takes the place of **Mute stream** there. From the keyboard, Tab to a stream's buttons and press Enter on it |
+| **Stream Volume** | In the menu, or behind the speaker button on a touch screen. That stream's own volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. The slider follows loudness, so quiet levels are as easy to set as loud ones; above 100% boosts it. Each stream you watch has its own, and moving one never moves another. Kept on this device for the person sharing and used every time you watch them, in the stream view and the small player. Someone you have never set starts at the last level you set on anyone (100% before you have set any) and keeps that as their own |
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |

@@ -10,10 +10,11 @@
  * its OWN GainNode — never shared, so one stream's level never moves another
  * — on one context routed to Settings > Output Device. Its gain is the
  * stream's level on the loudness curve times Output Volume, NOT capped, so a
- * boost above 100% plays here as it does on the stage; on an iPhone or iPad,
- * where a page cannot set an element's volume, the level and Output Volume
- * apply at last; and Stream Attenuation ducks it while anyone in the call
- * talks, as it does on the stage.
+ * boost above 100% plays here as it does on the stage; and on an iPhone or
+ * iPad, where a page cannot set an element's volume, the level and Output
+ * Volume apply at last. Stream Attenuation does NOT duck it: that stays the
+ * big stream view's, as it always was (the owner, 2026-10-26: "Big view
+ * only, as before").
  *
  * The <audio> stays bound, playing and MUTED: Chromium (the desktop app's
  * engine) feeds remote WebRTC audio into Web Audio only while a media element
@@ -25,24 +26,20 @@
  * Firefox needs none.
  *
  * Where Web Audio cannot play — no AudioContext, one that throws, one that is
- * not running (an autoplay policy before the first tap, a phone call
- * interrupting it on an iPhone), one whose switch to the chosen output device
- * has not landed — a stream plays through its <audio> exactly as before this
- * graph existed: unmuted once THAT element's routing has landed, at
- * min(gain, 1), no ducking. Every pass resumes a suspended context (a tap is
- * a pass: StreamAudioHost runs one on each gesture), and the streams move onto
- * the graph as soon as it runs.
+ * not running (an autoplay policy before the first tap; 'interrupted' on an
+ * iPhone after a phone call), one whose switch to the chosen output device
+ * has not landed, one that cannot follow the chosen device at all (Firefox and
+ * Safari have no AudioContext.setSinkId: a graph there would play on the OS
+ * default while the routed <audio> sat muted) — a stream plays through its
+ * <audio> exactly as before this graph existed: unmuted once THAT element's
+ * routing has landed, at min(gain, 1), no ducking. Every pass resumes a
+ * context that is not running (a tap is a pass: StreamAudioHost runs one on
+ * each gesture), and the streams move onto the graph as soon as it runs.
  *
  * The stage's claim (streamAudioRouting.ts) arrives as a pass whose plan is
  * inaudible: every gain goes to 0 and every element is muted, in that task.
  */
 import type { StreamAudioEntry } from './streamAudioRouting';
-
-export interface HostAttenuation {
-    enabled: boolean;
-    /** 0 = no reduction, 1 = silent while anyone talks. */
-    strength: number;
-}
 
 export interface HostDeps {
     /** One entry per watched stream that may sound here (never your own). */
@@ -54,10 +51,11 @@ export interface HostDeps {
     /** Route an element, or the context, to the chosen Output Device. */
     routeElement: (el: HTMLAudioElement) => Promise<void>;
     routeContext: (ctx: AudioContext) => Promise<void>;
+    /** Can `ctx` play on the chosen Output Device (settingsStore's
+     *  contextFollowsOutputDevice)? Read once per pass. */
+    followsOutputDevice: (ctx: AudioContext) => boolean;
     /** A new AudioContext; may throw where Web Audio is missing. */
     createContext: () => AudioContext;
-    /** Stream Attenuation, read on every pass. */
-    attenuation: () => HostAttenuation;
 }
 
 /** Which path carries a stream's sound right now. */
@@ -113,18 +111,16 @@ export function createHostController(deps: HostDeps) {
     let ctx: AudioContext | null = null;
     let ctxRouted = false;
     let webAudioBroken = false;
+    // The context can play on the chosen device (read once per pass).
+    let followsDevice = true;
     const graphs = new Map<number, Graph>();
     const paths = new Map<number, StreamAudioPath>();
-    let entries = new Map<number, StreamAudioEntry>();
-    let speaking = false;
-    let attenuation: HostAttenuation = { enabled: false, strength: 0 };
 
     const elements = () => [
         ...(container?.querySelectorAll<HTMLAudioElement>('audio[data-stream-audio]') ?? []),
     ];
 
-    const duck = () => (speaking && attenuation.enabled ? 1 - attenuation.strength : 1);
-    const live = () => !webAudioBroken && ctx !== null && ctxRouted && ctx.state === 'running';
+    const live = () => !webAudioBroken && ctx !== null && ctxRouted && followsDevice && ctx.state === 'running';
 
     function disconnect(g: Graph) {
         for (const s of g.sources) {
@@ -147,7 +143,11 @@ export function createHostController(deps: HostDeps) {
 
     function ensureContext() {
         if (webAudioBroken) return;
-        if (!ctx || ctx.state === 'closed') {
+        // Closed from outside (the platform, a crash of the audio service):
+        // its nodes are dead, and a graph kept from it would be a silent
+        // stream. Drop them all before making the next.
+        if (ctx && ctx.state === 'closed') closeContext();
+        if (!ctx) {
             let made: AudioContext;
             try {
                 made = deps.createContext();
@@ -166,25 +166,21 @@ export function createHostController(deps: HostDeps) {
                 reconcile();
             }));
         }
-        if (ctx.state === 'suspended') {
-            // Allowed inside a gesture, refused (and harmless) outside one.
+        // 'suspended' (an autoplay policy) and Safari's 'interrupted' (a phone
+        // call) both resume; allowed inside a gesture, refused (and harmless)
+        // outside one.
+        if (ctx.state !== 'running' && ctx.state !== 'closed') {
             try { quiet(ctx.resume?.()); } catch { /* the next gesture */ }
         }
     }
 
-    /** Aim a graph's gain: silence (and sound back from silence) at once,
-     *  like an element's mute; a change while sounding, smoothly when asked
-     *  (ducking: quick to dip, gentle to come back, as on the stage). */
-    function aim(g: Graph, target: number, smooth: boolean) {
+    /** Aim a graph's gain, at once, like an element's volume and mute: a
+     *  claim must silence it in its own task, never overlap the stage. */
+    function aim(g: Graph, target: number) {
         if (target === g.target) return;
         const p = g.gain.gain;
-        const now = ctx?.currentTime ?? 0;
-        if (smooth && target > 0 && g.target > 0) {
-            p.setTargetAtTime(target, now, target < g.target ? 0.06 : 0.2);
-        } else {
-            p.cancelScheduledValues?.(now);
-            p.value = target;
-        }
+        p.cancelScheduledValues?.(ctx?.currentTime ?? 0);
+        p.value = target;
         g.target = target;
     }
 
@@ -235,16 +231,16 @@ export function createHostController(deps: HostDeps) {
             }
         }
         if (g.failed) {
-            aim(g, 0, false);
+            aim(g, 0);
             return false;
         }
-        aim(g, target, false);
+        aim(g, target);
         return true;
     }
 
     const reconcile = () => {
         const list = deps.plan();
-        entries = new Map(list.map(e => [e.userId, e]));
+        const entries = new Map(list.map(e => [e.userId, e]));
         const els = elements();
         if (list.length === 0 && els.length === 0) {
             // Nothing watched: let the audio device go. A context that could
@@ -256,7 +252,7 @@ export function createHostController(deps: HostDeps) {
             return;
         }
         if (list.length > 0) ensureContext();
-        attenuation = deps.attenuation();
+        followsDevice = ctx ? deps.followsOutputDevice(ctx) : true;
         const seen = new Set<number>();
         for (const el of els) {
             const userId = Number(el.dataset.streamAudio);
@@ -265,11 +261,11 @@ export function createHostController(deps: HostDeps) {
             const source = deps.sourceOf(userId);
             const rebound = syncTracks(el, source);
             const tracks = source?.getAudioTracks?.() ?? [];
-            const target = entry && entry.audible ? entry.gain * duck() : 0;
+            const target = entry && entry.audible ? entry.gain : 0;
             const viaGraph = !!entry && live() && carry(userId, tracks, target);
             if (!viaGraph) {
                 const g = graphs.get(userId);
-                if (g) aim(g, 0, false);
+                if (g) aim(g, 0);
             }
             paths.set(userId, viaGraph ? 'graph' : 'element');
             if (viaGraph) {
@@ -338,17 +334,6 @@ export function createHostController(deps: HostDeps) {
         rerouteAll: () => {
             for (const el of elements()) route(el);
             if (ctx && ctx.state !== 'closed') quiet(deps.routeContext(ctx));
-        },
-        /** Anyone in the call talking (Stream Attenuation's trigger). */
-        setSpeaking: (on: boolean) => {
-            if (on === speaking) return;
-            speaking = on;
-            if (!live()) return;
-            for (const [id, g] of graphs) {
-                if (paths.get(id) !== 'graph' || g.failed) continue;
-                const e = entries.get(id);
-                aim(g, e && e.audible ? e.gain * duck() : 0, true);
-            }
         },
         /** Which path carries `userId`'s sound (diagnostics and tests). */
         path: (userId: number): StreamAudioPath | null => paths.get(userId) ?? null,

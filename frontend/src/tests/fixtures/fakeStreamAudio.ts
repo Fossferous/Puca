@@ -15,13 +15,15 @@
  */
 import { FakeSink } from './fakeSink';
 
-/** An AudioParam that remembers every value it was sent, in order. */
+/** An AudioParam that remembers every value it was sent, in order, and
+ *  how: set at once (`value`) or ramped toward (setTargetAtTime). */
 export class RecordingParam {
     sent: number[] = [];
+    events: Array<{ how: 'set' | 'ramp'; to: number }> = [];
     private v = 1;
     get value() { return this.v; }
-    set value(x: number) { this.v = x; this.sent.push(x); }
-    setTargetAtTime(target: number) { this.sent.push(target); }
+    set value(x: number) { this.v = x; this.sent.push(x); this.events.push({ how: 'set', to: x }); }
+    setTargetAtTime(target: number) { this.sent.push(target); this.events.push({ how: 'ramp', to: target }); }
     cancelScheduledValues() { /* nothing scheduled to cancel in a recording */ }
     /** Where it ends up: events in one task share a currentTime, where the
      *  last one inserted wins. */
@@ -56,6 +58,9 @@ const registry = {
     unavailable: false,
     /** Make createMediaStreamSource throw. */
     sourcesFail: false,
+    /** False: contexts have NO setSinkId, as in Firefox and Safari (an
+     *  <audio> can be routed there, a context cannot). */
+    contextSinkId: true,
 };
 
 export function resetFakeStreamAudio(opts: { devices?: string[] } = {}) {
@@ -65,6 +70,7 @@ export function resetFakeStreamAudio(opts: { devices?: string[] } = {}) {
     registry.bornIn = 'running';
     registry.unavailable = false;
     registry.sourcesFail = false;
+    registry.contextSinkId = true;
 }
 
 export const fakeAudio = {
@@ -73,6 +79,7 @@ export const fakeAudio = {
     set bornIn(s: AudioContextState) { registry.bornIn = s; },
     set unavailable(v: boolean) { registry.unavailable = v; },
     set sourcesFail(v: boolean) { registry.sourcesFail = v; },
+    set contextSinkId(v: boolean) { registry.contextSinkId = v; },
     /** The contexts one component built, oldest first. */
     of(owner: ContextOwner) { return registry.contexts.filter(c => c.owner === owner); },
     /** The live (not closed) context of one component. */
@@ -97,6 +104,8 @@ export class FakeStreamAudioContext extends FakeSink {
     constructor() {
         super(registry.devices);
         if (registry.unavailable) throw new Error('no Web Audio in this engine');
+        // Firefox and Safari: the context has no setSinkId at all.
+        if (!registry.contextSinkId) Object.defineProperty(this, 'setSinkId', { value: undefined, configurable: true });
         this.owner = ownerOf(new Error().stack ?? '');
         this.state = registry.bornIn;
         registry.contexts.push(this);

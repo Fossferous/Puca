@@ -1025,6 +1025,21 @@ export function applyOutputDeviceToContext(ctx: AudioContext): Promise<void> {
 }
 
 /**
+ * Can `ctx` play on the Output Device chosen in Settings? Always on the
+ * default; on any other, only where an AudioContext has setSinkId (Chromium
+ * 110+: the desktop app, Android, Chrome, Edge). Firefox (116+) and Safari
+ * (18.4+) route an <audio> element but not a context, so there
+ * applyOutputDeviceToContext resolves at once and a graph plays on the OS
+ * default whatever was chosen. StreamAudioHost keeps such streams on their
+ * routed elements instead.
+ */
+export function contextFollowsOutputDevice(ctx: AudioContext): boolean {
+    const chosen = loadSettings().outputDeviceId;
+    if (!chosen || chosen === 'default') return true;
+    return typeof (ctx as AudioContext & SinkTarget).setSinkId === 'function';
+}
+
+/**
  * Keep one media element on the chosen output device until the returned stop
  * is called: routed now, and again whenever Settings change or a device comes
  * or goes (the chosen one can vanish and return — a Bluetooth headset out of

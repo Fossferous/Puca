@@ -12,9 +12,10 @@
  * 2026-10-26: what sounds is a Web Audio gain PER STREAM (the owner: "make
  * sure if watching multiple streams you can still adjust each volume
  * separate of each other"), so a boost above 100% and an iPhone's volume work
- * here as on the stage, and Stream Attenuation ducks it; each <audio> is the
- * muted sink Chromium needs. Where Web Audio cannot play, the <audio> plays
- * it exactly as before (the element fallback, below).
+ * here as on the stage; each <audio> is the muted sink Chromium needs. Stream
+ * Attenuation stays the stage's ("Big view only, as before"). Where Web Audio
+ * cannot play, or cannot reach the chosen Output Device (Firefox, Safari), the
+ * <audio> plays it exactly as before (the element fallback, below).
  *
  * Asserted as ROUTING and VALUES (which element is bound to which track, its
  * muted flag, its volume, its sink; which gain node carries which track, what
@@ -306,14 +307,6 @@ describe('cost on the Chat render path', () => {
         expect(graphLevel(1)).toBe(1);
     });
 
-    it('a speaking flip reads no storage (Stream Attenuation re-aims from what the last pass read)', async () => {
-        await renderHost();
-        const reads = vi.spyOn(localStorage, 'getItem');
-        reads.mockClear();
-        act(() => { speak(true); speak(false); speak(true); });
-        expect(reads.mock.calls.length).toBe(0);
-        reads.mockRestore();
-    });
 });
 
 describe('per-stream level and mute, and the master Output Volume', () => {
@@ -364,27 +357,91 @@ describe('per-stream level and mute, and the master Output Volume', () => {
     });
 });
 
-describe('Stream Attenuation, here as on the stage', () => {
-    it('ducks every stream by its strength while anyone talks, and comes back after', async () => {
+describe('Stream Attenuation is the big stream view’s alone (the owner: "Big view only, as before")', () => {
+    it('the small player stays at its level while someone talks: talking sends its gains nothing', async () => {
         setAttenuation({ enabled: true, strength: 0.5 });
         setStreamVolume(1, 100); // its own, or it would be seeded with the last level (150)
         setStreamVolume(2, 150);
         await renderHost();
+        const g1 = fakeAudio.hostGainFor('a-1')!;
+        const g2 = fakeAudio.hostGainFor('a-2')!;
+        const sent = [g1.gain.sent.length, g2.gain.sent.length];
         act(() => { speak(true); });
-        expect(graphLevel(1)).toBeCloseTo(0.5, 9);
-        expect(graphLevel(2)).toBeCloseTo(loud(150) * 0.5, 9);
-        act(() => { speak(false); });
         expect(graphLevel(1)).toBe(1);
         expect(graphLevel(2)).toBeCloseTo(loud(150), 9);
+        act(() => { speak(false); });
+        expect(g1.gain.sent.slice(sent[0])).toEqual([]);
+        expect(g2.gain.sent.slice(sent[1])).toEqual([]);
     });
 
-    it('switched off, talking changes nothing; a muted stream stays silent either way', async () => {
-        setAttenuation({ enabled: false, strength: 0.5 });
-        setStreamMuted(2, true);
-        await renderHost();
+    it('the stage still ducks by its strength while someone talks, and ramps — never jumps — even at Strength 100%', async () => {
+        setAttenuation({ enabled: true, strength: 1 });
+        selected = [1];
+        await act(async () => { root.render(<StreamStage onBackToChat={() => {}} />); });
+        await act(async () => { await flushMicrotasks(); });
+        const g = fakeAudio.gainsOf('stage')[0];
+        expect(g.gain.effective).toBe(1); // positive control: playing at its level
+        const before = g.gain.events.length;
         act(() => { speak(true); });
+        expect(g.gain.effective).toBe(0);
+        act(() => { speak(false); });
+        expect(g.gain.effective).toBe(1);
+        expect(g.gain.events.slice(before).map(e => e.how), 'a jump clicks on every word').toEqual(['ramp', 'ramp']);
+    });
+
+    it('…while the stage’s claim on the small player is still silence at once, never a ramp', async () => {
+        await renderHost();
+        const g = fakeAudio.hostGainFor('a-1')!;
+        const before = g.gain.events.length;
+        const release = claimStageAudio();
+        expect(g.gain.events.slice(before)).toEqual([{ how: 'set', to: 0 }]);
+        await act(async () => { release(); await flushMicrotasks(); });
+    });
+});
+
+describe('Firefox and Safari: a context cannot follow the chosen Output Device', () => {
+    // An <audio> can be routed there (setSinkId, Firefox 116+, Safari 18.4+),
+    // an AudioContext cannot: a graph would play on the OS default while the
+    // correctly routed element sat muted.
+    beforeEach(() => { fakeAudio.contextSinkId = false; });
+
+    it('with a device chosen, every stream plays through its own routed <audio>, and nothing through the graph', async () => {
+        choose('headset-1');
+        await renderHost();
+        const s1 = elementSinks.sinkOf(audioFor(1)!);
+        const s2 = elementSinks.sinkOf(audioFor(2)!);
+        expect(s1.calls).toEqual(['headset-1']);
+        await act(async () => { await s1.settle(); await s2.settle(); });
+        expect(s1.sinkId).toBe('headset-1');
+        expect(audioFor(1)!.muted).toBe(false);
+        expect(audioFor(2)!.muted).toBe(false);
+        const sounding = fakeAudio.gainsOf('host').filter(g => !g.disconnected && g.speakersAt !== null && g.gain.effective > 0);
+        expect(sounding, 'a graph on the OS default').toEqual([]);
+    });
+
+    it('on the default device the graph plays (there is no device to follow)', async () => {
+        await renderHost();
         expect(graphLevel(1)).toBe(1);
-        expect(graphLevel(2)).toBe(0);
+        expect(audioFor(1)!.muted).toBe(true);
+    });
+
+    it('choosing a device moves the streams onto their elements, and the default moves them back', async () => {
+        await renderHost();
+        expect(graphLevel(1)).toBe(1);
+        act(() => { choose('headset-1'); });
+        await act(async () => {
+            await elementSinks.sinkOf(audioFor(1)!).settle();
+            await elementSinks.sinkOf(audioFor(2)!).settle();
+        });
+        expect(graphLevel(1)).toBe(0);
+        expect(audioFor(1)!.muted).toBe(false);
+        act(() => { choose(''); });
+        await act(async () => {
+            await elementSinks.sinkOf(audioFor(1)!).settle();
+            await flushMicrotasks();
+        });
+        expect(graphLevel(1)).toBe(1);
+        expect(audioFor(1)!.muted).toBe(true);
     });
 });
 
@@ -424,10 +481,35 @@ describe('the element fallback: where Web Audio cannot play, the <audio> plays i
         await act(async () => { ctx.become('running'); await flushMicrotasks(); });
         expect(graphLevel(1)).toBe(1);
         expect(audioFor(1)!.muted, 'and the element is the sink again').toBe(true);
-        // An interruption (a phone call on an iPhone) hands it back to the element.
-        await act(async () => { ctx.become('suspended'); await flushMicrotasks(); });
+    });
+
+    it("Safari's 'interrupted' (a phone call on an iPhone): the element carries it, and the next tap resumes the context", async () => {
+        await renderHost();
+        const ctx = fakeAudio.liveOf('host')!;
+        expect(graphLevel(1)).toBe(1);
+        await act(async () => { ctx.become('interrupted' as AudioContextState); await flushMicrotasks(); });
         expect(graphLevel(1)).toBe(0);
         expect(audioFor(1)!.muted).toBe(false);
+        const before = ctx.resumes;
+        await act(async () => { document.dispatchEvent(new Event('pointerdown')); await flushMicrotasks(); });
+        expect(ctx.resumes, 'an interrupted context is asked to resume, not left').toBeGreaterThan(before);
+        await act(async () => { ctx.become('running'); await flushMicrotasks(); });
+        expect(graphLevel(1)).toBe(1);
+        expect(audioFor(1)!.muted).toBe(true);
+    });
+
+    it('a context closed from outside is replaced, and no stream is left on its dead nodes', async () => {
+        await renderHost();
+        const first = fakeAudio.liveOf('host')!;
+        const dead = fakeAudio.hostGainFor('a-1')!;
+        await act(async () => { first.become('closed'); await flushMicrotasks(); });
+        const second = fakeAudio.liveOf('host');
+        expect(second, 'a new context').not.toBeNull();
+        expect(second).not.toBe(first);
+        const now = fakeAudio.hostGainFor('a-1')!;
+        expect(now.ctx, 'stream 1 is on the NEW context').toBe(second);
+        expect(now.gain.effective).toBe(1);
+        expect(dead.disconnected).toBe(true);
     });
 
     it('a context that could not be made is tried again the next time you watch (a refusal can be passing)', async () => {
@@ -454,20 +536,42 @@ describe('the element fallback: where Web Audio cannot play, the <audio> plays i
 });
 
 describe('an iPhone or iPad: a page cannot set an element’s volume', () => {
-    it('the level still applies, because the graph carries it (the element volume is never what sounds)', async () => {
-        const real = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume')!;
+    const real = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume')!;
+    beforeEach(() => {
         Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
             configurable: true, get: () => 1, set: () => { /* iOS ignores it */ },
         });
-        try {
-            master(50);
-            setStreamVolume(1, 40);
-            await renderHost();
-            expect(graphLevel(1)).toBeCloseTo(loud(40) * 0.5, 9);
-            expect(audioFor(1)!.volume).toBe(1); // what iOS reports, whatever was set
-        } finally {
-            Object.defineProperty(HTMLMediaElement.prototype, 'volume', real);
-        }
+    });
+    afterEach(() => { Object.defineProperty(HTMLMediaElement.prototype, 'volume', real); });
+
+    it('the level still applies, because the graph carries it (the element volume is never what sounds)', async () => {
+        master(50);
+        setStreamVolume(1, 40);
+        await renderHost();
+        expect(graphLevel(1)).toBeCloseTo(loud(40) * 0.5, 9);
+    });
+
+    it('NEGATIVE CONTROL: under the same override the element path LOSES the level — the graph is what keeps it', async () => {
+        fakeAudio.unavailable = true;
+        master(50);
+        setStreamVolume(1, 40);
+        await renderHost();
+        expect(audioFor(1)!.muted).toBe(false); // the element is what plays here
+        // The engine asked for 0.08 (40% on the curve x 50%); iOS plays 1.
+        expect(audioFor(1)!.volume, 'the override did not take: this test would prove nothing').toBe(1);
+    });
+});
+
+describe('the stage resumes an interrupted context too', () => {
+    it("at the next gesture, Safari's 'interrupted' as well as 'suspended'", async () => {
+        await act(async () => { root.render(<StreamStage onBackToChat={() => {}} />); });
+        await act(async () => { await flushMicrotasks(); });
+        const ctx = fakeAudio.liveOf('stage')!;
+        expect(ctx, 'positive control: the stage built its graph').not.toBeNull();
+        ctx.state = 'interrupted' as AudioContextState;
+        const before = ctx.resumes;
+        await act(async () => { document.dispatchEvent(new Event('pointerdown')); await flushMicrotasks(); });
+        expect(ctx.resumes).toBe(before + 1);
     });
 });
 

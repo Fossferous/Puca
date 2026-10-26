@@ -6,31 +6,38 @@
 // WHY THIS EXISTS. vitest runs under jsdom, which has no Web Audio and no
 // WebRTC: the unit tests drive the engine against a fake context that only
 // records the values it is sent. Whether a remote track actually reaches the
-// graph (in Chromium it does ONLY while a media element plays it: the muted
-// <audio> sink), whether a boost above 100% is audible, whether mute is
-// silence, only a real engine can say. So this bundles the REAL module
+// graph (in Chromium only while a media element has remote audio bound: the
+// muted <audio> sinks), whether a boost above 100% is audible, whether mute
+// is silence, only a real engine can say. So this bundles the REAL module
 // (esbuild), negotiates a loopback call carrying two tones, one per watched
 // stream (A at 440 Hz, B at 1000 Hz), and reads what the engine sends to the
 // speakers, per stream, by frequency.
 //
-// SILENT, three ways: every AudioContext's destination is replaced by an
-// AnalyserNode that is connected to nothing (nothing can reach an output
-// device); the tones feed only MediaStream destinations; the browser runs
-// with --mute-audio (Firefox: media.volume_scale 0). The fallback phases,
-// where an <audio> plays unmuted, carry silent tracks.
+// SILENT, three ways, each enough on its own:
+//   1. every AudioContext in the page has an AnalyserNode connected to
+//      nothing as its destination: no graph can reach an output device;
+//   2. no <audio> ever carries a tone unmuted. The tones start only once
+//      every stream reads 'graph' (its <audio> a muted sink); from then on
+//      the page refuses every unmute (a guard on HTMLMediaElement.muted; any
+//      refusal fails the run). The phases where an <audio> plays unmuted on
+//      purpose (the fallbacks, and the gesture phase before its tap) carry
+//      tracks that are silent at their source;
+//   3. the browser runs muted: --mute-audio (Firefox: media.volume_scale 0).
 //
 // Checks (Edge, the desktop app's engine, and Firefox):
 //   - both streams heard at 100% (positive control);
 //   - B at 150% is +3 dB, A untouched; A at 30% is -21 dB, B untouched;
 //   - mute: that stream is gone, the other untouched; both muted is digital
-//     silence; the stage's claim is digital silence at once, and comes back;
-//   - Output Volume 50% is -6 dB on both; Stream Attenuation ducks both by
-//     its strength while anyone talks, and comes back;
+//     silence; the stage's claim is digital silence, and comes back;
+//   - Output Volume 50% is -6 dB on both (Stream Attenuation is the big
+//     view's alone: the small player has no ducking to check);
 //   - an iPhone-style element whose volume cannot be set: the levels apply
-//     anyway (the graph carries them);
-//   - NEGATIVE CONTROL (Chromium): with no sink <audio> bound the graph hears
-//     neither stream — the meter reads the engine, and the sinks are what
-//     feed it — and the next pass binds them again;
+//     anyway (the graph carries them), and — NEGATIVE CONTROL — under the
+//     same override the element path loses the level;
+//   - (Chromium) a PAUSED sink still feeds the graph (so on Android, which
+//     pauses elements in the background, the stream keeps sounding), and —
+//     NEGATIVE CONTROL — with no sink bound at all the graph hears neither
+//     stream; the next pass binds them again;
 //   - fallback: no Web Audio at all, and a context held suspended until a
 //     tap (the autoplay policy, simulated: headless counts every page as
 //     already tapped): each stream on its <audio> (unmuted, at min(gain, 1)),
@@ -75,7 +82,8 @@ const dB = (g) => 20 * Math.log10(g);
 /** Everything below runs in the page. */
 const harness = () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    // SILENCE: no context in this page can reach an output device.
+
+    // SILENCE 1: no context in this page can reach an output device.
     const Real = window.AudioContext;
     class TapContext extends Real {
         constructor(o) {
@@ -89,20 +97,37 @@ const harness = () => {
     }
     window.AudioContext = TapContext;
 
+    // SILENCE 2: once a tone is live, no element may be unmuted. A refused
+    // unmute stays muted, and is counted: the run fails on any.
+    window.__tonesLive = false;
+    window.__unmuteRefused = 0;
+    const muted = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
+    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
+        configurable: true,
+        get() { return muted.get.call(this); },
+        set(v) {
+            if (!v && window.__tonesLive) { window.__unmuteRefused++; muted.set.call(this, true); return; }
+            muted.set.call(this, v);
+        },
+    });
+
     const ms = (t) => { const s = new MediaStream(); s.addTrack(t); return s; };
 
-    /** A loopback call carrying one tone per stream (Hz), or silence. */
+    /** A loopback call with one stream per tone (Hz). Every tone is SILENT at
+     *  its source until start(); a 0 is a track that stays silent. */
     async function call(tones) {
         const src = new AudioContext();
+        const levels = [];
         const locals = tones.map((hz) => {
             const out = src.createMediaStreamDestination();
             if (hz) {
                 const osc = src.createOscillator();
                 osc.frequency.value = hz;
                 const g = src.createGain();
-                g.gain.value = 0.5;
+                g.gain.value = 0;
                 osc.connect(g).connect(out); // never to a destination
                 osc.start();
+                levels.push(g);
             }
             return out.stream;
         });
@@ -123,7 +148,12 @@ const harness = () => {
         await pc2.setLocalDescription(await pc2.createAnswer());
         await pc1.setRemoteDescription(pc2.localDescription);
         await all;
-        return { src, tracks: locals.map((s) => remote.get(s.id)) };
+        /** Let the tones go. From this moment no element may be unmuted. */
+        const start = () => {
+            window.__tonesLive = true;
+            for (const g of levels) g.gain.value = 0.5;
+        };
+        return { src, tracks: locals.map((s) => remote.get(s.id)), start };
     }
 
     /** The host as StreamAudioHost mounts it, over `tracks` (user ids 1..n). */
@@ -131,7 +161,6 @@ const harness = () => {
         const state = {
             levels: Object.fromEntries(tracks.map((_, i) => [i + 1, 100])),
             mutes: {}, master: 1, claimed: false,
-            attenuation: { enabled: false, strength: 0.5 },
             ctx: null,
         };
         const sources = Object.fromEntries(tracks.map((t, i) => [i + 1, ms(t)]));
@@ -148,17 +177,27 @@ const harness = () => {
             watched: () => ids,
             routeElement: () => Promise.resolve(),
             routeContext: () => Promise.resolve(),
+            followsOutputDevice: () => true, // the default device
             createContext: () => {
                 if (opts.noWebAudio) throw new Error('no Web Audio in this engine');
                 state.ctx = new AudioContext();
                 return state.ctx;
             },
-            attenuation: () => state.attenuation,
         });
         ctl.attach(box);
         ctl.adopt();
         const el = (id) => box.querySelector(`audio[data-stream-audio="${id}"]`);
-        return { ctl, state, el, box };
+        return { ctl, state, el, box, ids };
+    }
+
+    /** Wait (no tone yet) until every stream is on the graph. */
+    async function onGraph(h, ms = 4000) {
+        const t0 = performance.now();
+        while (performance.now() - t0 < ms) {
+            if (h.ids.every((id) => h.ctl.path(id) === 'graph') && h.ids.every((id) => h.el(id).muted)) return true;
+            await sleep(25);
+        }
+        return false;
     }
 
     /** What the small player sends the speakers, per tone and overall. */
@@ -181,24 +220,42 @@ const harness = () => {
         return { a: peak(440), b: peak(1000), maxAbs };
     }
 
-    return { sleep, call, host, meter };
+    /** An iPhone: a page cannot set an element's volume. */
+    function iosVolume() {
+        Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
+            configurable: true, get: () => 1, set: () => {},
+        });
+    }
+
+    return { sleep, call, host, onGraph, meter, iosVolume };
 };
+
+async function newRig(browser) {
+    const page = await (await browser.newContext()).newPage();
+    await page.setContent('<!doctype html><meta charset=utf-8><title>stream audio gain</title><body style="height:400px">rig</body>');
+    await page.addScriptTag({ content: moduleSrc });
+    return page;
+}
 
 async function runMain(engine, launch, { chromiumSink }) {
     const browser = await launch();
     try {
-        const page = await (await browser.newContext()).newPage();
-        await page.setContent('<!doctype html><meta charset=utf-8><title>stream audio gain</title><body>rig</body>');
-        await page.addScriptTag({ content: moduleSrc });
+        const page = await newRig(browser);
         const r = await page.evaluate(async ({ harnessSrc, chromiumSink }) => {
             const H = (0, eval)(`(${harnessSrc})`)();
             const out = {};
-            const { tracks } = await H.call([440, 1000]);
-            const h = H.host(tracks);
-            await H.sleep(200);
+            const c = await H.call([440, 1000]);
+            const h = H.host(c.tracks);
+            out.onGraph = await H.onGraph(h);
+            if (!out.onGraph) {
+                // Never let the tones go unless every sink is a muted one.
+                out.path = [h.ctl.path(1), h.ctl.path(2)];
+                return out;
+            }
             out.path = [h.ctl.path(1), h.ctl.path(2)];
             out.sinksMuted = [h.el(1).muted, h.el(2).muted];
-            out.base = await H.meter(h);
+            c.start();
+            out.base = await H.meter(h, 700);
 
             h.state.levels[2] = 150; h.ctl.reconcile();
             out.bBoost = await H.meter(h);
@@ -221,44 +278,39 @@ async function runMain(engine, launch, { chromiumSink }) {
             out.master = await H.meter(h);
             h.state.master = 1; h.ctl.reconcile();
 
-            h.state.attenuation = { enabled: true, strength: 0.5 };
-            h.ctl.reconcile();
-            h.ctl.setSpeaking(true);
-            out.ducked = await H.meter(h, 700);
-            h.ctl.setSpeaking(false);
-            out.unducked = await H.meter(h, 1600);
-            h.state.attenuation = { enabled: false, strength: 0.5 };
-            h.ctl.reconcile();
-
-            // An iPhone: a page cannot set an element's volume.
-            Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
-                configurable: true, get: () => 1, set: () => {},
-            });
+            H.iosVolume();
             h.state.levels[1] = 30; h.ctl.reconcile();
             out.ios = await H.meter(h);
             out.iosPath = h.ctl.path(1);
             h.state.levels[1] = 100; h.ctl.reconcile();
 
             if (chromiumSink) {
-                // NEGATIVE CONTROL: with NO sink bound, the graph hears neither
-                // stream. (Measured 2026-10-26: Chromium's remote playout is
-                // shared, so any one bound element keeps every remote track
-                // flowing — unbinding A's alone left A heard — and a paused
-                // one still counts; with none bound, nothing flows.)
+                // A PAUSED sink still feeds the graph (Android pauses elements
+                // in the background): both heard with both sinks paused.
+                h.el(1).pause();
+                h.el(2).pause();
+                out.sinksPausedMeter = await H.meter(h, 900);
+                out.sinksPaused = [h.el(1).paused, h.el(2).paused];
+                h.ctl.reconcile(); // plays them again
+                // NEGATIVE CONTROL: with NO sink bound the graph hears neither
+                // stream. (Chromium's remote playout is shared: any one bound
+                // element keeps every remote track flowing, a paused one too.)
                 h.el(1).srcObject = null;
                 h.el(2).srcObject = null;
                 // The renderer lets go a moment after the unbind, and the
                 // meter's window is 341 ms long.
-                out.sinkPaused = await H.meter(h, 1500);
-                h.ctl.reconcile(); // a pass binds and plays the sinks again
-                out.sinkBack = await H.meter(h);
+                out.unbound = await H.meter(h, 1500);
+                h.ctl.reconcile(); // binds and plays the sinks again
+                out.rebound = await H.meter(h);
             }
+            out.unmuteRefused = window.__unmuteRefused;
+            out.stillMuted = [h.el(1).muted, h.el(2).muted];
             return out;
         }, { harnessSrc: harness.toString(), chromiumSink });
 
         const tag = `[${engine}]`;
-        ck(r.path[0] === 'graph' && r.path[1] === 'graph', `${tag} both streams play through the graph`, JSON.stringify(r.path));
-        ck(r.sinksMuted.every(Boolean), `${tag} the <audio> sinks are muted`);
+        ck(r.onGraph, `${tag} both streams on the graph, their <audio> muted sinks, BEFORE any tone starts`, JSON.stringify(r.path));
+        if (!r.onGraph) return;
         ck(r.base.a > -45 && r.base.b > -45 && r.base.maxAbs > 0.05,
             `${tag} POSITIVE CONTROL both streams heard at 100%`, `A ${r.base.a.toFixed(1)} dB, B ${r.base.b.toFixed(1)} dB`);
         ck(near(r.bBoost.b - r.base.b, dB(Math.SQRT2), 0.6), `${tag} B at 150% is +3 dB`, `${(r.bBoost.b - r.base.b).toFixed(2)} dB`);
@@ -269,56 +321,61 @@ async function runMain(engine, launch, { chromiumSink }) {
             `${tag} A muted: gone, B untouched`, `A ${r.aMuted.a.toFixed(1)} dB`);
         ck(r.bothMuted.maxAbs === 0, `${tag} both muted: digital silence`, String(r.bothMuted.maxAbs));
         ck(near(r.back.a, r.base.a, 0.5) && near(r.back.b, r.base.b, 0.5), `${tag} unmuted at 100%: both back`);
-        ck(r.claimed.maxAbs === 0, `${tag} the stage's claim: digital silence at once`, String(r.claimed.maxAbs));
+        ck(r.claimed.maxAbs === 0, `${tag} the stage's claim: digital silence`, String(r.claimed.maxAbs));
         ck(near(r.released.a, r.base.a, 0.5), `${tag} ...and back when the stage lets go`);
         ck(near(r.master.a - r.base.a, -6.02, 0.6) && near(r.master.b - r.base.b, -6.02, 0.6),
             `${tag} Output Volume 50% is -6 dB on both`, `${(r.master.a - r.base.a).toFixed(2)} / ${(r.master.b - r.base.b).toFixed(2)} dB`);
-        ck(near(r.ducked.a - r.base.a, -6.02, 0.8) && near(r.ducked.b - r.base.b, -6.02, 0.8),
-            `${tag} Stream Attenuation (50%) ducks both while anyone talks`, `${(r.ducked.a - r.base.a).toFixed(2)} dB`);
-        ck(near(r.unducked.a, r.base.a, 0.6), `${tag} ...and lets go after`, `${(r.unducked.a - r.base.a).toFixed(2)} dB`);
         ck(r.iosPath === 'graph' && near(r.ios.a - r.base.a, dB(0.09), 1.0),
             `${tag} element volume unsettable (iPhone): A at 30% is still -21 dB`, `${(r.ios.a - r.base.a).toFixed(2)} dB`);
         if (chromiumSink) {
-            ck(r.sinkPaused.maxAbs < 1e-4,
-                `${tag} NEGATIVE CONTROL no sink bound: the graph hears neither stream`, `max ${r.sinkPaused.maxAbs}`);
-            ck(near(r.sinkBack.a, r.base.a, 0.6) && near(r.sinkBack.b, r.base.b, 0.6),
-                `${tag} ...and the next pass binds the sinks again: both heard`, `${(r.sinkBack.a - r.base.a).toFixed(2)} dB`);
+            ck(r.sinksPaused.every(Boolean) && near(r.sinksPausedMeter.a, r.base.a, 0.6) && near(r.sinksPausedMeter.b, r.base.b, 0.6),
+                `${tag} both sinks PAUSED: both still heard through the graph`, `A ${(r.sinksPausedMeter.a - r.base.a).toFixed(2)} dB`);
+            ck(r.unbound.maxAbs < 1e-4,
+                `${tag} NEGATIVE CONTROL no sink bound: the graph hears neither stream`, `max ${r.unbound.maxAbs}`);
+            ck(near(r.rebound.a, r.base.a, 0.6) && near(r.rebound.b, r.base.b, 0.6),
+                `${tag} ...and the next pass binds the sinks again: both heard`, `${(r.rebound.a - r.base.a).toFixed(2)} dB`);
         }
+        ck(r.unmuteRefused === 0 && r.stillMuted.every(Boolean),
+            `${tag} SAFETY no element was unmuted while a tone was live`, `refused ${r.unmuteRefused}`);
 
-        // Fallback: no Web Audio at all, in a fresh page (no iPhone override).
-        // Silent tracks: these elements play unmuted.
-        const page2 = await (await browser.newContext()).newPage();
-        await page2.setContent('<!doctype html><meta charset=utf-8><title>stream audio fallback</title><body>rig</body>');
-        await page2.addScriptTag({ content: moduleSrc });
-        const f = await page2.evaluate(async ({ harnessSrc }) => {
-            const H = (0, eval)(`(${harnessSrc})`)();
-            const { tracks } = await H.call([0, 0]);
-            const h = H.host(tracks, { noWebAudio: true });
-            h.state.levels = { 1: 30, 2: 150 };
-            h.ctl.reconcile();
-            await H.sleep(100);
-            return {
-                path: [h.ctl.path(1), h.ctl.path(2)],
-                muted: [h.el(1).muted, h.el(2).muted],
-                volume: [h.el(1).volume, h.el(2).volume],
-            };
-        }, { harnessSrc: harness.toString() });
-        ck(f.path.every(p => p === 'element') && f.muted.every(m => !m),
-            `[${engine}] no Web Audio: each stream on its own unmuted <audio> (no silence)`, JSON.stringify(f.path));
-        ck(near(f.volume[0], 0.09, 1e-6) && f.volume[1] === 1,
-            `[${engine}] ...at min(gain, 1) each: 30% -> 0.09, 150% -> 1 (an element cannot boost)`, JSON.stringify(f.volume));
+        // The element fallback (no Web Audio), with silent tracks: these
+        // elements play unmuted on purpose. Once as it is, once as an iPhone.
+        for (const ios of [false, true]) {
+            const fallbackPage = await newRig(browser);
+            const f = await fallbackPage.evaluate(async ({ harnessSrc, ios }) => {
+                const H = (0, eval)(`(${harnessSrc})`)();
+                if (ios) H.iosVolume();
+                const { tracks } = await H.call([0, 0]); // silent at the source
+                const h = H.host(tracks, { noWebAudio: true });
+                h.state.levels = { 1: 30, 2: 150 };
+                h.ctl.reconcile();
+                await H.sleep(100);
+                return {
+                    path: [h.ctl.path(1), h.ctl.path(2)],
+                    muted: [h.el(1).muted, h.el(2).muted],
+                    volume: [h.el(1).volume, h.el(2).volume],
+                };
+            }, { harnessSrc: harness.toString(), ios });
+            if (!ios) {
+                ck(f.path.every(p => p === 'element') && f.muted.every(m => !m),
+                    `${tag} no Web Audio: each stream on its own unmuted <audio> (no silence)`, JSON.stringify(f.path));
+                ck(near(f.volume[0], 0.09, 1e-6) && f.volume[1] === 1,
+                    `${tag} ...at min(gain, 1) each: 30% -> 0.09, 150% -> 1 (an element cannot boost)`, JSON.stringify(f.volume));
+            } else {
+                ck(f.path.every(p => p === 'element') && f.volume[0] === 1,
+                    `${tag} NEGATIVE CONTROL as an iPhone, the element path LOSES the level (30% plays at 1)`, JSON.stringify(f.volume));
+            }
+        }
     } finally {
         await browser.close();
     }
 }
 
-/** A context the autoplay policy holds suspended until a tap. */
+/** A context held suspended until a tap. */
 async function runGesture(engine, launch) {
     const browser = await launch();
     try {
-        const page = await (await browser.newContext()).newPage();
-        await page.setContent('<!doctype html><meta charset=utf-8><title>stream audio gesture</title><body style="height:400px">tap here</body>');
-        await page.addScriptTag({ content: moduleSrc });
+        const page = await newRig(browser);
         const before = await page.evaluate(async ({ harnessSrc }) => {
             const H = (0, eval)(`(${harnessSrc})`)();
             window.__H = H;
@@ -335,10 +392,9 @@ async function runGesture(engine, launch) {
                 }
             }
             window.AudioContext = HeldContext;
-            // The tone's own context is held too: until the second tap the call
-            // carries silence.
+            // Silent at its source (and its context held) until the second tap.
             const c = await H.call([440]);
-            window.__src = c.src;
+            window.__call = c;
             window.__tone = false;
             const h = H.host(c.tracks);
             window.__h = h;
@@ -347,13 +403,16 @@ async function runGesture(engine, launch) {
             document.addEventListener('pointerdown', () => {
                 window.__inTap = true;
                 h.ctl.reconcile();
-                if (window.__tone) void window.__src.resume();
+                if (window.__tone && h.ctl.path(1) === 'graph' && h.el(1).muted) {
+                    void window.__call.src.resume();
+                    window.__call.start();
+                }
                 window.__inTap = false;
             }, { capture: true });
             return { state: h.state.ctx.state, path: h.ctl.path(1), muted: h.el(1).muted };
         }, { harnessSrc: harness.toString() });
         ck(before.state === 'suspended' && before.path === 'element' && before.muted === false,
-            `[${engine}] a context held suspended: the stream waits on its unmuted <audio>, not the graph`, JSON.stringify(before));
+            `[${engine}] a context held suspended: the stream waits on its unmuted <audio> (silent here), not the graph`, JSON.stringify(before));
         await page.mouse.click(50, 50);
         const moved = await page.evaluate(async () => {
             const h = window.__h;
@@ -362,14 +421,15 @@ async function runGesture(engine, launch) {
         });
         ck(moved.state === 'running' && moved.path === 'graph' && moved.muted === true,
             `[${engine}] a tap resumes it: the stream moves onto the graph, the <audio> a muted sink again`, JSON.stringify(moved));
-        // Only now (the <audio> muted) is the tone let go, by a second tap.
+        // Only now, with the <audio> muted, does a second tap let the tone go.
         await page.evaluate(() => { window.__tone = true; });
         await page.mouse.click(60, 60);
         const heard = await page.evaluate(async () => {
-            const m = await window.__H.meter(window.__h, 600);
-            return { a: m.a, muted: window.__h.el(1).muted };
+            const m = await window.__H.meter(window.__h, 700);
+            return { a: m.a, muted: window.__h.el(1).muted, live: window.__tonesLive, refused: window.__unmuteRefused };
         });
-        ck(heard.a > -45 && heard.muted === true, `[${engine}] ...and heard through the graph`, `${heard.a.toFixed(1)} dB`);
+        ck(heard.live && heard.a > -45 && heard.muted === true, `[${engine}] ...and heard through the graph`, `${heard.a.toFixed(1)} dB`);
+        ck(heard.refused === 0, `[${engine}] SAFETY no element was unmuted while the tone was live`, `refused ${heard.refused}`);
     } finally {
         await browser.close();
     }
@@ -389,8 +449,9 @@ const ffOpts = {
     firefoxUserPrefs: { 'media.volume_scale': '0.0', 'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0 },
 };
 
-await runMain(CHANNEL === 'bundled' ? 'chromium' : CHANNEL, () => chromium.launch(chromeOpts()), { chromiumSink: true });
-await runGesture(CHANNEL === 'bundled' ? 'chromium' : CHANNEL, () => chromium.launch(chromeOpts()));
+const engineName = CHANNEL === 'bundled' ? 'chromium' : CHANNEL;
+await runMain(engineName, () => chromium.launch(chromeOpts()), { chromiumSink: true });
+await runGesture(engineName, () => chromium.launch(chromeOpts()));
 if (process.env.FIREFOX !== '0') {
     await runMain('firefox', () => firefox.launch(ffOpts), { chromiumSink: false });
 }

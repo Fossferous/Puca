@@ -13,11 +13,13 @@
  *    own commit, before its graph can reach the speakers;
  *  - otherwise each stream sounds through its OWN Web Audio gain, as on the
  *    stage: its level on the loudness curve × the master Output Volume (a
- *    boost above 100% included), ducked by Stream Attenuation while anyone
- *    talks, unless muted per stream; the <audio> is the muted sink Chromium
- *    needs to feed a remote track into Web Audio. Where Web Audio cannot play
- *    yet (or at all) the <audio> itself plays it, as it always did: capped
- *    at 100%, no ducking. Your own share never plays back to you;
+ *    boost above 100% included), unless muted per stream; the <audio> is the
+ *    muted sink Chromium needs to feed a remote track into Web Audio. Stream
+ *    Attenuation never ducks it: that is the big stream view's alone, as it
+ *    always was. Where Web Audio cannot play yet (or at all), or cannot reach
+ *    the chosen Output Device (Firefox and Safari route elements, not
+ *    contexts), the <audio> itself plays it, as it always did: capped at
+ *    100%. Your own share never plays back to you;
  *  - Output Device: the context and each element are routed when they
  *    appear and re-routed on settingsChanged / devicechange; neither sounds
  *    before its own first routing has landed — an autoplaying element and a
@@ -33,14 +35,12 @@ import {
     getCurrentStreamingUserId,
     getSelectedStreams,
     getStreamData,
-    globalSpeakingUsers,
-    subscribeToSpeaking,
     subscribeToStreamState,
 } from './voiceState';
 import {
-    DEFAULT_STREAM_VOLUME, getAttenuation, getStreamMutes, getStreamVolumes, seedStreamVolumes,
+    DEFAULT_STREAM_VOLUME, getStreamMutes, getStreamVolumes, seedStreamVolumes,
 } from './streamVolumeStore';
-import { applyOutputDevice, applyOutputDeviceToContext, outputGain } from './settingsStore';
+import { applyOutputDevice, applyOutputDeviceToContext, contextFollowsOutputDevice, outputGain } from './settingsStore';
 import { stageOwnsStreamAudio, streamAudioPlan, subscribeStageAudio } from './streamAudioRouting';
 import { createHostController } from './streamAudioHostCore';
 import { installBackgroundResumeAll } from './deviceStageResume';
@@ -80,16 +80,16 @@ export function StreamAudioHost() {
         watched: getSelectedStreams,
         routeElement: applyOutputDevice,
         routeContext: applyOutputDeviceToContext,
+        followsOutputDevice: contextFollowsOutputDevice,
         createContext: () => new AudioContext(),
-        attenuation: getAttenuation,
     }));
 
     // Only when the ELEMENT SET changes (or the container mounts/unmounts
     // with it): this is an unmemoized child of Chat, which re-renders on
     // every voice-user bump, and every other input to the plan already has
     // its own subscription below (stream bus, stage claim, settingsChanged,
-    // devicechange, speaking). Running on every render redid the whole
-    // reconcile, storage reads included, for nothing.
+    // devicechange). Running on every render redid the whole reconcile,
+    // storage reads included, for nothing.
     useLayoutEffect(() => {
         host.attach(containerRef.current);
         host.adopt();
@@ -107,18 +107,12 @@ export function StreamAudioHost() {
             host.rerouteAll();
             host.reconcile(); // master Output Volume
         };
-        // Stream Attenuation: the same trigger as the stage's (anyone in the
-        // call talking). The speaking store emits on every flip; the host
-        // re-aims only when the answer changes, and reads no storage for it.
-        const onSpeaking = () => host.setSpeaking(globalSpeakingUsers.size > 0);
         // Back from the background: a context the platform suspended is
         // resumed on this pass (and the streams wait on their elements).
         const onVisible = () => { if (document.visibilityState === 'visible') host.reconcile(); };
         onStreams();
-        onSpeaking();
         const unsubStreams = subscribeToStreamState(onStreams);
         const unsubStage = subscribeStageAudio(host.reconcile);
-        const unsubSpeaking = subscribeToSpeaking(onSpeaking);
         window.addEventListener('settingsChanged', onSettings);
         navigator.mediaDevices?.addEventListener?.('devicechange', host.rerouteAll);
         document.addEventListener('visibilitychange', onVisible);
@@ -133,7 +127,6 @@ export function StreamAudioHost() {
             unsubGesture();
             unsubStreams();
             unsubStage();
-            unsubSpeaking();
             unsubResume();
             window.removeEventListener('settingsChanged', onSettings);
             navigator.mediaDevices?.removeEventListener?.('devicechange', host.rerouteAll);
