@@ -138,6 +138,10 @@ describe('a viewer whose connection keeps losing a share', () => {
 
     it('leaves a share being remote-controlled alone: its jitter buffer is held at zero on purpose', async () => {
         const { m, pub, receiver } = watching([0, 1, 2]);
+        // Watched, and settled, BEFORE control: so the settle after it is the
+        // control's own, not the first sight's.
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + VIEW_SAMPLE_MS * 3);
+        expect(pub.asked.at(-1), 'fixture: clean so far').toBe(VideoQuality.HIGH);
         setScreenLatencyMinimised(7, true);
         try {
             receiver.lossPct = 3;
