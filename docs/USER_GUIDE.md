@@ -553,6 +553,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | Control | Action |
 |---------|--------|
 | **Mute stream** / **Unmute stream** | Silence that stream's audio (the menu row is **Mute**) |
+| **Stream Volume** | Menu only. That stream's volume, 0–200% in 1% steps, with the level shown beside it; with the slider selected, the arrow keys move it 1% and Page Up / Page Down 10%. Kept on this device for the person sharing and used every time you watch them; someone you have not set starts at 100% |
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |

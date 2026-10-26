@@ -394,6 +394,20 @@
     color: #dbdee1;
 }
 
+/* A slider's label with its level at the right ("Stream Volume  40%"). */
+.scm-label-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.scm-value {
+    font-size: 0.8rem;
+    color: #b5bac1;
+    font-variant-numeric: tabular-nums;
+}
+
 /* Standalone section heading inside the menu (e.g. "Give Control"). */
 .scm-section-label {
     display: block;

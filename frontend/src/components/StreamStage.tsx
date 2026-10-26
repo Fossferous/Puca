@@ -24,6 +24,8 @@ import {
     type AttenuationSettings,
     DEFAULT_STREAM_VOLUME,
     MAX_STREAM_VOLUME,
+    STREAM_VOLUME_STEP,
+    streamVolumeKeyStep,
 } from './streamVolumeStore';
 import {
     requestControl,
@@ -1456,18 +1458,42 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                 />
                             </label>
 
-                            <div className="scm-slider-block">
-                                <span className="scm-label">Stream Volume</span>
-                                <input
-                                    type="range"
-                                    min={0}
-                                    max={audioFallback ? 100 : MAX_STREAM_VOLUME}
-                                    step={5}
-                                    value={volumes[ctxMenu.userId] ?? DEFAULT_STREAM_VOLUME}
-                                    disabled={mutedStreams.has(ctxMenu.userId)}
-                                    onChange={(e) => handleVolumeChange(ctxMenu.userId, Number(e.target.value))}
-                                />
-                            </div>
+                            {(() => {
+                                // This person's level, remembered per user id
+                                // (streamVolumeStore). 1% a step, shown as it
+                                // moves; the element fallback cannot boost, so
+                                // it shows (and goes) no higher than 100%.
+                                const userId = ctxMenu.userId;
+                                const max = audioFallback ? 100 : MAX_STREAM_VOLUME;
+                                const level = Math.min(volumes[userId] ?? DEFAULT_STREAM_VOLUME, max);
+                                return (
+                                    <div className="scm-slider-block">
+                                        <span className="scm-label-row">
+                                            <span className="scm-label">Stream Volume</span>
+                                            <span className="scm-value">{level}%</span>
+                                        </span>
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={max}
+                                            step={STREAM_VOLUME_STEP}
+                                            value={level}
+                                            aria-label="Stream Volume"
+                                            aria-valuetext={`${level}%`}
+                                            disabled={mutedStreams.has(userId)}
+                                            onKeyDown={(e) => {
+                                                const next = streamVolumeKeyStep(e, level, max);
+                                                if (next === null) return;
+                                                // Not the browser's step: its Page Up /
+                                                // Page Down is a tenth of the range.
+                                                e.preventDefault();
+                                                if (next !== level) handleVolumeChange(userId, next);
+                                            }}
+                                            onChange={(e) => handleVolumeChange(userId, Number(e.target.value))}
+                                        />
+                                    </div>
+                                );
+                            })()}
 
                             <div className="scm-separator" />
 

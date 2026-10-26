@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+
+- **Stream Volume moves 1% at a time and shows its level.** In the menu you get by right-clicking a stream, **Stream Volume** used to jump 5% at a time and showed no number. It now moves 1% at a time and shows the level beside it as you move it; with the slider selected, the arrow keys move it 1%, Page Up and Page Down 10%, and Home and End to either end. As before, the level you set for someone's stream is kept on this device for that person and used whenever you watch them again, in the stream view and in the small player over the chat (which plays at most 100%: a boost above that works in the stream view); someone you have not set starts at 100%. Comes with the in-app update on Android and the web app, and with the next desktop update.
+
 ## 0.9.849 — 2026-10-24
 
 Notifications for the web app and iPhone; calls encrypted in Safari and Firefox; one-tap iPhone install
