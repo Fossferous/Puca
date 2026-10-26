@@ -507,6 +507,9 @@ fn update_size_reconfigures_without_a_rebuild() {
 /// changes everywhere (the control). An encoder that padded every frame up to
 /// its budget would make a moving pointer cost the full bitrate; that is the
 /// failure this exists to see. Synthetic frames: no display is touched.
+// Windows only: it measures the real hardware encoder at its High profile,
+// which the other platforms' stand-in encoder does not have.
+#[cfg(windows)]
 #[test]
 #[ignore = "needs a working H.264 encoder; run with --ignored --nocapture --test-threads=1"]
 fn bench_a_pointer_moving_over_a_still_picture() {
