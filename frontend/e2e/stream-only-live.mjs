@@ -6,7 +6,8 @@
 // What it proves:
 //   1. the owner's setup UI: + Stream Only Role, the channel list, No receive,
 //      Join voice without a microphone - on a 1280x800 desktop and at 390x844
-//      touch (in view, no sideways scroll, what a tap hits);
+//      touch (in view, no sideways scroll, what a tap hits); Open streams
+//      automatically is reachable there and reads Off on a new device;
 //   2. the server's cap: the account lists only the voice channel opened for
 //      it, and is refused a text channel's messages;
 //   3. the account selects the server, opens the channel, joins and shares by
@@ -23,11 +24,18 @@
 //      recorder before any page script, so nothing is ever spoken): none for
 //      the account, joining or leaving; a person joining and leaving IS
 //      announced (the positive control);
-//   8. auto-watch: its share opens by itself for the owner, in the chat view's
-//      small player (the chat stays); a person joining while it is live gets
-//      it too (desktop), and so does a 390x844 phone (the docked player, inside
-//      the screen); a PERSON's share does not open by itself (the control);
-//      and once the owner closes it, it stays closed;
+//   8. Open streams automatically is OFF by default, so nothing opens by
+//      itself until a viewer chooses it. THE NEGATIVE CONTROL: at the default,
+//      the account's share does NOT open by itself for the owner (in the chat
+//      view), though the owner's client has it live and knows the account is
+//      stream-only, nor for a person joining while it is live (a new device
+//      that never saved a setting). Chosen (From stream-only accounts), the
+//      account's next share opens by itself for the owner, in the chat view's
+//      small player (the chat stays); the person, choosing it while the share
+//      is live, gets it at once; a 390x844 phone that chose it in the real
+//      Settings select gets it on joining (the docked player, inside the
+//      screen); a PERSON's share does not open by itself (the control); and
+//      once the owner closes it, it stays closed;
 //   9. Open streams automatically = All streams: a PERSON's share then opens
 //      by itself too, the closed one stays closed, and the owner's stream
 //      view keeps its focus on the stream it was showing.
@@ -189,6 +197,21 @@ const TTS_RECORDER = () => {
 };
 const spoken = (page) => page.evaluate(() => window.__spoken ?? null);
 const selectedStreams = (page) => page.evaluate(async () => (await import('/src/components/voiceState.ts')).getSelectedStreams());
+/** Settings → Voice & Video → Open streams automatically, as the app reads it. */
+const autoOpenOf = (page) => page.evaluate(async () => (await import('/src/components/settingsStore.ts')).loadSettings().autoOpenStreams);
+const chooseAutoOpen = (page, mode) => page.evaluate(async (mode) => {
+    const m = await import('/src/components/settingsStore.ts');
+    m.saveSettings({ ...m.loadSettings(), autoOpenStreams: mode });
+}, mode);
+const liveStreamers = (page) => page.evaluate(async () => (await import('/src/components/voiceState.ts')).getAllStreamers().map(s => s.userId));
+/** What the auto-watch rule needs to open `id`'s share: it is live in this
+ *  client's stream list AND the client knows `id` is stream-only. With both,
+ *  the old default ('stream-only') opened it at once; that is what makes the
+ *  default-Off checks below a real negative control and not a vacuous one. */
+const knowsLiveStreamOnly = (page, id) => page.evaluate(async (id) => {
+    const v = await import('/src/components/voiceState.ts');
+    return v.getAllStreamers().some(s => s.userId === id) && v.isStreamOnlyMember(id);
+}, id);
 /** A <video> on the page showing frames (videoWidth > 0), optionally inside `within`. */
 const playingVideo = (page, within = '') => page.evaluate((within) => {
     const root = within ? document.querySelector(within) : document;
@@ -279,7 +302,8 @@ try {
     check('390x844: Join voice without a microphone is reachable', setting.ok, JSON.stringify(setting));
     const autoOpen = await reachable(phone, '[data-testid="settings-auto-open-streams"]');
     check('390x844: Open streams automatically is reachable', autoOpen.ok, JSON.stringify(autoOpen));
-    check('...and defaults to From stream-only accounts', await phone.locator('[data-testid="settings-auto-open-streams"]').inputValue() === 'stream-only');
+    // A new device for this account (nothing saved on it): Off by default.
+    check('...and defaults to Off', await phone.locator('[data-testid="settings-auto-open-streams"]').inputValue() === 'off');
     await phone.screenshot({ path: path.join(OUT, 'settings-no-mic-phone.png') });
     await phoneCtx.close();
 
@@ -321,10 +345,33 @@ try {
     await sleep(800);
     check('the account joining was not spoken', !(await spoken(owner)).some(t => t.includes(BOT)), JSON.stringify(await spoken(owner)));
 
+    // 8a. THE NEGATIVE CONTROL: Open streams automatically at its default,
+    // Off. The owner never chose it (the save above wrote the whole settings
+    // object, the default with it), so the account's share must NOT open by
+    // itself, although everything the rule needs to open it is there.
+    check('default: the owner\'s Open streams automatically is Off', await autoOpenOf(owner) === 'off');
     await bot.locator('[data-testid="voice-share-screen"]').click();
     check('the share button turns into voice-stop-share', !!await until(async () => (await bot.locator('[data-testid="voice-stop-share"]').count()) > 0, 15000));
+    check('default: the owner\'s client has the account\'s share live and knows it is stream-only', !!await until(() => knowsLiveStreamOnly(owner, B), 15000));
+    const ownerWatchedByDefault = await until(async () => (await selectedStreams(owner)).includes(B), 6000);
+    const ownerSel = await selectedStreams(owner); // throws, failing the run, if it cannot be read
+    check('default (Off): the account\'s share is NOT watched without a click',
+        Array.isArray(ownerSel) && !ownerSel.includes(B) && !ownerWatchedByDefault, JSON.stringify(ownerSel));
+    check('default (Off): ...no small player opened over the chat, no stream view',
+        (await owner.locator('.stream-pip').count()) === 0 && (await owner.locator('.stream-stage').count()) === 0);
+    await owner.screenshot({ path: path.join(OUT, 'owner-default-off.png') });
+
+    // 8b. The owner chooses From stream-only accounts; the account's NEXT
+    // share opens by itself (it goes live while the owner is there).
+    await bot.locator('[data-testid="voice-stop-share"]').click();
+    check('the account stops sharing', !!await until(async () => (await bot.locator('[data-testid="voice-share-screen"]').count()) > 0, 10000));
+    check('...and its share leaves the owner\'s stream list', !!await until(async () => !(await liveStreamers(owner)).includes(B), 15000));
+    await chooseAutoOpen(owner, 'stream-only');
+    check('the owner chose From stream-only accounts', await autoOpenOf(owner) === 'stream-only');
+    await bot.locator('[data-testid="voice-share-screen"]').click();
+    check('the account shares again', !!await until(async () => (await bot.locator('[data-testid="voice-stop-share"]').count()) > 0, 15000));
     // 8. Auto-watch, live while the owner is in the chat view.
-    check('auto-watch: the owner is watching the account\'s share without a click', !!await until(async () => (await selectedStreams(owner)).includes(B), 15000));
+    check('auto-watch (chosen): the owner is watching the account\'s share without a click', !!await until(async () => (await selectedStreams(owner)).includes(B), 15000));
     check('...in the small player over the chat (the chat view stays)', !!await until(async () => (await owner.locator('.stream-pip').count()) > 0, 8000)
         && (await owner.locator('.stream-stage').count()) === 0);
     check('...and it shows the picture', !!await until(() => playingVideo(owner, '.stream-pip'), 15000));
@@ -336,8 +383,11 @@ try {
     check('the owner receives the account\'s screen share (inbound video grows)', v1.inVideo - v0.inVideo > 20000, JSON.stringify({ v0, v1 }));
     check('the owner sees the account LIVE', (await owner.locator('.voice-users-list .live-badge-mini').count()) > 0);
 
-    // 7/8. A person joins while the account is live: spoken (control), and
-    // auto-watches the share on a desktop...
+    // 7/8. A person joins while the account is live: spoken (control). Their
+    // device is new and has never saved a setting, so Open streams
+    // automatically is Off and the share does NOT open by itself on joining
+    // (the negative control again, on the join path); chosen while the share
+    // is live, it opens at once, on a desktop...
     const humanCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     await humanCtx.addInitScript(BOT_INIT); // a canvas behind getDisplayMedia, for the control share
     const human = await signIn(humanCtx, HUMAN, 'HUMAN', true);
@@ -350,23 +400,43 @@ try {
     await human.locator(`[data-testid="voice-channel"][data-channel-id="${stage.id}"]`).click();
     check('a person joins the call while the account is live', !!await until(async () => (await human.locator('[data-testid="voice-connected"]').count()) > 0, 20000));
     check('control: the owner\'s client SPEAKS a person joining', !!await until(async () => (await spoken(owner)).some(t => t === `${HUMAN} joined the channel`), 25000), JSON.stringify(await spoken(owner)));
-    check('auto-watch: a person joining while it is live watches it without a click', !!await until(async () => (await selectedStreams(human)).includes(B), 15000));
+    check('default: the person\'s new device has Open streams automatically Off', await autoOpenOf(human) === 'off');
+    check('default: the person\'s client has the account\'s share live and knows it is stream-only', !!await until(() => knowsLiveStreamOnly(human, B), 15000));
+    const humanWatchedByDefault = await until(async () => (await selectedStreams(human)).includes(B), 6000);
+    const humanSel = await selectedStreams(human);
+    check('default (Off): a person joining while it is live does NOT watch it without a click',
+        Array.isArray(humanSel) && !humanSel.includes(B) && !humanWatchedByDefault, JSON.stringify(humanSel));
+    await chooseAutoOpen(human, 'stream-only');
+    check('auto-watch (chosen while it is live): the person watches it at once, without a click', !!await until(async () => (await selectedStreams(human)).includes(B), 15000));
     check('...and sees the picture', !!await until(() => playingVideo(human), 15000));
 
-    // ...and on a 390x844 phone, in the docked player.
+    // ...and on a 390x844 phone that chose it in the real Settings select
+    // before joining: it opens on joining, in the docked player.
     const phoneVCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
     const phoneV = await signIn(phoneVCtx, PHONEV, 'PHONEV', true);
     await call(phoneV, '/src/api/servers.ts', 'joinViaInvite', [inv.code]);
     await phoneV.reload({ waitUntil: 'domcontentloaded' });
     await sleep(2500);
     await dismiss(phoneV);
+    await phoneV.locator('button[title="Settings"]').first().tap().catch(() => {});
+    await phoneV.locator('.settings-nav-item', { hasText: 'Voice & Video' }).first().tap().catch(() => {});
+    const phoneVSelect = phoneV.locator('[data-testid="settings-auto-open-streams"]');
+    await phoneVSelect.waitFor({ timeout: 15000 });
+    check('390x844: a new device reads Off in the select', await phoneVSelect.inputValue() === 'off');
+    await phoneVSelect.selectOption('stream-only');
+    check('390x844: choosing From stream-only accounts in the select saves it', !!await until(async () => (await autoOpenOf(phoneV)) === 'stream-only', 5000));
+    // A reload closes Settings; the choice is the device's own and stays.
+    await phoneV.reload({ waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    await dismiss(phoneV);
+    check('390x844: ...and the choice survives a reload', await autoOpenOf(phoneV) === 'stream-only');
     await phoneV.locator('.mobile-nav-btn').first().tap().catch(() => {});
     await sleep(400);
     await phoneV.locator(`[data-testid="server-icon"][data-server-id="${srv.id}"]`).tap();
     await sleep(800);
     await phoneV.locator(`[data-testid="voice-channel"][data-channel-id="${stage.id}"]`).tap();
     check('390x844: the phone is in the call', !!await until(async () => (await phoneV.locator('[data-testid="voice-connected"]').count()) > 0, 20000));
-    check('390x844: auto-watch selected the account\'s share', !!await until(async () => (await selectedStreams(phoneV)).includes(B), 15000));
+    check('390x844: auto-watch (chosen) selected the account\'s share on joining', !!await until(async () => (await selectedStreams(phoneV)).includes(B), 15000));
     // It plays in the CHAT panel's docked player; the phone is left on the
     // panel it was on (no navigation is taken over), so go and look.
     await phoneV.locator('.mobile-bottom-nav .mobile-nav-btn', { hasText: 'Chat' }).first().tap();
@@ -387,7 +457,8 @@ try {
     await phoneV.locator('[data-testid="voice-leave"]').tap().catch(() => {});
     await phoneVCtx.close();
 
-    // CONTROL: a person's share does NOT open by itself.
+    // CONTROL: a person's share does NOT open by itself (the owner chose From
+    // stream-only accounts, not All streams).
     await human.locator('[data-testid="voice-share-screen"]').click();
     check('control: the person is sharing', !!await until(async () => (await human.locator('[data-testid="voice-stop-share"]').count()) > 0, 15000));
     check('control: the owner sees two LIVE shares', !!await until(async () => (await owner.locator('.voice-users-list .live-badge-mini').count()) >= 2, 15000));
@@ -407,10 +478,7 @@ try {
         (await import('/src/stores/streamStore.ts')).useStreamStore.getState().setFocusedStream(id);
     }, B);
     check('the owner is on the stream view, the account in focus', !!await until(async () => (await owner.locator('.stream-stage').count()) > 0, 8000));
-    await owner.evaluate(async () => {
-        const m = await import('/src/components/settingsStore.ts');
-        m.saveSettings({ ...m.loadSettings(), autoOpenStreams: 'all' });
-    });
+    await chooseAutoOpen(owner, 'all');
     await human.locator('[data-testid="voice-share-screen"]').click();
     const H = await uidOf(human);
     check('All streams: a person\'s share opens by itself', !!await until(async () => (await selectedStreams(owner)).includes(H), 15000), JSON.stringify(await selectedStreams(owner)));
@@ -418,10 +486,7 @@ try {
     check('...without taking the focus from the stream the owner was watching', focus === B, String(focus));
     check('...and the owner is still on the stream view', (await owner.locator('.stream-stage').count()) > 0);
     await human.locator('[data-testid="voice-stop-share"]').click();
-    await owner.evaluate(async () => {
-        const m = await import('/src/components/settingsStore.ts');
-        m.saveSettings({ ...m.loadSettings(), autoOpenStreams: 'stream-only' });
-    });
+    await chooseAutoOpen(owner, 'stream-only');
 
     // 5b. The owner ticks No receive in the role editor.
     await owner.locator('button[title="Server Settings"]').click();
