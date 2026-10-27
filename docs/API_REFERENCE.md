@@ -343,9 +343,11 @@ occupant's speak right and tells the room with a server→client frame:
 
 `stream_only` is present, and `true`, only for a member capped by
 `STREAM_ONLY`; when it is absent the member is not. Clients leave such a
-member out of spoken join/leave announcements and start watching its share
-without a click. Same frames, same delivery, as `can_speak` and `receives`; a
-change mid-call reaches the room through the perms sweep. Pinned by
+member out of spoken join/leave announcements and, for a viewer who chose
+**From stream-only accounts** under **Open streams automatically** (Off by
+default), start watching its share without a click. Same frames, same
+delivery, as `can_speak` and `receives`; a change mid-call reaches the room
+through the perms sweep. Pinned by
 `frontend/src/tests/fixtures/voiceSpeakStateStreamOnly.json`.
 
 `receives` is present, and `false`, only for a member whose roles carry

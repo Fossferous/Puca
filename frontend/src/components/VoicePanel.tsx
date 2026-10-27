@@ -1717,7 +1717,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // The server's VoiceSpeakState for one member of this room.
     const applySpeakState = useCallback((userId: number, allowed: boolean, receives: boolean, streamOnly: boolean) => {
         // A stream-only member (docs/STREAM_ONLY.md): no spoken join/leave
-        // announcement for them, and Chat auto-watches their share.
+        // announcement for them, and Chat auto-watches their share for a
+        // viewer who chose that (Open streams automatically, Off by default).
         setStreamOnlyMember(userId, streamOnly);
         if (userId === currentUserId) {
             if (!allowed) void denySpeakLocally();

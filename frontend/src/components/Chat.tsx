@@ -1218,9 +1218,10 @@ export function Chat({ onLogout }: ChatProps) {
 
     // PiP (Picture-in-Picture) mode: shows chat with stream overlay
     const [showPip, setShowPip] = useState(false);
-    // An AUTO-watch (a stream-only account's share, below) started while the
-    // chat view was up: the stream-state effect opens the picture-in-picture
-    // for it instead of switching the screen to the stream view. One-shot.
+    // An AUTO-watch (Open streams automatically, below; off unless the viewer
+    // chose it) started while the chat view was up: the stream-state effect
+    // opens the picture-in-picture for it instead of switching the screen to
+    // the stream view. One-shot.
     const autoWatchPipRef = useRef(false);
     // OS-level picture-in-picture: which stream (if any) is popped out into
     // the system PiP window (StreamPopout). Pinned to the tile that was
@@ -1423,9 +1424,12 @@ export function Chat({ onLogout }: ChatProps) {
         if (showPip || viewMode !== 'chat') autoWatchPipRef.current = false;
     }, [showPip, viewMode]);
 
-    // AUTO-WATCH (docs/STREAM_ONLY.md): a share from a stream-only member of
-    // the call starts playing here without a Watch click, once per share -
-    // when we join while it is live and when it goes live while we are here.
+    // AUTO-WATCH (docs/STREAM_ONLY.md): only once the viewer has chosen it in
+    // Settings → Voice & Video → Open streams automatically (Off by default),
+    // a share from a stream-only member of the call (From stream-only
+    // accounts), or any share (All streams), starts playing here without a
+    // Watch click, once per share - when we join while it is live and when it
+    // goes live while we are here. Off, nothing does.
     // The rule is utils/autoWatch.ts; this applies it on every stream-state
     // change (a share starting or ending, a member flagged stream-only, a
     // selection) and on a settings change. The stream list only ever holds

@@ -522,10 +522,11 @@ pub enum ServerMessage {
     ///
     /// `stream_only`: true for a member capped by STREAM_ONLY (an automated
     /// streaming account). Clients use it to leave the member out of spoken
-    /// join/leave announcements and to start watching its share without a
-    /// click. Left OUT when false, like `receives` when true, so every other
-    /// member's frame is unchanged; `voiceSpeakStateStreamOnly.json` pins the
-    /// true shape.
+    /// join/leave announcements and, for a viewer who chose From stream-only
+    /// accounts under Open streams automatically (Off by default), to start
+    /// watching its share without a click. Left OUT when false, like
+    /// `receives` when true, so every other member's frame is unchanged;
+    /// `voiceSpeakStateStreamOnly.json` pins the true shape.
     VoiceSpeakState {
         room_id: String,
         user_id: UserId,
