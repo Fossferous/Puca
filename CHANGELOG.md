@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.852 — 2026-10-27
 
+Streams no longer start playing by themselves unless you turn that on; Púca for Steam Deck updates to the newest version
 ### Changed
 
 - **Streams no longer start playing by themselves unless you ask.** **Open streams automatically** in **Settings → Voice & Video** is now **Off** by default, for every stream: a share from a stream-only account (an automated account a server owner has set up to stream into calls) now waits for your **Watch stream** click like anyone else's, where it used to start by itself. Púca cannot tell the old default, **From stream-only accounts**, apart from a choice you made, so this update switches it to **Off**, once, on every device that has it; **All streams** and **Off** stay as they are, and whatever you choose after the update is kept. To have streams start by themselves again, choose **From stream-only accounts** or **All streams** in **Settings → Voice & Video → Open streams automatically**, on each device you want it on. Comes with the in-app update on Android and the web app, and with the next desktop update.
