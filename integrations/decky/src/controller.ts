@@ -23,7 +23,10 @@ import {
     type ButtonJob, type PluginSettings, type PushToTalkButton,
 } from './settings';
 import { ASK_MS, pauseReason, readScreenSignals, SHARE_POLL_MS, ShareArming, type PauseReason } from './share';
-import { isNewer, readKey, readOffer, verifyOffer, type UpdateKey, type UpdateOffer } from './update';
+import {
+    isNewer, parseVersion, readKey, readOffer, UPDATE_FIRST_CHECK_MS, UPDATE_TICK_MS, UpdateClock, verifyOffer,
+    type UpdateKey,
+} from './update';
 
 export const FULL_VIEW_ROUTE = '/puca';
 
@@ -79,9 +82,14 @@ export interface Snapshot {
     /** A newer plugin that the download site offers, signed with the release
      *  key (update.ts); null when there is none. */
     update: UpdateState | null;
+    /** Update found nothing newer than this version, the one installed: the
+     *  panel says the plugin is up to date, until the menu closes. */
+    upToDate: string | null;
 }
 
 export interface UpdateState {
+    /** What the download site offered at the last look. Update installs what
+     *  it offers when pressed, which can be newer by then. */
     version: string;
     /** Downloading it, or handing it to Decky. */
     busy: boolean;
@@ -113,9 +121,8 @@ const JOIN_WAIT_MS = 8000;
 const LEARN_TIMEOUT_S = 15;
 /** "Live now" looks at this many of the person's servers at most. */
 const LIVE_SERVERS_MAX = 25;
-/** The first look for a plugin update once Púca is up, then how often. */
-const UPDATE_FIRST_CHECK_MS = 20 * 1000;
-const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
+/** Installing an update reloads the plugin, which ends a call. */
+const UPDATE_LEAVE_CALL = 'Leave the call first: updating restarts Púca.';
 
 const randomId = (): string => {
     const a = new Uint8Array(12);
@@ -128,7 +135,7 @@ class Controller {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
         micOn: false, micSilent: false, talking: false, micSwitchedOn: false, pttError: null, viewOpen: false,
         shareActive: false, sharePaused: null, shareAsk: false, shareBusy: false, shareError: null,
-        pluginVersion: null, update: null,
+        pluginVersion: null, update: null, upToDate: null,
     };
     private listeners = new Set<() => void>();
     private view = new PucaBrowserView();
@@ -172,9 +179,19 @@ class Controller {
     private bootSeq = 0;
     private retries = 0;
     private started = false;
+    /** The look a little after Púca is up, or after the Deck wakes. */
     private updateTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Reads the wall clock every UPDATE_TICK_MS, which notices a sleep:
+     *  timers cannot, their clock stops while the Deck sleeps (update.ts). */
+    private updateTick: ReturnType<typeof setInterval> | null = null;
+    private updateClock = new UpdateClock();
+    private updateLooking = false;
+    /** Bumped whenever a press of Update writes to the panel. A look that
+     *  began before then read the site before the press did, so when it
+     *  lands it writes nothing: its answer is the older one. */
+    private updateGen = 0;
     /** Where the offered update comes from, and the key that checked it. */
-    private updateFrom: { site: string; offer: UpdateOffer; key: UpdateKey } | null = null;
+    private updateFrom: { site: string; key: UpdateKey } | null = null;
     private noKeyLogged = false;
     /** Whose press the page's request for the screen is (share.ts). */
     private arming = new ShareArming();
@@ -224,6 +241,8 @@ class Controller {
             v => { if (typeof v === 'string') this.update({ pluginVersion: v }); },
             () => {},
         );
+        this.updateClock.tick(Date.now());
+        this.updateTick = setInterval(() => this.onUpdateTick(), UPDATE_TICK_MS);
         await this.boot();
     }
 
@@ -237,6 +256,7 @@ class Controller {
         removeEventListener('puca_share', this.onShare);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
         if (this.updateTimer) { clearTimeout(this.updateTimer); this.updateTimer = null; }
+        if (this.updateTick) { clearInterval(this.updateTick); this.updateTick = null; }
         this.clearLoadTimer();
         this.endShare();
         this.hold.reset();
@@ -881,23 +901,58 @@ class Controller {
 
     // ---- Updates for the plugin itself --------------------------------------------------
 
+    /** Look for an update in `ms`: a little after Púca is up, or after the Deck wakes. */
     private scheduleUpdateCheck(ms: number): void {
         if (this.updateTimer) clearTimeout(this.updateTimer);
         this.updateTimer = setTimeout(() => {
             this.updateTimer = null;
-            void this.checkForUpdate().finally(() => { if (this.started) this.scheduleUpdateCheck(UPDATE_EVERY_MS); });
+            void this.checkForUpdate();
         }, ms);
+    }
+
+    /** Every UPDATE_TICK_MS: six hours since the last look on the wall
+     *  clock, or the Deck slept since the last reading (update.ts). */
+    private onUpdateTick(): void {
+        const due = this.updateClock.tick(Date.now());
+        if (due === 'due') void this.checkForUpdate();
+        else if (due === 'woke' && !this.updateTimer) this.scheduleUpdateCheck(UPDATE_FIRST_CHECK_MS);
+    }
+
+    /**
+     * The Quick Access menu opened or closed on this panel (QuickAccess.tsx).
+     * Opening it looks again once the site's last answer is more than
+     * UPDATE_STALE_MS old, so what the panel offers is what the site offers.
+     * Closing it puts "up to date" away.
+     */
+    panelShown(shown: boolean): void {
+        if (!shown) {
+            if (this.snap.upToDate !== null) this.update({ upToDate: null });
+            return;
+        }
+        if (this.updateClock.panelOpened(Date.now())) void this.checkForUpdate();
+    }
+
+    /** One look at a time, and only while Púca is up: the page names the site. */
+    private async checkForUpdate(): Promise<void> {
+        if (this.snap.phase !== 'ready' || this.updateLooking) return;
+        this.updateLooking = true;
+        this.updateClock.tried(Date.now());
+        try {
+            await this.lookForUpdate();
+        } finally {
+            this.updateLooking = false;
+        }
     }
 
     /**
      * Ask the download site of the person's own Púca server whether a newer
      * plugin is published, and believe it only when the release key signed
-     * it (update.ts). Quiet when there is nothing to say: an older Púca that
-     * names no download site, a site that publishes no plugin, or a build
-     * without a key.
+     * it (update.ts): one manifest fetch. Quiet when there is nothing to
+     * say: an older Púca that names no download site, a site that publishes
+     * no plugin, or a build without a key.
      */
-    private async checkForUpdate(): Promise<void> {
-        if (this.snap.phase !== 'ready') return;
+    private async lookForUpdate(): Promise<void> {
+        const gen = this.updateGen;
         const site = await this.pageCall<string | null>('downloadSite');
         if (!site.ok || typeof site.value !== 'string') return;
         type Check = { current?: unknown; key?: unknown; offer?: unknown };
@@ -912,6 +967,7 @@ class Controller {
             console.log(`[Púca] update check: ${r.error}`);
             return;
         }
+        this.updateClock.answered(Date.now());
         const current = typeof r.value.current === 'string' ? r.value.current : null;
         const key = readKey(r.value.key);
         const offer = readOffer(r.value.offer);
@@ -920,38 +976,64 @@ class Controller {
             this.noKeyLogged = true;
             return;
         }
-        if (!current || !offer || !isNewer(offer.version, current)) {
-            if (this.snap.update && !this.snap.update.busy) this.update({ update: null });
+        let signed = false;
+        if (current && offer && isNewer(offer.version, current)) {
+            signed = await verifyOffer(offer, key);
+            if (!signed) console.warn(`[Púca] ${site.value} offers ${offer.version}, but it is not signed with this plugin's release key: ignored`);
+        }
+        // A press of Update since this look began read the site after it did,
+        // and one under way reads it by itself: either way the panel is the
+        // press's, not this look's.
+        if (gen !== this.updateGen || this.snap.update?.busy) return;
+        if (!offer || !signed) {
+            // Nothing newer, or nothing this plugin may install: no Update.
+            // Not for what an earlier look saw either, which Update can no
+            // longer get: it installs what the site offers now.
             this.updateFrom = null;
+            if (this.snap.update) this.update({ update: null });
             return;
         }
-        if (!await verifyOffer(offer, key)) {
-            console.warn(`[Púca] ${site.value} offers ${offer.version}, but it is not signed with this plugin's release key: ignored`);
-            return;
+        this.updateFrom = { site: site.value, key };
+        const shown = this.snap.update;
+        // A fresh, signed offer also puts away what a failed press said about
+        // the site before (an unsigned offer, a damaged download).
+        if (shown?.version !== offer.version || shown?.error || this.snap.upToDate !== null) {
+            this.update({ update: { version: offer.version, busy: false, error: null }, upToDate: null });
         }
-        this.updateFrom = { site: site.value, offer, key };
-        if (this.snap.update?.version !== offer.version) this.update({ update: { version: offer.version, busy: false, error: null } });
     }
 
     /**
-     * The panel's Update button: download the update, check it again, and
-     * hand it to Decky. Decky checks the file against the same SHA-256, asks
-     * the person to confirm, and reloads the plugin, which ends a call: so
-     * never during one.
+     * The panel's Update button: download what the download site offers
+     * NOW, check it, and hand it to Decky. Decky checks the file against the
+     * same SHA-256, asks the person to confirm, and reloads the plugin, which
+     * ends a call: so never during one.
+     *
+     * What the panel offers can be days old (a Deck that slept through a
+     * release still offers the one it saw last, which may be gone from the
+     * site), so the version installed is the one the site offers when Update
+     * is pressed, if it is newer than this one: never the same one, never an
+     * older one, and only with the release key's signature on that offer.
      */
     async installUpdate(): Promise<void> {
         const from = this.updateFrom;
         const u = this.snap.update;
         if (!from || !u || u.busy) return;
+        // Whatever a press writes is newer than what a look in flight read.
+        const answer = (patch: Partial<Snapshot>) => {
+            this.updateGen++;
+            this.update(patch);
+        };
         if (this.snap.state?.call) {
-            this.update({ update: { ...u, error: 'Leave the call first: updating restarts Púca.' } });
+            answer({ update: { ...u, error: UPDATE_LEAVE_CALL } });
             return;
         }
-        this.update({ update: { ...u, busy: true, error: null } });
-        const fail = (error: string) => this.update({ update: { version: u.version, busy: false, error } });
-        type Download = { path?: unknown; offer?: unknown };
+        answer({ update: { ...u, busy: true, error: null } });
+        let shown = u.version;
+        const fail = (error: string) => answer({ update: { version: shown, busy: false, error } });
+        type Download = { current?: unknown; offer?: unknown; path?: unknown };
         let r: CallResult<Download>;
         try {
+            // The version shown only goes in the backend's log.
             r = await call<[string, string], CallResult<Download>>('download_update', from.site, u.version);
         } catch (err) {
             fail(`The update could not be downloaded: ${String((err as Error)?.message ?? err)}`);
@@ -961,16 +1043,48 @@ class Controller {
             fail(`The update could not be downloaded: ${r.error}`);
             return;
         }
-        // The backend checked the file against this offer's SHA-256. The
-        // offer itself must still be the one the release key signed.
-        const offer = readOffer(r.value.offer);
-        if (!offer || offer.version !== u.version || typeof r.value.path !== 'string' || !await verifyOffer(offer, from.key)) {
-            fail('The download site changed the update while it was being fetched. Try again later.');
+        const current = parseVersion(r.value.current) ? r.value.current as string : null;
+        if (!current) {
+            fail('The update could not be downloaded: Púca could not tell which version this is.');
             return;
         }
+        const published = r.value.offer;
+        const offer = readOffer(published);
+        if (published !== null && published !== undefined && !offer) {
+            fail('The download site\'s update could not be read. Try again later.');
+            return;
+        }
+        if (!offer || !isNewer(offer.version, current)) {
+            // The site offers nothing newer than this version: up to date,
+            // whatever the panel offered before.
+            this.updateFrom = null;
+            answer({ update: null, upToDate: current });
+            return;
+        }
+        // The backend checked the file against this offer's SHA-256. The
+        // offer itself must be one the release key signed: this one, the
+        // site's own now, not what an earlier look saw.
+        if (!await verifyOffer(offer, from.key)) {
+            fail(`Your Púca server offers ${offer.version}, but it is not signed with this plugin's release key, so it was not installed.`);
+            return;
+        }
+        if (typeof r.value.path !== 'string') {
+            fail('The update could not be downloaded. Try again later.');
+            return;
+        }
+        // From here the panel shows the version being installed.
+        shown = offer.version;
+        answer({ update: { version: shown, busy: true, error: null } });
         const decky = (window as unknown as { DeckyBackend?: { call?: (route: string, ...args: unknown[]) => Promise<unknown> } }).DeckyBackend;
         if (typeof decky?.call !== 'function') {
             fail('This Decky Loader cannot install it from here. Install the new version from Decky\'s settings instead.');
+            return;
+        }
+        // A call can start while the update downloads. Decky's prompt would
+        // then come up during it, and confirming restarts Púca: the rule at
+        // the press holds here too.
+        if (this.snap.state?.call) {
+            fail(UPDATE_LEAVE_CALL);
             return;
         }
         try {
@@ -980,7 +1094,7 @@ class Controller {
             return;
         }
         // Decky now shows its own confirmation. If it is cancelled, the button is back.
-        this.update({ update: { version: u.version, busy: false, error: null } });
+        answer({ update: { version: shown, busy: false, error: null } });
     }
 }
 

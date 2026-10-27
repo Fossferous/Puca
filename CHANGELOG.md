@@ -4,6 +4,13 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Púca for Steam Deck: Update installs the newest version
+### Fixed
+
+- **Púca for Steam Deck: Update installs the newest version, even when the panel offered an older one.** A Deck that slept through a release kept offering the version it had seen last, and **Update** then said "the download site no longer offers that version" and installed nothing. Now **Update** installs the newest version your server's download site has when you press it, as long as it is newer than the one you have, and the panel shows the version it installs; if there is nothing newer after all, the panel says the plugin is up to date. The plugin also looks for a new version when you open its panel (if it last looked more than ten minutes before) and soon after the Deck wakes from sleep, not only every six hours, which on a Deck that sleeps could mean days. Only versions signed with your server's release key are installed, as before. This is Púca for Steam Deck 0.4.1, which comes separately from Púca: the panel offers it as an update once it is out, and the earlier versions install it from their own **Update**. If yours says the version is no longer offered, choose **Settings → Reload Púca** in its panel, wait half a minute and choose **Update** again. (docs/STEAM_DECK.md)
+
 ## 0.9.851 — 2026-10-26
 
 Remote control: the pointer moves over a still screen, a lid closed mid-session no longer freezes the picture, and only the screens you shared are ever shown; a PC you control keeps itself up to date

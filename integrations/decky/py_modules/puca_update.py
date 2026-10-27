@@ -29,7 +29,11 @@ MAX_MANIFEST_BYTES = 16 * 1024
 MAX_ZIP_BYTES = 32 * 1024 * 1024
 UPDATES_DIR = "updates"
 
-_VERSION = re.compile(r"\d{1,6}(\.\d{1,6}){0,3}")
+# [0-9], never \d: in Python \d is any Unicode digit, so "٠.٥.٠" would read as
+# 0.5.0, and int() takes those digits too. The frontend's \d (src/update.ts) is
+# ASCII only, so the backend would download a release the plugin can never
+# accept. scripts/verify_update.py reads versions through here as well.
+_VERSION = re.compile(r"[0-9]{1,6}(\.[0-9]{1,6}){0,3}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 

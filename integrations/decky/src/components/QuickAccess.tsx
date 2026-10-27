@@ -56,6 +56,14 @@ const muted: CSSProperties = { opacity: 0.7, fontSize: '0.9em' };
 
 export function QuickAccess() {
     const snap = useSnapshot();
+    const shown = useQuickAccessVisible();
+    // The panel stays mounted while the menu is closed. Opening it looks for
+    // a plugin update again if the last look is old (controller.panelShown);
+    // closing it, or leaving it for another plugin, counts as closing.
+    useEffect(() => {
+        controller.panelShown(shown);
+        return () => controller.panelShown(false);
+    }, [shown]);
     return (
         <>
             <Update snap={snap} />
@@ -68,16 +76,29 @@ export function QuickAccess() {
 /**
  * A newer plugin, signed with the release key, from the person's own Púca
  * server. Not shown during a call: installing it restarts Púca, so it waits
- * at the top of the panel until the call is over.
+ * at the top of the panel until the call is over. Update installs the newest
+ * the server offers when it is pressed, so the version named is what is
+ * available, not a promise; when there is nothing newer after all, the panel
+ * says so instead, until the menu closes.
  */
 function Update({ snap }: { snap: Snapshot }) {
     const u = snap.update;
-    if (!u || snap.state?.call) return null;
+    if (snap.state?.call) return null;
+    if (!u) {
+        if (!snap.upToDate) return null;
+        return (
+            <PanelSection>
+                <Note title="Púca for Steam Deck is up to date">
+                    {`You have ${snap.upToDate}, and your Púca server offers nothing newer.`}
+                </Note>
+            </PanelSection>
+        );
+    }
     return (
         <PanelSection title="Update">
             <PanelSectionRow>
                 <Field
-                    label={`Púca for Steam Deck ${u.version}`}
+                    label={`Update available: Púca for Steam Deck ${u.version}`}
                     description={u.error ?? 'A new version, from your Púca server. Decky asks you to confirm, then Púca restarts.'}
                     focusable={false}
                 />

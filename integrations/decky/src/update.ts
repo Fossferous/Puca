@@ -109,3 +109,73 @@ export async function verifyOffer(offer: UpdateOffer, key: UpdateKey, subtle: Su
         return false;
     }
 }
+
+/** The first look for an update once Púca is up, and the look after the Deck
+ *  wakes: a little later, because a Deck often wakes before its Wi-Fi does. */
+export const UPDATE_FIRST_CHECK_MS = 20 * 1000;
+/** Then a look every six hours, on the wall clock. */
+export const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
+/** Opening the panel, or waking the Deck, looks again once the download
+ *  site's last answer is older than this. */
+export const UPDATE_STALE_MS = 10 * 60 * 1000;
+/** How often the controller reads the wall clock. */
+export const UPDATE_TICK_MS = 60 * 1000;
+/** Two readings further apart than this slept between them: on the timers'
+ *  clock they were UPDATE_TICK_MS apart. The rest is room for a busy or
+ *  throttled timer, which can be a minute late without any sleep. */
+export const UPDATE_SLEPT_GAP_MS = 3 * 60 * 1000;
+/** However often the panel opens, looks are at least this far apart. */
+export const UPDATE_MIN_GAP_MS = 60 * 1000;
+
+/**
+ * When to look for an update, on the wall clock (Date.now()).
+ *
+ * A timer's clock stops while the Deck sleeps: a six-hour timer set before
+ * three days asleep goes off three days and six hours after it was set, and
+ * until then the panel offers what the last look saw. On the owner's Deck
+ * (October 2026) that was 0.3.0, days after 0.4.0 was out. So the controller
+ * reads the wall clock every UPDATE_TICK_MS and asks this: a jump between two
+ * readings is a sleep, and six hours are six hours of the day.
+ */
+export class UpdateClock {
+    private triedAt: number | null = null;
+    private answeredAt: number | null = null;
+    private tickAt: number | null = null;
+
+    /** A look starts. */
+    tried(now: number): void {
+        this.triedAt = now;
+    }
+
+    /** The download site answered it: with an offer, or with none. */
+    answered(now: number): void {
+        this.answeredAt = now;
+    }
+
+    /** The Quick Access panel opened: look now? Yes when the site's last
+     *  answer is more than UPDATE_STALE_MS old, or there is none yet. */
+    panelOpened(now: number): boolean {
+        return this.stale(now) && (this.triedAt === null || now - this.triedAt >= UPDATE_MIN_GAP_MS || now < this.triedAt);
+    }
+
+    /**
+     * A reading of the wall clock, every UPDATE_TICK_MS on the timers' clock.
+     * 'woke': the Deck slept since the last reading, and the last answer is
+     * stale: look in a little while. 'due': six hours since the last look.
+     * Null: nothing to do. Before the first look nothing is due: that one is
+     * Púca's start's (UPDATE_FIRST_CHECK_MS after it is up).
+     */
+    tick(now: number): 'woke' | 'due' | null {
+        const last = this.tickAt;
+        this.tickAt = now;
+        if (this.triedAt === null) return null;
+        // A clock set back counts as a jump too: nothing measured from before it holds.
+        const slept = last !== null && (now - last > UPDATE_SLEPT_GAP_MS || now < last);
+        if (slept && this.stale(now)) return 'woke';
+        return now - this.triedAt >= UPDATE_EVERY_MS || now < this.triedAt ? 'due' : null;
+    }
+
+    private stale(now: number): boolean {
+        return this.answeredAt === null || now - this.answeredAt > UPDATE_STALE_MS || now < this.answeredAt;
+    }
+}

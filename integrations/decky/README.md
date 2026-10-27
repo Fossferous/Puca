@@ -158,9 +158,26 @@ server: the page's `downloadSite()` (docs/EMBEDDING.md) names it, and the
 site publishes `steam-deck/puca-decky.json` beside the zips
 (`deploy/ops/dual-ship.sh decky`).
 
-- **When.** 20 seconds after Púca is up, then every six hours. A newer
-  version shows **Update** at the top of the panel, never during a call:
-  installing restarts Púca.
+- **When.** 20 seconds after Púca is up, then every six hours on the wall
+  clock, and when the Quick Access panel opens or the Deck wakes from sleep
+  if the site's last answer is more than 10 minutes old. Each look is one
+  manifest fetch. A timer cannot see a sleep, because its clock stops
+  meanwhile: a six-hour timer set before three days asleep goes off three
+  days and six hours later. So the frontend reads the wall clock once a
+  minute, and a jump between two readings is a sleep (`UpdateClock`,
+  `src/update.ts`); it looks 20 seconds after that, once the Wi-Fi is back.
+  A newer version shows **Update** at the top of the panel, never during a
+  call: installing restarts Púca.
+- **What Update installs.** What the site offers when it is pressed, if that
+  is newer than the installed version: never the same one, never an older
+  one. The panel's offer can be days old: a Deck that slept through a
+  release still offers the one it saw last. Up to 0.4.0 Update asked for
+  exactly that one, and refused when it was gone ("the download site no
+  longer offers that version"). Now the backend's `download_update` reads
+  the manifest again and downloads what it names, and the panel then shows
+  the version being installed. With nothing newer after all, the panel says
+  the plugin is up to date. A look still on its way when Update is pressed
+  read the site before the press did, so it changes nothing the press found.
 - **Signed.** The plugin runs inside Steam, with more reach than the page, so
   a server alone must not be able to change it. An update is installed only
   when it is signed with the release key whose public half the plugin carries
@@ -171,10 +188,12 @@ site publishes `steam-deck/puca-decky.json` beside the zips
   genuinely signed release being offered again as new.
 - **Installed by Decky.** The backend downloads the zip into the plugin's
   runtime directory and checks its SHA-256. The frontend checks the signature
-  again, then asks Decky to install the file with that same SHA-256, which
-  Decky checks once more. Decky shows its own confirmation, then reloads the
-  plugin. The download is a local file, so Decky reports nothing to its
-  plugin store about it.
+  on the offer the backend downloaded it for, then asks Decky to install the
+  file with that same SHA-256, which Decky checks once more. Not in a call:
+  that is checked when Update is pressed and again just before Decky is
+  asked, since a call can start while the update downloads. Decky shows its
+  own confirmation, then reloads the plugin. The download is a local file,
+  so Decky reports nothing to its plugin store about it.
 - **No key, no updates.** `npm run package` builds without one: fine on a
   test Deck, wrong for anything published, and `dual-ship.sh decky` refuses
   it.
@@ -203,7 +222,7 @@ it uploads anything.
 ```bash
 npm ci
 npm run typecheck
-npm test                 # vitest: settings, push-to-talk, the page protocol, sharing's rules
+npm test                 # vitest: settings, push-to-talk, the page protocol, sharing's rules, updates (the controller's own, with Decky stood in for)
 npm run test:py          # unittest: the backend's checks, the back-button reader, updates, the share's capture (aiohttp not needed)
 npm run package          # build + out/puca-decky-<version>.zip (+ .sha256), without an update key
 ```
