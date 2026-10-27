@@ -139,15 +139,19 @@ export const defaultSettings = {
     // streaming accounts (docs/STREAM_ONLY.md), which join this way anyway.
     joinWithoutMic: false,
     // Which shares in your call start playing without a Watch click
-    // (utils/autoWatch.ts): 'off' (every share waits for a click),
-    // 'stream-only' (shares from STREAM-ONLY accounts, docs/STREAM_ONLY.md;
-    // the default) or 'all' (every share in your voice channel). Once per
-    // share: closed, it stays closed until it starts again. In the chat view
-    // it opens in the picture-in-picture (the docked mini-player on a phone)
-    // rather than taking the screen; from the call's view it opens the
-    // stream view; a stream view already open just gains it, without moving
-    // its focus. Never while the browser asks to save data. Per device.
-    autoOpenStreams: 'stream-only' as AutoOpenStreams,
+    // (utils/autoWatch.ts): 'off' (every share waits for a click; the
+    // default), 'stream-only' (shares from STREAM-ONLY accounts,
+    // docs/STREAM_ONLY.md) or 'all' (every share in your voice channel).
+    // OFF BY DEFAULT, for every stream, a stream-only account's included:
+    // nothing starts playing unless the viewer chose that here. It shipped
+    // as 'stream-only' (0.9.845); migrateAutoOpenStreamsDefaultOff moves a
+    // stored 'stream-only' to 'off' once. Once per share: closed, it stays
+    // closed until it starts again. In the chat view it opens in the
+    // picture-in-picture (the docked mini-player on a phone) rather than
+    // taking the screen; from the call's view it opens the stream view; a
+    // stream view already open just gains it, without moving its focus.
+    // Never while the browser asks to save data. Per device.
+    autoOpenStreams: 'off' as AutoOpenStreams,
     // When true, images hosted on OTHER sites load automatically in messages.
     // Off by default: the URL is chosen by whoever SENT the message, so the
     // fetch hands that host your IP address, your user agent and the moment you
@@ -788,17 +792,56 @@ function migrateAutoOpenStreams(parsed: Partial<Settings> | null): Partial<Setti
     return rest;
 }
 
+/**
+ * One-time application of the new `autoOpenStreams: 'off'` default.
+ *
+ * Open streams automatically shipped (0.9.845) defaulting to 'stream-only',
+ * so a stream-only account's share started playing in everyone's call
+ * without a click. The owner's decision (2026-10-27): it is off by default,
+ * and that holds for every stream, not only an automated account's. Nothing
+ * starts playing unless the viewer chose it.
+ *
+ * Flipping the default alone reaches nobody who ever saved Settings: any
+ * write persists the WHOLE object, so such a profile carries an explicit
+ * 'stream-only', and stored values win over defaults. A stored 'stream-only'
+ * cannot be told apart from that old default, so it becomes 'off', once.
+ * 'all' was always a choice and is kept; 'off' already is off.
+ *
+ * Same contract as the other migrations: runs once, the marker is what makes
+ * a later 'stream-only' a real choice, and the marker must never be cleared.
+ * Runs after migrateAutoOpenStreams, so the profile it writes back carries no
+ * `autoWatchStreamOnly`.
+ */
+const AUTO_OPEN_STREAMS_OFF_MIGRATION_KEY = 'autoOpenStreamsDefaultOff_v1';
+
+function migrateAutoOpenStreamsDefaultOff(parsed: Partial<Settings> | null): Partial<Settings> | null {
+    if (localStorage.getItem(AUTO_OPEN_STREAMS_OFF_MIGRATION_KEY)) return parsed;
+    const changed = parsed != null && parsed.autoOpenStreams === 'stream-only';
+    const next: Partial<Settings> | null = changed ? { ...parsed, autoOpenStreams: 'off' } : parsed;
+    try {
+        // Marked done even with nothing stored, as with the others: left
+        // armed, it would undo the first deliberate "From stream-only
+        // accounts" on the next load.
+        localStorage.setItem(AUTO_OPEN_STREAMS_OFF_MIGRATION_KEY, '1');
+        if (changed) {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...defaultSettings, ...next }));
+            console.log('[Settings] Open streams automatically is now Off (the new default)');
+        }
+    } catch { /* storage full or blocked — the in-memory value below still applies */ }
+    return next;
+}
+
 export function loadSettings(): Settings {
     try {
         const stored = localStorage.getItem(SETTINGS_KEY);
         const parsed = stored ? (JSON.parse(stored) as Partial<Settings>) : null;
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
-        const migrated = migrateAutoOpenStreams(migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
+        const migrated = migrateAutoOpenStreamsDefaultOff(migrateAutoOpenStreams(migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
             migrateRequireMediaE2eeStandardPath(migrateRequireMediaE2ee(
                 migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
             )),
-        )) as Partial<Settings>);
+        )) as Partial<Settings>));
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {
         console.error('Failed to load settings:', e);

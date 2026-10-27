@@ -1,9 +1,11 @@
 /**
  * The auto-open rule (utils/autoWatch.ts; Settings → Voice & Video → Open
- * streams automatically): 'stream-only' (the default) opens a STREAM-ONLY
- * member's share, 'all' opens every share in the call, 'off' none; each once
- * per share; never your own; the viewer's choices (closing it, data saving)
- * hold. Every opening case has its negative control.
+ * streams automatically): 'off' (the default) opens nothing, 'stream-only'
+ * (From stream-only accounts, chosen) opens a STREAM-ONLY member's share,
+ * 'all' opens every share in the call; each once per share; never your own;
+ * the viewer's choices (closing it, data saving) hold. Every opening case has
+ * its negative control. That the default IS 'off', and what it opens in a
+ * call, is autoOpenStreamsSetting.test.ts (it needs the settings store).
  */
 import { describe, it, expect } from 'vitest';
 import { autoWatchPlan, type AutoWatchInput } from '../utils/autoWatch';
@@ -27,7 +29,7 @@ function input(over: Partial<AutoWatchInput> = {}): AutoWatchInput {
     };
 }
 
-describe("autoWatchPlan, 'stream-only' (the default)", () => {
+describe("autoWatchPlan, 'stream-only' (From stream-only accounts, chosen)", () => {
     it("opens a stream-only member's share and nobody else's", () => {
         expect(autoWatchPlan(input())).toEqual({ open: [BOT], adopt: [], forget: [] });
         // Negative control: an ordinary member's share alone opens nothing.
@@ -59,7 +61,7 @@ describe("autoWatchPlan, 'stream-only' (the default)", () => {
     });
 });
 
-describe("autoWatchPlan, 'all' and 'off'", () => {
+describe("autoWatchPlan, 'all' and 'off' (the default)", () => {
     it("'all' opens every share in the call, in the stream list's order, not your own", () => {
         expect(autoWatchPlan(input({ mode: 'all', streamers: [HUMAN, ME, BOT, OTHER] })).open).toEqual([HUMAN, BOT, OTHER]);
     });
@@ -78,5 +80,16 @@ describe("autoWatchPlan, 'all' and 'off'", () => {
     it("'off' opens nothing, not even a stream-only account's, but still forgets ended shares", () => {
         expect(autoWatchPlan(input({ mode: 'off' })).open).toEqual([]);
         expect(autoWatchPlan(input({ mode: 'off', streamers: [], handled: new Set([BOT]) })).forget).toEqual([BOT]);
+    });
+
+    it("any other stored value (a hand edit, a newer build's mode) opens nothing, as Off does", () => {
+        // The Settings select shows such a value as its first option, Off.
+        for (const mode of ['friends', '', null, undefined] as unknown as AutoWatchInput['mode'][]) {
+            const plan = autoWatchPlan(input({ mode }));
+            expect(plan.open, String(mode)).toEqual([]);
+            expect(plan.adopt, String(mode)).toEqual([]);
+        }
+        // It still forgets an ended share, as Off does.
+        expect(autoWatchPlan(input({ mode: 'friends' as unknown as AutoWatchInput['mode'], streamers: [], handled: new Set([BOT]) })).forget).toEqual([BOT]);
     });
 });

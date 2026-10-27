@@ -546,18 +546,20 @@ of your share, at up to 8 Mbps each, whatever the quality.
 
 ### Viewing Streams
 When someone shares, their entry in the voice view shows a **LIVE** badge and a
-**Watch stream** button. A share from a stream-only account (an automated
+**Watch stream** button, and the stream plays once you click it. By default
+that holds for every stream, a stream-only account's included (an automated
 account a server owner has set up; see
-[Stream-only accounts](STREAM_ONLY.md)) starts playing by itself instead:
-from the call's view as the stream view, from the chat in the small player.
-**Settings → Voice & Video → Open streams automatically** decides which
-streams do that: **Off**, **From stream-only accounts** (the default) or
-**All streams** in your voice channel. Each opens once: close it and it stays
-closed until it starts again. A stream that opens while you are already
-watching another is added beside it without moving your view, and nothing
-opens by itself while your browser asks to save data. The chat header also gains a **Watch live streams**
-button. Several streams can be watched at once; **Switch to Grid View** /
-**Switch to Focus View** changes the layout.
+[Stream-only accounts](STREAM_ONLY.md)). To have streams start playing by
+themselves, choose which in **Settings → Voice & Video → Open streams
+automatically**: **Off** (the default), **From stream-only accounts** or
+**All streams** in your voice channel. Such a stream opens from the call's
+view as the stream view, and from the chat in the small player. Each opens
+once: close it and it stays closed until it starts again. A stream that opens
+while you are already watching another is added beside it without moving your
+view, and nothing opens by itself while your browser asks to save data. The
+chat header also gains a **Watch live streams** button. Several streams can be
+watched at once; **Switch to Grid View** / **Switch to Focus View** changes
+the layout.
 
 Opening a text channel or a DM while you watch keeps the stream in a small
 player over the chat (docked under the header on a phone). Every stream you

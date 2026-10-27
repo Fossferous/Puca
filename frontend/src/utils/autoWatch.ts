@@ -1,9 +1,10 @@
 /**
  * Which live shares to start watching without a click (Settings → Voice &
- * Video → Open streams automatically; docs/STREAM_ONLY.md): with 'stream-only'
- * (the default) those of STREAM-ONLY members of the call, with 'all' every
- * share in the call, with 'off' none; once per share. Pure, so the rule is
- * testable without a call; Chat.tsx runs it on every stream-state change.
+ * Video → Open streams automatically; docs/STREAM_ONLY.md): with 'off' (the
+ * default) none, with 'stream-only' those of STREAM-ONLY members of the
+ * call, with 'all' every share in the call; once per share. Pure, so the
+ * rule is testable without a call; Chat.tsx runs it on every stream-state
+ * change.
  *
  * Several at once (joining a call with two shares live) open together, in the
  * stream list's order. Opening one never moves the viewer: the stage gains it
@@ -47,7 +48,12 @@ export interface AutoWatchPlan {
 export function autoWatchPlan(i: AutoWatchInput): AutoWatchPlan {
     const live = new Set(i.streamers);
     const forget = [...i.handled].filter(id => !live.has(id));
-    if (i.mode === 'off' || i.saveData || i.viewerIsStreamOnly) return { open: [], adopt: [], forget };
+    // Only the two choices that open anything do. 'off', and any other value
+    // a stored profile may hold (a hand edit, a newer build's mode after a
+    // downgrade), open nothing: the Settings select shows such a value as
+    // its first option, Off, and Off is what it must then do.
+    const opens = i.mode === 'stream-only' || i.mode === 'all';
+    if (!opens || i.saveData || i.viewerIsStreamOnly) return { open: [], adopt: [], forget };
     const wanted = (id: number) => i.mode === 'all' || i.isStreamOnly(id);
     const fresh = i.streamers.filter(id => id !== i.me && wanted(id) && !i.handled.has(id));
     return {

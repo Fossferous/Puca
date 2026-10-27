@@ -155,30 +155,36 @@ from the same cap it enforces; no client works it out from role bits.
   channel" for real people only, never for a stream-only member. The join and
   leave chime (and a member's own join/leave sound, when they have one) is a
   separate path and plays as before. Púca has no join/leave toasts.
-- **Its stream starts by itself.** When a stream-only member is sharing in
-  your call (you join while it is live, or it goes live while you are there),
-  your client starts watching it without a Watch click, once per share: close
-  it, and it stays closed until its next share. From the call's view it opens
-  the stream view; from the chat it opens in the small player over the chat
+- **Its stream waits for your click, like anyone's, unless you choose
+  otherwise.** Out of the box no stream starts playing by itself, a
+  stream-only account's included: its share shows the same **LIVE** badge and
+  **Watch stream** button as anyone else's. Choose **From stream-only
+  accounts** (next point) and, when a stream-only member is sharing in your
+  call (you join while it is live, or it goes live while you are there), your
+  client starts watching it without a Watch click, once per share: close it,
+  and it stays closed until its next share. From the call's view it opens the
+  stream view; from the chat it opens in the small player over the chat
   (docked under the header on a phone), so nothing you are reading or typing
   is taken away. It plays at that stream's own volume and mute and the master
-  Output Volume, like any stream you watch. Everyone else's shares wait for a
-  click, unless you choose **All streams** (next point).
+  Output Volume, like any stream you watch. Everyone else's shares still wait
+  for a click, unless you choose **All streams**.
 - **The control**: **Settings → Voice & Video → Open streams automatically**,
-  per device, with three choices: **Off** (every stream waits for your
-  click), **From stream-only accounts** (the default, described above) and
-  **All streams** (every share in your voice channel opens the same way, once
-  per share). A stream costs data like any other, so a phone on mobile data
-  may want it off; nothing opens by itself while the browser asks to save data
+  per device, with three choices: **Off** (the default: every stream waits
+  for your click), **From stream-only accounts** (described above) and **All
+  streams** (every share in your voice channel opens the same way, once per
+  share). It used to default to **From stream-only accounts**; the update
+  that made Off the default switches a device that still has that to Off,
+  once, and a choice made after that is kept. A stream costs data like any
+  other; nothing opens by itself while the browser asks to save data
   (Chromium's Data Saver).
-- **Several at once.** Shares that are live when you join open together, in
-  the order the call lists them; one that starts later is added beside the
-  ones already open. Opening one never takes you anywhere: a stream view you
-  are already in gains it as another tile without moving its focus (in Focus
-  View the stream you were watching stays in the spotlight), and the small
-  player keeps showing the stream it was showing. Only from the chat (into
-  the small player) or the call's view (into the stream view) does a first
-  stream appear on its own.
+- **Several at once.** With either choice on, shares that are live when you
+  join open together, in the order the call lists them; one that starts
+  later is added beside the ones already open. Opening one never takes you
+  anywhere: a stream view you are already in gains it as another tile
+  without moving its focus (in Focus View the stream you were watching stays
+  in the spotlight), and the small player keeps showing the stream it was
+  showing. Only from the chat (into the small player) or the call's view
+  (into the stream view) does a first stream appear on its own.
 - **Autoplay.** The picture is a muted video and always starts. A browser
   starts a stream's sound only after you have used the page; you almost always
   have (you clicked to join the call), but if the call came back on its own
@@ -209,18 +215,27 @@ rule it pins is removed):
 - how it shows up in the call: the room is told `stream_only` (the socket
   test above, and a third fixture); the auto-watch rule (`autoWatch.test.ts`:
   stream-only members only, once per share, not your own, the setting, data
-  saving); and the wiring that leaves these members out of spoken
-  announcements and opens their share in the small player from the chat
-  (`streamOnlyWiring.test.ts`).
+  saving); the setting itself (`autoOpenStreamsSetting.test.ts`: Off by
+  default on a new device, on an old one that never saved a setting and on
+  one saved with the old default; the one-time switch, which keeps **All
+  streams**, **Off** and any choice made after it; and, fed to the rule as
+  the chat feeds it, the default opening nothing while the two other choices
+  open what they say); and the wiring that leaves these members out of
+  spoken announcements and opens their share in the small player from the
+  chat (`streamOnlyWiring.test.ts`).
 
 Verified live by `frontend/e2e/stream-only-live.mjs` on a mesh call, in
 real browsers run with `--mute-audio` and the owner's `speechSynthesis`
 replaced by a recorder (nothing is ever spoken): the account's joining and
 leaving is never announced while a person's joining and leaving is (the
-control); its share opens by itself in the owner's small player while the
-chat stays, for a person joining while it is live, and in a 390x844 phone's
-docked player; a person's share does not open by itself (the control); and a
-closed share stays closed.
+control); with **Open streams automatically** at its default, Off, its share
+does not open by itself, for the owner or for a person joining while it is
+live (the negative control: both clients have the share live and know the
+account is stream-only); once they choose **From stream-only accounts** it
+does, in the owner's small player while the chat stays, for that person at
+once, and in the docked player of a 390x844 phone that chose it in the
+Settings select; a person's share does not open by itself (the control); and
+a closed share stays closed.
 
 Not verified by an automated gate: a real browser streaming into a real SFU
 call under a stream-only role (LiveKit is not part of the test rig). The SFU
