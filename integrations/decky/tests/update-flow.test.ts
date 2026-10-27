@@ -22,6 +22,10 @@ import { publicJwk, signRelease } from '../scripts/signing.mjs';
 type Handler = (payload: unknown) => void;
 type Route = (...args: unknown[]) => unknown;
 
+// Above the waits below (10 s, for signature checks on a busy machine), so a
+// failing wait reports what it waited for instead of a timeout.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const deck = vi.hoisted(() => ({
     handlers: new Map<string, (payload: unknown) => void>(),
     routes: {} as Record<string, (...args: unknown[]) => unknown>,
@@ -37,8 +41,31 @@ vi.mock('@decky/api', () => ({
     removeEventListener: (event: string) => { deck.handlers.delete(event); },
     toaster: { toast: () => ({ dismiss() {} }) },
 }));
-vi.mock('@decky/ui', () => ({ Navigation: { Navigate() {}, CloseSideMenus() {} }, Router: {} }));
-vi.mock('react', () => ({ createElement: () => null }));
+// Steam's components as plain names, and React as far as the panel needs it to
+// be called as a function: the Update section is rendered by calling it.
+vi.mock('@decky/ui', () => ({
+    Navigation: { Navigate() {}, CloseSideMenus() {} }, Router: {},
+    ButtonItem: 'ButtonItem', DialogButton: 'DialogButton', DropdownItem: 'DropdownItem', Field: 'Field',
+    Focusable: 'Focusable', PanelSection: 'PanelSection', PanelSectionRow: 'PanelSectionRow',
+    SteamSpinner: 'SteamSpinner', TextField: 'TextField', ToggleField: 'ToggleField',
+    useQuickAccessVisible: () => true,
+}));
+vi.mock('react', () => ({
+    createElement: () => null,
+    Fragment: (p: { children?: unknown }) => p.children ?? null,
+    useState: (v: unknown) => [typeof v === 'function' ? (v as () => unknown)() : v, () => {}],
+    useEffect: () => {},
+    useRef: (v: unknown) => ({ current: v }),
+}));
+vi.mock('react/jsx-runtime', () => ({
+    jsx: (type: unknown, props: unknown) => ({ type, props }),
+    jsxs: (type: unknown, props: unknown) => ({ type, props }),
+    Fragment: (p: { children?: unknown }) => p.children ?? null,
+}));
+vi.mock('react/jsx-dev-runtime', () => ({
+    jsxDEV: (type: unknown, props: unknown) => ({ type, props }),
+    Fragment: (p: { children?: unknown }) => p.children ?? null,
+}));
 vi.mock('../src/browserView', () => ({
     PucaBrowserView: class {
         create() { return true; }
@@ -48,7 +75,10 @@ vi.mock('../src/browserView', () => ({
         activate() {}
     },
 }));
-vi.mock('../src/components/icons', () => ({ PucaIcon: () => null }));
+vi.mock('../src/components/icons', () => ({
+    PucaIcon: () => null, PucaGlyph: () => null, MicIcon: () => null, MicOffIcon: () => null, NoMicIcon: () => null,
+    HeadphonesIcon: () => null, HeadphonesOffIcon: () => null, LeaveIcon: () => null, SpeakingDot: () => null,
+}));
 
 const pem = () => generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
 const RELEASE = pem();
@@ -87,6 +117,37 @@ const shownVersion = () => controller.getSnapshot().update?.version ?? null;
 const shows = (version: string) => vi.waitFor(() => expect(shownVersion()).toBe(version), { timeout: 10_000 });
 /** Real turns of the event loop, for a look that should NOT have started. */
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)); };
+/** The look in flight, if any, has finished: for one whose answer must change nothing. */
+const lookDone = () => vi.waitFor(
+    () => expect((controller as unknown as { updateLooking: boolean }).updateLooking).toBe(false), { timeout: 10_000 },
+);
+/** An answer from the backend that the test hands over when it chooses. */
+function later<T>() {
+    let give!: (value: T) => void;
+    const answer = new Promise<T>(resolve => { give = resolve; });
+    return { answer, give };
+}
+const STATE = { apiVersion: 1, appVersion: '0.9.851', signedIn: true, user: { id: 1, username: 'deck' }, servers: [], call: null };
+const IN_A_CALL = { ...STATE, call: { serverId: 's1', channelId: 42, channelName: 'Lounge', connected: true, members: [] } };
+
+/** Text the panel shows: function components called, every label, title, description and child collected. */
+function texts(node: unknown, out: string[] = []): string[] {
+    if (node === null || node === undefined || typeof node === 'boolean') return out;
+    if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
+    if (Array.isArray(node)) { node.forEach(n => texts(n, out)); return out; }
+    const el = node as { type: unknown; props?: Record<string, unknown> };
+    if (typeof el.type === 'function') return texts((el.type as (p: unknown) => unknown)(el.props ?? {}), out);
+    for (const k of ['title', 'label', 'description', 'children']) texts(el.props?.[k], out);
+    return out;
+}
+
+/** The Update section of the Quick Access panel as it is rendered now. */
+async function updateSection(): Promise<string[]> {
+    const { QuickAccess } = await import('../src/components/QuickAccess');
+    const sections = (QuickAccess() as unknown as { props: { children: { type: { name?: string } }[] } }).props.children;
+    expect(sections[0].type.name, 'the Update section comes first').toBe('Update');
+    return texts(sections[0]);
+}
 
 beforeEach(async () => {
     // setImmediate stays real: settle() needs it.
@@ -101,12 +162,13 @@ beforeEach(async () => {
         plugin_version: () => INSTALLED,
         attach: () => ({ ok: true, value: null }),
         page_call: (method: unknown) => {
-            if (method === 'getState') {
-                return { ok: true, value: { apiVersion: 1, appVersion: '0.9.851', signedIn: true, user: { id: 1, username: 'deck' }, servers: [], call: null } };
-            }
+            if (method === 'getState') return { ok: true, value: STATE };
             if (method === 'downloadSite') return { ok: true, value: SITE };
             return { ok: true, value: null };
         },
+        // What a call asks of the backend (the controls, the Deck's microphone).
+        watch_input: () => ({ ok: true, value: null }),
+        mic_for_call: () => ({ ok: true, value: { changed: false } }),
         check_update: () => ({ ok: true, value: { current: INSTALLED, key: KEY, offer: published } }),
         download_update: downloadAsMainPyDoes,
     };
@@ -183,6 +245,92 @@ describe('Update installs what the download site offers when it is pressed', () 
         controller.panelShown(false);
         expect(controller.getSnapshot().upToDate).toBeNull();
     });
+
+    it('never a download whose offer cannot be read, and that is no "up to date" either', async () => {
+        deck.routes.download_update = () => ({ ok: true, value: { current: INSTALLED, offer: { version: '0.4.1' }, path: `${UPDATES}/x.zip` } });
+        await controller.installUpdate();
+        expect(installs).toEqual([]);
+        expect(controller.getSnapshot().upToDate).toBeNull();
+        expect(controller.getSnapshot().update).toMatchObject({ busy: false, error: expect.stringContaining('could not be read') });
+    });
+
+    it('never a download that names no file', async () => {
+        published = signed('0.4.1');
+        deck.routes.download_update = () => ({ ok: true, value: { current: INSTALLED, offer: published, path: 42 } });
+        await controller.installUpdate();
+        expect(installs).toEqual([]);
+        expect(controller.getSnapshot().update).toMatchObject({ busy: false, error: expect.stringContaining('could not be downloaded') });
+    });
+
+    it('never during a call, though the call started while the update downloaded', async () => {
+        published = signed('0.4.1');
+        const download = later<unknown>();
+        deck.routes.download_update = () => download.answer;
+        const pressed = controller.installUpdate();
+        await settle();
+        deck.handlers.get('puca_page')!({ type: 'state', state: IN_A_CALL });
+        expect(controller.getSnapshot().state?.call, 'in a call now').toBeTruthy();
+        download.give(downloadAsMainPyDoes());
+        await pressed;
+        // Decky's prompt would have come up in the call, and confirming it restarts Púca.
+        expect(installs).toEqual([]);
+        expect(controller.getSnapshot().update).toEqual({ version: '0.4.1', busy: false, error: 'Leave the call first: updating restarts Púca.' });
+    });
+});
+
+describe('a press of Update and a look at the same time', () => {
+    beforeEach(async () => {
+        // The last answer is stale: opening the menu looks again.
+        await vi.advanceTimersByTimeAsync(UPDATE_STALE_MS + 60_000);
+    });
+
+    it('a slow look that read the site before a press does not undo its "up to date"', async () => {
+        const site = later<unknown>();
+        deck.routes.check_update = () => site.answer;
+        controller.panelShown(true);
+        await settle();
+        expect(looks()).toBe(2);
+        // The site goes back to the version installed, and a press reads that.
+        published = signed(INSTALLED);
+        await controller.installUpdate();
+        expect(controller.getSnapshot()).toMatchObject({ update: null, upToDate: INSTALLED });
+        // The look's answer lands only now: what the site offered before, 0.4.2.
+        site.give({ ok: true, value: { current: INSTALLED, key: KEY, offer: signed('0.4.2') } });
+        await lookDone();
+        expect(controller.getSnapshot()).toMatchObject({ update: null, upToDate: INSTALLED });
+    });
+
+    it('nor does its "nothing newer" take Update away while Decky asks', async () => {
+        const site = later<unknown>();
+        deck.routes.check_update = () => site.answer;
+        controller.panelShown(true);
+        await settle();
+        published = signed('0.4.1');
+        await controller.installUpdate();
+        expect(installs.map(a => a[3]), "Decky's prompt is up").toEqual(['0.4.1']);
+        // The look read the site before 0.4.1 was on it.
+        site.give({ ok: true, value: { current: INSTALLED, key: KEY, offer: signed(INSTALLED) } });
+        await lookDone();
+        // A cancelled prompt must find the button where it was.
+        expect(controller.getSnapshot().update).toEqual({ version: '0.4.1', busy: false, error: null });
+    });
+
+    it('a look that lands while Update is under way leaves the panel to it', async () => {
+        published = signed('0.4.1');
+        const download = later<unknown>();
+        deck.routes.download_update = () => download.answer;
+        const pressed = controller.installUpdate();
+        await settle();
+        expect(controller.getSnapshot().update).toMatchObject({ busy: true });
+        // The menu opens while it downloads: a look that starts after the press.
+        controller.panelShown(true);
+        await lookDone();
+        expect(looks()).toBe(2);
+        expect(controller.getSnapshot().update).toEqual({ version: '0.3.0', busy: true, error: null });
+        download.give(downloadAsMainPyDoes());
+        await pressed;
+        expect(installs.map(a => a[3])).toEqual(['0.4.1']);
+    });
 });
 
 describe('the panel looks again when its offer may be stale', () => {
@@ -233,6 +381,43 @@ describe('the panel looks again when its offer may be stale', () => {
         await settle();
         expect(looks()).toBe(2);
     });
+
+    it('and at most once a minute while the site does not answer, opened a few seconds apart', async () => {
+        // No answer, so every opening finds the last one stale.
+        deck.routes.check_update = () => ({ ok: false, error: 'could not reach the download site (ClientConnectorError)' });
+        await vi.advanceTimersByTimeAsync(UPDATE_STALE_MS + 60_000);
+        for (let i = 0; i < 5; i++) {
+            controller.panelShown(true);
+            await lookDone();
+            controller.panelShown(false);
+            await vi.advanceTimersByTimeAsync(10_000);
+        }
+        expect(looks(), 'five openings in 50 seconds').toBe(2);
+        await vi.advanceTimersByTimeAsync(10_000);
+        controller.panelShown(true);
+        await lookDone();
+        expect(looks(), 'a minute after the last look').toBe(3);
+    });
+
+    it('a look that finds the site offering an unsigned version takes the older offer away too', async () => {
+        // Update installs what the site offers now, so the 0.3.0 shown could not be had.
+        published = signed('0.4.1', STRANGER);
+        // The six-hour look (the reading after six hours since the last one).
+        await vi.advanceTimersByTimeAsync(UPDATE_EVERY_MS + UPDATE_TICK_MS);
+        await vi.waitFor(() => expect(controller.getSnapshot().update).toBeNull(), { timeout: 10_000 });
+        expect(looks()).toBe(2);
+    });
+
+    it('a look that finds a signed offer again puts away what a failed press said', async () => {
+        published = { ...signed('0.4.1'), signature: 'AAAA' };
+        await controller.installUpdate();
+        expect(controller.getSnapshot().update).toMatchObject({ version: '0.3.0', error: expect.stringContaining('not signed') });
+        // The site goes back to the signed 0.3.0.
+        published = signed('0.3.0');
+        await vi.advanceTimersByTimeAsync(UPDATE_STALE_MS + 60_000);
+        controller.panelShown(true);
+        await vi.waitFor(() => expect(controller.getSnapshot().update).toEqual({ version: '0.3.0', busy: false, error: null }), { timeout: 10_000 });
+    });
 });
 
 describe('when to look, on the wall clock (UpdateClock)', () => {
@@ -257,11 +442,52 @@ describe('when to look, on the wall clock (UpdateClock)', () => {
         expect(c.tick(t0 - 60 * 60_000)).toBe('woke');
     });
 
+    it('a clock set back behind the last look, though not behind the last reading, makes a look due', () => {
+        const c = new UpdateClock();
+        c.tick(t0);
+        c.tried(t0 + 30_000);
+        c.answered(t0 + 31_000);
+        // Ten seconds after the last reading by the clock, but before the look:
+        // six hours since it can no longer be measured.
+        expect(c.tick(t0 + 10_000)).toBe('due');
+        // POSITIVE CONTROL: a minute on, as the clock should go, nothing is due.
+        const d = new UpdateClock();
+        d.tick(t0);
+        d.tried(t0 + 30_000);
+        d.answered(t0 + 31_000);
+        expect(d.tick(t0 + 60_000)).toBeNull();
+    });
+
     it('the clock asks for nothing before the first look, which is the start\'s; an opened panel may', () => {
         const c = new UpdateClock();
         c.tick(t0);
         expect(c.tick(t0 + 3 * 24 * 60 * 60_000)).toBeNull();
         expect(c.panelOpened(t0)).toBe(true);
+    });
+});
+
+describe('the Update section, rendered', () => {
+    it('names what is available, and the button says only "Update"', async () => {
+        const shown = await updateSection();
+        expect(shown).toContain('Update available: Púca for Steam Deck 0.3.0');
+        expect(shown.filter(t => t === 'Update'), 'the section title and the button').toHaveLength(2);
+        expect(shown.some(t => /up to date/.test(t))).toBe(false);
+    });
+
+    it('says the plugin is up to date when Update found nothing newer, until the menu closes', async () => {
+        published = signed(INSTALLED);
+        await controller.installUpdate();
+        expect(await updateSection()).toEqual([
+            'Púca for Steam Deck is up to date',
+            `You have ${INSTALLED}, and your Púca server offers nothing newer.`,
+        ]);
+        controller.panelShown(false);
+        expect(await updateSection()).toEqual([]);
+    });
+
+    it('shows nothing during a call', async () => {
+        deck.handlers.get('puca_page')!({ type: 'state', state: IN_A_CALL });
+        expect(await updateSection()).toEqual([]);
     });
 });
 

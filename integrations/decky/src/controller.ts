@@ -121,6 +121,8 @@ const JOIN_WAIT_MS = 8000;
 const LEARN_TIMEOUT_S = 15;
 /** "Live now" looks at this many of the person's servers at most. */
 const LIVE_SERVERS_MAX = 25;
+/** Installing an update reloads the plugin, which ends a call. */
+const UPDATE_LEAVE_CALL = 'Leave the call first: updating restarts Púca.';
 
 const randomId = (): string => {
     const a = new Uint8Array(12);
@@ -184,6 +186,10 @@ class Controller {
     private updateTick: ReturnType<typeof setInterval> | null = null;
     private updateClock = new UpdateClock();
     private updateLooking = false;
+    /** Bumped whenever a press of Update writes to the panel. A look that
+     *  began before then read the site before the press did, so when it
+     *  lands it writes nothing: its answer is the older one. */
+    private updateGen = 0;
     /** Where the offered update comes from, and the key that checked it. */
     private updateFrom: { site: string; key: UpdateKey } | null = null;
     private noKeyLogged = false;
@@ -946,6 +952,7 @@ class Controller {
      * no plugin, or a build without a key.
      */
     private async lookForUpdate(): Promise<void> {
+        const gen = this.updateGen;
         const site = await this.pageCall<string | null>('downloadSite');
         if (!site.ok || typeof site.value !== 'string') return;
         type Check = { current?: unknown; key?: unknown; offer?: unknown };
@@ -974,8 +981,10 @@ class Controller {
             signed = await verifyOffer(offer, key);
             if (!signed) console.warn(`[Púca] ${site.value} offers ${offer.version}, but it is not signed with this plugin's release key: ignored`);
         }
-        // An Update under way fetches what the site offers by itself.
-        if (this.snap.update?.busy) return;
+        // A press of Update since this look began read the site after it did,
+        // and one under way reads it by itself: either way the panel is the
+        // press's, not this look's.
+        if (gen !== this.updateGen || this.snap.update?.busy) return;
         if (!offer || !signed) {
             // Nothing newer, or nothing this plugin may install: no Update.
             // Not for what an earlier look saw either, which Update can no
@@ -985,7 +994,10 @@ class Controller {
             return;
         }
         this.updateFrom = { site: site.value, key };
-        if (this.snap.update?.version !== offer.version || this.snap.upToDate !== null) {
+        const shown = this.snap.update;
+        // A fresh, signed offer also puts away what a failed press said about
+        // the site before (an unsigned offer, a damaged download).
+        if (shown?.version !== offer.version || shown?.error || this.snap.upToDate !== null) {
             this.update({ update: { version: offer.version, busy: false, error: null }, upToDate: null });
         }
     }
@@ -1006,13 +1018,18 @@ class Controller {
         const from = this.updateFrom;
         const u = this.snap.update;
         if (!from || !u || u.busy) return;
+        // Whatever a press writes is newer than what a look in flight read.
+        const answer = (patch: Partial<Snapshot>) => {
+            this.updateGen++;
+            this.update(patch);
+        };
         if (this.snap.state?.call) {
-            this.update({ update: { ...u, error: 'Leave the call first: updating restarts Púca.' } });
+            answer({ update: { ...u, error: UPDATE_LEAVE_CALL } });
             return;
         }
-        this.update({ update: { ...u, busy: true, error: null } });
+        answer({ update: { ...u, busy: true, error: null } });
         let shown = u.version;
-        const fail = (error: string) => this.update({ update: { version: shown, busy: false, error } });
+        const fail = (error: string) => answer({ update: { version: shown, busy: false, error } });
         type Download = { current?: unknown; offer?: unknown; path?: unknown };
         let r: CallResult<Download>;
         try {
@@ -1041,7 +1058,7 @@ class Controller {
             // The site offers nothing newer than this version: up to date,
             // whatever the panel offered before.
             this.updateFrom = null;
-            this.update({ update: null, upToDate: current });
+            answer({ update: null, upToDate: current });
             return;
         }
         // The backend checked the file against this offer's SHA-256. The
@@ -1057,10 +1074,17 @@ class Controller {
         }
         // From here the panel shows the version being installed.
         shown = offer.version;
-        this.update({ update: { version: shown, busy: true, error: null } });
+        answer({ update: { version: shown, busy: true, error: null } });
         const decky = (window as unknown as { DeckyBackend?: { call?: (route: string, ...args: unknown[]) => Promise<unknown> } }).DeckyBackend;
         if (typeof decky?.call !== 'function') {
             fail('This Decky Loader cannot install it from here. Install the new version from Decky\'s settings instead.');
+            return;
+        }
+        // A call can start while the update downloads. Decky's prompt would
+        // then come up during it, and confirming restarts Púca: the rule at
+        // the press holds here too.
+        if (this.snap.state?.call) {
+            fail(UPDATE_LEAVE_CALL);
             return;
         }
         try {
@@ -1070,7 +1094,7 @@ class Controller {
             return;
         }
         // Decky now shows its own confirmation. If it is cancelled, the button is back.
-        this.update({ update: { version: shown, busy: false, error: null } });
+        answer({ update: { version: shown, busy: false, error: null } });
     }
 }
 

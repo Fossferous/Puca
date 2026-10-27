@@ -61,6 +61,11 @@ def _offer(version="0.2.0", sha="a" * 64, sig="c2lnbmF0dXJl"):
     return {"version": version, "file": f"puca-decky-{version}.zip", "sha256": sha, "signature": sig}
 
 
+# 0.5.0 in Arabic-Indic and in full-width digits, and a mix: digits to
+# Python's \d and to int(), never to the frontend.
+OTHER_DIGITS = ("\u0660.\u0665.\u0660", "\uff10.\uff15.\uff10", "0.\u0665")
+
+
 class VersionTests(unittest.TestCase):
     def test_numbers_not_letters(self):
         self.assertTrue(pu.is_newer("0.2.0", "0.1.9"))
@@ -73,9 +78,16 @@ class VersionTests(unittest.TestCase):
         self.assertFalse(pu.is_newer("0.2.0", "0.2.0"))
 
     def test_anything_else_is_never_newer(self):
-        for bad in ("dev", "", "0.2.0-beta", "v0.2.0", "1.2.3.4.5", None, 3):
+        for bad in ("dev", "", "0.2.0-beta", "v0.2.0", "1.2.3.4.5", None, 3) + OTHER_DIGITS:
             self.assertFalse(pu.is_newer(bad, "0.1.0"), bad)
             self.assertFalse(pu.is_newer("9.9.9", bad), bad)
+
+    def test_only_ascii_digits_make_a_version(self):
+        # Python's \d is any Unicode digit, and int() reads them too; the
+        # frontend's \d is ASCII only (src/update.ts), and so is this now.
+        for bad in OTHER_DIGITS:
+            self.assertIsNone(pu.parse_version(bad), ascii(bad))
+        self.assertEqual(pu.parse_version("0.5.0"), (0, 5, 0))
 
 
 class SiteTests(unittest.TestCase):
@@ -110,11 +122,21 @@ class ManifestTests(unittest.TestCase):
             _offer(sig="A" * 1025),
             {k: v for k, v in _offer().items() if k != "signature"},
         ]
+        bad += [_offer(version=v) for v in OTHER_DIGITS]
         for o in bad:
             self.assertIsNone(pu.read_manifest(json.dumps(o).encode()), o)
         self.assertIsNone(pu.read_manifest(b"[1]"))
         self.assertIsNone(pu.read_manifest(b"\xff\xfe"))
         self.assertIsNone(pu.read_manifest(b" " * (pu.MAX_MANIFEST_BYTES + 1)))
+
+    def test_the_release_check_refuses_other_digits_too(self):
+        # verify_update.py reads the manifest through puca_update.
+        with tempfile.TemporaryDirectory() as d:
+            manifest = os.path.join(d, "puca-decky.json")
+            with open(manifest, "w", encoding="utf-8") as f:
+                json.dump(_offer(version=OTHER_DIGITS[0]), f)
+            self.assertEqual(vu.check(os.path.join(d, "unread.zip"), manifest),
+                             [f"{manifest} is not a well-formed update manifest"])
 
 
 class FilesTests(unittest.TestCase):
@@ -263,6 +285,16 @@ class DownloadTests(unittest.TestCase):
                 # Even asked for by name: no panel can make it download one.
                 r = self.download(installed="0.4.1", shown=offered)
                 self.assertEqual(r, {"ok": True, "value": {"current": "0.4.1", "offer": offer, "path": None}})
+                self.assertEqual(self.fetched, [pu.manifest_url(SITE)], "the zip is never fetched")
+                self.assertEqual(self.saved(), [])
+
+    def test_a_version_in_other_digits_is_refused_before_any_download(self):
+        # The frontend could never accept it, so its zip (up to 32 MB) is not fetched.
+        for version in OTHER_DIGITS:
+            with self.subTest(version=ascii(version)):
+                self.publish(version)
+                r = self.download(installed="0.2.0", shown="0.3.0")
+                self.assertFalse(r["ok"], r)
                 self.assertEqual(self.fetched, [pu.manifest_url(SITE)], "the zip is never fetched")
                 self.assertEqual(self.saved(), [])
 

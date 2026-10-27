@@ -176,7 +176,8 @@ site publishes `steam-deck/puca-decky.json` beside the zips
   longer offers that version"). Now the backend's `download_update` reads
   the manifest again and downloads what it names, and the panel then shows
   the version being installed. With nothing newer after all, the panel says
-  the plugin is up to date.
+  the plugin is up to date. A look still on its way when Update is pressed
+  read the site before the press did, so it changes nothing the press found.
 - **Signed.** The plugin runs inside Steam, with more reach than the page, so
   a server alone must not be able to change it. An update is installed only
   when it is signed with the release key whose public half the plugin carries
@@ -188,7 +189,9 @@ site publishes `steam-deck/puca-decky.json` beside the zips
 - **Installed by Decky.** The backend downloads the zip into the plugin's
   runtime directory and checks its SHA-256. The frontend checks the signature
   on the offer the backend downloaded it for, then asks Decky to install the
-  file with that same SHA-256, which Decky checks once more. Decky shows its
+  file with that same SHA-256, which Decky checks once more. Not in a call:
+  that is checked when Update is pressed and again just before Decky is
+  asked, since a call can start while the update downloads. Decky shows its
   own confirmation, then reloads the plugin. The download is a local file,
   so Decky reports nothing to its plugin store about it.
 - **No key, no updates.** `npm run package` builds without one: fine on a
