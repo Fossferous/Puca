@@ -116,9 +116,11 @@ Press **···** → the plug icon → **Púca**.
   notify you follows your settings in Púca: muted servers and channels stay
   quiet.
 - **Updates.** When a new version is out, **Update** appears at the top of the
-  panel. Choose it and confirm, and Púca restarts on the new version. It waits
-  until you are out of a call. The bottom of **Settings** shows the version
-  you have.
+  panel. Choose it and confirm, and Púca restarts on the new version: the
+  newest your server has, even if another came out after the panel showed
+  one. It waits until you are out of a call. If there is nothing newer after
+  all, the panel says the plugin is up to date. The bottom of **Settings**
+  shows the version you have.
 
 ## Good to know
 
@@ -202,7 +204,8 @@ Press **···** → the plug icon → **Púca**.
 | No **Share screen** in a call | Your server's Púca is older than 0.9.848, or your Steam is too old to show a shared picture. Ask whoever runs the server to update. |
 | The call sees **Paused** while you play | Something besides your game is on screen: a menu, the keyboard, a notification, Púca, or Steam's own pages. Go back to the game; the picture returns within a second or two. |
 | **Your screen share stopped** | The message says why. The Deck must be in Game Mode, with its screen on. Choose **Share screen** to start again. |
-| No **Update**, though the download page has a newer version | The plugin looks a little after Púca starts and then every six hours. Your server's Púca may be too old to tell it where the download page is: ask whoever runs it to update. Meanwhile, installing from the address again (step 3) updates it too. |
+| No **Update**, though the download page has a newer version | The plugin looks a little after Púca starts, every six hours, soon after the Deck wakes from sleep, and when you open its panel if it last looked more than ten minutes before: close the Quick Access menu and open it again. Your server's Púca may be too old to tell it where the download page is: ask whoever runs it to update. Meanwhile, installing from the address again (step 3) updates it too. |
+| **Update** says the download site no longer offers that version | Your plugin is older than 0.4.1, and a newer version replaced the one its panel offered. Choose **Settings → Reload Púca** in the panel, wait half a minute, and choose **Update** again: it then offers the newest. From 0.4.1 on, **Update** always installs the newest. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
 

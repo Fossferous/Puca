@@ -55,7 +55,7 @@ from puca_mic import MicForCalls
 from puca_settings import (MARKER, PAGE_CALL, PAGE_METHODS, check_mic_answer, check_request_id,
                            check_share_error, load_settings, normalize_app_url, save_settings)
 from puca_share import SHARE_ANSWER, SHARE_CHUNK, SHARE_ENDED, SHARE_PAUSED, ScreenCapture
-from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, manifest_url,
+from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, is_newer, manifest_url,
                          read_key, read_manifest, save_update, sha256_hex, ssl_context, zip_url)
 
 
@@ -459,18 +459,39 @@ class Plugin:
             "offer": read_manifest(raw) if raw is not None else None,
         }}
 
-    async def download_update(self, site: Any, version: Any) -> dict:
-        """Fetch the version the person chose, check it against the
-        manifest's SHA-256, and keep it where Decky can install it from:
-        {"path", "offer"}. The signature is the frontend's to check."""
+    async def download_update(self, site: Any, shown: Any = None) -> dict:
+        """Fetch the version the download site offers NOW, check it against
+        the manifest's SHA-256, and keep it where Decky can install it from:
+        {"current": this version, "offer": the manifest fetched, "path"}.
+        The signature is the frontend's to check, on that offer.
+
+        Only when it is newer than this version: never the same one, never an
+        older one. With nothing newer (or no manifest at all) nothing is
+        downloaded and "path" is None, which is not an error: the plugin is up
+        to date.
+
+        `shown` is the version the panel offered, and only goes in the log.
+        It can be days old: a Deck that slept through a release still offers
+        the one it saw last, and insisting on that one ("the download site no
+        longer offers that version") left Update unable to install anything."""
         origin = download_origin(site)
         if origin is None:
             return {"ok": False, "error": "no download site"}
+        current = decky.DECKY_PLUGIN_VERSION
         try:
             raw = await _fetch(manifest_url(origin), MAX_MANIFEST_BYTES)
-            offer = read_manifest(raw) if raw is not None else None
-            if offer is None or offer["version"] != version:
-                return {"ok": False, "error": "the download site no longer offers that version"}
+            if raw is None:
+                return {"ok": True, "value": {"current": current, "offer": None, "path": None}}
+            offer = read_manifest(raw)
+            if offer is None:
+                return {"ok": False, "error": "the download site's update manifest is not one this plugin can read"}
+            if not is_newer(offer["version"], current):
+                decky.logger.info("the download site offers %s, not newer than %s: nothing to download",
+                                  offer["version"], current)
+                return {"ok": True, "value": {"current": current, "offer": offer, "path": None}}
+            if shown != offer["version"]:
+                decky.logger.info("the panel offered %r; the download site offers %s now: downloading that",
+                                  shown, offer["version"])
             data = await _fetch(zip_url(origin, offer), MAX_ZIP_BYTES)
         except FetchError as e:
             return {"ok": False, "error": str(e)}
@@ -483,4 +504,4 @@ class Plugin:
         except OSError as e:
             return {"ok": False, "error": f"could not save it ({e.strerror or type(e).__name__})"}
         decky.logger.info("downloaded update %s (%d bytes)", offer["version"], len(data))
-        return {"ok": True, "value": {"path": path, "offer": offer}}
+        return {"ok": True, "value": {"current": current, "offer": offer, "path": path}}

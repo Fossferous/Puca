@@ -1,11 +1,13 @@
 """The plugin's updates, without a Deck: python -m unittest discover -s tests
 
-What the backend fetches (py_modules/puca_update.py), and the check every
-release passes before it is published (scripts/verify_update.py): a second
-implementation of the signature check the plugin makes with WebCrypto. The
-end-to-end cases sign with the release script's own signer (scripts/signing.mjs,
-through Node), so what is checked here is what releases are made with.
+What the backend fetches (py_modules/puca_update.py), what Update downloads
+(main.py, download_update), and the check every release passes before it is
+published (scripts/verify_update.py): a second implementation of the
+signature check the plugin makes with WebCrypto. The end-to-end cases sign
+with the release script's own signer (scripts/signing.mjs, through Node), so
+what is checked here is what releases are made with.
 """
+import asyncio
 import base64
 import hashlib
 import json
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 
@@ -21,6 +24,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(PLUGIN, "py_modules"))
 sys.path.insert(0, os.path.join(PLUGIN, "scripts"))
+sys.path.insert(0, PLUGIN)
+
+# main.py imports puca_cdp, which imports aiohttp (Decky bundles it). Nothing
+# here opens a connection, so a stand-in does when it is not installed.
+try:
+    import aiohttp  # noqa: F401
+except ImportError:
+    _stub = types.ModuleType("aiohttp")
+    _stub.ClientSession = object
+    _stub.ClientWebSocketResponse = object
+    _stub.ClientError = Exception
+    _stub.ClientTimeout = lambda **_: None
+    _stub.WSMsgType = types.SimpleNamespace(TEXT=1)
+    sys.modules["aiohttp"] = _stub
 
 import puca_update as pu  # noqa: E402
 import verify_update as vu  # noqa: E402
@@ -150,6 +167,138 @@ class RsaTests(unittest.TestCase):
         self.assertIsNone(vu.read_jwk(json.dumps({"kty": "RSA", "n": VECTOR["n"][:100], "e": "AQAB"}).encode()))
         self.assertIsNone(vu.read_jwk(json.dumps({"kty": "RSA", "n": VECTOR["n"], "e": "Ag"}).encode()))
         self.assertIsNone(vu.read_jwk(b"{}"))
+
+
+SITE = "https://download.example.com"
+
+
+def _decky_stub(runtime: str):
+    d = types.ModuleType("decky")
+    d.logged = []
+    d.logger = types.SimpleNamespace(info=lambda msg, *args: d.logged.append(msg % args),
+                                     warning=lambda *a, **k: None, exception=lambda *a, **k: None)
+
+    async def emit(*_):
+        pass
+
+    d.emit = emit
+    d.DECKY_PLUGIN_SETTINGS_DIR = d.DECKY_PLUGIN_DIR = HERE
+    d.DECKY_PLUGIN_RUNTIME_DIR = runtime
+    d.DECKY_PLUGIN_VERSION = "0.0.0"
+    return d
+
+
+class DownloadTests(unittest.TestCase):
+    """What Update downloads (main.py, download_update): what the download
+    site offers when it is pressed, if that is newer than the installed
+    version. The panel's own offer can be days old: the owner's Deck slept
+    through a release and kept offering 0.3.0, and Update, which insisted on
+    exactly that version, said "the download site no longer offers that
+    version" and installed nothing."""
+
+    def setUp(self):
+        self.runtime = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.runtime, ignore_errors=True)
+        sys.modules["decky"] = self.decky = _decky_stub(self.runtime)
+        sys.modules.pop("main", None)
+        import main  # noqa: E402 (after the stand-in for Decky)
+        self.main = main
+        self.addCleanup(sys.modules.pop, "main", None)
+        self.files: dict = {}
+        self.fetched: list = []
+
+        async def fetch(url, limit):
+            self.fetched.append(url)
+            data = self.files.get(url)
+            if data is not None and len(data) > limit:
+                raise main.FetchError("the download is too large")
+            return data  # None: a 404
+
+        main._fetch = fetch
+
+    def publish(self, version, data=None, signature="c2lnbmF0dXJl"):
+        """From now on the site offers `version`: a manifest, and the zip it names."""
+        data = f"the bytes of puca-decky-{version}.zip".encode() if data is None else data
+        offer = {"version": version, "file": f"puca-decky-{version}.zip",
+                 "sha256": hashlib.sha256(data).hexdigest(), "signature": signature}
+        self.files = {pu.manifest_url(SITE): json.dumps(offer).encode(), pu.zip_url(SITE, offer): data}
+        return offer, data
+
+    def download(self, installed, shown):
+        """The panel's Update, on a plugin of version `installed` that offered `shown`."""
+        self.decky.DECKY_PLUGIN_VERSION = installed
+        self.fetched.clear()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.main.Plugin().download_update(SITE, shown))
+        finally:
+            loop.close()
+
+    def saved(self):
+        folder = os.path.join(self.runtime, pu.UPDATES_DIR)
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
+    def test_a_stale_offer_downloads_what_the_site_offers_now(self):
+        offer, data = self.publish("0.4.1")
+        r = self.download(installed="0.2.0", shown="0.3.0")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["value"]["current"], "0.2.0")
+        self.assertEqual(r["value"]["offer"], offer, "the offer it fetched, signature and all: what the frontend checks")
+        with open(r["value"]["path"], "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertEqual(self.saved(), ["puca-decky-0.4.1.zip"])
+        self.assertEqual(self.fetched, [pu.manifest_url(SITE), pu.zip_url(SITE, offer)])
+        self.assertTrue(any("0.3.0" in line and "0.4.1" in line for line in self.decky.logged), self.decky.logged)
+
+    def test_the_offer_shown_is_downloaded_while_it_is_the_newest(self):
+        offer, _ = self.publish("0.4.1")
+        r = self.download(installed="0.2.0", shown="0.4.1")
+        self.assertEqual(r["value"]["offer"], offer)
+        self.assertEqual(self.saved(), ["puca-decky-0.4.1.zip"])
+
+    def test_the_same_version_or_an_older_one_is_never_downloaded(self):
+        for offered in ("0.4.1", "0.4", "0.4.0", "0.2.0"):
+            with self.subTest(installed="0.4.1", offered=offered):
+                offer, _ = self.publish(offered)
+                # Even asked for by name: no panel can make it download one.
+                r = self.download(installed="0.4.1", shown=offered)
+                self.assertEqual(r, {"ok": True, "value": {"current": "0.4.1", "offer": offer, "path": None}})
+                self.assertEqual(self.fetched, [pu.manifest_url(SITE)], "the zip is never fetched")
+                self.assertEqual(self.saved(), [])
+
+    def test_a_site_that_offers_nothing_is_up_to_date_not_an_error(self):
+        r = self.download(installed="0.2.0", shown="0.3.0")
+        self.assertEqual(r, {"ok": True, "value": {"current": "0.2.0", "offer": None, "path": None}})
+        self.assertEqual(self.saved(), [])
+
+    def test_a_damaged_or_missing_zip_and_an_unreadable_manifest_are_still_refused(self):
+        offer, data = self.publish("0.4.1")
+        self.files[pu.zip_url(SITE, offer)] = data + b"!"
+        r = self.download(installed="0.2.0", shown="0.3.0")
+        self.assertFalse(r["ok"], r)
+        self.assertIn("damaged", r["error"])
+        del self.files[pu.zip_url(SITE, offer)]
+        r = self.download(installed="0.2.0", shown="0.3.0")
+        self.assertFalse(r["ok"], r)
+        self.assertIn("does not have the file", r["error"])
+        self.files[pu.manifest_url(SITE)] = b"{not json"
+        r = self.download(installed="0.2.0", shown="0.3.0")
+        self.assertFalse(r["ok"], r)
+        self.assertEqual(self.saved(), [])
+
+    def test_the_signature_handed_on_is_the_one_over_what_was_downloaded(self):
+        """The backend never judges a signature; the frontend does, on the
+        offer this hands it (src/update.ts). So that must be the offer whose
+        zip was downloaded, as published: here one signed with the throwaway
+        key of VECTOR."""
+        self.publish("0.2.0", data=b"a release", signature=VECTOR["sig"])
+        r = self.download(installed="0.1.0", shown="0.1.5")
+        got = r["value"]["offer"]
+        n = int.from_bytes(base64.urlsafe_b64decode(VECTOR["n"] + "=="), "big")
+        message = vu.update_message(got["version"], got["sha256"])
+        self.assertTrue(vu.rsa_pkcs1_sha256_verify(n, 65537, message, base64.b64decode(got["signature"])))
+        with open(r["value"]["path"], "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), got["sha256"])
 
 
 def _node() -> str | None:
