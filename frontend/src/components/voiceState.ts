@@ -4,6 +4,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { useStreamStore } from '../stores/streamStore';
+import { logRtcEvent } from '../api/rtc/rtcEventLog';
 
 export interface VoiceUser {
     id: number;
@@ -359,8 +360,31 @@ export function selectStream(userId: number) {
     notifyStreamStateChange();
 }
 
-export function deselectStream(userId: number) {
-    globalSelectedStreams.delete(userId);
+/**
+ * Why a watched stream stopped being watched. Each time one does, a line in
+ * puca.log and Send diagnostics says whose and why (logRtcEvent, by user id
+ * as the other stream lines are): "the stream I was watching closed" could not
+ * be told apart from the viewer's own click, the sharer stopping or leaving,
+ * or (before 0.9.840) the viewer's own share ending.
+ */
+export type UnwatchReason = 'closed' | 'back-to-chat' | 'stop-watching-all' | 'sharer-stopped' | 'sharer-left' | 'sharer-disconnected' | 'left-call';
+const UNWATCH_WHY: Record<UnwatchReason, string> = {
+    'closed': 'closed by the viewer',
+    'back-to-chat': 'Back to Chat',
+    'stop-watching-all': 'stop watching, all streams',
+    'sharer-stopped': 'the sharer stopped sharing',
+    'sharer-left': 'the sharer left the call',
+    'sharer-disconnected': 'the sharer disconnected',
+    'left-call': 'we left the call',
+};
+function logUnwatched(userId: number, reason: UnwatchReason): void {
+    logRtcEvent(`[stream-watch] user ${userId}: no longer watched (${UNWATCH_WHY[reason]})`);
+}
+
+export function deselectStream(userId: number, reason: UnwatchReason) {
+    // Logged only for a stream that WAS watched: the same stop arrives on
+    // several paths (ScreenShareStopped in two handlers, a leave after it).
+    if (globalSelectedStreams.delete(userId)) logUnwatched(userId, reason);
     notifyStreamStateChange();
 }
 
@@ -394,13 +418,18 @@ export function dropOwnStream(userId: number): number {
     globalScreenSharers.delete(userId);
     const store = useStreamStore.getState();
     if (store.focusedStreamId === userId) store.setFocusedStream(null);
+    // The other streams are never touched here, and the log says how many
+    // are still watched, so a report of one closing can be checked.
+    const left = globalSelectedStreams.size;
+    logRtcEvent(`[stream-watch] own share stopped: ${left} other stream${left === 1 ? '' : 's'} still watched`);
     notifyStreamStateChange();
-    return globalSelectedStreams.size;
+    return left;
 }
 
 /** Leaving the call: every stream, everyone's - never for stopping your own
  *  share (dropOwnStream). */
 export function clearAllStreams() {
+    for (const id of globalSelectedStreams) logUnwatched(id, 'left-call');
     globalSelectedStreams.clear();
     globalStreamData.clear();
     globalScreenSharers.clear();

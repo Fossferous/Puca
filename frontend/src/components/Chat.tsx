@@ -5777,7 +5777,7 @@ export function Chat({ onLogout }: ChatProps) {
                         onStopWatching={() => {
                             // Deselecting every stream also closes the pip via
                             // the stream-state effect (no streams → showPip off).
-                            getSelectedStreams().forEach(id => deselectStream(id));
+                            getSelectedStreams().forEach(id => deselectStream(id, 'stop-watching-all'));
                         }}
                         poppedStreams={poppedStreams}
                         onTogglePopout={togglePopout}

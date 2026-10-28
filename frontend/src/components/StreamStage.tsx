@@ -842,7 +842,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     };
 
     const handleCloseStream = (userId: number) => {
-        deselectStream(userId);
+        deselectStream(userId, 'closed');
         if (selectedStreams.length <= 1) {
             onBackToChat();
         }
@@ -850,7 +850,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
 
     const handleBackToChat = () => {
         // Deselect all streams and go back
-        selectedStreams.forEach(id => deselectStream(id));
+        selectedStreams.forEach(id => deselectStream(id, 'back-to-chat'));
         onBackToChat();
     };
 
