@@ -4,6 +4,13 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.853 — 2026-10-28
+
+The log says why a stream you were watching closed
+### Changed
+
+- **When a stream you were watching closes, the log says why.** Nothing in `puca.log` or in **Send diagnostics** said when a stream you were watching stopped playing, or why, so "the stream I was watching closed" could not be told apart from a click of your own. Now each one leaves a line with the sharer's number and the reason: you closed it, **Back to Chat**, you stopped watching every stream, the person stopped sharing, left the call or lost their connection, or you left the call. Stopping your own share leaves a line too, saying how many other streams you are still watching, which stopping your own share has left alone since 0.9.840. As before, people are logged by their number, never by name. Comes with the in-app update on Android and the web app, and with the next desktop update, in Púca Lite too.
+
 ## 0.9.852 — 2026-10-27
 
 Streams no longer start playing by themselves unless you turn that on; Púca for Steam Deck updates to the newest version

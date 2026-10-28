@@ -1289,7 +1289,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 newMap.delete(payload.streamer_id);
                 return newMap;
             });
-            deselectStream(payload.streamer_id);
+            deselectStream(payload.streamer_id, 'sharer-left');
 
             // Update display
             refreshVoiceUsersList();
@@ -1442,7 +1442,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 newMap.delete(payload.streamer_id);
                 return newMap;
             });
-            deselectStream(payload.streamer_id);
+            deselectStream(payload.streamer_id, 'sharer-stopped');
             if (isInVoiceRef.current && payload.streamer_id !== currentUserId) {
                 playStreamStopSound();
             }
@@ -1499,7 +1499,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 newMap.delete(payload.user_id);
                 return newMap;
             });
-            deselectStream(payload.user_id);
+            deselectStream(payload.user_id, 'sharer-left');
             refreshVoiceUsersList();
             announceLeave(payload.user_id);
             // Forget their SPEAK state only once their media is really gone —
@@ -2052,7 +2052,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     newMap.delete(streamerId);
                     return newMap;
                 });
-                deselectStream(streamerId);
+                deselectStream(streamerId, 'sharer-left');
 
                 refreshVoiceUsersList();
             };
@@ -2107,7 +2107,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 });
 
                 // Remove from selected streams if being watched
-                deselectStream(streamerId);
+                deselectStream(streamerId, 'sharer-stopped');
             };
 
             // Register screen share listeners
@@ -2225,7 +2225,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 globalCameraUsers.delete(userId);
                 // The global set is the only copy now (no component mirror to
                 // resurrect from), so a plain deselect is safe and final.
-                deselectStream(userId);
+                deselectStream(userId, 'sharer-disconnected');
                 notifyStreamStateChange();
             };
             webrtcManager.setOnPeerDisconnected(handlePeerDisconnected);
