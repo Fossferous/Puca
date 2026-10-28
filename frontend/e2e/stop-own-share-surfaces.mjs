@@ -27,13 +27,16 @@
 // loopback LiveKit (LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET).
 // Usage: APP=http://127.0.0.1:5194 [SFU=1] [STREAM_ONLY=1] [ONLY=pip-panel,...] node e2e/stop-own-share-surfaces.mjs
 import { chromium } from '@playwright/test';
+import crypto from 'node:crypto';
 
 const APP = process.env.APP || 'http://127.0.0.1:5173';
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const SFU = process.env.SFU === '1';
 const STREAM_ONLY = process.env.STREAM_ONLY === '1';
 const ONLY = (process.env.ONLY || '').split(',').filter(Boolean);
-const PASS = 'Password123!pw'; // a test value for the throwaway backend only
+const PASS = 'Password123!pw';
+const TONE = { A: 440, B: 1000 };
+const LK = { api: process.env.LK_API, key: process.env.LK_KEY, secret: process.env.LK_SECRET }; // a test value for the throwaway backend only
 const stamp = Date.now().toString(36);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 async function until(fn, ms = 15000, step = 250) {
@@ -41,10 +44,43 @@ async function until(fn, ms = 15000, step = 250) {
     while (Date.now() - t0 < ms) { try { last = await fn(); if (last) return last; } catch { /* retry */ } await sleep(step); }
     return last;
 }
+/** What LiveKit says each participant publishes (SFU=1 with LK_API/LK_KEY/LK_SECRET), or null. */
+async function lkTracks(room) {
+    if (!LK.api || !LK.key || !LK.secret) return null;
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const body = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ iss: LK.key, sub: 'stop-own-share-check', nbf: now - 5, exp: now + 300, video: { roomAdmin: true, roomList: true, room } })}`;
+    const jwt = `${body}.${crypto.createHmac('sha256', LK.secret).update(body).digest('base64url')}`;
+    const r = await fetch(`${LK.api}/twirp/livekit.RoomService/ListParticipants`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` }, body: JSON.stringify({ room }),
+    });
+    if (!r.ok) return { error: r.status };
+    return Object.fromEntries(((await r.json()).participants || []).map(p => [p.identity, (p.tracks || []).map(t => t.source)]));
+}
 const args = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--mute-audio',
     '--allow-loopback-in-peer-connection', '--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'];
 
-const PAGE_INIT = () => {
+// Every page: no Web Audio graph can reach a device (each context's
+// destination is an analyser connected to nothing, read by meterTone), and the
+// "screen" is a canvas plus a TONE (`hz`) that exists only inside a
+// MediaStreamDestination, like the desktop app's Mixer app-audio track: the
+// share carries audio, published as screen-share audio.
+const PAGE_INIT = (hz) => {
+    const Real = window.AudioContext;
+    window.__ctxs = [];
+    class TapContext extends Real {
+        constructor(o) {
+            super(o);
+            const tap = this.createAnalyser();
+            tap.fftSize = 16384;
+            tap.smoothingTimeConstant = 0;
+            this.__tap = tap;
+            window.__ctxs.push(this);
+        }
+        get destination() { return this.__tap; }
+    }
+    window.AudioContext = TapContext;
+    window.webkitAudioContext = TapContext;
     const Native = window.RTCPeerConnection;
     window.__pcs = [];
     window.RTCPeerConnection = function (...a) { const pc = new Native(...a); window.__pcs.push(pc); return pc; };
@@ -55,8 +91,34 @@ const PAGE_INIT = () => {
         const g = c.getContext('2d'); let n = 0;
         setInterval(() => { n++; g.fillStyle = `hsl(${(n * 9) % 360} 50% 40%)`; g.fillRect(0, 0, 1280, 720); g.fillStyle = '#fff'; g.font = '90px sans-serif'; g.fillText(String(n), 500, 380); }, 1000 / 15);
         const s = c.captureStream(15);
+        const ctx = new Real();
+        const osc = ctx.createOscillator();
+        osc.frequency.value = hz;
+        const gain = ctx.createGain();
+        gain.gain.value = 0.5;
+        const dst = ctx.createMediaStreamDestination();
+        osc.connect(gain).connect(dst); // never to ctx.destination
+        osc.start();
+        const audio = dst.stream.getAudioTracks()[0];
+        s.addTrack(audio);
         window.__ownShareTrack = s.getVideoTracks()[0];
+        window.__ownShareAudio = audio;
         return s;
+    };
+    /** Power at `hz` summed over this page's RUNNING contexts (dB). */
+    window.__meterTone = (hz) => {
+        let p = 0;
+        for (const ctx of window.__ctxs) {
+            if (ctx.state !== 'running') continue;
+            const an = ctx.__tap;
+            const f = new Float32Array(an.frequencyBinCount);
+            an.getFloatFrequencyData(f);
+            const b = Math.round(hz / (ctx.sampleRate / an.fftSize));
+            let m = -Infinity;
+            for (let j = b - 4; j <= b + 4; j++) m = Math.max(m, f[j]);
+            if (Number.isFinite(m)) p += 10 ** (m / 10);
+        }
+        return p > 0 ? 10 * Math.log10(p) : -Infinity;
     };
     try {
         const k = 'sovereign_settings';
@@ -101,6 +163,28 @@ async function signUp(ctx, user, tag) {
 }
 const call = (page, mod, fn, a = []) => page.evaluate(async ({ mod, fn, a }) => (await import(mod))[fn](...a), { mod, fn, a });
 const uidOf = (p) => p.evaluate(() => { try { const t = localStorage.getItem('auth_token') || ''; return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub; } catch { return null; } });
+/** A's RECEIVED audio of B's share: B's stream's audio tracks (voiceState), the
+ *  inbound RTP bytes on their receivers, the tone's power on A's running
+ *  contexts, and any unmuted playing element carrying them. */
+const hearing = (p, uidB, hz) => p.evaluate(async ({ uidB, hz }) => {
+    const m = await import('/src/components/voiceState.ts');
+    const tracks = (m.getStreamData(uidB)?.stream?.getAudioTracks() ?? []).filter(t => t.readyState === 'live');
+    const ids = new Set(tracks.map(t => t.id));
+    let bytes = 0, receivers = 0;
+    for (const pc of window.__pcs) {
+        if (pc.connectionState === 'closed') continue;
+        for (const r of pc.getReceivers()) {
+            if (!r.track || !ids.has(r.track.id)) continue;
+            receivers++;
+            (await r.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'audio') bytes += s.bytesReceived || 0; });
+        }
+    }
+    const elements = [...document.querySelectorAll('audio,video')].filter(e => !e.muted && !e.paused && e.volume > 0
+        && (e.srcObject?.getAudioTracks?.() ?? []).some(t => ids.has(t.id))).length;
+    const db = window.__meterTone(hz);
+    return { tracks: tracks.length, receivers, bytes, db: Number.isFinite(db) ? Math.round(db * 10) / 10 : null, elements };
+}, { uidB, hz });
+const heard = (h) => h.tracks > 0 && h.receivers > 0 && ((h.db !== null && h.db > -70) || h.elements > 0);
 const selected = (p) => p.evaluate(async () => (await import('/src/components/voiceState.ts')).getSelectedStreams());
 
 async function startShare(p) {
@@ -135,7 +219,8 @@ try {
     const bB = await chromium.launch({ channel: CHANNEL, headless: true, args }); browsers.push(bB);
     const ctxA = await bA.newContext({ viewport: { width: 1400, height: 900 } });
     const ctxB = await bB.newContext({ viewport: { width: 1400, height: 900 } });
-    for (const c of [ctxA, ctxB]) await c.addInitScript(PAGE_INIT);
+    await ctxA.addInitScript(PAGE_INIT, TONE.A);
+    await ctxB.addInitScript(PAGE_INIT, TONE.B);
     const A = await signUp(ctxA, `ssa_${stamp}`, 'A');
     const B = await signUp(ctxB, `ssb_${stamp}`, 'B');
 
@@ -203,11 +288,19 @@ try {
             return true;
         },
         // The shared window closing / the browser's own stop: the capture's track ends.
-        ended: () => A.evaluate(() => { const t = window.__ownShareTrack; if (!t) return false; t.stop(); t.dispatchEvent(new Event('ended')); return true; }),
+        // Both tracks end together, the way a closed window ends its capture
+        // and the desktop's Mixer app-audio with it.
+        ended: () => A.evaluate(() => {
+            const ts = [window.__ownShareTrack, window.__ownShareAudio].filter(Boolean);
+            if (ts.length < 2) return false;
+            for (const t of ts) t.stop();
+            for (const t of ts) t.dispatchEvent(new Event('ended'));
+            return true;
+        }),
     };
     const PLAN = [
-        ['stage', 'panel'], ['stage', 'stage-button'], ['stage', 'stage-menu'], ['stage', 'ended'],
-        ['pip', 'panel'], ['pip', 'ended'],
+        ['stage', 'ended'], ['pip', 'ended'],
+        ['stage', 'panel'], ['stage', 'stage-button'], ['stage', 'stage-menu'], ['pip', 'panel'],
     ].filter(([s, h]) => !ONLY.length || ONLY.includes(`${s}-${h}`));
 
     for (const [surface, how] of PLAN) {
@@ -223,6 +316,18 @@ try {
         check(`${tag}: POSITIVE CONTROL: A still plays B's stream there while both share (frames rising)`,
             before1.playing && before2.playing && before2.frames > before1.frames, { before1, before2 });
         check(`${tag}: control: B is in A's watch selection before the stop`, (await selected(A)).includes(uid.B), await selected(A));
+        const hb1 = await hearing(A, uid.B, TONE.B);
+        await sleep(1500);
+        const hb2 = await hearing(A, uid.B, TONE.B);
+        check(`${tag}: POSITIVE CONTROL: A hears B's stream audio there while both share (bytes rising, tone or element)`,
+            heard(hb1) && heard(hb2) && hb2.bytes > hb1.bytes, { hb1, hb2 });
+        const room = `sfu_${voice.id}`;
+        const pubOf = (lk, id) => Object.entries(lk || {}).filter(([k]) => k.startsWith(`u${id}#`)).flatMap(([, v]) => v);
+        if (SFU && LK.api) {
+            const lk = await lkTracks(room);
+            check(`${tag}: control: LiveKit has A's share WITH its audio (SCREEN_SHARE + SCREEN_SHARE_AUDIO) and B's`,
+                pubOf(lk, uid.A).includes('SCREEN_SHARE') && pubOf(lk, uid.A).includes('SCREEN_SHARE_AUDIO') && pubOf(lk, uid.B).includes('SCREEN_SHARE'), lk);
+        }
         const stopped = await STOPS[how](`ssa_${stamp}`);
         check(`${tag}: A stops its own share (${how})`, stopped);
         const gone = await until(async () => (await A.locator('[data-testid="voice-share-screen"]').count()) > 0 && !(await showingOwn(A)), 8000);
@@ -235,6 +340,16 @@ try {
         check(`${tag}: B is STILL in A's watch selection after A stopped its own share`, sel.includes(uid.B), { selected: sel, B: uid.B });
         check(`${tag}: A is STILL playing B's stream on the same surface (frames rising)`,
             after1.playing && after2.playing && after2.frames > after1.frames, { after1, after2 });
+        const ha1 = await hearing(A, uid.B, TONE.B);
+        await sleep(1500);
+        const ha2 = await hearing(A, uid.B, TONE.B);
+        check(`${tag}: A STILL hears B's stream audio (bytes rising, tone or element)`,
+            heard(ha1) && heard(ha2) && ha2.bytes > ha1.bytes, { ha1, ha2 });
+        if (SFU && LK.api) {
+            const lk = await lkTracks(room);
+            check(`${tag}: LiveKit: A publishes no share any more, B's share is still there`,
+                !pubOf(lk, uid.A).some(x => /SCREEN_SHARE/.test(x)) && pubOf(lk, uid.B).includes('SCREEN_SHARE'), lk);
+        }
         // The next round starts from watching again, whatever this one did.
         await sleep(1000);
     }
