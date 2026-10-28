@@ -187,11 +187,21 @@ const hearing = (p, uidB, hz) => p.evaluate(async ({ uidB, hz }) => {
 const heard = (h) => h.tracks > 0 && h.receivers > 0 && ((h.db !== null && h.db > -70) || h.elements > 0);
 const selected = (p) => p.evaluate(async () => (await import('/src/components/voiceState.ts')).getSelectedStreams());
 
+// The automation data-testids (docs/AUTOMATION.md), with the plain markup
+// beside each so the same walk also drives an older client that predates them
+// (the positive control against 0.9.839, before the 0.9.840 fix).
+const SEL = {
+    share: '[data-testid="voice-share-screen"], button.vp-screenshare[title="Share Screen"]',
+    stop: '[data-testid="voice-stop-share"], button.vp-screenshare[title="Stop Sharing"]',
+    connected: '[data-testid="voice-connected"], .voice-connected-label',
+};
+const serverIcon = (p, srv) => p.locator(`[data-testid="server-icon"][data-server-id="${srv.id}"], .server-icon[title="${srv.name}"]`).first();
+const voiceChannel = (p, ch) => p.locator(`[data-testid="voice-channel"][data-channel-id="${ch.id}"], .voice-channel:has-text("${ch.name}")`).first();
 async function startShare(p) {
-    await p.locator('[data-testid="voice-share-screen"]').click();
+    await p.locator(SEL.share).first().click();
     await sleep(800);
     await p.evaluate(() => { [...document.querySelectorAll('button')].find(x => /go live|select screen/i.test(x.textContent))?.click(); });
-    return !!await until(async () => (await p.locator('[data-testid="voice-stop-share"]').count()) > 0
+    return !!await until(async () => (await p.locator(SEL.stop).count()) > 0
         && await p.evaluate(() => window.__ownShareTrack?.readyState === 'live'), 20000);
 }
 /** A <video> inside `within` PLAYING a track this page receives; its decoded frames. */
@@ -223,6 +233,10 @@ try {
     await ctxB.addInitScript(PAGE_INIT, TONE.B);
     const A = await signUp(ctxA, `ssa_${stamp}`, 'A');
     const B = await signUp(ctxB, `ssb_${stamp}`, 'B');
+    // LITE=1: the client under test is the Lite variant (VITE_ENABLE_RC=false: no remote-control code).
+    const rc = await A.evaluate(async () => (await import('/src/api/platform.ts')).RC_ENABLED).catch(() => null);
+    if (process.env.LITE === '1') check('the client is the Lite build (RC_ENABLED false)', rc === false, { RC_ENABLED: rc });
+    else console.log(`  client RC_ENABLED=${rc}`);
 
     // Fixture: A's server with a text channel and a voice channel (sfu_mode on SFU=1); B joins by invite.
     const srv = await call(A, '/src/api/servers.ts', 'createServer', ['SS ' + stamp.slice(-4)]);
@@ -243,10 +257,10 @@ try {
         !!srv.id && !!text.id && !!voice.id && Number.isInteger(uid.A) && Number.isInteger(uid.B), uid);
     for (const p of [A, B]) { await p.reload({ waitUntil: 'domcontentloaded' }); await sleep(2500); await dismiss(p); }
     for (const [tag, p] of [['B', B], ['A', A]]) {
-        await p.locator(`[data-testid="server-icon"][data-server-id="${srv.id}"]`).click();
+        await serverIcon(p, srv).click();
         await sleep(800);
-        await p.locator(`[data-testid="voice-channel"][data-channel-id="${voice.id}"]`).click();
-        check(`${tag} is in the call`, !!await until(async () => (await p.locator('[data-testid="voice-connected"]').count()) > 0, 25000));
+        await voiceChannel(p, voice).click();
+        check(`${tag} is in the call`, !!await until(async () => (await p.locator(SEL.connected).count()) > 0, 25000));
     }
     if (STREAM_ONLY) check('A knows B is stream-only', !!await until(() => A.evaluate(async (id) => (await import('/src/components/voiceState.ts')).isStreamOnlyMember(id), uid.B), 10000));
     await sleep(3000);
@@ -258,7 +272,7 @@ try {
     async function watchOn(surface) {
         if (!(await selected(A)).includes(uid.B)) {
             // A person's click: the voice stage's Watch, or the floating Live Streams button.
-            await A.locator(`[data-testid="voice-channel"][data-channel-id="${voice.id}"]`).click().catch(() => {});
+            await voiceChannel(A, voice).click().catch(() => {});
             await sleep(600);
             await until(() => A.evaluate(() => { const b = document.querySelector('.watch-live-btn'); if (b) { b.click(); return true; } return false; }), 8000);
             await sleep(500);
@@ -276,7 +290,7 @@ try {
         }, 20000);
     }
     const STOPS = {
-        panel: () => A.locator('[data-testid="voice-stop-share"]').click().then(() => true, () => false),
+        panel: () => A.locator(SEL.stop).first().click().then(() => true, () => false),
         'stage-button': () => A.evaluate(() => { const b = document.querySelector('.stop-watching-btn'); if (!b) return false; b.click(); return true; }),
         'stage-menu': async (ownName) => {
             const tile = A.locator('.stream-tile', { has: A.locator('.streamer-name', { hasText: ownName }) }).first();
@@ -330,7 +344,7 @@ try {
         }
         const stopped = await STOPS[how](`ssa_${stamp}`);
         check(`${tag}: A stops its own share (${how})`, stopped);
-        const gone = await until(async () => (await A.locator('[data-testid="voice-share-screen"]').count()) > 0 && !(await showingOwn(A)), 8000);
+        const gone = await until(async () => (await A.locator(SEL.share).count()) > 0 && !(await showingOwn(A)), 8000);
         check(`${tag}: the stop took: A is no longer sharing and its own picture left the page`, !!gone);
         await sleep(2500);
         const sel = await selected(A);
