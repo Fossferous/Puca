@@ -25,10 +25,12 @@ import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor
 
 export interface SovereignScreenSharePlugin {
     status(): Promise<{ available: boolean; reason: string | null; sdk: number; sharing: boolean }>;
-    start(options: { width: number; height: number; fps: number; nonce: string }): Promise<NativeCapture & { binary: boolean }>;
+    start(options: { width: number; height: number; fps: number; nonce: string }): Promise<NativeCapture & { binary: boolean; shareId?: number }>;
     resize(options: { width: number; height: number; fps: number }): Promise<NativeCapture>;
     stop(): Promise<{ stopped: boolean }>;
-    addListener(event: 'shareEnded', cb: (e: { reason: string }) => void): Promise<PluginListenerHandle>;
+    /** At startup: ends a share, and refuses a start, that an earlier page left. Absent before the review fixes. */
+    pageReady?(): Promise<{ endedShare: boolean; refusedStart: boolean }>;
+    addListener(event: 'shareEnded', cb: (e: { reason: string; shareId?: number }) => void): Promise<PluginListenerHandle>;
 }
 
 /** What the phone captures: the screen fitted into the asked box, upright
@@ -64,17 +66,51 @@ function canvasCaptures(): boolean {
         && typeof (HTMLCanvasElement.prototype as Partial<CanvasCapture>).captureStream === 'function';
 }
 
+/** What the plugin's status() said at startup about this WebView carrying
+ *  the frames (message channels); null until it has answered. */
+let webViewCarriesShares: boolean | null = null;
+
 /**
  * Whether Share is offered here: the Android app, an APK that carries the
- * plugin (OTA JavaScript can be newer than the installed app), and a page
- * that can make a track from frames. Synchronous, because the voice panel
- * renders from it; what the WebView itself supports is checked by start(),
- * which refuses with the missing feature named.
+ * plugin (OTA JavaScript can be newer than the installed app), a WebView that
+ * can carry the frames (asked once at startup, initNativeScreenShare), and a
+ * page that can make a track from them. Synchronous, because the voice panel
+ * renders from it. Before the startup answer it says yes, and start() itself
+ * still refuses with the missing feature named.
  */
 export function nativeScreenShareAvailable(): boolean {
     if (Capacitor.getPlatform() !== 'android') return false;
     if (!Capacitor.isPluginAvailable(PLUGIN)) return false;
+    if (webViewCarriesShares === false) return false;
     return generatorCtor() !== null || canvasCaptures();
+}
+
+/**
+ * Startup, in the Android app: ask the plugin once whether this WebView can
+ * carry a share, and end a share that is running with no page of ours behind
+ * it. A page that went away (a reload, an in-app update swapping the bundle, a
+ * crashed renderer) leaves its share to nobody: APKs with this code end it
+ * natively when the next page starts, and this is the page's own check.
+ */
+export async function initNativeScreenShare(): Promise<void> {
+    if (Capacitor.getPlatform() !== 'android' || !Capacitor.isPluginAvailable(PLUGIN)) return;
+    try {
+        const st = await SovereignScreenShare.status();
+        webViewCarriesShares = st.available !== false;
+        if (currentStats) return; // this page is sharing already: nothing earlier to end
+        // A start an earlier page left waiting on Android's dialog would go
+        // live for nobody once answered: the native side refuses it here, and
+        // ends a share that page left running.
+        const gone = await SovereignScreenShare.pageReady?.().catch(() => null);
+        if (gone?.endedShare || gone?.refusedStart) {
+            console.log('[ScreenShare] an earlier page left a share behind: ended it', JSON.stringify(gone));
+        } else if (!gone && st.sharing) {
+            console.log('[ScreenShare] a share from an earlier page was still running: ending it');
+            await SovereignScreenShare.stop();
+        }
+    } catch {
+        // An APK whose plugin cannot answer: offer Share, and let start() say why not.
+    }
 }
 
 /** The box the share asks for, from the dialog's constraints (shareHealth.ts
@@ -349,9 +385,11 @@ export async function getNativeDisplayMedia(options: DisplayMediaStreamOptions):
     const waiter = waitForPort(nonce);
     waiter.port.catch(() => { /* handled below */ });
     let capture: NativeCapture;
+    let shareId: number | undefined;
     try {
         const started = await SovereignScreenShare.start({ ...asked, nonce });
         capture = { width: started.width, height: started.height, fps: started.fps };
+        shareId = started.shareId;
     } catch (err) {
         waiter.cancel();
         throw refusalAsDomException(err);
@@ -436,7 +474,10 @@ export async function getNativeDisplayMedia(options: DisplayMediaStreamOptions):
         }
     };
     // The same end, by the plugin's event: a port that died first says nothing.
-    void SovereignScreenShare.addListener('shareEnded', () => finish(true))
+    // Only THIS share's end: the plugin numbers its shares.
+    void SovereignScreenShare.addListener('shareEnded', (e) => {
+        if (e?.shareId === undefined || shareId === undefined || e.shareId === shareId) finish(true);
+    })
         .then(h => { if (finished) void h.remove(); else listener = h; })
         .catch(() => { /* the port message still ends it */ });
 

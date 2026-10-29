@@ -17,17 +17,19 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const h = vi.hoisted(() => {
-    const listeners: Array<(e: { reason: string }) => void> = [];
+    const listeners: Array<(e: { reason: string; shareId?: number }) => void> = [];
     const state = { platform: 'android', pluginPresent: true, hello: null as ((nonce: string) => void) | null };
     const plugin = {
         start: vi.fn(async (o: { width: number; height: number; fps: number; nonce: string }) => {
             state.hello?.(o.nonce);
-            return { width: 576, height: 1280, fps: Math.min(30, o.fps), binary: true };
+            return { width: 576, height: 1280, fps: Math.min(30, o.fps), binary: true, shareId: 7 };
         }),
         resize: vi.fn(async (o: { width: number; height: number; fps: number }) => ({ width: 360, height: 800, fps: o.fps })),
         stop: vi.fn(async () => ({ stopped: true })),
-        status: vi.fn(),
-        addListener: vi.fn(async (_e: string, cb: (e: { reason: string }) => void) => {
+        pageReady: vi.fn(async () => ({ endedShare: false, refusedStart: false })) as
+            ((() => Promise<{ endedShare: boolean; refusedStart: boolean }>) & ReturnType<typeof vi.fn>) | undefined,
+        status: vi.fn(async () => ({ available: true, reason: null as string | null, sdk: 36, sharing: false })),
+        addListener: vi.fn(async (_e: string, cb: (e: { reason: string; shareId?: number }) => void) => {
             listeners.push(cb);
             return { remove: async () => { listeners.splice(listeners.indexOf(cb), 1); } };
         }),
@@ -58,6 +60,7 @@ import {
     REPEAT_MS,
     askedCapture,
     getNativeDisplayMedia,
+    initNativeScreenShare,
     nativeScreenShareAvailable,
     readPortMessage,
     refusalAsDomException,
@@ -378,11 +381,40 @@ describe('getNativeDisplayMedia: the share from start to end', () => {
         expect(listeners).toHaveLength(0); // its listener removed with the share
     });
 
-    it('a no at the consent dialog is NotAllowedError, as a cancelled picker is', async () => {
-        plugin.start.mockImplementationOnce(async () => { throw Object.assign(new Error('The screen share was not allowed'), { code: 'denied' }); });
-        await expect(getNativeDisplayMedia({ video: true })).rejects.toMatchObject({ name: 'NotAllowedError' });
-        // Its port listener went with it: a later hello with any nonce is ignored.
+    it('a no at the consent dialog is NotAllowedError, as a cancelled picker is, and its port listener goes with it', async () => {
+        // Every 'message' listener the start adds must be gone once it is
+        // refused: a listener left behind would take a later hello for a
+        // start that no longer exists.
+        const added: EventListenerOrEventListenerObject[] = [];
+        const removed: EventListenerOrEventListenerObject[] = [];
+        const add = vi.spyOn(window, 'addEventListener').mockImplementation(function (this: Window, type: string, l: EventListenerOrEventListenerObject | null) {
+            if (type === 'message' && l) added.push(l);
+        } as typeof window.addEventListener);
+        const remove = vi.spyOn(window, 'removeEventListener').mockImplementation(function (this: Window, type: string, l: EventListenerOrEventListenerObject | null) {
+            if (type === 'message' && l) removed.push(l);
+        } as typeof window.removeEventListener);
+        try {
+            plugin.start.mockImplementationOnce(async () => { throw Object.assign(new Error('The screen share was not allowed'), { code: 'denied' }); });
+            await expect(getNativeDisplayMedia({ video: true })).rejects.toMatchObject({ name: 'NotAllowedError' });
+        } finally {
+            add.mockRestore();
+            remove.mockRestore();
+        }
+        expect(added).toHaveLength(1);
+        expect(removed).toEqual(added);
         expect(plugin.stop).not.toHaveBeenCalled();
+    });
+
+    it("another share's end (an older one, replaced) leaves this share alone; its own end ends it", async () => {
+        const stream = await getNativeDisplayMedia({ video: true });
+        await flush();
+        const ended = vi.fn();
+        stream.getVideoTracks()[0].addEventListener('ended', ended);
+        listeners[0]({ reason: 'Replaced by a new share', shareId: 6 });
+        expect(ended).not.toHaveBeenCalled();
+        expect(stream.getVideoTracks()[0].readyState).toBe('live');
+        listeners[0]({ reason: 'Stopped from the notification', shareId: 7 });
+        expect(ended).toHaveBeenCalledTimes(1);
     });
 
     it('a port with the wrong nonce is never taken; the share gives up after 5 s and stops the phone', async () => {
@@ -411,6 +443,60 @@ describe('getNativeDisplayMedia: the share from start to end', () => {
         plugin.resize.mockImplementationOnce(async () => { throw Object.assign(new Error('Nothing is being shared'), { code: 'not-sharing' }); });
         await expect(stream.getVideoTracks()[0].applyConstraints({})).rejects.toBeInstanceOf(DOMException);
         stream.getVideoTracks()[0].stop();
+    });
+});
+
+describe('initNativeScreenShare: at startup', () => {
+    afterEach(async () => {
+        // Back to a WebView that carries shares, for the tests after these.
+        plugin.status.mockImplementation(async () => ({ available: true, reason: null, sdk: 36, sharing: false }));
+        await initNativeScreenShare();
+    });
+
+    it("a WebView that cannot carry the frames hides Share", async () => {
+        plugin.status.mockImplementation(async () => ({ available: false, reason: 'message channels', sdk: 36, sharing: false }));
+        expect(nativeScreenShareAvailable()).toBe(true);
+        await initNativeScreenShare();
+        expect(nativeScreenShareAvailable()).toBe(false);
+    });
+
+    it('at startup the page tells the native side, which ends what an earlier page left (a share, or a start waiting on the dialog)', async () => {
+        plugin.pageReady!.mockClear();
+        plugin.status.mockImplementation(async () => ({ available: true, reason: null, sdk: 36, sharing: true }));
+        await initNativeScreenShare();
+        expect(plugin.pageReady).toHaveBeenCalledTimes(1);
+        expect(plugin.stop).not.toHaveBeenCalled(); // pageReady did it
+    });
+
+    it('an APK without pageReady: a share an earlier page left running is stopped', async () => {
+        const pageReady = plugin.pageReady;
+        plugin.pageReady = undefined;
+        try {
+            plugin.status.mockImplementation(async () => ({ available: true, reason: null, sdk: 36, sharing: true }));
+            await initNativeScreenShare();
+            expect(plugin.stop).toHaveBeenCalledTimes(1);
+        } finally {
+            plugin.pageReady = pageReady;
+        }
+    });
+
+    it("this page's own running share is left alone", async () => {
+        const stream = await getNativeDisplayMedia({ video: true });
+        plugin.stop.mockClear();
+        plugin.pageReady!.mockClear();
+        plugin.status.mockImplementation(async () => ({ available: true, reason: null, sdk: 36, sharing: true }));
+        await initNativeScreenShare();
+        expect(plugin.stop).not.toHaveBeenCalled();
+        expect(plugin.pageReady).not.toHaveBeenCalled();
+        stream.getVideoTracks()[0].stop();
+    });
+
+    it('nothing is asked off Android', async () => {
+        state.platform = 'web';
+        plugin.status.mockClear();
+        await initNativeScreenShare();
+        expect(plugin.status).not.toHaveBeenCalled();
+        state.platform = 'android';
     });
 });
 
