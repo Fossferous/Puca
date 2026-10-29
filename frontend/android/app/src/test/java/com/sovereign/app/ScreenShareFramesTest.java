@@ -122,6 +122,60 @@ public class ScreenShareFramesTest {
     }
 
     @Test
+    public void aFrameHeldForAnAckIsWantedAgainWhenTheAckComes() {
+        // Review finding: a frame the gate refused was taken out of the reader
+        // and dropped, and a still screen sends no other, so viewers stayed on
+        // half a swipe. Now the gate remembers a held frame and the ack says
+        // to look again.
+        ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(30);
+        assertTrue(g.tryAcquire(0));
+        assertTrue(g.tryAcquire(100));
+        assertTrue("waiting on acks", g.waitMs(150) > 0);
+        g.holdFrame();
+        assertTrue("the ack brings the held frame back", g.release());
+        assertEquals(0, g.waitMs(160));
+        assertTrue(g.tryAcquire(160));
+        assertFalse("sent: nothing held any more", g.release());
+    }
+
+    @Test
+    public void anAckWithNothingHeldAsksForNothing() {
+        ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(30);
+        assertTrue(g.tryAcquire(0));
+        assertFalse(g.release());
+    }
+
+    @Test
+    public void aFrameTooSoonSaysWhenItMayGo() {
+        ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(10); // 100 ms, 75 with the jitter allowance
+        assertEquals("the first frame goes at once", 0, g.waitMs(1000));
+        assertTrue(g.tryAcquire(1000));
+        g.release();
+        assertEquals(75, g.waitMs(1000));
+        assertEquals(25, g.waitMs(1050));
+        assertEquals(0, g.waitMs(1075));
+    }
+
+    @Test
+    public void unacknowledgedFramesSayWhenTheyCountAsLost() {
+        ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(30);
+        assertTrue(g.tryAcquire(0));
+        assertTrue(g.tryAcquire(100));
+        assertEquals(ScreenShareFrames.STALE_MS - 50, g.waitMs(150));
+        assertEquals(0, g.waitMs(100 + ScreenShareFrames.STALE_MS));
+    }
+
+    @Test
+    public void onlyTheAppsOwnTaskEndsTheShare() {
+        // Review finding: dismissing the floating stream window (PipActivity,
+        // its own task) ended your own share.
+        String main = "com.sovereign.app.MainActivity";
+        assertTrue(ScreenShareFrames.taskRemovalEndsShare(main, main));
+        assertFalse(ScreenShareFrames.taskRemovalEndsShare("com.sovereign.app.PipActivity", main));
+        assertTrue("unknown: end it, to be safe", ScreenShareFrames.taskRemovalEndsShare(null, main));
+    }
+
+    @Test
     public void moreReleasesThanFramesNeverOpenTheGateWider() {
         ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(30);
         g.release();

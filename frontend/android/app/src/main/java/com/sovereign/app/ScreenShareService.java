@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -30,8 +31,6 @@ import androidx.core.app.NotificationCompat;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Shares this phone's screen into a call: holds the MediaProjection, draws it
@@ -70,17 +69,25 @@ public class ScreenShareService extends Service {
     static final String EXTRA_WIDTH = "width";
     static final String EXTRA_HEIGHT = "height";
     static final String EXTRA_FPS = "fps";
+    /** Which start this is (ScreenShareSlot): every event carries it back. */
+    static final String EXTRA_SHARE_ID = "shareId";
 
     private static final int JPEG_QUALITY = 70;
 
-    /** What the share tells the plugin. Called on the capture thread except
-     *  {@link #onEnded}, which may come from any thread. */
+    /** What the share tells the plugin, each event with the share's id.
+     *  Called on the capture thread except {@link #onEnded} and
+     *  {@link #onFailed}, which may come from any thread. */
     interface Listener {
-        void onStarted(int width, int height, int fps);
-        void onFailed(String message);
+        void onStarted(long shareId, int width, int height, int fps);
+        void onFailed(long shareId, String message);
         /** One frame as a JPEG. The listener owns the bytes. */
-        void onFrame(byte[] jpeg);
-        void onEnded(String reason);
+        void onFrame(long shareId, byte[] jpeg);
+        void onEnded(long shareId, String reason);
+    }
+
+    /** The answer to {@link #resize}: {width, height, fps}, or null. */
+    interface ResizeResult {
+        void done(int[] now);
     }
 
     private static volatile Listener listener;
@@ -93,7 +100,24 @@ public class ScreenShareService extends Service {
     }
 
     static boolean isSharing() {
-        return current != null && current.projection != null;
+        ScreenShareService s = current;
+        return s != null && s.projection != null;
+    }
+
+    /** The running share's id, or 0. */
+    static long sharingId() {
+        ScreenShareService s = current;
+        return s != null && s.projection != null ? s.shareId : 0;
+    }
+
+    /**
+     * The page acknowledged a frame. When a frame was being held back for it,
+     * look again now rather than at the next timer. Safe from any thread.
+     */
+    static void frameAcknowledged() {
+        ScreenShareFrames.Gate g = gate;
+        ScreenShareService s = current;
+        if (g != null && g.release() && s != null) s.handler().post(s.pump);
     }
 
     /** Ends the running share, if any. Safe from any thread. */
@@ -113,38 +137,35 @@ public class ScreenShareService extends Service {
     /**
      * Re-size the running share in place (the live Stream quality panel, and
      * the step-down when the phone cannot keep up): the same projection and
-     * display, a new size and frame rate. Returns {width, height, fps} as now
-     * captured, or null when nothing is shared. Blocks up to two seconds; call
-     * it off the main thread (plugin methods run on their own).
+     * display, a new size and frame rate. Answers {width, height, fps} as now
+     * captured, on the capture thread, or null when nothing is shared. Never
+     * blocks the caller: Capacitor runs every plugin's methods on one shared
+     * thread.
      */
-    static int[] resize(int w, int h, int fps) {
+    static void resize(int w, int h, int fps, ResizeResult result) {
         ScreenShareService s = current;
-        if (s == null || s.projection == null) return null;
-        int[] out = new int[3];
-        CountDownLatch done = new CountDownLatch(1);
-        s.handler().post(() -> {
-            if (!s.ended) {
-                s.wantW = w;
-                s.wantH = h;
-                s.fps = ScreenShareFrames.clampFps(fps);
-                gate = new ScreenShareFrames.Gate(s.fps);
-                s.resizeTo(s.contentW, s.contentH);
-                out[0] = s.width;
-                out[1] = s.height;
-                out[2] = s.fps;
-            }
-            done.countDown();
-        });
-        try {
-            if (!done.await(2, TimeUnit.SECONDS)) return null;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
+        if (s == null || s.projection == null) {
+            result.done(null);
+            return;
         }
-        return out[0] == 0 ? null : out;
+        s.handler().post(() -> {
+            if (s.ended) {
+                result.done(null);
+                return;
+            }
+            s.wantW = w;
+            s.wantH = h;
+            s.fps = ScreenShareFrames.clampFps(fps);
+            gate = new ScreenShareFrames.Gate(s.fps);
+            s.resizeTo(s.contentW, s.contentH);
+            result.done(new int[] { s.width, s.height, s.fps });
+        });
     }
 
-    private MediaProjection projection;
+    // Read by isSharing() from other threads; written on the main and
+    // capture threads.
+    private volatile MediaProjection projection;
+    private volatile long shareId;
     private VirtualDisplay display;
     private ImageReader reader;
     private HandlerThread thread;
@@ -161,8 +182,14 @@ public class ScreenShareService extends Service {
     private int height;
     private int dpi;
     private Bitmap padded;
+    /** The frame without the row padding, when the reader pads rows. Kept
+     *  between frames, like padded: a new one per frame was garbage at 30 fps. */
+    private Bitmap cropped;
+    private Canvas croppedCanvas;
     private final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(256 * 1024);
-    private boolean ended;
+    private volatile boolean ended;
+    /** Look at the reader again (a frame the gate held back). Capture thread. */
+    private final Runnable pump = this::pump;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -217,6 +244,7 @@ public class ScreenShareService extends Service {
         }
         current = this;
         ended = false;
+        shareId = intent.getLongExtra(EXTRA_SHARE_ID, 0);
 
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
         Intent data = Build.VERSION.SDK_INT >= 33
@@ -275,7 +303,7 @@ public class ScreenShareService extends Service {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, handler());
             watchRotation();
             Listener l = listener;
-            if (l != null) l.onStarted(width, height, fps);
+            if (l != null) l.onStarted(shareId, width, height, fps);
         } catch (Exception e) {
             Log.w(TAG, "starting the capture failed", e);
             fail("The screen capture could not start: " + e.getMessage());
@@ -284,7 +312,7 @@ public class ScreenShareService extends Service {
 
     private ImageReader newReader(int w, int h) {
         ImageReader r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
-        r.setOnImageAvailableListener(this::onImage, handler());
+        r.setOnImageAvailableListener(ignored -> pump(), handler());
         return r;
     }
 
@@ -340,16 +368,36 @@ public class ScreenShareService extends Service {
         display.setSurface(reader.getSurface());
         if (old != null) old.close();
         padded = null;
+        cropped = null;
+        croppedCanvas = null;
     }
 
-    /** Capture thread: one frame from the display. */
-    private void onImage(ImageReader r) {
+    /**
+     * Capture thread: a frame is waiting in the reader (or may be). When the
+     * gate says not yet, the frame STAYS in the reader and this runs again
+     * when it may go: on the page's next ack (frameAcknowledged), or at the
+     * gate's next slot. Taking it out and dropping it lost the last picture of
+     * every quick movement: the display sends nothing new while the screen is
+     * still, so viewers sat on half a swipe until something moved.
+     */
+    private void pump() {
+        ImageReader r = reader;
+        ScreenShareFrames.Gate g = gate;
+        if (ended || r == null || g == null) return;
+        long now = SystemClock.elapsedRealtime();
+        long wait = g.waitMs(now);
+        if (wait > 0) {
+            g.holdFrame();
+            Handler h = handler();
+            h.removeCallbacks(pump);
+            h.postDelayed(pump, wait);
+            return;
+        }
         Image image = null;
         try {
             image = r.acquireLatestImage();
-            if (image == null || ended || r != reader) return;
-            ScreenShareFrames.Gate g = gate;
-            if (g == null || !g.tryAcquire(SystemClock.elapsedRealtime())) return;
+            if (image == null) return;
+            if (!g.tryAcquire(now)) return;
             byte[] jpeg;
             try {
                 jpeg = encode(image);
@@ -358,7 +406,7 @@ public class ScreenShareService extends Service {
                 throw e;
             }
             Listener l = listener;
-            if (l != null) l.onFrame(jpeg);
+            if (l != null) l.onFrame(shareId, jpeg);
             else g.release();
         } catch (Exception e) {
             Log.w(TAG, "frame dropped", e);
@@ -379,16 +427,24 @@ public class ScreenShareService extends Service {
         }
         buf.rewind();
         padded.copyPixelsFromBuffer(buf);
-        Bitmap frame = rowWidth == w ? padded : Bitmap.createBitmap(padded, 0, 0, w, h);
+        Bitmap frame = padded;
+        if (rowWidth != w) {
+            if (cropped == null || cropped.getWidth() != w || cropped.getHeight() != h) {
+                cropped = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                croppedCanvas = new Canvas(cropped);
+            }
+            // The padded columns fall outside the w-wide bitmap.
+            croppedCanvas.drawBitmap(padded, 0, 0, null);
+            frame = cropped;
+        }
         jpegOut.reset();
         frame.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpegOut);
-        if (frame != padded) frame.recycle();
         return jpegOut.toByteArray();
     }
 
     private void fail(String message) {
         Listener l = listener;
-        if (l != null) l.onFailed(message);
+        if (l != null) l.onFailed(shareId, message);
         teardown();
     }
 
@@ -397,8 +453,9 @@ public class ScreenShareService extends Service {
         if (ended) return;
         ended = true;
         Listener l = listener;
+        long id = shareId;
         teardown();
-        if (l != null) l.onEnded(reason);
+        if (l != null) l.onEnded(id, reason);
     }
 
     private void teardown() {
@@ -421,17 +478,23 @@ public class ScreenShareService extends Service {
             projection = null;
             try { p.stop(); } catch (Exception ignored) { /* already stopped */ }
         }
+        if (captureHandler != null) captureHandler.removeCallbacks(pump);
         if (current == this) current = null;
         gate = null;
         stopForeground(Service.STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
-    /** Swiped out of Recents: the page that sent the share is gone with the
-     *  task, so the share is over. */
+    /** Swiped out of Recents: when it is the app's own task, the page that
+     *  sent the share is gone with it, so the share is over. The floating
+     *  stream window's task (PipActivity) is not that page. */
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        end("The app was closed");
+        String removed = rootIntent == null || rootIntent.getComponent() == null
+                ? null : rootIntent.getComponent().getClassName();
+        if (ScreenShareFrames.taskRemovalEndsShare(removed, MainActivity.class.getName())) {
+            end("The app was closed");
+        }
         super.onTaskRemoved(rootIntent);
     }
 

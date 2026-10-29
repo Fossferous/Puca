@@ -194,6 +194,11 @@ installWebPushNav()
 // full screen left the status and navigation bars hidden with nothing on this
 // page holding them: give them back. No-op elsewhere (api/systemBars.ts).
 restoreSystemBarsAtBoot()
+// Android: whether this WebView can carry a screen share (Share is offered
+// only then), and the end of any share a page before this one left running.
+// No-op elsewhere (api/nativeScreenShare.ts).
+import { initNativeScreenShare } from './api/nativeScreenShare'
+void initNativeScreenShare()
 // Desktop: the `puca://` invite link this launch carried, and any that arrive
 // while it runs (the web invite page's "Open in the Púca app"). Before React
 // renders, like the Android intent above: the link waits in the pending-

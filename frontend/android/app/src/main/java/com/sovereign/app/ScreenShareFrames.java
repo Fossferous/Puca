@@ -86,6 +86,16 @@ final class ScreenShareFrames {
         return Math.min(MAX_FPS, fps);
     }
 
+    /**
+     * Whether a task leaving Recents ends the share. Only the app's own task
+     * does: the page that shares lives there. The floating stream window
+     * (PipActivity) has a task of its own, and dismissing it must not take
+     * your share down. Unknown (no component): end it, to be safe.
+     */
+    static boolean taskRemovalEndsShare(String removedComponentClass, String mainActivityClass) {
+        return removedComponentClass == null || removedComponentClass.equals(mainActivityClass);
+    }
+
     private static int even(int v) {
         return v - (v & 1);
     }
@@ -95,32 +105,64 @@ final class ScreenShareFrames {
      * allows, and not while the page still has {@link #MAX_IN_FLIGHT} frames
      * it has not acknowledged. Thread-safe: frames arrive on the capture
      * thread, acknowledgements on the main thread.
+     *
+     * <p>A frame the gate holds back is not thrown away: the display sends
+     * nothing new while the screen is still, so a dropped frame left viewers
+     * on whatever came before it (half a swipe, say) until something moved.
+     * The capture leaves it in the reader instead, and the gate says when to
+     * look again: {@link #waitMs} for the frame rate (or a lost ack), and
+     * {@link #release} answering true when an ack is what it was waiting for.
      */
     static final class Gate {
         private final long intervalMs;
         private long lastSentMs = Long.MIN_VALUE;
         private int inFlight;
+        private boolean frameWaiting;
 
         Gate(int fps) {
             this.intervalMs = 1000L / clampFps(fps);
         }
 
-        /** True, and the frame counted as sent, when it may go now. */
-        synchronized boolean tryAcquire(long nowMs) {
-            if (inFlight >= MAX_IN_FLIGHT && nowMs - lastSentMs >= STALE_MS) inFlight = 0;
-            if (inFlight >= MAX_IN_FLIGHT) return false;
+        /**
+         * 0 when a frame may be encoded now; otherwise how many ms until it
+         * may, if no ack comes first (the frame rate's next slot, or the moment
+         * the unacknowledged frames count as lost).
+         */
+        synchronized long waitMs(long nowMs) {
+            if (inFlight >= MAX_IN_FLIGHT) {
+                long stale = lastSentMs + STALE_MS - nowMs;
+                if (stale > 0) return stale;
+                inFlight = 0;
+            }
+            if (lastSentMs == Long.MIN_VALUE) return 0;
             // A frame up to a quarter interval early still counts as on time:
             // the display's own vsync jitters around the interval, and a
             // strict comparison halved 30 fps to 15 on a 60 Hz screen.
-            if (lastSentMs != Long.MIN_VALUE && nowMs - lastSentMs < intervalMs - intervalMs / 4) return false;
+            long next = lastSentMs + intervalMs - intervalMs / 4 - nowMs;
+            return Math.max(0, next);
+        }
+
+        /** True, and the frame counted as sent, when it may go now. */
+        synchronized boolean tryAcquire(long nowMs) {
+            if (waitMs(nowMs) != 0) return false;
             lastSentMs = nowMs;
             inFlight++;
+            frameWaiting = false;
             return true;
         }
 
-        /** The page decoded a frame (or one could not be sent at all). */
-        synchronized void release() {
+        /** A frame is being held back: the next {@link #release} reports it. */
+        synchronized void holdFrame() {
+            frameWaiting = true;
+        }
+
+        /**
+         * The page decoded a frame (or one could not be sent at all). True
+         * when a frame is being held back and may now be worth another look.
+         */
+        synchronized boolean release() {
             if (inFlight > 0) inFlight--;
+            return frameWaiting;
         }
 
         synchronized int inFlight() {
