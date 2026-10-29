@@ -157,6 +157,15 @@
                 android:value="Self-hosted messenger: keeps an active remote-desktop control session and/or the message WebSocket connected while the app is backgrounded, at the user's request. The only external signal is a content-free wake ping; all data flows over this socket to the user's own server." />
         </service>
 
+        <!-- Sharing this phone's screen into a call (ScreenShareService.java):
+             started only after Android's own consent dialog, and only while the
+             share is live. mediaProjection is the one type a MediaProjection
+             may be obtained in. Not exported. -->
+        <service
+            android:name=".ScreenShareService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
         <!-- Home-screen shortcuts (Friends / Tasks / Devices / Settings).
              Exported because the launcher's APPWIDGET_UPDATE broadcast must
              reach it; that action is a protected broadcast only the system
@@ -240,6 +249,10 @@
          `microphone` type. Requested only while a call is live, and only
          when RECORD_AUDIO has been granted. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Screen sharing into a call (Android 14+): pairs with ScreenShareService's
+         mediaProjection type. A normal permission; the person's consent is
+         Android's own capture dialog, asked for every share. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Background delivery is NativeDelivery's socket to the user's OWN

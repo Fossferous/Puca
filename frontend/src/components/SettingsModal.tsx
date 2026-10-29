@@ -25,6 +25,7 @@ import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
 import { isTouchDevice, screenShareOffered, settingsSections } from './settingsModal.utils';
+import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { sendTestNotification } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
@@ -2812,10 +2813,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     api/rtc/shareLadder.ts for when Automatic sends several
                                     sizes. Shown wherever the voice panel offers Share Screen
                                     (screenShareOffered): not on phones, but on a 2-in-1 in
-                                    tablet mode, which shares under Automatic too. A change
-                                    reaches a running share at once
+                                    tablet mode, which shares under Automatic too, and in the
+                                    Android app, which shares natively (nativeScreenShare.ts).
+                                    A change reaches a running share at once
                                     (sfuManager.followLadderSetting). */}
-                                {screenShareOffered() && (
+                                {(screenShareOffered() || nativeScreenShareAvailable()) && (
                                     <>
                                         <h3>Screen Sharing</h3>
                                         <div className="settings-card">

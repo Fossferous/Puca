@@ -30,6 +30,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(SovereignAppPlugin.class);
         registerPlugin(SovereignLocationPlugin.class);
         registerPlugin(SovereignDownloadsPlugin.class);
+        registerPlugin(SovereignScreenSharePlugin.class);
         super.onCreate(savedInstanceState);
     }
 

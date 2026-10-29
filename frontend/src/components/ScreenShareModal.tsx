@@ -1,5 +1,6 @@
 import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { isTauri } from '../api/platform';
+import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { goLiveMark } from '../api/goLiveTiming';
 import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection, withOwner } from '../api/appAudio';
 import type { CaptureApp, SelectedApp, WindowOwner } from '../api/appAudio';
@@ -70,6 +71,8 @@ function savedGainFor(owner: WindowOwner): number | undefined {
 
 const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 'settings', onClose, onCaptureScreen, onGoLive, onCancelAfterCapture }) => {
     const desktop = isTauri();
+    // The Android app: Android's own dialog instead of a picker, and no sound.
+    const phone = !desktop && nativeScreenShareAvailable();
     // One object rather than two fields: they are always read and written
     // together, and it keeps the effect below to a single setState call.
     const [{ resolution: selectedRes, fps: selectedFps, audio }, setChoices] =
@@ -360,7 +363,9 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                                     : audio === 'pick'
                                         ? "Next you'll pick the window or screen, then tick exactly which apps' audio the stream carries."
                                         : "Next you'll pick the window or screen — then you're live, video only.")
-                                : "Next you'll pick the window, screen, or tab — then you're live. To include sound, tick “Share audio” in that picker."}
+                                : phone
+                                    ? "Next Android asks to share this phone's screen — then you're live. The phone's sound is not shared."
+                                    : "Next you'll pick the window, screen, or tab — then you're live. To include sound, tick “Share audio” in that picker."}
                             {' '}These settings are remembered: the Share button goes straight to the picker next time.
                         </span>
                     </div>

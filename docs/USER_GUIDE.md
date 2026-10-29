@@ -407,7 +407,9 @@ can never be bought, sold or exchanged for anything.
 ## Screen Sharing
 
 ### Start Sharing
-Desktop and browser only — a phone cannot share its screen.
+From the desktop app, a browser, or the Android app (see
+[From the Android app](#from-the-android-app) below). A phone's browser and
+the iPhone cannot share a screen.
 
 Púca remembers the **Resolution**, **Frame Rate** and **Audio to share** you
 last picked, and **Share Screen** uses them without asking. So if you turn the
@@ -464,6 +466,38 @@ the stream says it is capturing 1080p. A share sent at several sizes (see
 below) changes too, every size with it. When a change means the share should
 go from one size to several, or back (see **Automatic** below), viewers see
 the picture hold for about a second while it switches.
+
+### From the Android app
+
+1. Join a voice channel. On a phone, tap the arrow at the edge of the voice
+   panel to show all its buttons
+2. Tap **Share Screen**. Android asks in its own dialog whether Púca may
+   share your screen. Choose **Share entire screen**, or (Android 14 and
+   later) **Share one app** and then the app, and confirm. **Cancel** shares
+   nothing
+3. You are live. Everyone in the call can watch, in mesh and SFU channels
+   alike, encrypted end to end like anything else in the call
+
+The share keeps going while you use other apps: that is the point of
+sharing a phone. While it runs, Android shows that the screen is being
+recorded or cast, and Púca's notification **Sharing your screen** has a
+**Stop sharing** button. **Stop Sharing** in the app stops it too, and so
+does Android's own control in the status bar.
+
+Android asks every time. Its permission lasts for one share only.
+
+What is different from a computer:
+
+- **No sound.** Only the picture is shared, never the phone's audio.
+- **At most 1080p and 30 fps.** The phone turns every frame into a picture
+  for the app and then encodes it again, so the larger sizes and 60 fps in
+  the dialog are treated as 1080p and 30 fps. The picture keeps the phone's
+  shape: upright when you hold it upright, and it follows when you turn it.
+- **A still screen sends little.** Frames go out when something on the
+  screen changes, plus about one a second while nothing does.
+- It needs the new Android app (a new install from the download page, not
+  only the in-app update), in Púca Lite too. In an older Android app the
+  button stays hidden.
 
 ### How much a share sends
 

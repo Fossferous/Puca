@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+
+- **Share your phone's screen from the Android app.** In a call, **Share Screen** is now in the voice panel on Android too (tap the arrow at the panel's edge for the full controls). Android asks first in its own dialog, where you choose the entire screen or, on Android 14 and later, one app. The share then works like one from a computer: everyone in the call can watch it, in mesh and SFU channels alike, and it is encrypted end to end with the call's own keys. It keeps going while you use other apps. A notification says your screen is being shared and has a **Stop sharing** button, and **Stop Sharing** in the app works as before. The picture is at most 1080p and 30 fps whatever the dialog asks, and the phone's sound is not shared. Needs the new Android app (a new APK), in Púca Lite too; an older app keeps the button hidden.
+
 ## 0.9.853 — 2026-10-28
 
 The log says why a stream you were watching closed

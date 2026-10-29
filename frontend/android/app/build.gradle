@@ -147,6 +147,10 @@ dependencies {
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
+    // WebMessagePort for a screen share's frames (SovereignScreenSharePlugin).
+    // Capacitor already ships it, as an implementation detail: named here so
+    // the app does not lean on that.
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
     // Data NEVER rides Firebase — the first FCM design carried sender names
     // and conversation ids and was removed on principle. What returned is the
     // DOORBELL ONLY: firebase-messaging receives a constant-payload wake

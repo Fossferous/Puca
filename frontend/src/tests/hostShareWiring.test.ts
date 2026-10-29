@@ -275,10 +275,16 @@ const PINS: Pin[] = [
     {
         name: "the share's capture goes through the host when there is one",
         src: 'media',
-        holds: (c) => c.includes('this.screenShareStream = await getDisplayMediaForShare(displayMediaOptions);')
+        // The Android app's own capture comes first (nativeScreenShare.ts:
+        // an embedding host never runs inside the Android app), then the host.
+        holds: (c) => c.includes('this.screenShareStream = nativeScreenShareAvailable()\n'
+            + '                ? await getNativeDisplayMedia(displayMediaOptions)\n'
+            + '                : await getDisplayMediaForShare(displayMediaOptions);')
             && !c.includes('navigator.mediaDevices.getDisplayMedia('),
         mutants: [
-            ['straight to the browser', replace('await getDisplayMediaForShare(displayMediaOptions);', 'await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);')],
+            ['straight to the browser', replace(': await getDisplayMediaForShare(displayMediaOptions);', ': await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);')],
+            ['the Android app through the host path', replace('? await getNativeDisplayMedia(displayMediaOptions)', '? await getDisplayMediaForShare(displayMediaOptions)')],
+            ['the native path taken everywhere', replace('this.screenShareStream = nativeScreenShareAvailable()', 'this.screenShareStream = true')],
         ],
     },
     {
