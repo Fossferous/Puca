@@ -109,6 +109,7 @@ import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { combineHostIdle, decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { hostIdleSeconds, hostReportsIdle, screenShareAvailable } from '../api/embedHost';
+import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
@@ -301,8 +302,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pendingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // Detect mobile for hiding screen share option (the same answer the
-    // sharing settings follow: settingsModal.utils screenShareOffered)
-    const isMobile = !screenShareOffered();
+    // sharing settings follow: settingsModal.utils screenShareOffered). The
+    // Android app shares from its native half (api/nativeScreenShare.ts),
+    // when the installed APK carries it.
+    const nativeShare = nativeScreenShareAvailable();
+    const isMobile = !screenShareOffered() && !nativeShare;
 
     // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
     // query (utils/phonePanel.ts), and nothing else. This decides whether the
