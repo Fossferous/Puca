@@ -268,9 +268,26 @@ const SEL = {
     connected: '[data-testid="voice-connected"], .voice-connected-label',
 };
 
+/** An 8x16 grid of BLOCK MEANS (RGBA) of an ImageData. A drawImage straight
+ *  to 8x16 samples single pixels, and two resolutions of the same dark screen
+ *  with thin bright text (the SFU's smaller layer against the phone's own
+ *  screencap) then sample different pixels: correlation near 0 for the same
+ *  picture. Means over each block compare the pictures, not the sampling. */
+const BLOCK_GRID = `window.blockGrid = (d) => {
+    const out = [];
+    for (let by = 0; by < 16; by++) for (let bx = 0; bx < 8; bx++) {
+        const x0 = Math.floor(bx * d.width / 8), x1 = Math.floor((bx + 1) * d.width / 8);
+        const y0 = Math.floor(by * d.height / 16), y1 = Math.floor((by + 1) * d.height / 16);
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) { const i = (y * d.width + x) * 4; r += d.data[i]; g += d.data[i + 1]; b += d.data[i + 2]; n++; }
+        out.push(r / n, g / n, b / n, 255);
+    }
+    return out;
+};`;
+
 /** The viewer's received video of `uid`'s share: decoded frames, size, and an
  *  8x16 RGB grid of the picture (for comparison with the phone's screen). */
-const received = (v, uid) => v.evaluate(async (uid) => {
+const received = async (v, uid) => { await v.evaluate(BLOCK_GRID); return v.evaluate(async (uid) => {
     const m = await import('/src/components/voiceState.ts');
     const track = m.getStreamData(uid)?.stream?.getVideoTracks().find(t => t.readyState === 'live');
     if (!track) return { live: false };
@@ -282,32 +299,41 @@ const received = (v, uid) => v.evaluate(async (uid) => {
             (await r.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') { frames += s.framesDecoded || 0; w = s.frameWidth || w; h = s.frameHeight || h; } });
         }
     }
-    const el = document.createElement('video');
-    el.muted = true;
-    el.srcObject = new MediaStream([track]);
-    await el.play().catch(() => {});
-    await new Promise(r => setTimeout(r, 400));
+    // One sampling element per track, kept: a fresh <video> shows nothing until
+    // the track's NEXT frame, and a phone screen that is not changing sends
+    // about one a second, so a new element read 400 ms later was often black.
+    window.__probe ??= new Map();
+    let el = window.__probe.get(track);
+    if (!el) {
+        el = document.createElement('video');
+        el.muted = true;
+        el.srcObject = new MediaStream([track]);
+        window.__probe.set(track, el);
+        await el.play().catch(() => {});
+        await new Promise(r => setTimeout(r, 400));
+    }
+    await new Promise(r => requestAnimationFrame(() => r()));
     let grid = null;
     if (el.videoWidth > 0) {
-        const c = document.createElement('canvas'); c.width = 8; c.height = 16;
-        const g = c.getContext('2d', { willReadFrequently: true });
-        g.drawImage(el, 0, 0, 8, 16);
-        grid = Array.from(g.getImageData(0, 0, 8, 16).data);
+        const big = document.createElement('canvas'); big.width = el.videoWidth; big.height = el.videoHeight;
+        const bg = big.getContext('2d', { willReadFrequently: true });
+        bg.drawImage(el, 0, 0);
+        grid = blockGrid(bg.getImageData(0, 0, big.width, big.height));
+        window.__probeShot = big.toDataURL('image/png');
     }
-    el.srcObject = null;
     return { live: true, frames, w, h, grid };
-}, uid);
+}, uid); };
 
 /** The same 8x16 grid of a PNG, decoded by the viewer's browser. */
-const gridOfPng = (v, png) => v.evaluate(async (b64) => {
+const gridOfPng = async (v, png) => { await v.evaluate(BLOCK_GRID); return v.evaluate(async (b64) => {
     const img = new Image();
     img.src = 'data:image/png;base64,' + b64;
     await img.decode();
-    const c = document.createElement('canvas'); c.width = 8; c.height = 16;
+    const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
     const g = c.getContext('2d', { willReadFrequently: true });
-    g.drawImage(img, 0, 0, 8, 16);
-    return Array.from(g.getImageData(0, 0, 8, 16).data);
-}, png.toString('base64'));
+    g.drawImage(img, 0, 0);
+    return blockGrid(g.getImageData(0, 0, c.width, c.height));
+}, png.toString('base64')); };
 
 /** How alike two grids are: the correlation of their luminance, -1..1. */
 function likeness(a, b) {
@@ -388,9 +414,17 @@ try {
         check(`${tag} is in the call`, !!await until(async () => (await p.locator(SEL.connected).count()) > 0, 30000));
     }
     await sleep(3000);
-    const badges = await until(async () => { const x = [await badge(V), await badge(P)]; return x[0] === 'Encrypted' && x[1] === 'Encrypted' ? x : null; }, 20000)
-        ?? [await badge(V), await badge(P)];
-    check('both panels say Encrypted', badges[0] === 'Encrypted' && badges[1] === 'Encrypted', badges);
+    if (SFU) {
+        // On an SFU call the badge counts only participants that PUBLISH
+        // something (sfuManager.allMediaE2eeStatuses), and neither side has
+        // published yet (no microphone here): no badge is the right answer.
+        // Encryption is checked once the share is live (below).
+        step('SFU: the badge waits for something published (checked with the share live)');
+    } else {
+        const badges = await until(async () => { const x = [await badge(V), await badge(P)]; return x[0] === 'Encrypted' && x[1] === 'Encrypted' ? x : null; }, 20000)
+            ?? [await badge(V), await badge(P)];
+        check('both panels say Encrypted', badges[0] === 'Encrypted' && badges[1] === 'Encrypted', badges);
+    }
 
     // ---- Share is offered on the phone, and opens Android's consent ----
     async function phoneShare(answer) {
@@ -471,6 +505,7 @@ try {
         const png = screencap();
         save(`${tag}-phone.png`, png);
         if (OUT) save(`${tag}-viewer.png`, await V.screenshot());
+        if (OUT) { const d = await V.evaluate(() => window.__probeShot || ''); if (d) save(`${tag}-probe.png`, Buffer.from(d.split(',')[1], 'base64')); }
         const like = likeness(r2.grid, await gridOfPng(V, png));
         check(`${tag}: the viewer receives the phone's share`, !!r1?.live && r2.live, { w: r2.w, h: r2.h });
         check(`${tag}: frames keep arriving`, !!r1 && r2.frames > r1.frames, { before: r1?.frames, after: r2.frames });
@@ -484,10 +519,19 @@ try {
         check('walk: Stop Sharing is on screen, >= 44 px, and what a tap there hits', !!g && g.onScreen && g.w >= 44 && g.h >= 44 && g.hits, g);
         save('walk-live.png', screencap());
     }
-    check('still Encrypted with the share live', (await badge(V)) === 'Encrypted' && (await badge(P)) === 'Encrypted');
+    if (SFU) {
+        // The phone publishes; the viewer publishes nothing, so only the
+        // viewer's badge has anything to count (the phone's has none).
+        const vb = await until(async () => (await badge(V)) === 'Encrypted' ? 'Encrypted' : null, 15000) ?? await badge(V);
+        check("the viewer's panel says Encrypted with the phone's share live", vb === 'Encrypted', { viewer: vb, phone: await badge(P) });
+        const st = await V.evaluate(async (id) => (await import('/src/api/rtc/sfuManager.ts')).sfuManager.allMediaE2eeStatuses().find(s => s.userId === id) ?? null, uid.P);
+        check("LiveKit E2EE: the viewer opens the phone's publications encrypted", !!st && st.encrypted === true, st);
+    } else {
+        check('still Encrypted with the share live', (await badge(V)) === 'Encrypted' && (await badge(P)) === 'Encrypted');
+    }
     if (SFU && LK.api) {
-        const t = await until(async () => { const x = await lkTracks(`voice_${voice.id}`); return x && Object.values(x).some(a => a.includes('SCREEN_SHARE') || a.includes(3)) ? x : null; }, 10000)
-            ?? await lkTracks(`voice_${voice.id}`);
+        const t = await until(async () => { const x = await lkTracks(`sfu_${voice.id}`); return x && Object.values(x).some(a => a.includes('SCREEN_SHARE') || a.includes(3)) ? x : null; }, 10000)
+            ?? await lkTracks(`sfu_${voice.id}`);
         check('LiveKit sees the phone publish a screen share (the SFU path, not mesh)', !!t && Object.values(t).some(a => a.includes('SCREEN_SHARE') || a.includes(3)), t);
     }
 
