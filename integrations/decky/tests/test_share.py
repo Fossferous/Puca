@@ -55,6 +55,18 @@ class CommandTests(unittest.TestCase):
         self.assertIn("video/x-raw,format=NV12,width=1280,height=800", argv)
         self.assertEqual(argv[-2:], ["fdsink", "fd=1"])
 
+    def test_the_feed_is_timestamped_on_arrival_before_it_is_thinned(self):
+        # gamescope's feed is variable-rate (framerate 0/1) and its own buffer
+        # times are no use to videorate (gst 1.26.4, SteamOS, 2026-10-30): the
+        # thinning stage passed the FIRST frame and dropped every one after,
+        # so the encoder made one unit, the splitter waited forever for the
+        # next, and every share was black. Measured with a game in front: 1
+        # frame in 3 s without do-timestamp, ~30 fps with it.
+        argv = sh.capture_argv("puca-share-1-1")
+        source = argv[argv.index("pipewiresrc"):argv.index("!")]
+        self.assertIn("do-timestamp=true", source, "on pipewiresrc itself, not elsewhere in the pipeline")
+        self.assertLess(argv.index("pipewiresrc"), argv.index("videorate"))
+
     def test_the_encoder_is_the_decks_own_and_marks_every_unit(self):
         argv = sh.encode_argv()
         joined = " ".join(argv)
@@ -266,6 +278,92 @@ class FakeProc:
 
     async def wait(self):
         return 0
+
+
+class Running:
+    """A capture or encoder process that is still running."""
+    returncode = None
+
+
+# `pw-link -l` on a Deck with a game in front and Steam's background recording on (2026-10-30).
+LINKS_STEAM = "gamescope:capture_1\n  |-> steam:input_1\nsteam:input_1\n  |<- gamescope:capture_1\n"
+LINKS_OURS = "gamescope:capture_1\n  |-> puca-share-9-1:input_1\npuca-share-9-1:input_1\n  |<- gamescope:capture_1\n"
+
+
+def fake_run(links):
+    """sh._run for the link step: our port is there, linking works, and `pw-link -l` says `links()`."""
+    async def run(argv, env):
+        if argv == ["pw-link", "-o"]:
+            return 0, "gamescope:capture_1\n"
+        if argv == ["pw-link", "-i"]:
+            return 0, "puca-share-9-1:input_1\n"
+        if argv == ["pw-link", "-l"]:
+            return 0, links()
+        return 0, ""
+    return run
+
+
+class RecorderTests(unittest.TestCase):
+    """Steam's background recording takes the feed: the capture then gets no
+    frames, so a share says so instead of sending black."""
+
+    def test_reads_steams_recorder_off_pw_link(self):
+        self.assertTrue(sh.feed_taken(LINKS_STEAM))
+        self.assertTrue(sh.feed_taken("gamescope:capture_1\n  |-> puca-share-9-1:input_1\n  |-> steam:input_1\n"))
+        self.assertFalse(sh.feed_taken(LINKS_OURS), "our own capture is not Steam's")
+        self.assertFalse(sh.feed_taken(""))
+        self.assertFalse(sh.feed_taken("alsa_output:monitor_FL\n  |-> steam:input_FL\n"), "Steam reading another port")
+        self.assertFalse(sh.feed_taken("steam:input_1\n  |<- gamescope:capture_1\n"), "the same link, from Steam's side, is not counted twice")
+        self.assertFalse(sh.feed_taken("gamescope:capture_1\n  |-> steamy:input_1\n"))
+        self.assertLessEqual(len(sh.RECORDER_TAKES_FEED), 160, "the panel shows at most 160 characters of why")
+
+    def link(self, links):
+        loop = asyncio.new_event_loop()
+        try:
+            cap = sh.ScreenCapture(lambda au, key: None, lambda why: None)
+            cap.client, cap.gst, cap.ff = "puca-share-9-1", Running(), Running()
+            old = sh._run
+            sh._run = fake_run(lambda: links)
+            try:
+                return loop.run_until_complete(cap._link({}))
+            finally:
+                sh._run = old
+        finally:
+            loop.close()
+
+    def test_a_share_does_not_start_while_steam_records_the_feed(self):
+        self.assertEqual(self.link(LINKS_STEAM), sh.RECORDER_TAKES_FEED)
+        self.assertIsNone(self.link(LINKS_OURS))
+
+    def test_a_running_share_ends_saying_why_when_steam_starts_recording(self):
+        loop = asyncio.new_event_loop()
+        ended = []
+        links = [LINKS_OURS]
+
+        async def go():
+            cap = sh.ScreenCapture(lambda au, key: None, ended.append)
+            cap.ff = FakeProc()
+            cap.begin()
+            await asyncio.sleep(0.05)
+            before = list(ended)
+            links[0] = LINKS_STEAM  # a game starts, and Steam's recorder with it
+            for _ in range(100):
+                if ended:
+                    break
+                await asyncio.sleep(0.01)
+            await cap.stop()
+            return before
+
+        old = sh._run
+        sh._run = fake_run(lambda: links[0])
+        try:
+            with Patched(FEED_CHECK_S=0.01):
+                before = loop.run_until_complete(go())
+        finally:
+            sh._run = old
+            loop.close()
+        self.assertEqual(before, [], "not while only our capture reads the feed")
+        self.assertEqual(ended, [sh.RECORDER_TAKES_FEED])
 
 
 class PumpTests(unittest.TestCase):

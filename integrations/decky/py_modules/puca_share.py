@@ -50,6 +50,13 @@ LAG_S = 0.03           # a look vouches only for what began this long before it
 MAX_HOLD_S = 0.6       # a unit nobody vouched for by then is dropped
 SETTLE_S = 0.5         # after a pause: menus slide away, toasts fade
 PAGE_GONE_S = 3.0      # the page refusing the picture this long ends the share
+FEED_CHECK_S = 2.0     # how often a running share checks that Steam's recorder has not taken the feed
+# Steam's Game Recording, set to Record in Background, reads the same feed while a
+# game runs, and then this capture gets no frames at all (measured on a Deck,
+# 2026-10-30: 0 frames with Steam's recorder linked, ~30 fps with it off).
+RECORDER = "steam"
+RECORDER_TAKES_FEED = ("Steam's background recording is using the screen. Turn off Record in Background "
+                       "in Steam's Settings > Game Recording, then share again.")
 _names = itertools.count(1)
 
 # What the page's shim is called with (puca_cdp.call_function): values, never script text.
@@ -66,10 +73,15 @@ def client_name() -> str:
 
 def capture_argv(client: str) -> list[str]:
     """The feed at 30 fps, NV12 at the Deck's own size (letterboxed if it is
-    another shape), raw on stdout. It waits for the link."""
+    another shape), raw on stdout. It waits for the link.
+
+    do-timestamp: gamescope's feed is variable-rate and its own buffer times
+    are no use to videorate, which then passed the first frame and dropped
+    every one after it, a black share (measured on a Deck, 2026-10-30: one
+    frame in 3 s with a game in front; ~30 fps once stamped on arrival)."""
     return [
         "gst-launch-1.0", "-q",  # -q: its chatter would go down the pipe with the picture
-        "pipewiresrc", "autoconnect=false", f"client-name={client}",
+        "pipewiresrc", "autoconnect=false", f"client-name={client}", "do-timestamp=true",
         "!", "videorate", "drop-only=true", "!", f"video/x-raw,framerate={FPS}/1",
         "!", "videoconvert", "!", "videoscale",
         "!", f"video/x-raw,format=NV12,width={WIDTH},height={HEIGHT}",
@@ -95,6 +107,21 @@ def find_ports(outputs: str, inputs: str, client: str, feed: str = FEED) -> Opti
     out = next((l.strip() for l in outputs.splitlines() if l.strip().startswith(f"{feed}:")), None)
     inp = next((l.strip() for l in inputs.splitlines() if l.strip().startswith(f"{client}:")), None)
     return (out, inp) if out and inp else None
+
+
+def feed_taken(links: str, feed: str = FEED, recorder: str = RECORDER) -> bool:
+    """Whether Steam's own recorder reads the feed, from `pw-link -l`: each
+    output port, then one "  |-> node:port" line per input it feeds."""
+    port: Optional[str] = None
+    for line in links.splitlines():
+        if line and not line[0].isspace():
+            port = line.strip()
+            continue
+        target = line.strip()
+        if port and port.startswith(f"{feed}:") and target.startswith("|->"):
+            if target[3:].strip().split(":", 1)[0] == recorder:
+                return True
+    return False
 
 
 def tool_env(base: Optional[dict] = None) -> dict:
@@ -318,7 +345,8 @@ class ScreenCapture:
         return problem
 
     def begin(self) -> None:
-        self.tasks = [asyncio.ensure_future(self._read()), asyncio.ensure_future(self._send())]
+        self.tasks = [asyncio.ensure_future(self._read()), asyncio.ensure_future(self._send()),
+                      asyncio.ensure_future(self._watch_feed())]
 
     async def _link(self, env: dict) -> Optional[str]:
         loop = asyncio.get_running_loop()
@@ -330,9 +358,20 @@ class ScreenCapture:
                 return "the Deck's video encoder could not be used"
             ports = find_ports((await _run(["pw-link", "-o"], env))[1], (await _run(["pw-link", "-i"], env))[1], self.client)
             if ports is not None and (await _run(["pw-link", ports[0], ports[1]], env))[0] == 0:
-                return None
+                return RECORDER_TAKES_FEED if feed_taken((await _run(["pw-link", "-l"], env))[1]) else None
             await asyncio.sleep(0.25)
         return "no screen to share (the Deck must be in Game Mode)"
+
+    async def _watch_feed(self) -> None:
+        """Steam's recorder starts when a game does, so a share started on
+        Steam's own screen can lose the feed later: end it, saying why,
+        rather than send nothing."""
+        env = tool_env()
+        while True:
+            await asyncio.sleep(FEED_CHECK_S)
+            if feed_taken((await _run(["pw-link", "-l"], env))[1]):
+                self._end(RECORDER_TAKES_FEED)
+                return
 
     async def _read(self) -> None:
         loop = asyncio.get_running_loop()
