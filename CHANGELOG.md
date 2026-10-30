@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Púca for Steam Deck: sharing your screen shows your game, not black.** A share started from the plugin showed viewers only black, with a game in front, a non-Steam game or Steam's own menus. The Deck's screen capture let through the first frame and dropped every one after it, so no picture ever reached the call. It now sends the game at 30 frames a second, and pauses for menus, the keyboard and notifications as before. One Steam setting still stops it: with **Game Recording** set to **Record in Background**, Steam's own recorder takes the screen while a game runs, and Púca gets no picture. The plugin now tells you so instead of sending black, and asks you to turn that setting off. This is Púca for Steam Deck 0.4.2, which comes separately from Púca: the panel offers it as an update once it is out. (docs/STEAM_DECK.md)
+
 ## 0.9.854 — 2026-10-29
 
 Share your phone's screen from the Android app
