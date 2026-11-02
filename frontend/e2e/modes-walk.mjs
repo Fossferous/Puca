@@ -550,8 +550,12 @@ async function sfuRun() {
     }, 30000, 500);
     check('SFU: Call everyone back moves both into the main channel, by LiveKit\'s own list', !!moved, await lkPeople(`sfu_${town.id}`));
     check('SFU: and out of where they were, with one session each', !!await gone(cottage, pId) && !!await gone(attic, qId), { cottage: await lkPeople(`sfu_${cottage.id}`), attic: await lkPeople(`sfu_${attic.id}`) });
-    const movedTo = [await room(P), await room(Q)];
-    check('SFU: both clients are connected to the main channel\'s room', movedTo.every(r => r?.name === `sfu_${town.id}` && r.state === 'connected'), movedTo);
+    // LiveKit lists a session a moment before its client calls itself connected.
+    const movedTo = await until(async () => {
+        const both = [await room(P), await room(Q)];
+        return both.every(r => r?.name === `sfu_${town.id}` && r.state === 'connected') ? both : null;
+    }, 10000);
+    check('SFU: both clients are connected to the main channel\'s room', !!movedTo, [await room(P), await room(Q)]);
     check('SFU: and each is told who moved them', (await Promise.all([P, Q].map(p => until(async () => (await p.evaluate(() => document.body.innerText)).includes('moved you to Town Square'), 8000)))).every(Boolean));
     check('SFU control: the caller\'s own call elsewhere did not move', await keptCall());
     await shot(O, 'sfu-01-called-back');
