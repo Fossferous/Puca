@@ -90,7 +90,7 @@ name and press **Add mode**. Then tick the channels it should show, and press
 **Save**. A collection's subchannels show and hide with it. You can also choose:
 
 - **Main voice channel**: where **Join** goes when the mode starts, and where **Call
-  everyone back** brings people.
+  everyone to** brings people.
 - **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat in its own
   colours. Each person's device darkens or lightens it only as far as messages need to
   stay readable on their theme, so one bright moon does not dim the whole sky. While a
@@ -121,7 +121,7 @@ the name of its main voice channel: it pulls everyone in the mode's voice channe
 that channel. It can't move anyone ranked at or above you, and tells you how many it left.
 
 **A mode tidies the list. It does not keep anyone out.** Anyone allowed to see a channel
-can still open it from a mention, a notification or a link, and people on an older
+can still open it from a mention or a notification, and people on an older
 version of Púca see every channel. To keep someone out of a channel, use its permissions
 (*Channel permissions*, below). A voice channel with people in it stays listed even while
 hidden, so a call is never invisible.

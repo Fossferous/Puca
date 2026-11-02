@@ -1245,6 +1245,17 @@ pub(crate) async fn perform_voice_move(
     StatusCode::OK.into_response()
 }
 
+/// The name an audit row shows. A null actor renders as a name, not as "user null": the
+/// shipped clients fall back to `user <id>` when the username is absent, and there is no id to
+/// show. The space makes it unforgeable: validate_username allows only [A-Za-z0-9_.-], so no real
+/// account can be called this. Usually the account has been deleted; for a mode that turned
+/// itself off, nobody acted.
+fn audit_actor_name(action_type: &str, username: Option<String>, actor_id: Option<i32>) -> Option<String> {
+    username.or_else(|| {
+        actor_id.is_none().then(|| if action_type == "mode_auto_off" { "the server" } else { "deleted user" }.to_string())
+    })
+}
+
 /// True when the caller's resolved access to a channel carries VIEW_CHANNEL
 /// (ADMINISTRATOR passes through `Permissions::has`). NotFound (which is also
 /// what a resolver error returns), NotMember and a missing VIEW all read as blind.
@@ -1393,17 +1404,12 @@ pub async fn list_audit_log(
                 details,
                 created_at,
             )| {
+                let actor_username = audit_actor_name(&action_type, actor_username, actor_id);
                 AuditLogEntry {
                     id: id as i64,
                     action_type,
                     actor_id: actor_id.map(|v| v as i64),
-                    // A null actor renders as a name, not as "user null": the
-                    // shipped clients fall back to `user <id>` when the username
-                    // is absent, and there is no id to show. The space makes it
-                    // unforgeable — validate_username allows only
-                    // [A-Za-z0-9_.-], so no real account can be called this.
-                    actor_username: actor_username
-                        .or_else(|| actor_id.is_none().then(|| "deleted user".to_string())),
+                    actor_username,
                     target_id: target_id.map(|v| v as i64),
                     target_type,
                     details,
@@ -1825,7 +1831,15 @@ mod crash_resistance_tests {
 
 #[cfg(test)]
 mod nullable_actor_tests {
-    use super::{AuditLogEntry, ReportResponse};
+    use super::{audit_actor_name, AuditLogEntry, ReportResponse};
+
+    /// Old clients and the API read this as the actor. An auto-off has none, and nobody was deleted.
+    #[test]
+    fn an_auto_off_names_the_server_and_a_deleted_actor_stays_deleted() {
+        assert_eq!(audit_actor_name("mode_auto_off", None, None).as_deref(), Some("the server"));
+        assert_eq!(audit_actor_name("mode_switch", None, None).as_deref(), Some("deleted user"));
+        assert_eq!(audit_actor_name("mode_switch", Some("alice".into()), Some(7)).as_deref(), Some("alice"));
+    }
 
     /// The rendering rule the two list handlers apply, extracted verbatim so
     /// this test runs the expression they run.

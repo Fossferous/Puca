@@ -162,7 +162,7 @@ import './Chat.css';
 import { parseServerTimestampSecs } from '../utils/serverTime';
 import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
-import { canMoveVoiceMember, movedOutOfHere, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
+import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
 import {
     useServers,
@@ -195,6 +195,7 @@ import { useModeLook } from './modes/useModeLook';
 import {
     adoptModeFrame, callEveryoneBack, channelInMode, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
     listedNow, notificationNav, setActiveMode, shownByMode, shownWithParent, usableHome, type ServerModes,
+    MODES_CHANGED_EVENT,
     pictureRoleColour,
 } from '../api/serverModes';
 import { useSwipe } from '../hooks/useSwipe';
@@ -1616,13 +1617,13 @@ export function Chat({ onLogout }: ChatProps) {
     // WS handler below is registered once: closing over `channels` and
     // `handleChannelClick` directly would capture whichever versions existed
     // when the handler was registered, and a click could then jump to a channel
-    // list from minutes ago.
+    // list from minutes ago. It opens and never joins (opensFromNav).
     const openChannelRef = useRef<(channelId: number, serverId?: string) => void>(() => { });
     useEffect(() => {
         openChannelRef.current = (channelId: number, serverId?: string) => {
             const ch = channels.find(c => c.id === channelId);
             if (ch) {
-                handleChannelClick(ch);
+                if (opensFromNav(ch)) handleChannelClick(ch);
                 return;
             }
             // Another server's channel. Fetched rather than left to that server's list:
@@ -1640,7 +1641,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setShowDevicesView(false);
                 setShowNotesView(false);
                 switchServer(server);
-                handleChannelClick(target);
+                if (opensFromNav(target)) handleChannelClick(target);
             }).catch(() => { /* stays where it is, like a click on a channel that is gone */ });
         };
     });
@@ -2809,6 +2810,7 @@ export function Chat({ onLogout }: ChatProps) {
             // teardown, exactly as for any eviction.
             const notice = roomLeftNotice(msg.payload, endedModeNameRef.current);
             if (notice) showToast(notice);
+            sfuCutRef.current = cutAfterRoomLeft(sfuCutRef.current, payload.room_id);
         };
 
         // The remove-side mirror of UserJoined for VOICE rooms only: the
@@ -4160,6 +4162,8 @@ export function Chat({ onLogout }: ChatProps) {
             endedModeNameRef.current = known?.find(m => m.id === f.previous_mode_id)?.name ?? null;
             adoptModeFrame<Server>(queryClient, keys.servers, f);
             void queryClient.invalidateQueries({ queryKey: keys.modes(f.server_id) });
+            // Notes has a query client of its own, and stays mounted once opened.
+            window.dispatchEvent(new CustomEvent(MODES_CHANGED_EVENT));
             setModeNotice(prev => {
                 const quiet = f.active_mode_id === null || f.by === currentUserId || isServerMuted(f.server_id);
                 if (quiet) return prev?.serverId === f.server_id ? null : prev;

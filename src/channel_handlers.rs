@@ -68,6 +68,9 @@ pub struct ChannelResponse {
     /// on. Tidiness, not access: an older client ignores this and lists it, and
     /// every permission still applies exactly as it reads.
     pub mode_ids: Vec<i64>,
+    /// The modes of this channel's collection. A subchannel goes with its collection,
+    /// and a member denied the collection itself has no row of it to read them from.
+    pub parent_mode_ids: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -204,7 +207,7 @@ pub async fn list_channels(
         }
     };
 
-    let mut mode_ids = match crate::mode_handlers::channel_mode_ids(&state.pool, &server_id).await {
+    let mode_ids = match crate::mode_handlers::channel_mode_ids(&state.pool, &server_id).await {
         Ok(m) => m,
         Err(e) => {
             tracing::error!("  Failed to read channel modes: {:?}", e);
@@ -246,7 +249,8 @@ pub async fn list_channels(
                     has_checklist,
                     sfu_mode,
                     my_permissions: perms.bits() as i64,
-                    mode_ids: mode_ids.remove(&id).unwrap_or_default(),
+                    mode_ids: mode_ids.get(&id).cloned().unwrap_or_default(),
+                    parent_mode_ids: parent_id.and_then(|p| mode_ids.get(&p).cloned()).unwrap_or_default(),
                 })
             },
         )
@@ -445,6 +449,7 @@ pub async fn create_channel(
                 sfu_mode: false,
                 my_permissions: my_permissions.bits() as i64,
                 mode_ids: Vec::new(),
+                parent_mode_ids: Vec::new(),
             })
             .into_response()
         }

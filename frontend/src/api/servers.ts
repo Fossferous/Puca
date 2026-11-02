@@ -40,6 +40,8 @@ export interface Channel {
     server_id: string | null;
     description?: string | null;
     parent_id?: number | null;
+    /** The modes of its collection, for a reader denied that collection (docs/SERVER_MODES.md). */
+    parent_mode_ids?: number[];
     slowmode_seconds?: number;
     /** AFK voice channel: members can't transmit; idle users get moved here. */
     is_afk?: boolean;

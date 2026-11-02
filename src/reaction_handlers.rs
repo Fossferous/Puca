@@ -408,9 +408,10 @@ pub async fn create_emoji(
     // UUID (an IDOR on the blob) — and, because delete_emoji reclaims the blob
     // on behalf of its true uploader, could then delete that file out from
     // under its owner by removing the emoji. An invalid-uuid string fails the
-    // ::uuid cast → None → refused.
-    let owns: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+    // ::uuid cast → None → refused. id::text is what gets stored: the cast accepts other
+    // spellings of a uuid, and every guard on the column compares text.
+    let owns: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
     )
     .bind(&payload.file_id)
     .bind(claims.sub as i32)
@@ -418,7 +419,7 @@ pub async fn create_emoji(
     .await
     .unwrap_or(None);
 
-    if owns.is_none() {
+    let Some((file_id,)) = owns else {
         tracing::warn!(
             "create_emoji: user {} tried to use file {} they do not own on server {}",
             claims.sub, payload.file_id, server_id
@@ -428,7 +429,7 @@ pub async fn create_emoji(
             "Emoji image must be a file you uploaded",
         )
             .into_response();
-    }
+    };
 
     let emoji_id = Uuid::new_v4().to_string();
     let result = sqlx::query(
@@ -438,7 +439,7 @@ pub async fn create_emoji(
     .bind(&server_id)
     .bind(&payload.name)
     .bind(claims.sub as i32)
-    .bind(&payload.file_id)
+    .bind(&file_id)
     .execute(&state.pool)
     .await;
 
@@ -446,7 +447,7 @@ pub async fn create_emoji(
         Ok(_) => Json(EmojiResponse {
             id: emoji_id,
             name: payload.name,
-            url: format!("/files/{}", payload.file_id),
+            url: format!("/files/{}", file_id),
             uploader_id: claims.sub,
         })
         .into_response(),

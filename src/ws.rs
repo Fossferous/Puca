@@ -1588,6 +1588,7 @@ pub async fn evict_user_from_voice_room(
     // a second device left holding the old room re-asserts the voice claim on
     // its next JoinRoom replay and the eviction undoes itself.
     //
+    let ended_by_a_mode = matches!(notice, SelfNotice::ModeEnded);
     // Sent BEFORE the SFU cut below, and the order is load-bearing for a MOVE.
     // `evict_user_from_channel` awaits an HTTP round trip to LiveKit, and
     // LiveKit then pushes the forced removal to the browser over its own
@@ -1676,7 +1677,11 @@ pub async fn evict_user_from_voice_room(
     // publication has to be severed server-side.
     if cut_sfu {
         if let Some(cid) = parse_voice_room(room_id) {
-            crate::sfu::evict_user_from_channel(state, cid, user_id).await;
+            if ended_by_a_mode {
+                crate::sfu::cut_user_from_channel(state, cid, user_id).await;
+            } else {
+                crate::sfu::evict_user_from_channel(state, cid, user_id).await;
+            }
         }
     }
     // The account's other devices: the call they were showing has ended (or
@@ -3474,10 +3479,6 @@ pub(crate) async fn handle_message(
                 let may_play = matches!(&access_after, ChannelPermAccess::Allowed { perms, .. }
                     if perms.has(Permissions::CONNECT) && perms.has(Permissions::PLAY_GAMES));
                 state.games.on_join(state, &room_id, user_id, conn_id, may_play);
-                // A stream-only account is nobody being there (the auto-off's rule).
-                if !matches!(&access_after, ChannelPermAccess::Allowed { perms, .. } if perms.is_stream_only()) {
-                    crate::mode_handlers::note_voice_join(state, cid).await;
-                }
             }
 
             // Send existing streams to the joining connection
@@ -3589,6 +3590,14 @@ pub(crate) async fn handle_message(
                 }
                 // The account's other devices: "You're in <channel> on ...".
                 push_own_voice_state(state, user_id).await;
+                // Last: it waits on the database, and a stop arriving while the media replays
+                // above were still to come would leave this joiner a tile with nothing behind
+                // it. A stream-only account is nobody being there (the auto-off's rule).
+                if let Some(cid) = parse_voice_room(&room_id) {
+                    if !matches!(&access_after, ChannelPermAccess::Allowed { perms, .. } if perms.is_stream_only()) {
+                        crate::mode_handlers::note_voice_join(state, cid).await;
+                    }
+                }
             }
 
             tracing::info!("User {} joined room {}", user_id, room_id);

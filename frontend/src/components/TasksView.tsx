@@ -378,8 +378,10 @@ export function TasksView() {
         ...support.trashedKeys,
         ...allTabs.filter(t => !matchesFilter(taskTabKey(t))).map(taskTabKey),
     ]);
-    const noteLabels = labelsInUse(allTabs.map(taskTabKey), notePrefs.labels);
-    const archivedCount = allTabs.filter(t => isArchived(taskTabKey(t))).length;
+    // What counts and labels speak for: a tab a mode hides is on no list they lead to.
+    const unhiddenTabs = allTabs.filter(t => !modeHiddenKeys.has(taskTabKey(t)));
+    const noteLabels = labelsInUse(unhiddenTabs.map(taskTabKey), notePrefs.labels);
+    const archivedCount = unhiddenTabs.filter(t => isArchived(taskTabKey(t))).length;
 
     // Resolved from ALL tabs, not the visible ones: archiving the open note
     // takes it off the bar, and "that checklist is gone" would be a lie.
@@ -1296,7 +1298,7 @@ export function TasksView() {
                     {/* In the FIXED actions block, never in the scroller: the
                         bar scrolls away under a coarse pointer and a filter
                         you cannot find is a filter you cannot turn off. */}
-                    {allTabs.length > 0 && (
+                    {unhiddenTabs.length > 0 && (
                         <button
                             className={`tasks-tab tasks-tab-icon tasks-tab-filter ${noteFilter.kind === 'all' ? '' : 'on'}`}
                             title={`Showing: ${filterName}`}
@@ -1381,13 +1383,16 @@ export function TasksView() {
                 ) : orderedTabs.length === 0 ? (
                     <div className="tasks-editor-empty" {...contentSwipe}>
                         <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
-                        {allTabs.length > 0 ? (
+                        {unhiddenTabs.length > 0 ? (
                             // Not "you have nothing" — a filter is on, and saying
                             // so is the only way back from it.
                             <p>
                                 Nothing {noteFilter.kind === 'archive' ? 'in the archive' : <>labelled “{filterName}”</>}.{' '}
                                 <button type="button" className="tasks-empty-link" onClick={() => setNoteFilter({ kind: 'all' })}>Show all notes</button>
                             </p>
+                        ) : allTabs.length > 0 ? (
+                            // Nor a filter: what would take it away is on a server's mode.
+                            <p>Every checklist here belongs to a server mode that is off. Create a list with New list, above, or it will be back when the mode is on.</p>
                         ) : (
                             <p>Create a list with New list, above — or make any text channel a checklist and it will show up here.</p>
                         )}
@@ -1536,7 +1541,7 @@ export function TasksView() {
                             onClick={() => { setNoteFilter({ kind: 'all' }); setFilterAnchor(null); }}
                         >
                             <NoteIcon /><span className="tasks-filter-label">All notes</span>
-                            <span className="tasks-filter-count">{allTabs.length - archivedCount}</span>
+                            <span className="tasks-filter-count">{unhiddenTabs.length - archivedCount}</span>
                         </button>
                         {noteLabels.map(l => (
                             <button

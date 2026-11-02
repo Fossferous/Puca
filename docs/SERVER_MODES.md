@@ -28,7 +28,7 @@ A channel a mode hides is still there for everyone allowed to see it:
 
 - it is still in `GET /servers/:id/channels`, with `mode_ids` saying why a client
   should not list it, and an older client lists it;
-- a #mention, a notification or a link still opens it, and it can be joined;
+- a #mention or a notification still opens it, and it can be joined;
 - its messages are kept, its keys are untouched, and it comes back with the mode.
 
 The opposite design was considered and refused. Making the switch deny
@@ -52,7 +52,7 @@ The list keeps a hidden channel in two cases (`listedNow` in
   keeps its text subchannels;
 - **a voice channel with people in it**: a call nobody can see is not tidy, it is a
   secret. Everyone is disconnected when a mode ends (below), so this only shows for
-  someone who rejoined from a link or an older client, and it shows honestly.
+  someone who rejoined from a mention or an older client, and it shows honestly.
 
 A hidden channel's unread messages stay out of the server rail's bubble, because
 nothing in that server's list could clear them. Its own count comes back with the
@@ -115,7 +115,7 @@ Manage Channels. An edit never disconnects anyone.
 | Define, edit and delete modes | **Manage Channels**. Assigning a channel to a mode is managing channels |
 | Turn a mode on or off | **Switch Modes**, a new permission nobody has by default |
 | Delete the mode that is on | Both: it turns the mode off |
-| Call everyone back | **Move Members**, with a drag's own rules. Holding only this still gets the selector's menu, while there is someone to call back and somewhere to bring them |
+| Call everyone back | **Move Members**, with a drag's own rules. Holding only this still gets the selector's menu, while a mode is on and has a main channel to go to |
 
 The owner and administrators can do all of it. Switch Modes is separate so that a
 Storyteller role can run a game without being able to delete channels.

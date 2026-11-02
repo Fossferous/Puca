@@ -109,7 +109,7 @@ none. A backend that predates modes omits it, and a client must then offer none.
 |--------|----------|------|-------------|
 | GET | `/servers/:id/roles` | ✅ | List roles |
 | POST | `/servers/:id/roles` | ✅ | Create role |
-| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role. `permissions` is stored as the bits it means: since `SWITCH_MODES` is `1 << 31`, a JavaScript client's mask for a role holding it can arrive negative (sign-extended), and this route keeps its low 32 bits. The two restricting bits, `STREAM_ONLY` (`1 << 29`) and `NO_RECEIVE` (`1 << 30`, see [STREAM_ONLY.md](STREAM_ONLY.md)), are refused on @everyone with 400 `Stream only and No receive cannot be set on @everyone`; an editor who is not the owner or an administrator can neither add nor remove them (the role keeps what it had) A caller without `SWITCH_MODES` can neither grant nor remove that bit: their value for it is ignored, and the answer is still 200. |
+| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role. `permissions` is stored as the bits it means: since `SWITCH_MODES` is `1 << 31`, a JavaScript client's mask for a role holding it can arrive negative (sign-extended), and this route keeps its low 32 bits. The two restricting bits, `STREAM_ONLY` (`1 << 29`) and `NO_RECEIVE` (`1 << 30`, see [STREAM_ONLY.md](STREAM_ONLY.md)), are refused on @everyone with 400 `Stream only and No receive cannot be set on @everyone`; an editor who is not the owner or an administrator can neither add nor remove them (the role keeps what it had). A caller without `SWITCH_MODES` can neither grant nor remove that bit: their value for it is ignored, and the answer is still 200. |
 | DELETE | `/servers/:id/roles/:role_id` | ✅ | Delete role |
 | PUT | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Assign role. Needs Manage Roles, a role below your highest, and no bit you lack. A caller who is not an administrator (or the owner) may not target **themselves**: 403 `Cannot change your own roles`. A role's channel overwrites are not bits, so without this a Manage Roles holder could give themselves a permission-less role whose allow overwrite opens a hidden channel. |
 | DELETE | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Remove role. Same rules as assign, including the self-target refusal — removing from yourself the role that carries a deny overwrite would restore the channel it hides. |
@@ -487,7 +487,7 @@ has reported, so a device joining by Move here starts the call as it was.
   new device's.
 - `JoinRoom { …, replay: true }` marks the client re-sending a room it
   remembers after its socket came back. A replayed voice join is refused —
-  answered with a `RoomLeft` (`reason` `"moved"` or `"left_elsewhere"`),
+  answered with a `RoomLeft` (`reason` `"moved"`, `"left_elsewhere"` or `"mode_ended"`),
   never an `Error` — when another device of the account has since ended or
   moved the call away from this session (Leave, Move here, or joining another
   voice channel), and whenever the account's call is live on another device
@@ -501,6 +501,8 @@ The displaced connection, and only it, is sent
 `RoomLeft { room_id, reason, by }`: `reason` is `"moved"` (Move here, the
 same channel tapped on the other device, or another voice channel joined
 there) or `"left_elsewhere"` (Leave), and `by` the kind of device that did it.
+A server mode turning off, or switching to one that does not list the channel, sends
+`reason` `"mode_ended"` to the connections that held the call, with no `by`.
 Every other `RoomLeft` is unchanged and carries neither field. A connection
 that is not itself in a voice room cannot touch the account's call in it:
 its `StopStream`, `ScreenShareStop` and `CameraStop` are no-ops — so a

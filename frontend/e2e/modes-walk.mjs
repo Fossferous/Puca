@@ -1338,6 +1338,27 @@ try {
     await B.locator('.mobile-nav-btn').nth(1).tap();
     await sleep(400);
 
+    // A navigation target opens and never joins: any app on a phone can send one.
+    const navigate = (target) => A.evaluate(async (t) => {
+        (await import('/src/api/mobileApp.ts')).deferNav(t);
+        window.dispatchEvent(new CustomEvent('sovereign-navigate'));
+    }, target);
+    const inACall = async () => (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0;
+    check('control: the owner is in no call', !(await inACall()));
+    await navigate(`channel:${srv.id}:${town.id}`);
+    await sleep(3000);
+    check('a navigation target to a voice channel joins nothing', !(await inACall()));
+    await A.locator(`.server-icon[title="elsewhere_${stamp}"]`).click();
+    await sleep(800);
+    await navigate(`channel:${srv.id}:${town.id}`);
+    await until(async () => (await A.locator('.server-name').first().innerText()) === srvName, 8000);
+    await sleep(3000);
+    check('from another server too, where it opens the server and joins nothing', (await A.locator('.server-name').first().innerText()) === srvName && !(await inACall()));
+    await navigate(`channel:${srv.id}:${gameChat.id}`);
+    check('control: a target to a text channel opens it', !!await until(async () => (await header(A)).includes('game-chat'), 8000), await header(A).catch(String));
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    await sleep(400);
+
     // A collection's merged feed leaves out a subchannel a mode hides, as the list does.
     const hall = await servers(A, 'createChannel', [srv.id, 'Hall', 2]);
     const openSub = await servers(A, 'createChannel', [srv.id, 'open-sub', 0, hall.id]);

@@ -22,6 +22,7 @@ import {
     contrast,
     listedNow,
     luminance,
+    neverListed,
     notificationNav,
     parseCssColor,
     parseServerModeChanged,
@@ -135,6 +136,46 @@ describe('what a mode hides', () => {
         it('an open collection keeps its text subchannels, not its voice rooms or one another mode hides', () => {
             expect(listedOf({ openChannelId: collection.id })).toEqual([collection.id, s1.id, s2.id]);
         });
+    });
+});
+
+describe('a collection the reader has no row of', () => {
+    // Denied the collection: its row is withheld, and a child does not inherit VIEW.
+    const voice = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [], parent_mode_ids: [7] };
+
+    it('still takes its subchannel with it, from what the row says', () => {
+        expect(shownWithParent(voice, [voice], null)).toBe(false);
+        expect(shownWithParent(voice, [voice], 8)).toBe(false);
+        expect(shownWithParent(voice, [voice], 7)).toBe(true);
+        expect(channelInMode(voice, [voice], 7)).toBe(true);
+        expect(channelInMode(voice, [voice], 8)).toBe(false);
+    });
+
+    it('agrees with the row when there is one, and with an older server that says nothing', () => {
+        const parent = { id: 1, channel_type: 2, mode_ids: [7] };
+        const old = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [] };
+        expect(shownWithParent(old, [parent, old], null), 'the collection\'s own row').toBe(false);
+        expect(shownWithParent(old, [old], null), 'nothing to go on: listed, as before').toBe(true);
+    });
+});
+
+describe('a channel listed under nothing', () => {
+    const parent = { id: 1, channel_type: 2, mode_ids: [7] };
+
+    it('is one ticked in one mode while its collection is in another', () => {
+        const sub = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [8] };
+        expect(neverListed(sub, [parent, sub])).toBe(true);
+        for (const on of [null, 7, 8]) expect(shownWithParent(sub, [parent, sub], on), `with ${on} on`).toBe(false);
+    });
+
+    it('CONTROLS: in the same mode, in none, or with no collection, it can be listed', () => {
+        const same = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [7] };
+        const none = { id: 3, parent_id: 1, channel_type: 1, mode_ids: [] };
+        const top = { id: 4, channel_type: 1, mode_ids: [8] };
+        expect(neverListed(same, [parent, same])).toBe(false);
+        expect(shownWithParent(same, [parent, same], 7)).toBe(true);
+        expect(neverListed(none, [parent, none])).toBe(false);
+        expect(neverListed(top, [parent, top])).toBe(false);
     });
 });
 

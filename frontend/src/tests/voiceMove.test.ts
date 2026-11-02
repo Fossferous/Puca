@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canMoveVoiceMember, MOVE_AFTER_CUT_MS, movedOutOfHere, voiceMoveTargets, type VoiceMoveChannel } from '../utils/voiceMove';
+import { canMoveVoiceMember, cutAfterRoomLeft, MOVE_AFTER_CUT_MS, movedOutOfHere, opensFromNav, voiceMoveTargets, type VoiceMoveChannel } from '../utils/voiceMove';
 
 const ch = (id: number, opts: Partial<VoiceMoveChannel> = {}): VoiceMoveChannel => ({
     id,
@@ -87,6 +87,34 @@ describe('movedOutOfHere', () => {
 
     it('not when the person has already gone somewhere else', () => {
         expect(movedOutOfHere(7, 9, { channelId: 7, at: NOW - 200 }, NOW)).toBe(false);
+    });
+});
+
+describe('cutAfterRoomLeft', () => {
+    const cut = { channelId: 7, at: 1000 };
+
+    it('forgets a removal the server says was not a move', () => {
+        expect(cutAfterRoomLeft(cut, 'voice_7')).toBeNull();
+    });
+
+    it('keeps it for a RoomLeft about anywhere else, and has nothing to forget otherwise', () => {
+        expect(cutAfterRoomLeft(cut, 'voice_8')).toBe(cut);
+        expect(cutAfterRoomLeft(cut, 'channel_7')).toBe(cut);
+        expect(cutAfterRoomLeft(null, 'voice_7')).toBeNull();
+    });
+
+    it('so a move after that removal is no longer about this device', () => {
+        const left = cutAfterRoomLeft(cut, 'voice_7');
+        expect(movedOutOfHere(7, null, cut, 1200), 'control: with the note it would be').toBe(true);
+        expect(movedOutOfHere(7, null, left, 1200)).toBe(false);
+    });
+});
+
+describe('opensFromNav', () => {
+    it('opens text channels and collections, and never a voice channel, which would join it', () => {
+        expect(opensFromNav({ channel_type: 0 })).toBe(true);
+        expect(opensFromNav({ channel_type: 2 })).toBe(true);
+        expect(opensFromNav({ channel_type: 1 })).toBe(false);
     });
 });
 

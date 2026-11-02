@@ -14,7 +14,7 @@ one-line summary; this file is the full story. Versions follow
     - a **main voice channel**, with a quiet notice and a **Join** button when the mode starts, and **Call everyone to** it, to pull people out of the private rooms;
     - **Turn off when empty**, after 30 minutes with nobody in its voice channels.
 
-  A mode tidies the list. It does not keep anyone out: anyone allowed to see a channel can still open it from a mention, a notification or a link, and people on an older version see every channel. Use channel permissions to keep someone out. High Contrast hides the background and colour, and anyone can turn them off under **Settings > Server Backgrounds and Colours**. Needs the new server. (docs/SERVER_MODES.md)
+  A mode tidies the list. It does not keep anyone out: anyone allowed to see a channel can still open it from a mention or a notification, and people on an older version see every channel. Use channel permissions to keep someone out. High Contrast hides the background and colour, and anyone can turn them off under **Settings > Server Backgrounds and Colours**. Needs the new server. (docs/SERVER_MODES.md)
 
 ### Fixed
 

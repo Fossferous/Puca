@@ -31,7 +31,7 @@
  * interval while a SHARED note is open and the stream is down, and the
  * explicit refresh button.
  */
-import { shownWithParent } from '../../api/serverModes';
+import { MODES_CHANGED_EVENT, shownWithParent } from '../../api/serverModes';
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { QueryClient, useQueries, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
@@ -164,6 +164,13 @@ export function useServersQuery() {
  *  must not prune prefs against an INCOMPLETE set). */
 export function useChannelSources(): { sources: NoteSource[]; complete: boolean; updatedAt: number; oldestAt: number } {
     const { data: servers = [], isSuccess: serversDone, dataUpdatedAt: serversAt } = useServersQuery();
+    // A mode switched in the app around us: which of these it hides has changed.
+    const qc = useQueryClient();
+    useEffect(() => {
+        const refresh = () => { void qc.invalidateQueries({ queryKey: notesKeys.servers }); };
+        window.addEventListener(MODES_CHANGED_EVENT, refresh);
+        return () => window.removeEventListener(MODES_CHANGED_EVENT, refresh);
+    }, [qc]);
     const channelQueries = useQueries({
         queries: servers.map((s: Server) => ({
             queryKey: notesKeys.channels(s.id),

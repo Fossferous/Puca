@@ -1366,16 +1366,20 @@ pub async fn update_profile(
     // while any user's avatar references a blob, so pointing your avatar at
     // someone else's file id pinned their storage quota permanently — they
     // could never reclaim it.
+    //
+    // id::text is what gets stored: the cast accepts other spellings of a uuid, and
+    // every guard on these columns compares text.
+    let mut canonical_avatar: Option<String> = None;
     if let Some(ref avatar_id) = payload.avatar_file_id {
         if !avatar_id.trim().is_empty() {
-            let owned: Option<(i32,)> =
-                sqlx::query_as("SELECT uploader_id FROM uploaded_files WHERE id = $1::uuid")
+            let owned: Option<(i32, String)> =
+                sqlx::query_as("SELECT uploader_id, id::text FROM uploaded_files WHERE id = $1::uuid")
                     .bind(avatar_id)
                     .fetch_optional(&state.pool)
                     .await
                     .unwrap_or(None);
             match owned {
-                Some((uid,)) if uid == claims.sub as i32 => {}
+                Some((uid, canonical)) if uid == claims.sub as i32 => canonical_avatar = Some(canonical),
                 _ => {
                     return (StatusCode::FORBIDDEN, "Avatar must be a file you uploaded")
                         .into_response()
@@ -1389,25 +1393,26 @@ pub async fn update_profile(
     // audio clip — every member of every shared voice room downloads it, and
     // the declared mime is the only type signal the upload path records.
     const MAX_SOUND_BYTES: i64 = 1024 * 1024;
-    for (label, field) in [
-        ("Join sound", &payload.join_sound_file_id),
-        ("Leave sound", &payload.leave_sound_file_id),
+    let (mut canonical_join, mut canonical_leave): (Option<String>, Option<String>) = (None, None);
+    for (label, field, canonical_sound) in [
+        ("Join sound", &payload.join_sound_file_id, &mut canonical_join),
+        ("Leave sound", &payload.leave_sound_file_id, &mut canonical_leave),
     ] {
         if let Some(ref file_id) = field {
             if !file_id.trim().is_empty() {
-                let row: Option<(i32, String, i64)> = sqlx::query_as(
-                    "SELECT uploader_id, mime_type, size_bytes FROM uploaded_files WHERE id = $1::uuid"
+                let row: Option<(i32, String, i64, String)> = sqlx::query_as(
+                    "SELECT uploader_id, mime_type, size_bytes, id::text FROM uploaded_files WHERE id = $1::uuid"
                 )
                 .bind(file_id)
                 .fetch_optional(&state.pool)
                 .await
                 .unwrap_or(None);
                 match row {
-                    Some((uid, ref mime, size))
+                    Some((uid, ref mime, size, ref canonical))
                         if uid == claims.sub as i32
                             && mime.starts_with("audio/")
-                            && size <= MAX_SOUND_BYTES => {}
-                    Some((uid, _, _)) if uid != claims.sub as i32 => {
+                            && size <= MAX_SOUND_BYTES => *canonical_sound = Some(canonical.clone()),
+                    Some((uid, _, _, _)) if uid != claims.sub as i32 => {
                         return (
                             StatusCode::FORBIDDEN,
                             format!("{} must be a file you uploaded", label),
@@ -1478,7 +1483,7 @@ pub async fn update_profile(
     let mut query_builder = sqlx::query(&query);
 
     if let Some(ref avatar_id) = payload.avatar_file_id {
-        query_builder = query_builder.bind(avatar_id);
+        query_builder = query_builder.bind(canonical_avatar.as_ref().unwrap_or(avatar_id));
     }
     if let Some(ref display_name) = payload.display_name {
         // Allow empty string to clear display name (set to null)
@@ -1503,7 +1508,7 @@ pub async fn update_profile(
         let v = if join_sound.trim().is_empty() {
             None
         } else {
-            Some(join_sound.clone())
+            canonical_join.clone()
         };
         query_builder = query_builder.bind(v);
     }
@@ -1511,7 +1516,7 @@ pub async fn update_profile(
         let v = if leave_sound.trim().is_empty() {
             None
         } else {
-            Some(leave_sound.clone())
+            canonical_leave.clone()
         };
         query_builder = query_builder.bind(v);
     }
@@ -1521,7 +1526,7 @@ pub async fn update_profile(
         Ok(r) => {
             tracing::info!("update_profile: rows_affected={}", r.rows_affected());
             // Reclaim the replaced avatar blob if it actually changed.
-            if let (Some(old), Some(new)) = (&old_avatar, &payload.avatar_file_id) {
+            if let (Some(old), Some(new)) = (&old_avatar, canonical_avatar.as_ref().or(payload.avatar_file_id.as_ref())) {
                 if old != new {
                     crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                 }
@@ -1530,8 +1535,8 @@ pub async fn update_profile(
             // "clear it" value, so a clear reclaims too — `old != new` covers
             // both replace ("" != new id) and clear (old id != "").
             for (old, new) in [
-                (&old_join_sound, &payload.join_sound_file_id),
-                (&old_leave_sound, &payload.leave_sound_file_id),
+                (&old_join_sound, canonical_join.as_ref().or(payload.join_sound_file_id.as_ref())),
+                (&old_leave_sound, canonical_leave.as_ref().or(payload.leave_sound_file_id.as_ref())),
             ] {
                 if let (Some(old), Some(new)) = (old, new) {
                     if old != new && !old.is_empty() {

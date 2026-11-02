@@ -15,6 +15,8 @@ interface RoleSettingsModalProps {
     /** Render just the list+editor panels (no overlay/header) so this can sit
      *  inside another surface — ServerSettingsModal's Roles tab uses this. */
     embedded?: boolean;
+    /** False on a backend from before modes: Switch Modes would be a right to nothing. */
+    modesSupported?: boolean;
 }
 
 // A checkbox here is a PROMISE that toggling it changes what a member can do.
@@ -119,6 +121,7 @@ export function RoleSettingsModal({
     serverName,
     isOwner,
     embedded = false,
+    modesSupported = true,
 }: RoleSettingsModalProps) {
     const [roles, setRoles] = useState<Role[]>([]);
     const [selectedRole, setSelectedRole] = useState<Role | null>(null);
@@ -413,7 +416,7 @@ export function RoleSettingsModal({
                                         <div key={category.name} className="permission-category">
                                             <h4>{category.name}</h4>
                                             <div className="permission-list">
-                                                {category.permissions.map(perm => {
+                                                {category.permissions.filter(perm => modesSupported || perm.key !== 'SWITCH_MODES').map(perm => {
                                                     const notYours = perm.key === 'SWITCH_MODES' && !canGrantSwitchModes;
                                                     return (
                                                         <label key={perm.key} className="permission-item">

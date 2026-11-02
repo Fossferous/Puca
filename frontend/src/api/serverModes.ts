@@ -4,7 +4,7 @@
  *
  * Hiding is tidiness, not access. `shownWithParent` decides what the channel LIST
  * shows; a hidden channel is still in the rows, still reachable from a #mention,
- * a notification or a link, and an older client lists it. Permissions stay the
+ * or a notification, and an older client lists it. Permissions stay the
  * one thing that keeps anybody out.
  *
  * No DOM in here (the frames, the rules and the colour arithmetic are pure); what
@@ -90,8 +90,16 @@ interface ModeRow {
     id: number;
     parent_id?: number | null;
     mode_ids?: number[];
+    /** The collection's modes, for a reader who has no row of that collection. */
+    parent_mode_ids?: number[];
     is_afk?: boolean;
 }
+
+/** Dispatched on `window` when a mode switches, for what keeps its own copy of the servers. */
+export const MODES_CHANGED_EVENT = 'sovereign:modes-changed';
+
+const parentModes = <C extends ModeRow>(channel: C, channels: readonly C[]): number[] | undefined =>
+    channels.find(c => c.id === channel.parent_id)?.mode_ids ?? channel.parent_mode_ids;
 
 /**
  * `shownByMode` for a channel among its siblings: a subchannel goes with its
@@ -107,15 +115,26 @@ export function shownWithParent<C extends ModeRow>(
     if (channel.is_afk) return true;
     if (!shownByMode(channel, activeModeId)) return false;
     if (channel.parent_id == null) return true;
-    const parent = channels.find(c => c.id === channel.parent_id);
-    return !parent || shownByMode(parent, activeModeId);
+    return shownByMode({ mode_ids: parentModes(channel, channels) }, activeModeId);
+}
+
+/**
+ * Is this channel listed under nothing at all? Ticked in one mode while its collection is
+ * ticked in others: each hides it from the other, and with no mode on it is hidden too. The
+ * rule is the server's as well. The editor has to say so, since both cards show a tick.
+ */
+export function neverListed<C extends ModeRow>(channel: C, channels: readonly C[]): boolean {
+    if (channel.is_afk || channel.parent_id == null) return false;
+    const own = channel.mode_ids ?? [];
+    const parent = parentModes(channel, channels) ?? [];
+    return own.length > 0 && parent.length > 0 && !own.some(m => parent.includes(m));
 }
 
 /** Is the channel in this mode: ticked, or under a ticked collection? */
 export function channelInMode<C extends ModeRow>(channel: C, channels: readonly C[], modeId: number): boolean {
     if (channel.is_afk) return false;
     if (channel.mode_ids?.includes(modeId)) return true;
-    return channel.parent_id != null && !!channels.find(c => c.id === channel.parent_id)?.mode_ids?.includes(modeId);
+    return channel.parent_id != null && !!parentModes(channel, channels)?.includes(modeId);
 }
 
 /**
@@ -171,9 +190,9 @@ export function usableHome<C extends ModeRow & { channel_type: number }>(
 /**
  * Where an Android notification's tap lands. The server, as always, unless the list
  * there would not show this channel: a mode hides it, so there would be no row to
- * press. Rows the device does not hold yet read as listed. The `channel:` target is
- * only ever posted by this web bundle, which is also what reads it, so an older APK
- * passes it through untouched (`nav` is opaque in Java).
+ * press. Rows the device does not hold yet read as listed. This web bundle is what reads
+ * a `channel:` target, so an older APK passes it through untouched (`nav` is opaque in Java).
+ * It is not the only thing that can send one: see opensFromNav.
  */
 export function notificationNav<C extends ModeRow>(
     serverId: string,
