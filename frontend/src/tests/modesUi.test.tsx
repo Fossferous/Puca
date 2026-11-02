@@ -26,6 +26,13 @@ vi.mock('../api/serverModes', async (importOriginal) => ({
     updateMode: (s: string, id: number, e: unknown) => updateMode(s, id, e),
     deleteMode: (s: string, id: number) => deleteMode(s, id),
 }));
+// The signed-in account, for the role editor's "what do I hold?": nobody unless a test says.
+let signedIn: number | null = null;
+vi.mock('../api/auth', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/auth')>()),
+    getToken: () => (signedIn === null ? null : 'a token'),
+    decodeJwtPayload: () => (signedIn === null ? null : { sub: signedIn }),
+}));
 vi.mock('../api/uploads', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/uploads')>()),
     uploadFile: (f: File) => uploadFile(f),
@@ -37,6 +44,7 @@ vi.mock('../api/modeLook', async (importOriginal) => ({
 const MEMBER: Role = { id: 5, server_id: SERVER, name: 'Storyteller', color: '#3498DB', permissions: 1 << 8, position: 1, is_default: false };
 const updateRole = vi.fn(async () => {});
 let roleBits = MEMBER.permissions;
+let myBits = 0;
 vi.mock('../api/servers', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/servers')>()),
     listChannels: async () => [
@@ -50,7 +58,7 @@ vi.mock('../api/servers', async (importOriginal) => ({
         { id: 8, name: 'Voice Under', channel_type: 1, server_id: SERVER, parent_id: 6, mode_ids: [] },
     ],
     listRoles: async () => [{ ...MEMBER, permissions: roleBits }],
-    listMembersWithRoles: async () => [],
+    listMembersWithRoles: async () => (signedIn === null ? [] : [{ id: signedIn, roles: [{ permissions: myBits }] }]),
     updateRole: (...a: unknown[]) => updateRole(...(a as [])),
 }));
 
@@ -86,6 +94,8 @@ beforeEach(() => {
     vi.clearAllMocks();
     stored = modes();
     roleBits = MEMBER.permissions;
+    signedIn = null;
+    myBits = 0;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -361,7 +371,9 @@ describe('Server Settings, Modes', () => {
         await render(<ModesSettings serverId={SERVER} />);
         const rowOf = (name: string) => [...container.querySelectorAll('label.mode-channel')]
             .find(l => l.querySelector('.mode-channel-name')?.textContent === name)!;
-        expect(rowOf('Rooms').querySelector('svg[data-icon="FolderIcon"], .mode-channel-icon svg')).toBeTruthy();
+        const icon = (name: string) => rowOf(name).querySelector('.mode-channel-icon')!.innerHTML;
+        expect(icon('Rooms'), 'a collection is drawn as one').not.toBe(icon('game-chat'));
+        expect(icon('Room A'), 'control: two text channels look alike').toBe(icon('game-chat'));
         const under = rowOf('Room A');
         expect(under.classList.contains('mode-channel-sub')).toBe(true);
         expect(under.querySelector('.mode-channel-parent')?.textContent).toBe('in Rooms');
@@ -407,14 +419,26 @@ describe('the role editor', () => {
         });
     };
 
-    it('someone who does not hold Switch Modes cannot tick it, because the server would ignore it', async () => {
+    const openAsMember = async (bits: number) => {
+        signedIn = 42;
+        myBits = bits;
         await act(async () => {
             root.render(<RoleSettingsModal isOpen onClose={() => {}} serverId={SERVER} serverName="S" isOwner={false} embedded />);
         });
-        await act(async () => { await new Promise(r => setTimeout(r, 0)); });
-        const box = row('Switch Modes')!.querySelector('input')!;
-        expect(box.disabled).toBe(true);
+        for (let i = 0; i < 4; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    };
+
+    it('someone with Manage Roles and not Switch Modes cannot tick it, because the server would ignore it', async () => {
+        await openAsMember(PERMISSIONS.MANAGE_ROLES);
+        expect(row('Create Invites')!.querySelector('input')!.disabled, 'control: they can edit this role').toBe(false);
+        expect(row('Switch Modes')!.querySelector('input')!.disabled).toBe(true);
         expect(row('Switch Modes')!.textContent).toContain('Only someone who holds this permission');
+    });
+
+    it('CONTROL: holding it too, they can', async () => {
+        await openAsMember(unsignedMask(PERMISSIONS.MANAGE_ROLES | PERMISSIONS.SWITCH_MODES));
+        expect(row('Switch Modes')!.querySelector('input')!.disabled).toBe(false);
+        expect(row('Switch Modes')!.textContent).not.toContain('Only someone who holds this permission');
     });
 
     it('has a Switch Modes row that saves bit 31 as a POSITIVE number', async () => {

@@ -177,6 +177,7 @@ export function RoleSettingsModal({
     useEffect(() => {
         setCanManage(isOwner);
         setCanRestrict(isOwner);
+        setCanGrantSwitchModes(isOwner);
         if (!isOpen || isOwner) return;
         let cancelled = false;
         (async () => {

@@ -240,7 +240,6 @@ fn occupants(state: &AppState, channel_id: i32) -> Vec<UserId> {
 /// there. A LiveKit session with no room entry (its socket died, or the backend just
 /// restarted) is somebody: the room only says it is empty because it lost track of them.
 async fn someone_there(state: &AppState, channel_id: i32) -> bool {
-    let in_room = occupants(state, channel_id);
     if let Some(room) = state.rooms.get(&format!("voice_{channel_id}")) {
         if room.members.iter().any(|&member| room.reads_text(member)) {
             return true;
@@ -255,7 +254,6 @@ async fn someone_there(state: &AppState, channel_id: i32) -> bool {
                 .participants
                 .keys()
                 .filter_map(|identity| crate::sfu::user_id_from_identity(identity))
-                .filter(|user| !in_room.contains(user))
                 .collect()
         })
         .unwrap_or_default();
@@ -1234,11 +1232,11 @@ pub async fn channel_is_named_by_a_mode(pool: &sqlx::PgPool, channel_id: i32) ->
 /// One pass of the auto-off (a once-a-minute task in main.rs). A failed read
 /// waits for the next tick: nothing here is urgent, and a mode left on is
 /// harmless. Stamps every active mode, opted in or not, so a mode opted back in
-/// knows whether anyone ever came.
+/// knows whether anyone ever came; `turn_off_empty` is what honours the opt-out.
 pub async fn auto_off_tick(state: &Arc<AppState>) {
     let rows: Vec<(String, i32, Option<i32>, String, bool, bool)> = match sqlx::query_as(
         "SELECT s.id, m.id, m.home_channel_id, m.name, s.active_mode_occupied_at IS NOT NULL, \
-                m.auto_off AND COALESCE(s.active_mode_occupied_at < NOW() - make_interval(mins => $1), false) \
+                COALESCE(s.active_mode_occupied_at < NOW() - make_interval(mins => $1), false) \
          FROM servers s JOIN server_modes m ON m.id = s.active_mode_id",
     )
     .bind(AUTO_OFF_EMPTY_MINUTES)
@@ -1288,9 +1286,9 @@ pub async fn auto_off_tick(state: &Arc<AppState>) {
     }
 }
 
-/// [`AutoOff::TurnOff`]. Re-checks in the UPDATE, so a switch that landed since
-/// the read stands. Someone who joined in the instant between goes with it, like
-/// anyone else in the channels when a mode ends.
+/// [`AutoOff::TurnOff`], for a mode that opted in. The UPDATE decides, so a switch
+/// or an opt-out that landed since the read stands. Someone who joined in the instant
+/// between goes with it, like anyone else in the channels when a mode ends.
 async fn turn_off_empty(state: &Arc<AppState>, server_id: &str, mode_id: i32, name: &str) {
     let failed = |e: sqlx::Error| tracing::error!("modes: auto-off of server {} failed: {:?}", server_id, e);
     let mut tx = match state.pool.begin().await {
