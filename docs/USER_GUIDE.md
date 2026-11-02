@@ -93,7 +93,9 @@ name and press **Add mode**. Then tick the channels it should show, and press
   everyone to** brings people.
 - **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat in its own
   colours. Each person's device darkens or lightens it only as far as messages need to
-  stay readable on their theme, so one bright moon does not dim the whole sky. While a
+  stay readable on their theme, so one bright moon does not dim the whole sky. A very
+  busy picture, such as confetti or a crowd, also has its fine detail softened so that it
+  does not compete with the words; its colours stay, and a calm picture is untouched. While a
   picture shows, smaller text in the chat is a little lighter (or, on the Light theme,
   darker) than usual, for the same reason. The picture never changes anyone's theme. It
   is stored unencrypted, like the server icon, so whoever runs the server can see it.

@@ -505,6 +505,116 @@ function curves(): { toLinear: Float32Array; toSrgb: Uint8Array } {
     return { toLinear, toSrgb };
 }
 
+/**
+ * How much a picture may move at the size of a word, as the spread of its lightness (0 to 1)
+ * across a patch of about a word by a line. AA asks only about the worst pixel, and says nothing
+ * of detail that size, which competes with the letters: confetti passed at 4.7:1 and was still
+ * work to read over. Measured on the mapped pictures: a landscape, balloons or a night sky with a
+ * moon reach 0.03 at most (a hard edge is one line of patches, not the picture), confetti 0.09 to 0.12.
+ */
+export const DETAIL_TARGET = 0.035;
+/** However busy a picture is, this much of its fine detail stays: it is still the picture. */
+export const DETAIL_KEEP_MIN = 0.3;
+/** A quarter of the picture being busy is enough: the text may be lying on that quarter. */
+const DETAIL_PERCENTILE = 0.75;
+/** A patch, as a share of the picture's long edge: a word by a line once it covers the chat. */
+const PATCH_ACROSS = 50;
+const PATCH_DOWN = 80;
+/** A dark pixel gains this much by scaling, which keeps its colour. Any more would turn a JPEG's noise in the blacks into coloured speckle, so the rest comes from mixing towards white. */
+const DETAIL_MAX_SCALE = 4;
+
+/** How busy a mapped picture is, and each patch's mean lightness, which softening leans towards. */
+export interface PictureDetail {
+    detail: number;
+    cols: number;
+    rows: number;
+    patchWidth: number;
+    patchHeight: number;
+    means: Float32Array;
+}
+
+/** Read off every second pixel each way: a patch has enough of them, and a phone is waiting. */
+export function measureDetail(rgba: Uint8ClampedArray, width: number, height: number): PictureDetail {
+    const { toLinear: lin, toSrgb: srgb } = curves();
+    const edge = Math.max(width, height);
+    const patchWidth = Math.max(2, Math.round(edge / PATCH_ACROSS));
+    const patchHeight = Math.max(2, Math.round(edge / PATCH_DOWN));
+    const cols = Math.ceil(width / patchWidth);
+    const rows = Math.ceil(height / patchHeight);
+    const sums = new Float64Array(cols * rows);
+    const squares = new Float64Array(cols * rows);
+    const counts = new Uint32Array(cols * rows);
+    for (let y = 0; y < height; y += 2) {
+        const row = Math.floor(y / patchHeight) * cols;
+        for (let x = 0; x < width; x += 2) {
+            const i = 4 * (y * width + x);
+            const luminance = 0.2126 * lin[rgba[i]] + 0.7152 * lin[rgba[i + 1]] + 0.0722 * lin[rgba[i + 2]];
+            const v = srgb[Math.round(luminance * SRGB_STEPS)] / 255;
+            const patch = row + Math.floor(x / patchWidth);
+            sums[patch] += v;
+            squares[patch] += v * v;
+            counts[patch]++;
+        }
+    }
+    const means = new Float32Array(cols * rows);
+    const spreads = new Float32Array(cols * rows);
+    for (let p = 0; p < means.length; p++) {
+        if (!counts[p]) continue;
+        means[p] = sums[p] / counts[p];
+        spreads[p] = Math.sqrt(Math.max(0, squares[p] / counts[p] - means[p] * means[p]));
+    }
+    spreads.sort();
+    return { detail: spreads[Math.floor((spreads.length - 1) * DETAIL_PERCENTILE)], cols, rows, patchWidth, patchHeight, means };
+}
+
+/** How much of its fine detail a picture keeps. All of it, unless it is busy. */
+export function detailToKeep(detail: number): number {
+    return detail <= DETAIL_TARGET ? 1 : Math.max(DETAIL_KEEP_MIN, DETAIL_TARGET / detail);
+}
+
+/**
+ * Takes the fine detail's contrast down over RGBA rows in place, starting at `firstRow`. It moves
+ * lightness only, so a busy picture keeps every colour it had: what competes with letters is
+ * lightness. Each pixel's lightness moves towards the mean around it, which lies between pixels of
+ * this very picture, so a mapped picture stays inside its ceiling or above its floor.
+ */
+export function softenDetail(rgba: Uint8ClampedArray, width: number, firstRow: number, shape: PictureDetail, keep: number): void {
+    if (keep >= 1) return;
+    const { toLinear: lin, toSrgb: srgb } = curves();
+    const encode = (v: number) => srgb[Math.round(v * SRGB_STEPS)];
+    const { cols, rows, patchWidth, patchHeight, means } = shape;
+    const rowCount = Math.floor(rgba.length / (4 * width));
+    for (let line = 0; line < rowCount; line++) {
+        // Between the centres of the patches, so that no patch's edge shows.
+        const down = Math.min(rows - 1, Math.max(0, (firstRow + line + 0.5) / patchHeight - 0.5));
+        const top = Math.floor(down);
+        const bottom = Math.min(rows - 1, top + 1);
+        const fy = down - top;
+        for (let x = 0; x < width; x++) {
+            const across = Math.min(cols - 1, Math.max(0, (x + 0.5) / patchWidth - 0.5));
+            const left = Math.floor(across);
+            const right = Math.min(cols - 1, left + 1);
+            const fx = across - left;
+            const mean = (means[top * cols + left] * (1 - fx) + means[top * cols + right] * fx) * (1 - fy)
+                + (means[bottom * cols + left] * (1 - fx) + means[bottom * cols + right] * fx) * fy;
+            const i = 4 * (line * width + x);
+            const r = lin[rgba[i]];
+            const g = lin[rgba[i + 1]];
+            const b = lin[rgba[i + 2]];
+            const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            const v = srgb[Math.round(y * SRGB_STEPS)] / 255;
+            const wanted = lin[Math.round(255 * (mean + keep * (v - mean)))];
+            const brightest = Math.max(r, g, b);
+            const scale = y > 0 ? Math.min(wanted / y, DETAIL_MAX_SCALE, brightest > 0 ? 1 / brightest : 1) : 1;
+            const scaled = y * scale;
+            const lift = scaled < wanted ? (wanted - scaled) / (1 - scaled) : 0;
+            rgba[i] = encode(Math.min(1, r * scale) + lift * (1 - Math.min(1, r * scale)));
+            rgba[i + 1] = encode(Math.min(1, g * scale) + lift * (1 - Math.min(1, g * scale)));
+            rgba[i + 2] = encode(Math.min(1, b * scale) + lift * (1 - Math.min(1, b * scale)));
+        }
+    }
+}
+
 /** Where the picture's mid-to-bright tones are put on a dark theme, as a share of the ceiling. */
 const CEILING_EXPOSE_TO = 0.62;
 /** A share of a bright picture may go past that and be compressed: a moon must not dim the sky. */

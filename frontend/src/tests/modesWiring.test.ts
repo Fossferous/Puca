@@ -44,7 +44,7 @@ describe('text in the chat that sets its own colour holds over a picture', () =>
     it('a file chip, a reply and the not-encrypted tag', () => {
         expect(rule('.message-attachment')).toContain('background: var(--mode-chip-bg,');
         expect(rule('[data-theme="light"] .message-attachment')).toContain('background: var(--mode-chip-bg,');
-        expect(css).toContain('button.message-attachment:hover { background: var(--mode-chip-bg,');
+        expect(css).toContain('\nbutton.message-attachment:hover { background: var(--mode-chip-bg,');
         expect(css).toContain('[data-theme="light"] button.message-attachment:hover { background: var(--mode-chip-bg,');
         expect(rule('.message-reply-ref')).toContain('background: var(--mode-reply-bg,');
         expect(rule('.message-reply-ref:hover')).toContain('background: var(--mode-reply-hover-bg,');

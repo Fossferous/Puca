@@ -11,6 +11,7 @@ import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pictureStyle, type PictureTheme } from '../api/modeLook';
+import { DETAIL_KEEP_MIN, DETAIL_TARGET, detailToKeep, measureDetail, softenDetail } from '../api/serverModes';
 import {
     ACCENT_MIN_LABEL_CONTRAST,
     ACCENT_MIN_SURFACE_CONTRAST,
@@ -700,5 +701,134 @@ describe('what a picture sets on the chat', () => {
         expect(style['--mode-warning-text']).toBe('rgb(2, 2, 2)');
         expect(style['--mode-danger-text']).toBe('rgb(3, 3, 3)');
         expect(style.color).toBe('rgb(1, 1, 1)');
+    });
+});
+
+describe('a picture that is busy at the size of a word', () => {
+    const W = 400;
+    const H = 240;
+    /** A picture from a function of x and y. */
+    const drawn = (at: (x: number, y: number) => [number, number, number]) => {
+        const out = new Uint8ClampedArray(4 * W * H);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+            const [r, g, b] = at(x, y);
+            const i = 4 * (y * W + x);
+            out[i] = r; out[i + 1] = g; out[i + 2] = b; out[i + 3] = 255;
+        }
+        return out;
+    };
+    // Squares of about half a word, each its own colour and lightness: confetti.
+    const paper = (x: number, y: number) => (Math.floor(x / 4) * 73 + Math.floor(y / 4) * 151) % 256;
+    const confetti = () => drawn((x, y) => { const v = paper(x, y); return [v, (v * 3) % 256, 255 - v]; });
+    // One hard edge across a calm picture: a moon, a horizon.
+    const horizon = () => drawn((_, y) => y < 122 ? [20, 30, 60] : [70, 90, 60]);
+    const lightness = (px: Uint8ClampedArray, x: number, y: number) => {
+        const i = 4 * (y * W + x);
+        return 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+    };
+
+    it('tells them apart: flat is nothing, a horizon is calm, confetti is busy', () => {
+        expect(measureDetail(drawn(() => [90, 90, 90]), W, H).detail).toBe(0);
+        expect(measureDetail(horizon(), W, H).detail).toBeLessThan(DETAIL_TARGET);
+        expect(measureDetail(confetti(), W, H).detail).toBeGreaterThan(DETAIL_TARGET * 2);
+    });
+
+    it('leaves a calm picture alone, to the byte', () => {
+        const px = horizon();
+        const shape = measureDetail(px, W, H);
+        expect(detailToKeep(shape.detail)).toBe(1);
+        const before = px.slice();
+        softenDetail(px, W, 0, shape, detailToKeep(shape.detail));
+        expect(px).toEqual(before);
+    });
+
+    it('keeps less the busier it is, and never less than the floor', () => {
+        expect(detailToKeep(DETAIL_TARGET)).toBe(1);
+        expect(detailToKeep(DETAIL_TARGET * 2)).toBeCloseTo(0.5);
+        expect(detailToKeep(1)).toBe(DETAIL_KEEP_MIN);
+    });
+
+    it('brings the busyness down towards the target', () => {
+        const px = confetti();
+        const shape = measureDetail(px, W, H);
+        const keep = detailToKeep(shape.detail);
+        expect(keep, 'control: this one is past what it may lose').toBe(DETAIL_KEEP_MIN);
+        softenDetail(px, W, 0, shape, keep);
+        const after = measureDetail(px, W, H).detail;
+        expect(after).toBeLessThan(shape.detail * 0.45);
+        expect(after).toBeGreaterThan(0);
+    });
+
+    it('and a picture only somewhat busy reaches the target', () => {
+        const busy = (DETAIL_TARGET * 2) * 255 * 2;
+        const px = drawn((x, y) => { const v = 120 + (paper(x, y) % 2 ? busy / 2 : -busy / 2); return [v, v, v]; });
+        const shape = measureDetail(px, W, H);
+        const keep = detailToKeep(shape.detail);
+        expect(keep, 'control: it does need softening, and not all the way').toBeLessThan(1);
+        expect(keep).toBeGreaterThan(DETAIL_KEEP_MIN);
+        softenDetail(px, W, 0, shape, keep);
+        expect(measureDetail(px, W, H).detail).toBeLessThan(DETAIL_TARGET * 1.25);
+    });
+
+    it('in bands, as a phone does it, it comes out the same', () => {
+        const whole = confetti();
+        const shape = measureDetail(whole, W, H);
+        const keep = detailToKeep(shape.detail);
+        const banded = whole.slice();
+        softenDetail(whole, W, 0, shape, keep);
+        const band = 4 * W * 50;
+        for (let at = 0; at < banded.length; at += band) softenDetail(banded.subarray(at, at + band), W, at / (4 * W), shape, keep);
+        expect(banded).toEqual(whole);
+    });
+
+    it('moves lightness and keeps the colour', () => {
+        // Mid-bright pixels that only need scaling, so nothing here clips or mixes.
+        const px = drawn((x, y) => (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? [180, 90, 60] : [90, 45, 30]);
+        const shape = measureDetail(px, W, H);
+        softenDetail(px, W, 0, shape, 0.5);
+        const lin = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        for (const [x, y] of [[100, 100], [104, 100], [200, 60], [204, 60]]) {
+            const i = 4 * (y * W + x);
+            const was = (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? lin(180) / lin(90) : lin(90) / lin(45);
+            expect(lin(px[i]) / lin(px[i + 1]), `the same colour at ${x},${y}`).toBeCloseTo(was, 0);
+            expect(px[i + 1]).toBeGreaterThan(px[i + 2]);
+        }
+        expect(Math.abs(lightness(px, 100, 100) - lightness(px, 104, 100))).toBeLessThan(0.5 * Math.abs(143 - 72) + 3);
+    });
+
+    it('stays under a dark theme\'s ceiling and over a light theme\'s floor', () => {
+        const lin = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        const luminance = (px: Uint8ClampedArray, i: number) => 0.2126 * lin(px[i]) + 0.7152 * lin(px[i + 1]) + 0.0722 * lin(px[i + 2]);
+        const range = (px: Uint8ClampedArray) => {
+            let [low, high] = [1, 0];
+            for (let i = 0; i < px.length; i += 4) {
+                const y = luminance(px, i);
+                if (y < low) low = y;
+                if (y > high) high = y;
+            }
+            return [low, high];
+        };
+        const ceiling = drawn((x, y) => { const v = paper(x, y) % 100; return [v, v, v]; });
+        const under = range(ceiling)[1];
+        const shape = measureDetail(ceiling, W, H);
+        softenDetail(ceiling, W, 0, shape, 0.3);
+        expect(range(ceiling)[1]).toBeLessThanOrEqual(under + 0.002);
+        expect(range(ceiling)[0], 'control: it did move the dark ones up').toBeGreaterThan(0);
+
+        const floor = drawn((x, y) => { const v = 150 + paper(x, y) % 100; return [v, v, v]; });
+        const over = range(floor)[0];
+        const lightShape = measureDetail(floor, W, H);
+        softenDetail(floor, W, 0, lightShape, 0.3);
+        expect(range(floor)[0]).toBeGreaterThanOrEqual(over - 0.002);
+        expect(range(floor)[1], 'control: it did bring the bright ones down').toBeLessThan(0.9);
+    });
+
+    it('does not turn the noise in the blacks into coloured speckle', () => {
+        // A black patch with a JPEG's stray chroma beside a bright one: pulled up by the mean.
+        const px = drawn((x, y) => (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? [3, 0, 0] : [200, 200, 200]);
+        const shape = measureDetail(px, W, H);
+        softenDetail(px, W, 0, shape, 0.3);
+        const dark = 4 * (0 * W + 4);
+        expect(px[dark] - px[dark + 1], 'nearly grey').toBeLessThan(24);
     });
 });

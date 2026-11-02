@@ -12,7 +12,10 @@ import {
     parseCssColor,
     pictureLimit,
     pictureTextColours,
+    detailToKeep,
+    measureDetail,
     planTone,
+    softenDetail,
     toneMap,
 } from './serverModes';
 
@@ -84,7 +87,9 @@ export function readPictureTheme(): PictureTheme | null {
         active: `rgba(${lean}, ${dark ? 0.38 : 0.6})`,
         mention: dark ? 'rgba(70, 45, 0, 0.45)' : 'rgba(255, 226, 150, 0.6)',
         mentionHover: dark ? 'rgba(70, 45, 0, 0.6)' : 'rgba(255, 226, 150, 0.75)',
-        halo: dark ? '0 0 3px rgba(0, 0, 0, 0.75), 0 1px 2px rgba(0, 0, 0, 0.6)' : '0 0 3px rgba(255, 255, 255, 0.85), 0 1px 2px rgba(255, 255, 255, 0.6)',
+        halo: dark
+            ? '0 0 2px rgba(0, 0, 0, 0.9), 0 0 5px rgba(0, 0, 0, 0.65), 0 1px 2px rgba(0, 0, 0, 0.7)'
+            : '0 0 2px rgba(255, 255, 255, 0.95), 0 0 5px rgba(255, 255, 255, 0.7), 0 1px 2px rgba(255, 255, 255, 0.7)',
     };
 }
 
@@ -94,7 +99,7 @@ export function readPictureTheme(): PictureTheme | null {
  * attachments on disk (api/authedMedia.ts says how). So it has nothing to revoke either.
  * Null for a picture that cannot be read: no picture then, rather than one nobody measured.
  */
-export async function mapPicture(url: string, limit: PictureLimit): Promise<{ url: string; plan: TonePlan } | null> {
+export async function mapPicture(url: string, limit: PictureLimit): Promise<{ url: string; plan: TonePlan; detail: number; keep: number } | null> {
     try {
         const img = new Image();
         img.decoding = 'async';
@@ -115,11 +120,19 @@ export async function mapPicture(url: string, limit: PictureLimit): Promise<{ ur
             toneMap(pixels.data.subarray(at, at + band), plan);
             await new Promise(done => setTimeout(done));
         }
+        const shape = measureDetail(pixels.data, canvas.width, canvas.height);
+        const keep = detailToKeep(shape.detail);
+        if (keep < 1) {
+            for (let at = 0; at < pixels.data.length; at += band) {
+                softenDetail(pixels.data.subarray(at, at + band), canvas.width, at / (4 * canvas.width), shape, keep);
+                await new Promise(done => setTimeout(done));
+            }
+        }
         ctx.putImageData(pixels, 0, 0);
         const mapped = canvas.toDataURL('image/jpeg', PICTURE_QUALITY);
         // Before the collector gets to it: iOS caps what all canvases may hold together.
         canvas.width = 0;
-        return { url: mapped, plan };
+        return { url: mapped, plan, detail: shape.detail, keep };
     } catch {
         return null;
     }

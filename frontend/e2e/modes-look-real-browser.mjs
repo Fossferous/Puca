@@ -15,7 +15,8 @@
 //   2. The picture is really there, in colour: how much of the original's colour and tonal
 //      range survives, against what the old veil left, printed per picture. On the default
 //      dark theme it must beat the old veil several times over.
-//   3. A bright moon costs only the moon: the night picture is not dimmed for it.
+//   3. A bright moon costs only the moon: the night picture is not dimmed for it. A busy picture's
+//      fine detail is softened, in lightness only, and a calm picture is left as it is.
 //   4. A picture that cannot be read gives no picture and no error. The result is a data:
 //      URL, never a blob: (api/authedMedia.ts), and it renders under all five CSPs the app ships.
 //   5. What it costs on a phone: decoding and mapping the largest stored picture, with the CPU
@@ -169,6 +170,8 @@ const theLook = (page, source, tooStrong = 1) => page.evaluate(async ({ source, 
         css: L.pictureStyle(picture.url, theme),
         text,
         plan: picture.plan,
+        detail: picture.detail,
+        keep: picture.keep,
         urlKind: picture.url.slice(0, 15),
         urlChars: picture.url.length,
         surfaces: { hover: theme.hover, active: theme.active, mention: theme.mention, 'mention hover': theme.mentionHover, composer: theme.composer },
@@ -263,7 +266,7 @@ try {
                 await drawn(page);
                 await pixelsOf(page, await page.screenshot());
                 const original = await seen(page);
-                report.push({ scene, theme, oldVeil: old.alpha, gain: Math.round(look.plan.gain * 1000) / 1000, original, before, now });
+                report.push({ scene, theme, oldVeil: old.alpha, gain: Math.round(look.plan.gain * 1000) / 1000, original, before, now, detail: look.detail, keep: look.keep });
 
                 // NEGATIVE CONTROL: the strongest veil the old code could use, with the text it had.
                 if (scene === 'daylight' || scene === 'snow' || scene === 'night') {
@@ -278,6 +281,17 @@ try {
         }
     }
     console.log(`TIGHTEST ${JSON.stringify(tightest)}`);
+    for (const r of report) {
+        console.log(`DETAIL ${r.scene} on ${r.theme}: ${r.detail.toFixed(3)}, keeps ${r.keep.toFixed(2)}; colourfulness ${r.now.colourfulness}`);
+        if (r.scene === 'busy') {
+            check(`busy on ${r.theme}: it is measured busy, and softened`, r.keep < 1, { detail: r.detail, keep: r.keep });
+            check(`busy on ${r.theme}: and keeps its colour`, r.now.colourfulness >= r.before.colourfulness * 2, { old: r.before.colourfulness, now: r.now.colourfulness });
+        } else if (r.scene === 'lines') {
+            check(`lines on ${r.theme}: nothing but fine detail, so softened as well`, r.keep < 1, { detail: r.detail, keep: r.keep });
+        } else {
+            check(`${r.scene} on ${r.theme}: a calm picture is left as it is`, r.keep === 1, { detail: r.detail, keep: r.keep });
+        }
+    }
     for (const r of report) console.log(`SEEN  ${r.scene} on ${r.theme}: old veil ${r.oldVeil}, new gain ${r.gain}; colourfulness original ${r.original.colourfulness}, old ${r.before.colourfulness}, new ${r.now.colourfulness}; tonal range p5-p95 original ${r.original.p5}-${r.original.p95}, old ${r.before.p5}-${r.before.p95}, new ${r.now.p5}-${r.now.p95}`);
     for (const r of report.filter(x => x.theme === 'dark')) {
         check(`${r.scene} on dark: far more colour than the old veil left`, r.now.colourfulness >= r.before.colourfulness * 1.8 || r.original.colourfulness < 15, { old: r.before.colourfulness, now: r.now.colourfulness });

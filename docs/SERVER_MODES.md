@@ -216,6 +216,16 @@ this reader's theme (`planTone` and `toneMap` in `api/serverModes.ts`):
   still too dark gains light by mixing towards white, which keeps its hue and gives up
   only the saturation that takes.
 
+**AA is not the whole of reading.** It asks about the worst pixel, and says nothing of detail
+the size of the words, which competes with them: over confetti the text passed at 4.7:1 and was
+still work to read. So the mapped picture's busyness is measured too, as the spread of lightness
+in a patch of about a word by a line, in the busiest quarter (`measureDetail`). A sky, a moon or
+a landscape is left as it is, down to the byte. A busy picture has its fine detail's lightness
+brought towards the mean around it until it reaches `DETAIL_TARGET`, keeping at least
+`DETAIL_KEEP_MIN` of it (`softenDetail`). Colour is not touched, and shapes larger than a word
+are not either. The text's shadow is a tight dark halo with a soft one around it (light on a
+light theme); the check above does not count it.
+
 The bound holds every pixel by construction, so what is left to measure is what the
 browser does afterwards. The result is stored as a JPEG, which rings a little at hard edges
 and moves colour around, and it is scaled to the window. That costs up to about 0.03 of
