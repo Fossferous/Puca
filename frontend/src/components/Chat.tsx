@@ -164,7 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, movedOutOfHere, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnUnderCollection, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { deleteChannelQuestion, drawnUnderCollection, keptByHideMuted, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -2087,8 +2087,11 @@ export function Chat({ onLogout }: ChatProps) {
             // Nor into a channel a mode hides: entering a server would otherwise open
             // it for every member, and being open would keep it listed.
             const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
-            const textChannel = modeShownChannels.find(c => c.channel_type === 0) || fallback;
-            if (textChannel) setCurrentChannel(textChannel);
+            const landing = modeShownChannels.find(c => c.channel_type === 0) || fallback;
+            // A collection opens as a click on its row opens it: one page, the feed of
+            // its text channels, which says so when it has none.
+            if (landing?.channel_type === 2) setCurrentCollection(landing);
+            else if (landing) setCurrentChannel(landing);
         }
     }, [currentServer, channels, modeShownChannels, currentChannel, currentCollection]);
 
@@ -3931,8 +3934,9 @@ export function Chat({ onLogout }: ChatProps) {
         if (!newChannelName.trim() || !currentServer) return;
 
         try {
-            // If parent ID is empty string or "null", use undefined
-            const parentId = newChannelParentId ?? undefined;
+            // If parent ID is empty string or "null", use undefined. A collection has no
+            // parent: Nest Under is hidden for it, and Create Subchannel may have set one.
+            const parentId = newChannelType === 2 ? undefined : newChannelParentId ?? undefined;
             const newChannel = await createChannel(currentServer.id, newChannelName.trim(), newChannelType, parentId, false, newChannelHasChecklist);
 
             // Update cache
@@ -4206,8 +4210,10 @@ export function Chat({ onLogout }: ChatProps) {
             showToast("Couldn't call everyone back. Try again in a moment.");
         }
     };
+    // The row whose page is open. Opening a collection clears currentChannel.
+    const openRowId = currentChannel?.id ?? currentCollection?.id;
     const listed = (c: Channel): boolean => listedNow(c, channels, activeModeId, {
-        openChannelId: currentChannel?.id ?? currentCollection?.id,
+        openChannelId: openRowId,
         voiceChannelId: currentVoiceChannel?.id,
         occupants: (id) => getVoiceUsersInRoom(`voice_${id}`).length,
     });
@@ -5349,28 +5355,15 @@ export function Chat({ onLogout }: ChatProps) {
                         {channels
                             .filter(c => (c.channel_type === 0 || c.channel_type === 2) && !c.parent_id)
                             // A hidden collection stays as the header of an open subchannel.
-                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && currentChannel?.id === sub.id))
-                            .filter(c => {
-                                if (!hideMutedHere || !isChannelMuted(c.id) || currentChannel?.id === c.id) return true;
-                                // A muted COLLECTION must not drag its children out of
-                                // the sidebar with it: the row and its subchannels render
-                                // as one fragment, so hiding the parent used to hide an
-                                // unmuted subchannel (unread badge and all), and could
-                                // hide the very channel being read — breaking the
-                                // never-hide-the-open-channel rule this feature promises.
-                                // Mute is per channel; the parent stays as the group
-                                // header for whatever is still visible beneath it,
-                                // which a voice room is not: it is drawn in its own section.
-                                return channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub)
-                                    && (!isChannelMuted(sub.id) || currentChannel?.id === sub.id));
-                            })
+                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && openRowId === sub.id))
+                            .filter(c => !hideMutedHere || keptByHideMuted(c, channels, isChannelMuted, openRowId))
                             .map(channel => {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
                                 const subchannels = channels.filter(sub => sub.parent_id === channel.id)
                                     .filter(drawnUnderCollection)
                                     .filter(listed)
-                                    .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || currentChannel?.id === sub.id);
+                                    .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || openRowId === sub.id);
 
                                 return (
                                     <React.Fragment key={channel.id}>

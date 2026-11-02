@@ -4,12 +4,18 @@
 //   A. A voice channel under a collection is drawn ONCE: as a voice row in the Voice
 //      Channels section, which joins on click and shows who is in it, never as a #
 //      row in the collection's list. Around that: a collection holding only voice
-//      rooms still opens (and says what it is), edits and deletes (the confirmation
-//      names the rooms, which go with it, and the list loses them at once); its feed
-//      asks for text subchannels only; unread badges; Hide Muted Channels; dragging a
-//      voice row, inside a collection and across collections, keeps every other row
-//      where it was; the phone at 390x844; a mode hides and shows a room with its
-//      collection, and Parent Collection is still what the mode reads.
+//      rooms still opens (and says what it is), and a server with no text channel lands
+//      on that same page; it edits and deletes (the confirmation names what goes with it,
+//      at every level, and the list loses it at once); its feed asks for text subchannels
+//      only, and so does the server's; a message in a voice room lights no badge on its
+//      collection; Hide Muted Channels hides it unless it is open; a collection made from
+//      Create Subchannel is not nested; dragging a voice row, inside a collection and
+//      across collections, keeps every other row where it was, a room the mode hides
+//      among them; the phone at 390x844; a mode hides and shows a room with its
+//      collection, a room it hides stays listed while someone is in it, and Parent
+//      Collection is still what the mode reads. The real field's "No parent (top level)"
+//      takes a text channel and a voice room out of their collection, for the phone too
+//      with no reload, and a voice room out of the mode with it.
 //      NEGATIVE CONTROL: a # row for a voice room injected into the list must be caught.
 //   B. Every switch on Server Settings > Overview (and Modes) is a switch: a track with
 //      a knob, a label beside it, on and off plainly different, at 3:1 on all eight
@@ -17,7 +23,9 @@
 //      reachable and pressable from the keyboard with a visible focus ring, and the
 //      Overview tab saving what it shows.
 //      NEGATIVE CONTROL: the old bare dot, forced back with a stylesheet, must be caught.
-//      Also the server menu's own switch, and the plain checkboxes in Edit Channel.
+//      Also the server menu's own switch, the plain checkboxes in Edit Channel (negative
+//      controls: collapsed, see-through, not what a click hits), and a sweep of every
+//      form group's checkboxes: Login and Notes' sign-in too. A page with none says INFO.
 //
 // Each check prints PASS/FAIL; the exit code is the number of failures. Screenshots go
 // to OUT (SHOT <file>): look at them.
@@ -312,6 +320,8 @@ try {
     const phoneCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
     const A = await signIn(desktop, 'sba_' + stamp, 'owner');
     const B = await signIn(phoneCtx, 'sbb_' + stamp, 'phone');
+    const thirdCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const C = await signIn(thirdCtx, 'sbc_' + stamp, 'third');
 
     // ── Fixture. A collection of nothing but voice rooms, one with both kinds, one a mode
     //    ticks, one that gets deleted.
@@ -327,15 +337,27 @@ try {
     const mixedNotes = await mk('mixed-notes', 0, mixed.id);
     const den = await mk('Den', 1, mixed.id);
     const secret = await mk('Secret rooms', 2);
-    await mk('Crypt', 1, secret.id);
+    const crypt = await mk('Crypt', 1, secret.id);
     const moved = await mk('Moved', 1);
     const doomed = await mk('Doomed', 2);
     const goneRoom = await mk('Gone room', 1, doomed.id);
+    // Two levels down, which the API still takes and a database may already hold.
+    const deeper = await mk('Deeper', 2, doomed.id);
+    const deepRoom = await mk('Deep room', 1, deeper.id);
     await api(A, 'POST', `/servers/${srv.id}/modes`, { name: 'Night', channel_ids: [secret.id] });
     const inv = await api(A, 'POST', `/servers/${srv.id}/invites`, {});
     await api(B, 'POST', `/invites/${inv.code}/join`);
+    await api(C, 'POST', `/invites/${inv.code}/join`);
     const phoneSrvName = 'sbp_' + stamp;
     const phoneSrv = await api(B, 'POST', '/servers', { name: phoneSrvName });
+    // A server with no text channel, whose first row is a collection of voice rooms.
+    const landSrvName = 'sbl_' + stamp;
+    const landSrv = await api(A, 'POST', '/servers', { name: landSrvName });
+    const vault = await api(A, 'POST', `/servers/${landSrv.id}/channels`, { name: 'Vault', channel_type: 2 });
+    await api(A, 'POST', `/servers/${landSrv.id}/channels`, { name: 'Vault room', channel_type: 1, parent_id: vault.id });
+    const landRows = await api(A, 'GET', `/servers/${landSrv.id}/channels`);
+    for (const c of landRows.filter(c => c.channel_type === 0)) await api(A, 'DELETE', `/channels/${c.id}`);
+    await api(A, 'POST', `/servers/${landSrv.id}/channels/reorder`, { channel_ids: [vault.id, ...landRows.filter(c => c.channel_type !== 0 && c.id !== vault.id).map(c => c.id)] });
     for (const page of [A, B]) {
         await page.reload({ waitUntil: 'domcontentloaded' });
         await sleep(2500);
@@ -351,7 +373,7 @@ try {
     // ── A1. Each voice channel exactly once, as a voice row.
     for (const [who, page] of [['desktop', A], ['phone', B]]) {
         const rows = await sidebarRows(page);
-        for (const name of ['Town', 'Attic', 'Cellar', 'Den', 'Gone room']) {
+        for (const name of ['Town', 'Attic', 'Cellar', 'Den', 'Gone room', 'Deep room']) {
             check(`${who}: ${name} is listed exactly once, as a voice row`, oneVoiceRow(rows, name), named(rows, name));
         }
         const notes = named(rows, 'mixed-notes');
@@ -362,7 +384,7 @@ try {
             const row = named(rows, name);
             check(`${who}: the collection ${name} keeps its one row`, row.length === 1 && row[0].collection, row);
         }
-        check(`${who}: no voice room is drawn in a collection's list`, !rows.some(r => r.sub && ['Attic', 'Cellar', 'Den', 'Gone room'].includes(r.name)), rows.filter(r => r.sub));
+        check(`${who}: no voice room is drawn in a collection's list`, !rows.some(r => r.sub && ['Attic', 'Cellar', 'Den', 'Gone room', 'Deep room'].includes(r.name)), rows.filter(r => r.sub));
     }
     const text = await textOrder(A);
     check('the collection of voice rooms draws nothing under itself, and the mixed one its text only',
@@ -403,7 +425,10 @@ try {
     check('opening it did not leave the call', await A.locator('.voice-panel-compact .voice-connected-label').count() > 0);
     await shot(A, '04-desktop-collection-of-voice-rooms-open');
 
-    // A text subchannel, its message, the feed and an unread badge.
+    // A text subchannel, its message, the feed and an unread badge. A voice room has a
+    // text side the server keeps too: its message goes first, so the poll that lights the
+    // subchannel's badge has already counted it.
+    await api(A, 'POST', `/channels/${attic.id}/messages`, { content: 'a note left in the attic' });
     await textRow(A, 'mixed-notes').click();
     const say = A.locator('textarea[placeholder^="Message #"]');
     await say.waitFor({ timeout: 8000 });
@@ -418,23 +443,45 @@ try {
     check('with text to read, it does not say it is empty', await empty().count() === 0);
     const badge = (page, name) => textRow(page, name).locator('.unread-badge');
     check('the phone gets the unread badge on the text subchannel (a 30 s poll)', !!await until(async () => (await badge(B, 'mixed-notes').count()) > 0, 35000));
-    check('and none on a collection of voice rooms', await badge(B, 'Rooms').count() === 0);
+    const unread = async (page, id) => (await api(page, 'GET', `/servers/${srv.id}/unread`)).channels.find(c => c.channel_id === id)?.unread_count ?? 0;
+    check('control: the phone has an unread message in a voice room under the collection', await unread(B, attic.id) > 0, await unread(B, attic.id));
+    check('and no badge on the collection for it: nothing of that room is drawn under it', await badge(B, 'Rooms').count() === 0);
+
+    // The server's own feed, which an installed older client draws as a # row per child.
+    const feedNames = async (id) => (await api(A, 'GET', `/channels/${id}/feed`)).children.map(c => c.name);
+    check('the server\'s feed of a collection of voice rooms lists none of them', (await feedNames(rooms.id)).length === 0, await feedNames(rooms.id));
+    check('and of a mixed one, its text channel only', (await feedNames(mixed.id)).join() === 'mixed-notes', await feedNames(mixed.id));
+
+    // Entering a server with no text channel opens its first row, here a collection: the
+    // page a click on that row opens, not a second page with a voice room as a # row.
+    await A.locator(`.server-icon[title="${landSrvName}"]`).click();
+    check('a server with no text channel lands on its first row, a collection', !!await until(async () => (await header(A)) === 'Vault', 8000), await header(A));
+    const landed = await until(async () => ((await empty().count()) ? empty().innerText() : ''), 6000);
+    check('on the page that says what it holds', /voice/i.test(landed ?? '') && /Voice Channels/.test(landed ?? ''), landed);
+    check('and not a dashboard listing a voice room as # Vault room', await A.locator('.channel-dashboard').count() === 0 && !(await A.locator('body').innerText()).includes('# Vault room'));
+    check('its room is listed once, as a voice row', oneVoiceRow(await sidebarRows(A), 'Vault room'), named(await sidebarRows(A), 'Vault room'));
+    await shot(A, '04b-desktop-landed-on-a-collection');
+    await A.locator(`.server-icon[title="${srvName}"]`).click();
+    await until(async () => (await voiceOrder(A)).includes('Town') && (await header(A)) !== 'Vault', 8000);
 
     // ── A4. Dragging. A flat list has one order: a move changes that, and nothing else.
     const beforeText = await textOrder(A);
     const startVoice = await voiceOrder(A);
-    check('fixture: the voice list starts in creation order', startVoice.join() === 'default,Town,Attic,Cellar,Den,Moved,Gone room,AFK', startVoice);
+    check('fixture: the voice list starts in creation order', startVoice.join() === 'default,Town,Attic,Cellar,Den,Moved,Gone room,Deep room,AFK', startVoice);
     await drag(A, voiceRow(A, attic.id), voiceRow(A, cellar.id));
     await until(async () => (await voiceOrder(A)).join() !== startVoice.join(), 5000);
     let order = await voiceOrder(A);
-    check('dragging a room onto its neighbour in the same collection swaps those two and leaves the rest', order.join() === 'default,Town,Cellar,Attic,Den,Moved,Gone room,AFK', order);
+    check('dragging a room onto its neighbour in the same collection swaps those two and leaves the rest', order.join() === 'default,Town,Cellar,Attic,Den,Moved,Gone room,Deep room,AFK', order);
     await drag(A, voiceRow(A, den.id), voiceRow(A, town.id));
     await until(async () => (await voiceOrder(A)).join() !== order.join(), 5000);
     order = await voiceOrder(A);
-    check('dragging a room under one collection onto a room outside it moves it there', order.join() === 'default,Den,Town,Cellar,Attic,Moved,Gone room,AFK', order);
+    check('dragging a room under one collection onto a room outside it moves it there', order.join() === 'default,Den,Town,Cellar,Attic,Moved,Gone room,Deep room,AFK', order);
     const stored = await api(A, 'GET', `/servers/${srv.id}/channels`);
     const storedVoice = stored.filter(c => c.channel_type === 1).map(c => c.name);
-    check('the server stores the order the list shows (a mode\'s hidden room among them, AFK pinned)', storedVoice.filter(n => n !== 'Crypt' && n !== 'AFK').join() === order.filter(n => n !== 'AFK').join(), storedVoice);
+    // Crypt is hidden by the mode and keeps its slot, between Attic and Moved: numbering only
+    // what is drawn would leave it on its old position, out of step with every row renumbered.
+    const wholeVoiceOrder = 'default,Den,Town,Cellar,Attic,Crypt,Moved,Gone room,Deep room';
+    check('the server stores the order the list shows, with the room a mode hides in its own slot', storedVoice.filter(n => n !== 'AFK').join() === wholeVoiceOrder, storedVoice);
     const parents = Object.fromEntries(stored.map(c => [c.name, c.parent_id ?? null]));
     check('a drag changes no room\'s collection', parents.Attic === rooms.id && parents.Cellar === rooms.id && parents.Den === mixed.id && parents.Town === null, parents);
     check('and moves nothing in the text list', (await textOrder(A)).join() === beforeText.join(), await textOrder(A));
@@ -463,6 +510,7 @@ try {
         const rows = await sidebarRows(page);
         check(`${who}: and its collection, with nothing drawn under it`, named(rows, 'Secret rooms').length === 1 && !rows.some(r => r.sub && r.name === 'Crypt'), named(rows, 'Secret rooms'));
     }
+    check('and the room the mode hid sits where the numbering left it, AFK still last', (await voiceOrder(A)).join() === `${wholeVoiceOrder},AFK`, await voiceOrder(A));
     await shot(A, '05-desktop-mode-on-room-under-collection');
     // Parent Collection, the real field: a top-level room goes under the ticked collection.
     await menu(A, voiceRow(A, moved.id), 'Edit');
@@ -477,7 +525,83 @@ try {
     await pickMode(A, false, 'Off');
     check('the mode reads it: off, the room moved under the ticked collection is hidden', !!await until(async () => !hasRow(await sidebarRows(A), 'Moved'), 8000), (await sidebarRows(A)).map(r => r.name));
     check('on the phone too', !!await until(async () => !hasRow(await sidebarRows(B), 'Moved'), 8000), (await sidebarRows(B)).map(r => r.name));
-    check('and a room with someone in it stays, once: a call nobody can see is a secret', oneVoiceRow(await sidebarRows(A), 'Attic'));
+    // A call nobody can see is a secret. Turning the mode off ended its calls and nothing
+    // refuses a later join, so this is someone back in a room it hides, as from a link or an
+    // older client: a socket of their own, joining by the room's id.
+    const hiddenRoom = `voice_${crypt.id}`;
+    await C.evaluate(({ API, hiddenRoom }) => new Promise((resolve, reject) => {
+        const ws = new WebSocket(`${API.replace(/^http/, 'ws')}/ws`, ['bearer', localStorage.getItem('auth_token')]);
+        window.__bare = ws;
+        ws.onopen = () => { ws.send(JSON.stringify({ type: 'JoinRoom', payload: { room_id: hiddenRoom } })); resolve(); };
+        ws.onerror = () => reject(new Error('the socket was refused'));
+    }), { API, hiddenRoom });
+    check('a room the mode hides, with someone in it, is listed, once', !!await until(async () => oneVoiceRow(await sidebarRows(A), 'Crypt'), 8000), named(await sidebarRows(A), 'Crypt'));
+    check('and says who is in it', !!await until(async () => (await occupant(A, crypt.id)).includes('sbc_'), 5000), await occupant(A, crypt.id));
+    const withSomeone = await sidebarRows(A);
+    check('its empty sibling stays hidden, and so does their collection', !hasRow(withSomeone, 'Moved') && !hasRow(withSomeone, 'Secret rooms'), withSomeone.map(r => r.name));
+    await C.evaluate((hiddenRoom) => {
+        window.__bare.send(JSON.stringify({ type: 'LeaveRoom', payload: { room_id: hiddenRoom } }));
+        window.__bare.close();
+    }, hiddenRoom);
+    check('and when they leave, the mode hides it again', !!await until(async () => !hasRow(await sidebarRows(A), 'Crypt'), 10000), (await sidebarRows(A)).map(r => r.name));
+
+    // ── A5b. Parent Collection's "No parent (top level)": the real select, text and voice.
+    //    The server used to read its null as "nothing said". The editor's own list moved the
+    //    row at once and the refetch put it back, so each of these waits for the server first.
+    const parentOf = async (id) => (await api(A, 'GET', `/servers/${srv.id}/channels`)).find(c => c.id === id)?.parent_id ?? null;
+    const editParent = async (row, label) => {
+        await menu(A, row, 'Edit');
+        const field = A.locator('#channel-parent');
+        await field.waitFor({ timeout: 6000 });
+        await field.selectOption({ label });
+        await A.locator('.edit-channel-modal').getByRole('button', { name: /^Save/ }).click();
+        await A.locator('.edit-channel-modal').waitFor({ state: 'detached', timeout: 6000 });
+    };
+    const topLevelText = (rows, name) => named(rows, name).length === 1 && !named(rows, name)[0].sub && !named(rows, name)[0].voice;
+    const NO_PARENT = 'No parent (top level)';
+    // Text. A channel in a collection, out of it, and back: both directions through one field.
+    await editParent(textRow(A, 'mixed-notes'), NO_PARENT);
+    const notesCleared = await until(async () => (await parentOf(mixedNotes.id)) === null, 5000);
+    check('text: No parent (top level) reaches the server', !!notesCleared, await parentOf(mixedNotes.id));
+    // Past a refetch: the frame goes to the editor too, so a stale answer would have put it back.
+    await sleep(800);
+    check('text: its row is at the top level on the owner\'s list, and stays', topLevelText(await sidebarRows(A), 'mixed-notes'), named(await sidebarRows(A), 'mixed-notes'));
+    check('text: and on the phone, with no reload: the frame makes it refetch', !!await until(async () => topLevelText(await sidebarRows(B), 'mixed-notes'), 8000), named(await sidebarRows(B), 'mixed-notes'));
+    await shot(A, '05b-desktop-no-parent-text');
+    await A.reload({ waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    await dismiss(A);
+    await A.locator(`.server-icon[title="${srvName}"]`).click();
+    await until(async () => (await voiceOrder(A)).length > 3);
+    check('text: a reload agrees', topLevelText(await sidebarRows(A), 'mixed-notes'), named(await sidebarRows(A), 'mixed-notes'));
+    await editParent(textRow(A, 'mixed-notes'), 'Mixed');
+    check('control: naming a collection in that field still moves it there', !!await until(async () => (await parentOf(mixedNotes.id)) === mixed.id, 5000), await parentOf(mixedNotes.id));
+    check('and the phone sees that too', !!await until(async () => named(await sidebarRows(B), 'mixed-notes')[0]?.sub === true, 8000), named(await sidebarRows(B), 'mixed-notes'));
+    // Left out: a request that does not name the field keeps the parent.
+    await api(A, 'PATCH', `/channels/${cellar.id}`, { description: 'under the stairs' });
+    check('control: an edit that leaves the field out leaves the parent', (await parentOf(cellar.id)) === rooms.id, await parentOf(cellar.id));
+    // Voice. The list draws a voice room the same under a collection or not, so what shows
+    // the change is the mode: under the ticked collection it goes when the mode does.
+    await pickMode(A, false, 'Night');
+    await until(async () => oneVoiceRow(await sidebarRows(A), 'Moved'), 8000);
+    await menu(A, voiceRow(A, moved.id), 'Edit');
+    await A.locator('#channel-parent').waitFor({ timeout: 6000 });
+    check('voice: the field shows the collection it is under', (await A.locator('#channel-parent').inputValue()) === String(secret.id), await A.locator('#channel-parent').inputValue());
+    await A.locator('#channel-parent').selectOption({ label: NO_PARENT });
+    await A.locator('.edit-channel-modal').getByRole('button', { name: /^Save/ }).click();
+    await A.locator('.edit-channel-modal').waitFor({ state: 'detached', timeout: 6000 });
+    const movedCleared = await until(async () => (await parentOf(moved.id)) === null, 5000);
+    check('voice: No parent (top level) reaches the server', !!movedCleared, await parentOf(moved.id));
+    check('voice: still drawn once, as a voice row', oneVoiceRow(await sidebarRows(A), 'Moved'), named(await sidebarRows(A), 'Moved'));
+    // The phone hears the edit before the switch, so the room it keeps is the frame's doing.
+    await sleep(1500);
+    await pickMode(A, false, 'Off');
+    for (const [who, page] of [['desktop', A], ['phone', B]]) {
+        // Crypt going says the switch has landed: until then Moved would be listed either way.
+        check(`${who} control: the mode is off, its room gone`, !!await until(async () => !hasRow(await sidebarRows(page), 'Crypt'), 8000), (await sidebarRows(page)).map(r => r.name));
+        check(`${who}: the room taken out of the ticked collection is not hidden with it, and is listed once`, oneVoiceRow(await sidebarRows(page), 'Moved'), named(await sidebarRows(page), 'Moved'));
+    }
+    await shot(A, '05c-desktop-no-parent-voice');
 
     // ── A6. Editing, muting, deleting a collection of voice rooms.
     await textRow(A, 'Rooms').click({ button: 'right' });
@@ -517,9 +641,10 @@ try {
         const open = await A.locator('.has-toggle .toggle-switch').count();
         return open ? menuSwitch() : null;
     }, 1500);
+    check('the server menu stays open when its switch is pressed', !!menuOn);
     if (menuOn) await shot(A, '07-desktop-server-menu-switch-on');
     check('the server menu\'s own switch has a track, at the size its own rules give it', menuOff.w === 40 && menuOff.h === 22, menuOff);
-    if (menuOn) check('and on and off differ, the knob reaching the far end', menuOn.bg !== menuOff.bg && menuOn.knob !== menuOff.knob && menuOn.endMargin === menuOff.left, { menuOff, menuOn });
+    check('and on and off differ, the knob reaching the far end', !!menuOn && menuOn.bg !== menuOff.bg && menuOn.knob !== menuOff.knob && menuOn.endMargin === menuOff.left, { menuOff, menuOn });
     check('its off track is not a ghost on that dark menu (a settings rule used to paint it, by load order)', /rgba\(255, 255, 255, 0\.3/.test(menuOff.bg), menuOff.bg);
     await A.keyboard.press('Escape').catch(() => {});
     await A.mouse.click(700, 500);
@@ -527,22 +652,58 @@ try {
     let rows = await sidebarRows(A);
     check('Hide Muted Channels hides a muted collection of voice rooms: nothing would sit under its header', !hasRow(rows, 'Rooms renamed'), rows.map(r => r.name));
     check('and its rooms stay listed', oneVoiceRow(rows, 'Cellar') && oneVoiceRow(rows, 'Attic'), rows.filter(r => r.voice).map(r => r.name));
-    await A.locator(`.server-icon[title="${srvName}"]`).click({ button: 'right' });
-    await A.locator('.context-menu-item.has-toggle', { hasText: 'Hide Muted Channels' }).click();
-    await A.keyboard.press('Escape').catch(() => {});
-    await A.mouse.click(700, 500);
-    await sleep(300);
+    const pressHideMuted = async () => {
+        await A.locator(`.server-icon[title="${srvName}"]`).click({ button: 'right' });
+        await A.locator('.context-menu-item.has-toggle', { hasText: 'Hide Muted Channels' }).click();
+        await A.keyboard.press('Escape').catch(() => {});
+        await A.mouse.click(700, 500);
+        await sleep(300);
+    };
+    // What is open never vanishes from under the reader, a collection as much as a channel.
+    await pressHideMuted();
+    await textRow(A, 'Rooms renamed').click();
+    await until(async () => (await header(A)) === 'Rooms renamed', 6000);
+    await pressHideMuted();
+    rows = await sidebarRows(A);
+    const openRow = named(rows, 'Rooms renamed');
+    check('Hide Muted Channels keeps the muted collection that is open, once', openRow.length === 1 && openRow[0].collection, rows.map(r => r.name));
+    check('with its page still there', (await header(A)) === 'Rooms renamed' && await empty().count() === 1, await header(A));
+    await shot(A, '07b-desktop-open-muted-collection-stays');
+    await textRow(A, 'lobby').click();
+    check('and leaving it is what hides it', !!await until(async () => !hasRow(await sidebarRows(A), 'Rooms renamed'), 6000), (await sidebarRows(A)).map(r => r.name));
+    await pressHideMuted();
     await menu(A, textRow(A, 'Rooms renamed'), 'Unmute Channel');
+
+    // Create Subchannel, then the Collection button: Nest Under is hidden for a collection, so
+    // it has no parent. A nested one would be a collection whose rooms a delete can miss.
+    const createFrom = async (collection, kind, name) => {
+        await menu(A, textRow(A, collection), 'Create Subchannel');
+        await A.locator('.type-btn', { hasText: kind }).click();
+        await A.locator('form:has(button.create-btn) input[type="text"]').fill(name);
+        await A.locator('button.create-btn').click();
+        await A.locator('button.create-btn').waitFor({ state: 'detached', timeout: 6000 });
+    };
+    const rowCalled = async (name) => (await api(A, 'GET', `/servers/${srv.id}/channels`)).find(c => c.name === name);
+    await createFrom('Mixed', 'Collection', 'Top shelf');
+    const shelf = await until(() => rowCalled('Top shelf'), 5000);
+    check('a collection made from Create Subchannel has no parent', !!shelf && shelf.channel_type === 2 && (shelf.parent_id ?? null) === null, shelf);
+    await createFrom('Mixed', 'Text', 'mixed-more');
+    const more = await until(() => rowCalled('mixed-more'), 5000);
+    check('control: a text channel made the same way is nested', more?.parent_id === mixed.id, more);
 
     // Deleting takes the rooms with it (the foreign key cascades): they are not drawn under
     // it any more, so the confirmation has to say so, and the list has to lose them.
     dialogs.length = 0;
     await menu(A, textRow(A, 'Doomed'), 'Delete');
-    check('deleting a collection names the rooms that go with it', !!await until(() => dialogs.length > 0, 3000) && dialogs[dialogs.length - 1].includes('Gone room'), dialogs);
+    await until(() => dialogs.length > 0, 3000);
+    const asked = dialogs[dialogs.length - 1] ?? '';
+    check('deleting a collection names what goes with it, at every level', ['Gone room', 'Deeper', 'Deep room'].every(n => asked.includes(n)), dialogs);
+    check('with no # on anything that is not a text channel', !asked.includes('#'), asked);
     check('its row goes', !!await until(async () => !hasRow(await sidebarRows(A), 'Doomed'), 6000));
-    check('and so do its rooms, with no reload', !hasRow(await sidebarRows(A), 'Gone room'), (await sidebarRows(A)).map(r => r.name));
+    const afterDelete = await sidebarRows(A);
+    check('and so does everything in it, at every level, with no reload', !hasRow(afterDelete, 'Gone room') && !hasRow(afterDelete, 'Deeper') && !hasRow(afterDelete, 'Deep room'), afterDelete.map(r => r.name));
     const gone = await api(A, 'GET', `/servers/${srv.id}/channels`);
-    check('as the server says', !gone.some(c => c.id === doomed.id || c.id === goneRoom.id), gone.map(c => c.name));
+    check('as the server says', !gone.some(c => [doomed.id, goneRoom.id, deeper.id, deepRoom.id].includes(c.id)), gone.map(c => c.name));
 
     // ── A7. The phone.
     await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
@@ -747,25 +908,39 @@ try {
     }));
     const known = /(^|\s)(toggle-row|checkbox-label|mode-channel)(\s|$)/;
     const sweep = {};
-    const look = async (where) => {
+    // A page with no such row is no evidence of anything: it says so, and a page that should
+    // have one fails without it. Any row on any page still has to be a known kind.
+    const sweepOk = (found, expectRows) => (!expectRows || found.length > 0) && found.every(f => known.test(f.kind));
+    const look = async (where, { page = A, expectRows = false } = {}) => {
         await sleep(250);
-        const found = await groupCheckboxes(A);
+        const found = await groupCheckboxes(page);
         sweep[where] = found.map(f => `${f.kind}: ${f.text}`);
-        check(`sweep, ${where}: no other kind of checkbox row in a form group`, found.every(f => known.test(f.kind)), found.filter(f => !known.test(f.kind)));
+        if (found.length === 0 && !expectRows) {
+            console.log(`INFO  sweep, ${where}: no checkbox in a form group on this page`);
+            return;
+        }
+        check(`sweep, ${where}: ${found.length} checkbox row(s) in a form group, each a kind this walk knows`, sweepOk(found, true), found.filter(f => !known.test(f.kind)));
     };
     const checkboxRows = (page, root) => page.evaluate((root) => [...document.querySelectorAll(`${root} .form-group label`)].filter(l => l.querySelector('input[type="checkbox"]')).map((l) => {
-        const box = l.querySelector('input[type="checkbox"]').getBoundingClientRect();
+        l.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const input = l.querySelector('input[type="checkbox"]');
+        const box = input.getBoundingClientRect();
         const s = getComputedStyle(l);
+        let opacity = 1;
+        for (let e = input; e && e !== l.parentElement; e = e.parentElement) opacity *= parseFloat(getComputedStyle(e).opacity);
         const range = document.createRange();
-        const textNode = [...l.childNodes].filter(n => n.nodeType === 3 && n.textContent.trim()).pop();
-        range.selectNodeContents(textNode ?? l);
+        // The words: a text node in Edit Channel, a span in the two sign-in forms.
+        const words = [...l.childNodes].filter(n => n.textContent.trim()).pop();
+        range.selectNodeContents(words ?? l);
         const t = range.getBoundingClientRect();
-        return { text: l.textContent.trim().slice(0, 30), display: s.display, transform: s.textTransform, height: Math.round(l.getBoundingClientRect().height), box: [Math.round(box.width), Math.round(box.height)], beside: box.right <= t.left + 1 && Math.abs((box.top + box.height / 2) - (t.top + t.height / 2)) <= 14, right: Math.round(l.getBoundingClientRect().right) };
+        return { text: l.textContent.trim().slice(0, 30), display: s.display, transform: s.textTransform, height: Math.round(l.getBoundingClientRect().height), box: [Math.round(box.width), Math.round(box.height)], opacity, hitsBox: document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === input, beside: box.right <= t.left + 1 && Math.abs((box.top + box.height / 2) - (t.top + t.height / 2)) <= 14, right: Math.round(l.getBoundingClientRect().right) };
     }), root);
     const checkboxBad = (r, minRow = 0) => [
         r.display !== 'flex' ? `display:${r.display}` : null,
         r.transform !== 'none' ? r.transform : null,
-        r.box[0] > 24 || r.box[1] > 24 ? `checkbox ${r.box.join('x')}` : null,
+        r.box[0] > 24 || r.box[1] > 24 || r.box[0] < 14 || r.box[1] < 14 ? `checkbox ${r.box.join('x')}` : null,
+        r.opacity < 0.5 ? `checkbox at opacity ${r.opacity}` : null,
+        !r.hitsBox ? 'the checkbox is not what a click on it hits' : null,
         !r.beside ? 'text not beside the box' : null,
         r.height < minRow ? `row ${r.height}px` : null,
     ].filter(Boolean);
@@ -776,15 +951,36 @@ try {
     await A.locator('.server-settings-btn').first().click();
     for (const tab of ['Overview', 'Roles', 'Modes', 'Emoji', 'Invites', 'Moderation']) {
         await A.locator('.server-settings-nav .nav-item', { hasText: tab }).click();
-        await look(`Server Settings > ${tab}`);
+        await A.locator('.server-settings-nav .nav-item.active', { hasText: tab }).waitFor({ timeout: 4000 });
+        await look(`Server Settings > ${tab}`, { expectRows: tab === 'Overview' || tab === 'Modes' });
     }
+    // NEGATIVE CONTROLS: what the sweep reads must be able to fail it. The last tab has no row.
+    const noRows = await groupCheckboxes(A);
+    check('NEGATIVE CONTROL: a page that should hold a row and holds none fails the sweep', noRows.length === 0 && !sweepOk(noRows, true), noRows);
+    await A.evaluate(() => {
+        const group = document.createElement('div');
+        group.id = 'mystery-group';
+        group.className = 'form-group';
+        group.innerHTML = '<label class="mystery-row"><input type="checkbox"> a kind nobody measured</label>';
+        document.querySelector('.server-settings-content').append(group);
+    });
+    const mystery = await groupCheckboxes(A);
+    check('NEGATIVE CONTROL: a row of a kind this walk does not know fails the sweep', mystery.length === 1 && !sweepOk(mystery, false), mystery);
+    await A.evaluate(() => document.getElementById('mystery-group').remove());
     await A.locator(`${overview} .close-btn`).click();
     await A.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 });
     await menu(A, voiceRow(A, attic.id), 'Edit');
     await A.locator('.edit-channel-modal').waitFor({ timeout: 6000 });
-    await look('Edit Channel, voice');
+    await look('Edit Channel, voice', { expectRows: true });
     const voiceBoxes = await checkboxRows(A, '.edit-channel-modal');
     check('Edit Channel, voice: AFK and SFU are rows with the box beside the words', voiceBoxes.length === 2 && voiceBoxes.every(r => checkboxBad(r).length === 0), voiceBoxes.map(r => [r.text.slice(0, 12), checkboxBad(r)]));
+    // NEGATIVE CONTROLS: a box you cannot see or cannot press must fail that measure.
+    for (const [what, css] of [['collapsed to nothing', 'width: 0 !important; height: 0 !important;'], ['see-through', 'opacity: 0 !important;'], ['that a click goes through', 'pointer-events: none !important;']]) {
+        const forcedBox = await A.addStyleTag({ content: `.edit-channel-modal .checkbox-label input[type="checkbox"] { ${css} }` });
+        const boxes = await checkboxRows(A, '.edit-channel-modal');
+        check(`NEGATIVE CONTROL: a checkbox ${what} is caught`, boxes.length === 2 && boxes.every(r => checkboxBad(r).length > 0), boxes.map(r => checkboxBad(r)));
+        await forcedBox.evaluate(el => el.remove());
+    }
     const afkBox = A.locator('.edit-channel-modal .checkbox-label input').first();
     const afkWas = await afkBox.isChecked();
     await A.locator('.edit-channel-modal .checkbox-label').first().click();
@@ -794,7 +990,7 @@ try {
     await closeEdit(A);
     await menu(A, textRow(A, 'lobby'), 'Edit');
     await A.locator('.edit-channel-modal').waitFor({ timeout: 6000 });
-    await look('Edit Channel, text');
+    await look('Edit Channel, text', { expectRows: true });
     const textBoxes = await checkboxRows(A, '.edit-channel-modal');
     check('Edit Channel, text: Checklist is a row with the box beside the words', textBoxes.length === 1 && textBoxes.every(r => checkboxBad(r).length === 0), textBoxes.map(r => [r.text.slice(0, 12), checkboxBad(r)]));
     await closeEdit(A);
@@ -805,14 +1001,29 @@ try {
     await sleep(150);
     await A.locator('.user-actions .user-action-btn[title="Settings"]').first().click({ timeout: 6000 });
     await A.locator('.settings-nav-item').first().waitFor({ timeout: 6000 });
-    const userTabs = await A.locator('.settings-nav-item').allInnerTexts();
-    for (const tab of userTabs) {
-        await A.locator('.settings-nav-item', { hasText: tab.trim() }).first().click().catch(() => {});
-        await look(`Settings > ${tab.trim()}`);
+    // Log Out is a row of this nav too, and not a page.
+    const userSections = A.locator('.settings-nav-item:not(.logout)');
+    const userTabs = await userSections.allInnerTexts();
+    check('the user settings have pages to sweep', userTabs.length >= 3, userTabs);
+    for (let i = 0; i < userTabs.length; i++) {
+        await userSections.nth(i).click();
+        await A.locator('.settings-nav-item.active', { hasText: userTabs[i].trim() }).waitFor({ timeout: 4000 });
+        await look(`Settings > ${userTabs[i].trim()}`);
     }
-    console.log('SWEEP', JSON.stringify(Object.fromEntries(Object.entries(sweep).filter(([, v]) => v.length))));
     await A.keyboard.press('Escape');
     await sleep(200);
+    // The two forms outside the app that hold such a row, signed out.
+    const signedOutCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const signedOut = await signedOutCtx.newPage();
+    watch(signedOut, 'signed-out');
+    for (const [where, url] of [['Login', '/login'], ['Notes sign-in', '/notes/']]) {
+        await signedOut.goto(APP + url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await signedOut.locator('#stay-signed-in').waitFor({ timeout: 30000 });
+        await look(where, { page: signedOut, expectRows: true });
+        const stayRows = await checkboxRows(signedOut, 'body');
+        check(`${where}: Stay signed in is a row with the box beside the words`, stayRows.length === 1 && stayRows.every(r => checkboxBad(r).length === 0), stayRows.map(r => [r.text.slice(0, 12), checkboxBad(r)]));
+    }
+    console.log('SWEEP', JSON.stringify(Object.fromEntries(Object.entries(sweep).filter(([, v]) => v.length))));
 
     // ── B5. The phone, at 390x844 with a coarse pointer: its own server, so its own switches.
     await B.locator('.mobile-nav-btn').first().tap();

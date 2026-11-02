@@ -21,6 +21,24 @@ export function drawnUnderCollection(channel: { channel_type: number }): boolean
 }
 
 /**
+ * Whether Hide Muted Channels keeps a top-level row. What is open never vanishes from
+ * under the reader, a collection as much as a channel. Nor must a muted collection drag
+ * its children out of the sidebar with it: the row and its subchannels render as one
+ * fragment, and mute is per channel, so the row stays as the group header for whatever
+ * is still drawn beneath it. A voice room is not: it is drawn in its own section.
+ */
+export function keptByHideMuted<C extends SidebarRow>(
+    row: C,
+    channels: readonly C[],
+    isMuted: (channelId: number) => boolean,
+    openId: number | null | undefined,
+): boolean {
+    if (!isMuted(row.id) || openId === row.id) return true;
+    return channels.some(sub => sub.parent_id === row.id && drawnUnderCollection(sub)
+        && (!isMuted(sub.id) || openId === sub.id));
+}
+
+/**
  * The ids to store after dragging one row onto another, in their new order, or null
  * if the drag moves nothing.
  *
@@ -51,19 +69,40 @@ export function reorderedChannelIds<C extends SidebarRow>(
 }
 
 /**
+ * Everything under a channel, at any depth, in list order. The foreign key cascades
+ * through every level, and a collection can sit inside a collection: one made before
+ * the create form stopped sending a parent for it, or through the API.
+ */
+function everythingUnder<C extends SidebarRow>(channels: readonly C[], channelId: number): C[] {
+    const under = new Set<number>();
+    const toVisit = [channelId];
+    while (toVisit.length > 0) {
+        const parent = toVisit.pop();
+        for (const c of channels) {
+            // A row has one parent, so a loop reachable from here runs through here.
+            if (c.parent_id !== parent || c.id === channelId) continue;
+            under.add(c.id);
+            toVisit.push(c.id);
+        }
+    }
+    return channels.filter(c => under.has(c.id));
+}
+
+/**
  * The question to ask before deleting a channel. Deleting a collection deletes
  * everything in it (the database cascades), and a voice room is not drawn under its
  * collection, so the question has to name what goes with it.
  */
 export function deleteChannelQuestion<C extends SidebarRow>(channels: readonly C[], channelId: number): string {
-    const inside = channels.filter(c => c.parent_id === channelId);
+    const inside = everythingUnder(channels, channelId);
     if (inside.length === 0) return 'Are you sure you want to delete this channel?';
     const name = channels.find(c => c.id === channelId)?.name ?? 'this collection';
-    const names = inside.map(c => (c.channel_type === 1 ? c.name : `#${c.name}`)).join(', ');
+    const names = inside.map(c => (c.channel_type === 0 ? `#${c.name}` : c.name)).join(', ');
     return `Delete ${name}? Everything in it is deleted too: ${names}.`;
 }
 
 /** The channel rows left after a delete: what the database's cascade took goes as well. */
 export function withoutDeletedChannel<C extends SidebarRow>(channels: readonly C[], channelId: number): C[] {
-    return channels.filter(c => c.id !== channelId && c.parent_id !== channelId);
+    const gone = new Set(everythingUnder(channels, channelId).map(c => c.id)).add(channelId);
+    return channels.filter(c => !gone.has(c.id));
 }
