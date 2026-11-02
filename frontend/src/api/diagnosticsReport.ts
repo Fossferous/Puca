@@ -11,8 +11,9 @@
  * measurement instead of an adjective.
  *
  * WHAT IT DOES NOT CONTAIN, deliberately. No message content, no channel or
- * server names, no account token, no email, no file paths, no IP addresses.
- * The candidate pair is reported by TYPE (`host/udp`, `relay/udp`) because
+ * server names, no account token, no email, no file paths, no IP addresses, and
+ * no key presses: the hotkeys section names only what the person bound
+ * (hotkeyReport.ts). The candidate pair is reported by TYPE (`host/udp`, `relay/udp`) because
  * which KIND of path is in use answers a real question and the address answers
  * none. Peer identities are the pseudonymous ids the SFU already uses. Read it
  * before you send it — it is plain text for exactly that reason.
@@ -22,6 +23,7 @@ import { webrtcManager } from './webrtc';
 import { currentAppVersion } from './appVersion';
 import { h264SendProfilesLine } from './rtc/h264Profiles';
 import { recentRcConnectLines } from './devices/connectLog';
+import { hotkeyReportSection } from './hotkeyReport';
 import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
 import { ENCODER_CODECS, ENCODER_SIZES, STEP_TIMEOUT_MS, WINDOW_MS } from './diagnosticsBudget';
 
@@ -172,6 +174,11 @@ export async function buildDiagnosticsReport(): Promise<string> {
         const rc = recentRcConnectLines();
         lines.push(...(rc.length === 0 ? ['(none)'] : rc));
     }
+
+    // Ahead of the two stats windows, so "what is held right now" is right now.
+    lines.push('', '--- voice hotkeys ---');
+    const hotkeys = await attempt('voice hotkeys', () => hotkeyReportSection());
+    lines.push(...(typeof hotkeys === 'string' ? [hotkeys] : hotkeys));
 
     lines.push('', '--- voice / screen share (SFU) ---');
     const sfu = await attempt('sfu', () => sfuManager.voiceDiagnostics(WINDOW_MS));

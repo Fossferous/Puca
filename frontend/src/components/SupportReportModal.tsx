@@ -79,9 +79,9 @@ export function SupportReportModal({ servers, currentUserId, preferredServerId, 
                     <>
                         <p className="support-report-text">
                             Sends a report to a server owner as an encrypted direct message:
-                            measurements of your call right now
+                            measurements of your call right now, your input mode and the keys you bound as voice hotkeys
                             {isTauri() ? ', plus this app\'s log (call and stream quality over the last hours, and the names of programs whose audio you shared)' : ''}.
-                            No messages, passwords or addresses are included. Send it while the
+                            No messages, passwords, addresses or anything you type are included. Send it while the
                             problem is happening, or soon after.
                         </p>
                         {error && <div className="forward-error">{error}</div>}

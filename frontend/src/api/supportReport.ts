@@ -9,9 +9,11 @@
  * get an extensive log off someone without talking them through Explorer.
  *
  * WHAT GOES. The same report "Copy diagnostics" builds (encoders, live call
- * measurements), then, on desktop, the whole app log (support_log.rs: the
- * rotated files too, Windows account name removed from paths). No messages,
- * keys, tokens, email or addresses are in either. It travels as a normal DM
+ * measurements, the input mode and the keys bound as voice hotkeys), then, on
+ * desktop, the whole app log (support_log.rs: the rotated files too, Windows
+ * account name removed from paths). No messages, encryption keys, tokens, email
+ * or addresses are in either, and no key press: the only keys named are the ones
+ * the person bound. It travels as a normal DM
  * attachment: sealed on this device, readable only by the two people in the
  * conversation.
  *

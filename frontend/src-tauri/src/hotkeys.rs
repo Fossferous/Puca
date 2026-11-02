@@ -40,7 +40,18 @@
 //! is proof the hook is gone, so the hooks (the mouse hook only while a
 //! mouse button is bound) are re-installed on the spot rather than at the
 //! next 60 s tick. All counted in `diag`, so a rising
-//! `poll_*` number says the hook is losing input.
+//! `poll_*` number says the hook is losing input. A release the poll supplied
+//! also leaves a line in puca.log (rate-limited, and naming only the bound key
+//! it was).
+//!
+//! A SET DOWN BIT IS A RELEASE THE PAGE IS OWED. Rewriting the watch list used
+//! to clear the bit of every slot that changed. If the key was held, the page
+//! was left holding it with nothing on this side remembering that: the key-up
+//! then read as "up, and already up", so a release before the poll caught up
+//! (under two ticks, ~40 ms) was swallowed, and the person stayed in the wrong
+//! push-to-talk or push-to-mute state until their next press. A bit now follows
+//! its key to its new slot, and a key that leaves the list gets its release sent
+//! right there (`rewrite_watch`, `start`).
 //!
 //! THE POLL MUST NOT SEE OUR OWN INJECTIONS. The hooks ignore input stamped
 //! with `PUCA_INJECT_TAG` — the remote-control agent's own SendInput — so a
@@ -476,9 +487,10 @@ mod imp {
     /// every keystroke on the system while the webview holds it.
     pub const WATCH_SLOTS: usize = 16;
     static WATCH: [AtomicU32; WATCH_SLOTS] = [const { AtomicU32::new(0) }; WATCH_SLOTS];
-    /// Bitmap of watched slots currently physically down — collapses OS
-    /// auto-repeat to one edge per press, and lets keyup match the slot even
-    /// if the watch list was re-written mid-hold.
+    /// Bitmap of watched slots the page was last told are down — collapses OS
+    /// auto-repeat to one edge per press. A set bit is a release the page is
+    /// owed, so nothing may clear one without sending that release: see
+    /// `rewrite_watch`, and `stop`, where the frontend releases its own holds.
     static DOWN: AtomicU32 = AtomicU32::new(0);
 
     /// Modifier state as the HOOK's own stream reports it (left/right folded).
@@ -568,8 +580,100 @@ mod imp {
         out
     }
 
+    /// Which slot of this table holds `vk`. A parameter, so the tests walk the
+    /// same lookup the hook does.
+    fn slot_of(watch: &[AtomicU32; WATCH_SLOTS], vk: u32) -> Option<usize> {
+        watch.iter().position(|w| w.load(Ordering::SeqCst) == vk)
+    }
+
     fn watched_slot(vk: u32) -> Option<usize> {
-        WATCH.iter().position(|w| w.load(Ordering::SeqCst) == vk)
+        slot_of(&WATCH, vk)
+    }
+
+    /// What a rewrite of the watch list did to keys that were down.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct WatchRewrite {
+        /// The list differs from what it was, so the hook thread has to look.
+        changed: bool,
+        /// Keys that were down and are no longer watched. No later edge can
+        /// come for them, so the caller owes the page a release for each.
+        released: Vec<u32>,
+        /// Keys that were down and are still watched. Their release still
+        /// reaches the page in the ordinary way.
+        kept: Vec<u32>,
+    }
+
+    /// Carry a slot bitmap across a rewrite. A bit describes a KEY, not a slot:
+    /// it follows the key to its new slot and goes when the key goes, and a
+    /// slot that now holds a different key inherits nothing.
+    fn carry_bits(bits: u32, old: &[u32; WATCH_SLOTS], new: &[u32; WATCH_SLOTS]) -> u32 {
+        let mut out = 0;
+        for (slot, vk) in old.iter().enumerate() {
+            if *vk != 0 && bits & (1u32 << slot) != 0 {
+                if let Some(to) = new.iter().position(|n| n == vk) {
+                    out |= 1u32 << to;
+                }
+            }
+        }
+        out
+    }
+
+    /// Swap the watch list. A save moves keys between slots without anyone
+    /// rebinding them, because `computeNativeWatch` builds the list in order:
+    /// turning on "Use Mute and Deafen from other apps" pushes push-to-talk from
+    /// slot 0 to slot 2.
+    ///
+    /// The tables are parameters so a test drives this exact code: `start()`
+    /// passes the real statics. An unchanged list, which is most saves (a slider
+    /// drag saves on every tick), touches nothing at all.
+    ///
+    /// The hook thread can run in the middle of this. `fetch_update` keeps an edge
+    /// it records on another key. An edge on a key being moved, in the microseconds
+    /// this takes, can leave DOWN disagreeing with the key-state table for the poll
+    /// to put right within two ticks. Only a press landing in those microseconds
+    /// and released inside those two ticks gets past that; closing it would mean
+    /// rewriting the list on the hook thread, for a tap no finger can aim.
+    fn rewrite_watch(
+        watch: &[AtomicU32; WATCH_SLOTS],
+        down: &AtomicU32,
+        masked: &AtomicU32,
+        wanted: &[u32; WATCH_SLOTS],
+    ) -> WatchRewrite {
+        let old: [u32; WATCH_SLOTS] = std::array::from_fn(|i| watch[i].load(Ordering::SeqCst));
+        if old == *wanted {
+            return WatchRewrite::default();
+        }
+        for (slot, next) in watch.iter().zip(wanted) {
+            slot.store(*next, Ordering::SeqCst);
+        }
+        let carry = |bits| Some(carry_bits(bits, &old, wanted));
+        let was_down = down.fetch_update(Ordering::SeqCst, Ordering::SeqCst, carry).unwrap_or_else(|bits| bits);
+        let _ = masked.fetch_update(Ordering::SeqCst, Ordering::SeqCst, carry);
+
+        let mut out = WatchRewrite { changed: true, ..WatchRewrite::default() };
+        for (slot, vk) in old.iter().enumerate() {
+            if *vk != 0 && was_down & (1u32 << slot) != 0 {
+                if wanted.contains(vk) {
+                    out.kept.push(*vk);
+                } else {
+                    out.released.push(*vk);
+                }
+            }
+        }
+        out
+    }
+
+    /// The puca.log line for a rewrite that found a key down, or nothing: the
+    /// list also changes whenever the clip buffer arms, and that is not news.
+    /// Every key named was in the watch list, so was bound by the person.
+    fn rewrite_log_line(r: &WatchRewrite) -> Option<String> {
+        if r.kept.is_empty() && r.released.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "[hotkeys] watch list changed with a key down: still watched vk={:?}, released now vk={:?}",
+            r.kept, r.released
+        ))
     }
 
     /// Counts transitions the hook has actually emitted. Read by `diag` — the
@@ -634,6 +738,51 @@ mod imp {
     /// happening where the hook cannot see them.
     static POLL_PRESSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static POLL_RELEASES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// Releases sent because a save stopped watching a key that was down.
+    static RELEASES_ON_REWRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// How often a release the poll supplied may reach puca.log. One physical
+    /// release is one line at most, so this only matters with a dead hook and a
+    /// fast finger; `poll_releases` in `diag` still counts every one, and the
+    /// next line says how many went unwritten.
+    const POLL_RELEASE_LOG_MIN_MS: u64 = 10_000;
+
+    /// At most one note per `min_gap_ms`: the first one at once, then whatever
+    /// the clock allows, each saying how many were held back before it.
+    struct NoteLimiter {
+        min_gap_ms: u64,
+        last_ms: Option<u64>,
+        held_back: u64,
+    }
+
+    impl NoteLimiter {
+        fn new(min_gap_ms: u64) -> Self {
+            Self { min_gap_ms, last_ms: None, held_back: 0 }
+        }
+
+        /// `Some(n)`: write a note now; `n` others were held back since the
+        /// last one. `None`: not yet, and it is counted.
+        fn offer(&mut self, now_ms: u64) -> Option<u64> {
+            match self.last_ms {
+                Some(last) if now_ms.saturating_sub(last) < self.min_gap_ms => {
+                    self.held_back += 1;
+                    None
+                }
+                _ => {
+                    self.last_ms = Some(now_ms);
+                    Some(std::mem::take(&mut self.held_back))
+                }
+            }
+        }
+    }
+
+    /// The line that settles "was my key stuck, or did the hook just miss it?"
+    /// `vk` comes from the watch list and nowhere else, so it is a key the person
+    /// bound: no other key has any way into this line.
+    fn poll_release_line(vk: u32, total: u64, held_back: u64, blocked: bool) -> String {
+        let why = if blocked { " (an elevated window is in front: every key reads up)" } else { "" };
+        format!("[hotkeys] the poll supplied a release the hook missed: vk={vk}, poll_releases={total}, {held_back} more since the last line{why}")
+    }
     /// Presses the poll refused because the remote-control injector was
     /// holding something. Non-zero is not a fault: it is the self-trigger
     /// guard doing its job.
@@ -703,8 +852,8 @@ mod imp {
     /// `injector_holding` comes from the injector itself
     /// (`puca_input::injected_inputs_held`), and is the backstop for every
     /// case where the mask cannot be right: the hooks were evicted before the
-    /// tagged edge arrived, or the watch list was rewritten mid-hold and the
-    /// slot-indexed mask went with it. Without it, a controller holding the
+    /// tagged edge arrived, or the key joined the watch list while an injection
+    /// was already holding it. Without it, a controller holding the
     /// host's push-to-talk key opens the host's microphone — precisely what
     /// the hooks' `PUCA_INJECT_TAG` filter refuses, arrived at through the
     /// poll instead.
@@ -731,52 +880,91 @@ mod imp {
         }
     }
 
+    /// What one poll tick works from, read once at the top of the tick.
+    struct PollView {
+        watch: [u32; WATCH_SLOTS],
+        down: u32,
+        masked: u32,
+        injector_holding: bool,
+        swapped: bool,
+    }
+
+    /// The tick's decisions, with the key-state read as a parameter. `read_key`
+    /// is only ever asked about a key in `view.watch`: nothing else on the
+    /// keyboard is read, here or anywhere, and a test holds this to that.
+    fn poll_tick(
+        view: &PollView,
+        disagree: &mut [u8; WATCH_SLOTS],
+        mut read_key: impl FnMut(u32) -> bool,
+        mut act: impl FnMut(usize, u32, PollAction),
+    ) {
+        for (slot, &vk) in view.watch.iter().enumerate() {
+            if vk == 0 || (view.swapped && (vk == 1 || vk == 2)) {
+                disagree[slot] = 0;
+                continue;
+            }
+            let bit = 1u32 << slot;
+            let phys = read_key(vk);
+            let ours = view.down & bit != 0;
+            match poll_slot_action(&mut disagree[slot], view.masked & bit != 0, view.injector_holding, ours, phys) {
+                PollAction::Nothing => {}
+                action => act(slot, vk, action),
+            }
+        }
+    }
+
     /// One poll tick over the watch list. Runs on the hook thread only (the
     /// timer is thread-scoped), which is what lets it share the DOWN bitmap
     /// with the hook callbacks without a lock: the callback and this tick are
     /// never on the CPU at the same time. Returns whether it had to supply a
     /// PRESS — the evidence that the hook is no longer reporting.
-    unsafe fn poll_watched_keys(disagree: &mut [u8; WATCH_SLOTS]) -> bool {
-        // GetAsyncKeyState reports PHYSICAL mouse buttons while the hook
-        // reports LOGICAL ones; with "swap buttons" on, VK 1 and 2 would
-        // disagree forever and the poll would release a right-button hold
-        // 40 ms after every press. Those two are left to the hook alone in
-        // that configuration. Middle and X buttons are never swapped.
-        let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
-        let down = DOWN.load(Ordering::SeqCst);
-        let masked_bits = SELF_INJECTED.load(Ordering::SeqCst);
-        // Asked ONCE per tick, not per slot: it is a relaxed atomic read in
-        // another crate, and every slot gets the same answer anyway.
-        let injector_holding = puca_input::injected_inputs_held() > 0;
+    unsafe fn poll_watched_keys(
+        disagree: &mut [u8; WATCH_SLOTS],
+        release_notes: &mut NoteLimiter,
+        pump_started: std::time::Instant,
+    ) -> bool {
+        let view = PollView {
+            watch: watch_snapshot(),
+            down: DOWN.load(Ordering::SeqCst),
+            masked: SELF_INJECTED.load(Ordering::SeqCst),
+            // Asked ONCE per tick, not per slot: it is a relaxed atomic read in
+            // another crate, and every slot gets the same answer anyway.
+            injector_holding: puca_input::injected_inputs_held() > 0,
+            // GetAsyncKeyState reports PHYSICAL mouse buttons while the hook
+            // reports LOGICAL ones; with "swap buttons" on, VK 1 and 2 would
+            // disagree forever and the poll would release a right-button hold
+            // 40 ms after every press. Those two are left to the hook alone in
+            // that configuration. Middle and X buttons are never swapped.
+            swapped: GetSystemMetrics(SM_SWAPBUTTON) != 0,
+        };
         let mut supplied_press = false;
-        for (slot, w) in WATCH.iter().enumerate() {
-            let vk = w.load(Ordering::SeqCst);
-            if vk == 0 || (swapped && (vk == 1 || vk == 2)) {
-                disagree[slot] = 0;
-                continue;
-            }
-            let bit = 1u32 << slot;
-            let phys = (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0;
-            let ours = down & bit != 0;
-            match poll_slot_action(&mut disagree[slot], masked_bits & bit != 0, injector_holding, ours, phys) {
+        poll_tick(
+            &view,
+            disagree,
+            |vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0,
+            |slot, vk, action| match action {
                 PollAction::Nothing => {}
                 PollAction::SuppressedPress => {
                     POLL_PRESSES_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
                 }
                 PollAction::ClearMask => {
-                    SELF_INJECTED.fetch_and(!bit, Ordering::SeqCst);
+                    SELF_INJECTED.fetch_and(!(1u32 << slot), Ordering::SeqCst);
                 }
                 PollAction::Emit(is_down) => {
                     if is_down {
                         POLL_PRESSES.fetch_add(1, Ordering::Relaxed);
                         supplied_press = true;
                     } else {
-                        POLL_RELEASES.fetch_add(1, Ordering::Relaxed);
+                        let total = POLL_RELEASES.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(held_back) = release_notes.offer(pump_started.elapsed().as_millis() as u64) {
+                            let blocked = BLOCKED.load(Ordering::SeqCst);
+                            note(HookNote::PollRelease { vk, total, held_back, blocked });
+                        }
                     }
                     emit_transition(slot, vk, is_down);
                 }
-            }
-        }
+            },
+        );
         // A modifier bit the hook set but the table says is up: the hook
         // missed the release. One tick is enough here — the table lags the
         // hook by microseconds, not milliseconds, and a stuck Ctrl bit would
@@ -1097,6 +1285,9 @@ mod imp {
             "poll_every_ms": POLL_EVERY_MS,
             "poll_presses": POLL_PRESSES.load(Ordering::Relaxed),
             "poll_releases": POLL_RELEASES.load(Ordering::Relaxed),
+            // Releases sent because a save stopped watching a key that was
+            // down. Each one is also a line in puca.log.
+            "releases_on_rewrite": RELEASES_ON_REWRITE.load(Ordering::Relaxed),
             // Presses refused because our own remote-control injector was
             // holding a key. Expected during a device session, zero otherwise.
             "poll_presses_suppressed": POLL_PRESSES_SUPPRESSED.load(Ordering::Relaxed),
@@ -1154,6 +1345,7 @@ mod imp {
         PollTimerUnavailable,
         EvidenceRearm,
         RearmFailed(i32),
+        PollRelease { vk: u32, total: u64, held_back: u64, blocked: bool },
     }
 
     enum MouseNote {
@@ -1194,6 +1386,9 @@ mod imp {
                 "[hotkeys] re-arm FAILED, the poll is the only source until the next one: 0x{:08X}",
                 c as u32
             ),
+            HookNote::PollRelease { vk, total, held_back, blocked } => {
+                log::warn!("{}", poll_release_line(vk, total, held_back, blocked))
+            }
         }
     }
 
@@ -1239,16 +1434,30 @@ mod imp {
     /// wants edges. Runs in the hook callback — everything here must be cheap
     /// and lock-free (atomics, GetAsyncKeyState, a channel append).
     unsafe fn emit_transition(slot: usize, vk: u32, is_down: bool) {
+        if take_edge(&DOWN, slot, is_down) {
+            send_edge(vk, is_down);
+        }
+    }
+
+    /// The edge detector: is this report a change from what the page was last
+    /// told about the slot? Records it if so.
+    fn take_edge(down: &AtomicU32, slot: usize, is_down: bool) -> bool {
         let bit = 1u32 << slot;
-        let was_down = DOWN.load(Ordering::SeqCst) & bit != 0;
+        let was_down = down.load(Ordering::SeqCst) & bit != 0;
         if is_down == was_down {
-            return;
+            return false;
         }
         if is_down {
-            DOWN.fetch_or(bit, Ordering::SeqCst);
+            down.fetch_or(bit, Ordering::SeqCst);
         } else {
-            DOWN.fetch_and(!bit, Ordering::SeqCst);
+            down.fetch_and(!bit, Ordering::SeqCst);
         }
+        true
+    }
+
+    /// Tell the page about an edge. Only ever called with a key that is, or a
+    /// moment ago was, in the watch list.
+    unsafe fn send_edge(vk: u32, is_down: bool) {
         let down_now = |vk| (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
         let ev = KeyEvent {
             key_code: vk,
@@ -1405,6 +1614,8 @@ mod imp {
                     note(HookNote::PollTimerUnavailable);
                 }
                 let mut disagree = [0u8; WATCH_SLOTS];
+                let mut release_notes = NoteLimiter::new(POLL_RELEASE_LOG_MIN_MS);
+                let pump_started = std::time::Instant::now();
                 let mut last_rearm = std::time::Instant::now();
                 let mut last_blocked = std::time::Instant::now();
                 loop {
@@ -1416,6 +1627,8 @@ mod imp {
                     match hooks.on_message(kind, &watch_snapshot()) {
                         // A rebind: the mouse hook was added or removed in place.
                         Handled::Mouse(step) => {
+                            // Each count was about whichever key its slot held.
+                            disagree = [0u8; WATCH_SLOTS];
                             publish_hook_state(&hooks);
                             match step {
                                 HookStep::Install if hooks.mouse_live() => note(HookNote::Mouse(MouseNote::Live)),
@@ -1441,7 +1654,7 @@ mod imp {
                             if BLOCKED.load(Ordering::SeqCst) {
                                 last_blocked = std::time::Instant::now();
                             }
-                            let hook_missed_a_press = poll_watched_keys(&mut disagree);
+                            let hook_missed_a_press = poll_watched_keys(&mut disagree, &mut release_notes, pump_started);
                             if hook_missed_a_press
                                 && last_rearm.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_MIN_MS)
                                 && last_blocked.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_BLOCKED_QUIET_MS)
@@ -1490,23 +1703,19 @@ mod imp {
         // press of every session.
         let _ = emitter();
         ensure_blocker_thread();
-        // Re-arming a slot with a DIFFERENT key invalidates that slot's
-        // down-state bit: the bit tracks a physical key, so after a rebind it
-        // claims the new key is already held — swallowing its first press (no
-        // edge is emitted) and, if the old key really was down, never emitting
-        // its release. Only changed slots are cleared, so rebinding one action
-        // cannot disturb another key the user is currently holding.
-        let wanted = dedupe_slots(&keys);
-        let mut changed = false;
-        for (i, slot) in WATCH.iter().enumerate() {
-            let next = wanted[i];
-            if slot.swap(next, Ordering::SeqCst) != next {
-                changed = true;
-                DOWN.fetch_and(!(1u32 << i), Ordering::SeqCst);
-                // The mask describes a KEY, not a slot: a slot that now
-                // holds a different key inherits nothing.
-                SELF_INJECTED.fetch_and(!(1u32 << i), Ordering::SeqCst);
-            }
+        // A down bit belongs to its key, so it moves with it: a slot's new key
+        // does not inherit it (its first press would be swallowed), and the key
+        // that was held keeps it (its release would be). A key that leaves the
+        // list is told now, because no later edge can come for it. Sent from this
+        // thread on the same channel the hook thread uses.
+        let rewrite = rewrite_watch(&WATCH, &DOWN, &SELF_INJECTED, &dedupe_slots(&keys));
+        let changed = rewrite.changed;
+        for vk in &rewrite.released {
+            RELEASES_ON_REWRITE.fetch_add(1, Ordering::Relaxed);
+            unsafe { send_edge(*vk, false) };
+        }
+        if let Some(line) = rewrite_log_line(&rewrite) {
+            log::info!("{line}");
         }
         ACTIVE.store(true, Ordering::SeqCst);
         // A running hook thread re-checks whether it needs its mouse hook —
@@ -1725,6 +1934,372 @@ mod imp {
             assert_eq!(d, 0);
             // A fresh disagreement starts from zero again.
             assert_eq!(poll_verdict(&mut d, true, false), None);
+        }
+    }
+
+    /// The feed with Win32 taken out and the page reduced to what it believes:
+    /// the hook's edges, `start()`'s rewrite and the poll's tick all run the real
+    /// functions over tables of the test's own. `hook` is a report the hook
+    /// delivered; `finger` is a key moving where the hook cannot see it.
+    #[cfg(test)]
+    mod rewrite_tests {
+        use super::{
+            dedupe_slots, poll_release_line, poll_tick, rewrite_log_line, rewrite_watch, slot_of, take_edge, NoteLimiter,
+            PollAction, PollView, WatchRewrite, POLL_CONFIRM, POLL_RELEASE_LOG_MIN_MS, WATCH_SLOTS,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const V: u32 = 0x56; // the push-to-mute key in these stories
+        const M: u32 = 0x4D; // Toggle Mute
+        const D: u32 = 0x44; // Toggle Deafen
+        const B: u32 = 0x42;
+        const TYPED: u32 = 0x41; // A: bound to nothing, however often it is pressed
+
+        struct Rig {
+            watch: [AtomicU32; WATCH_SLOTS],
+            down: AtomicU32,
+            masked: AtomicU32,
+            disagree: [u8; WATCH_SLOTS],
+            /// What the key-state table says.
+            physical: Vec<u32>,
+            /// What the page believes is held: down edges minus up edges.
+            page: Vec<u32>,
+            /// Every edge the page heard, in order.
+            heard: Vec<(u32, bool)>,
+            injector_holding: bool,
+            last_rewrite: WatchRewrite,
+        }
+
+        impl Rig {
+            fn watching(keys: &[u32]) -> Self {
+                let mut rig = Rig {
+                    watch: [const { AtomicU32::new(0) }; WATCH_SLOTS],
+                    down: AtomicU32::new(0),
+                    masked: AtomicU32::new(0),
+                    disagree: [0; WATCH_SLOTS],
+                    physical: Vec::new(),
+                    page: Vec::new(),
+                    heard: Vec::new(),
+                    injector_holding: false,
+                    last_rewrite: WatchRewrite::default(),
+                };
+                rig.save(keys);
+                rig
+            }
+
+            fn page_hears(&mut self, vk: u32, is_down: bool) {
+                self.heard.push((vk, is_down));
+                self.page.retain(|k| *k != vk);
+                if is_down {
+                    self.page.push(vk);
+                }
+            }
+
+            fn finger(&mut self, vk: u32, is_down: bool) {
+                self.physical.retain(|k| *k != vk);
+                if is_down {
+                    self.physical.push(vk);
+                }
+            }
+
+            /// The key moved and the hook reported it (kbd_proc's own path).
+            fn hook(&mut self, vk: u32, is_down: bool) {
+                self.finger(vk, is_down);
+                if let Some(slot) = slot_of(&self.watch, vk) {
+                    if take_edge(&self.down, slot, is_down) {
+                        self.page_hears(vk, is_down);
+                    }
+                }
+            }
+
+            /// A settings save reaching `start()`, then the releases it owes.
+            fn save(&mut self, keys: &[u32]) {
+                let rewrite = rewrite_watch(&self.watch, &self.down, &self.masked, &dedupe_slots(keys));
+                for vk in rewrite.released.clone() {
+                    self.page_hears(vk, false);
+                }
+                self.last_rewrite = rewrite;
+            }
+
+            fn tick(&mut self) {
+                let view = PollView {
+                    watch: std::array::from_fn(|i| self.watch[i].load(Ordering::SeqCst)),
+                    down: self.down.load(Ordering::SeqCst),
+                    masked: self.masked.load(Ordering::SeqCst),
+                    injector_holding: self.injector_holding,
+                    swapped: false,
+                };
+                let physical = self.physical.clone();
+                let mut acted = Vec::new();
+                poll_tick(&view, &mut self.disagree, |vk| physical.contains(&vk), |slot, vk, action| acted.push((slot, vk, action)));
+                for (slot, vk, action) in acted {
+                    match action {
+                        PollAction::Emit(is_down) => {
+                            if take_edge(&self.down, slot, is_down) {
+                                self.page_hears(vk, is_down);
+                            }
+                        }
+                        PollAction::ClearMask => {
+                            self.masked.fetch_and(!(1u32 << slot), Ordering::SeqCst);
+                        }
+                        PollAction::Nothing | PollAction::SuppressedPress => {}
+                    }
+                }
+            }
+
+            fn ticks(&mut self, n: u8) {
+                for _ in 0..n {
+                    self.tick();
+                }
+            }
+        }
+
+        /// THE BUG. Push-to-mute on V, nothing else system-wide, and a save that
+        /// makes Toggle Mute system-wide too: computeNativeWatch lists Toggle
+        /// Mute first, so V moves from slot 0 to slot 1 while it is held. A
+        /// release before the poll has caught up (under two ticks, ~40 ms) must
+        /// still reach the page, or it stays muted until the next press.
+        #[test]
+        fn a_release_right_after_a_save_that_moved_the_key_reaches_the_page() {
+            for ticks_before_release in 0..POLL_CONFIRM {
+                let mut rig = Rig::watching(&[V]);
+                rig.hook(V, true);
+                assert_eq!(rig.page, [V]);
+
+                rig.save(&[M, V]);
+                rig.ticks(ticks_before_release);
+                rig.hook(V, false);
+                rig.ticks(POLL_CONFIRM + 3);
+
+                assert_eq!(rig.page, [] as [u32; 0], "released {ticks_before_release} tick(s) after the save: the page never heard it");
+            }
+        }
+
+        #[test]
+        fn positive_control_with_no_save_the_same_release_reaches_the_page() {
+            let mut rig = Rig::watching(&[V]);
+            rig.hook(V, true);
+            rig.hook(V, false);
+            rig.ticks(POLL_CONFIRM + 3);
+            assert_eq!(rig.heard, [(V, true), (V, false)]);
+        }
+
+        /// The sibling: V stops being watched while it is held. Nothing can
+        /// report its release from here on, so the save itself has to.
+        #[test]
+        fn a_hold_whose_key_left_the_watch_list_is_released_by_the_save() {
+            let mut rig = Rig::watching(&[V, M]);
+            rig.hook(V, true);
+            rig.save(&[B, M]);
+            assert_eq!(rig.page, [] as [u32; 0], "no later edge can come for a key nobody watches");
+            assert_eq!(rig.heard, [(V, true), (V, false)]);
+            assert_eq!(rig.last_rewrite.released, [V]);
+        }
+
+        #[test]
+        fn a_key_that_moved_and_is_still_held_is_neither_released_nor_pressed_again() {
+            let mut rig = Rig::watching(&[V]);
+            rig.hook(V, true);
+            rig.save(&[M, D, V]);
+            rig.ticks(POLL_CONFIRM + 3);
+            assert_eq!(rig.page, [V]);
+            // A second "down" here would be the poll supplying a press, which
+            // the hook thread reads as proof its hook is dead and re-arms.
+            assert_eq!(rig.heard, [(V, true)], "a move is not an edge");
+            assert_eq!(rig.last_rewrite.kept, [V]);
+            assert_eq!(rig.last_rewrite.released, [] as [u32; 0]);
+        }
+
+        #[test]
+        fn a_key_that_moved_is_still_released_by_the_poll_when_the_hook_misses_it() {
+            let mut rig = Rig::watching(&[V]);
+            rig.hook(V, true);
+            rig.save(&[M, V]);
+            rig.finger(V, false); // released where the hook cannot see it
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [] as [u32; 0], "the poll is the guarantee behind the hook");
+        }
+
+        #[test]
+        fn a_slot_that_now_holds_a_different_key_inherits_nothing() {
+            let mut rig = Rig::watching(&[V]);
+            rig.hook(V, true);
+            rig.save(&[M, V]);
+            // Slot 0 was V's and its bit was set: M's first press must be an
+            // edge, not a repeat of V's.
+            rig.hook(M, true);
+            assert_eq!(rig.page, [V, M]);
+            rig.hook(M, false);
+            assert_eq!(rig.page, [V], "M going up must not touch V");
+        }
+
+        #[test]
+        fn two_keys_down_one_moved_one_gone() {
+            let mut rig = Rig::watching(&[M, V]);
+            rig.hook(M, true);
+            rig.hook(V, true);
+            rig.save(&[V]); // V moves to slot 0, M stops being watched
+            assert_eq!(rig.page, [V]);
+            assert_eq!(rig.last_rewrite.released, [M]);
+            rig.hook(V, false);
+            assert_eq!(rig.page, [] as [u32; 0]);
+        }
+
+        #[test]
+        fn a_key_bound_to_two_actions_keeps_its_one_slot_through_a_save() {
+            // Bare M for one action, Ctrl+M for another: the frontend sends the
+            // same VK twice, and dedupe_slots gives it one slot.
+            let mut rig = Rig::watching(&[M, M, V]);
+            rig.hook(V, true);
+            rig.save(&[M, V, V]);
+            rig.hook(V, false);
+            rig.ticks(POLL_CONFIRM + 3);
+            assert_eq!(rig.page, [] as [u32; 0]);
+        }
+
+        #[test]
+        fn a_save_that_changes_nothing_touches_nothing() {
+            // A slider drag saves on every tick and each save reaches start().
+            let mut rig = Rig::watching(&[M, V]);
+            rig.hook(V, true);
+            let down = rig.down.load(Ordering::SeqCst);
+            rig.masked.store(0b01, Ordering::SeqCst);
+            rig.save(&[M, V]);
+            assert!(!rig.last_rewrite.changed, "an unchanged list must not wake the hook thread");
+            assert_eq!(rig.down.load(Ordering::SeqCst), down);
+            assert_eq!(rig.masked.load(Ordering::SeqCst), 0b01);
+            assert_eq!(rig.heard, [(V, true)]);
+        }
+
+        /// A remote controller is holding the host's V through SendInput when a
+        /// save moves it. The mask is about the KEY: if it stayed behind, the
+        /// poll would read that hold as a press the hook missed and open the
+        /// host's microphone for them.
+        #[test]
+        fn the_injection_mask_moves_with_its_key() {
+            let mut rig = Rig::watching(&[V]);
+            rig.masked.store(0b1, Ordering::SeqCst); // the hook saw the tagged edge
+            rig.finger(V, true); // SendInput moves the key-state table
+            rig.save(&[M, V]);
+            rig.ticks(POLL_CONFIRM + 3);
+            assert_eq!(rig.heard, [] as [(u32, bool); 0], "the poll acted on our own injection");
+            assert_eq!(rig.masked.load(Ordering::SeqCst), 0b10);
+            // And the mask still lifts once the key is up.
+            rig.finger(V, false);
+            rig.tick();
+            assert_eq!(rig.masked.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn a_mask_does_not_land_on_the_key_that_takes_over_its_slot() {
+            let mut rig = Rig::watching(&[V]);
+            rig.masked.store(0b1, Ordering::SeqCst);
+            rig.save(&[M, V]);
+            rig.finger(M, true); // a real press the hook did not report
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.heard, [(M, true)], "M was never injected: the poll must still see it");
+        }
+
+        // --- It must not become a keylogger ---------------------------------
+
+        #[test]
+        fn the_poll_never_reads_or_reports_a_key_that_is_not_watched() {
+            let view = PollView { watch: dedupe_slots(&[M, V]), down: 0, masked: 0, injector_holding: false, swapped: false };
+            let mut asked = Vec::new();
+            let mut acted = Vec::new();
+            let mut disagree = [0; WATCH_SLOTS];
+            // Every key on the board reads down, as far as this tick can tell.
+            for _ in 0..POLL_CONFIRM {
+                poll_tick(&view, &mut disagree, |vk| { asked.push(vk); true }, |_, vk, _| acted.push(vk));
+            }
+            assert_eq!(asked, [M, V, M, V], "the only keys whose state is ever read");
+            assert_eq!(acted, [M, V], "the only keys a line or an edge can name");
+        }
+
+        /// Everything that leaves this file with a key in it starts from a watched
+        /// slot. A hook callback sees EVERY key on the machine, so what it must
+        /// never do is write anything down: this reads their source, since no test
+        /// can run them without installing a real system-wide hook.
+        #[test]
+        fn the_hook_callbacks_see_every_key_and_write_none_of_them_down() {
+            let src = include_str!("hotkeys.rs");
+            for callback in ["unsafe extern \"system\" fn kbd_proc", "unsafe extern \"system\" fn mouse_proc"] {
+                let at = src.find(callback).expect("the callback is in this file");
+                let rest = &src[at..];
+                let body = &rest[..rest.find("CallNextHookEx").expect("it ends by passing the event on")];
+                assert!(body.contains("watched_slot("), "{callback}: the gate every forwarded key passes");
+                for writes in ["log::", "note(", "format!", "println!", "emit("] {
+                    assert!(!body.contains(writes), "{callback} must not contain {writes}");
+                }
+            }
+            // The positive control: the words it looks for do exist in this file.
+            assert!(src.contains("log::warn!") && src.contains("format!"));
+        }
+
+        #[test]
+        fn the_exact_lines_in_puca_log() {
+            assert_eq!(
+                poll_release_line(V, 3, 2, false),
+                "[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=3, 2 more since the last line",
+            );
+            assert_eq!(
+                poll_release_line(V, 1, 0, true),
+                "[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=1, 0 more since the last line (an elevated window is in front: every key reads up)",
+            );
+            let rewrite = WatchRewrite { changed: true, kept: vec![V], released: vec![M] };
+            assert_eq!(
+                rewrite_log_line(&rewrite).as_deref(),
+                Some("[hotkeys] watch list changed with a key down: still watched vk=[86], released now vk=[77]"),
+            );
+        }
+
+        #[test]
+        fn a_rewrite_with_nothing_held_writes_no_line() {
+            // The list changes whenever the clip buffer arms; that alone is not news.
+            assert_eq!(rewrite_log_line(&WatchRewrite { changed: true, ..WatchRewrite::default() }), None);
+        }
+
+        #[test]
+        fn a_rewrite_names_only_keys_that_were_watched() {
+            let mut rig = Rig::watching(&[M, V]);
+            rig.hook(TYPED, true);
+            rig.hook(V, true);
+            rig.save(&[B]);
+            assert_eq!(rig.last_rewrite.released, [V]);
+            assert_eq!(rig.last_rewrite.kept, [] as [u32; 0]);
+        }
+
+        #[test]
+        fn the_release_line_is_rate_limited_and_counts_what_it_held_back() {
+            let mut limit = NoteLimiter::new(POLL_RELEASE_LOG_MIN_MS);
+            assert_eq!(limit.offer(0), Some(0), "the first one is written at once");
+            assert_eq!(limit.offer(1), None);
+            assert_eq!(limit.offer(POLL_RELEASE_LOG_MIN_MS - 1), None);
+            assert_eq!(limit.offer(POLL_RELEASE_LOG_MIN_MS), Some(2), "and the next says how many it held back");
+            assert_eq!(limit.offer(POLL_RELEASE_LOG_MIN_MS + 1), None);
+            assert_eq!(limit.offer(10 * POLL_RELEASE_LOG_MIN_MS), Some(1));
+            assert_eq!(limit.offer(100 * POLL_RELEASE_LOG_MIN_MS), Some(0), "the count starts over");
+        }
+
+        #[test]
+        fn a_flood_of_releases_stays_a_trickle_of_lines() {
+            // A dead hook and PTT tapped ten times a second for a minute.
+            let mut limit = NoteLimiter::new(POLL_RELEASE_LOG_MIN_MS);
+            let written = (0..600u64).filter(|i| limit.offer(i * 100).is_some()).count();
+            assert_eq!(written, 6);
+        }
+
+        #[test]
+        fn a_key_nobody_bound_produces_nothing_at_all() {
+            let mut rig = Rig::watching(&[M, V]);
+            rig.hook(TYPED, true);
+            rig.ticks(POLL_CONFIRM + 3);
+            rig.hook(TYPED, false);
+            rig.save(&[V, M]);
+            rig.ticks(POLL_CONFIRM + 3);
+            assert_eq!(rig.heard, [] as [(u32, bool); 0], "an unbound key reached the page");
+            assert_eq!(rig.last_rewrite.kept, [] as [u32; 0]);
+            assert_eq!(rig.last_rewrite.released, [] as [u32; 0]);
         }
     }
 

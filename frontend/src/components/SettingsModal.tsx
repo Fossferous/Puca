@@ -3005,11 +3005,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Copy diagnostics</label>
                                             <span className="option-hint">
                                                 Copies what the app can measure about your call right now —
-                                                frame rates, the video encoder in use, connection quality — as
-                                                plain text you can paste to whoever is helping. Press it WHILE
-                                                the problem is happening: the numbers describe the moment you
-                                                press, and say nothing about a call that has ended. No
-                                                messages, names or addresses are included.
+                                                frame rates, the video encoder in use, connection quality, how
+                                                your voice hotkeys are set up — as plain text you can paste to
+                                                whoever is helping. Press it WHILE the problem is happening: the
+                                                numbers describe the moment you press, and say nothing about a
+                                                call that has ended. No messages, names or addresses are
+                                                included, and nothing you type: the only keys it names are the
+                                                ones you bound.
                                             </span>
                                             {diagNote && <span className="option-hint">{diagNote}</span>}
                                         </div>

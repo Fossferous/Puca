@@ -7,8 +7,9 @@
 //! What goes out is what the log holds: minute-by-minute call health, the
 //! share's frame rate and encoder, audio and clip capture events, and the
 //! names of programs (whose audio was shared, or which were in front when a
-//! hotkey could not be heard). It never held messages, keys or addresses; the
-//! one personal thing a path can carry, the Windows account name in
+//! hotkey could not be heard), and which bound hotkey the poll had to release.
+//! It never held messages, encryption keys or addresses, and it never holds a
+//! key press: hotkeys.rs names only keys the person bound. The one personal thing a path can carry, the Windows account name in
 //! `C:\Users\<name>\…`, is replaced before the text leaves this module.
 
 use std::path::{Path, PathBuf};

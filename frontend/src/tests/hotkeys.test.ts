@@ -6,6 +6,7 @@ import {
     registerHold,
     unregisterHold,
     registerPress,
+    holdFromHost,
     resetHotkeysForTest,
     nativeKeyEvent,
     setNativeFeedStateForTest,
@@ -497,5 +498,125 @@ describe('modifier matching depends on who is in front', () => {
         setNativeFeedStateForTest(true, ['voice.ptt']);
         handleNativeHotkeyPayload({ keyCode: 32, ctrlKey: true, altKey: false, shiftKey: true, down: true, foreground: true });
         expect(downs, 'push-to-talk must never need bare modifiers').toBe(1);
+    });
+});
+
+// THE PAGE'S HALF OF THE STUCK KEY. A hold ends when the key that started it
+// comes up, so that is the key a release is matched against. It used to be
+// matched against the CURRENT binding, read per event: change the binding while
+// the key is down (the Keybinds tab's Reset and trash buttons do not go through
+// capture) and nothing could ever release it, in a push-to-talk that means an
+// open microphone.
+describe('a hold whose binding changes while it is held', () => {
+    const B: KeyBinding = { keyCode: 66, ctrl: false, alt: false, shift: false, label: 'B' };
+    const save = () => window.dispatchEvent(new CustomEvent('settingsChanged'));
+    const up = { ctrlKey: false, altKey: false, shiftKey: false };
+    let binding: KeyBinding | null;
+    let downs = 0;
+    let ups = 0;
+
+    beforeEach(() => {
+        binding = SPACE;
+        downs = 0; ups = 0;
+        registerHold('voice.ptt', () => binding, { onDown: () => { downs++; }, onUp: () => { ups++; } });
+    });
+    afterEach(() => resetHotkeysForTest());
+
+    it('the in-app release matches the key that pressed it, not the binding as it is now', () => {
+        key('keydown', 32);
+        binding = B; // no save event yet: the release alone must be enough
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('the native release does too', () => {
+        nativeKeyEvent('down', { keyCode: 32, ...up });
+        binding = B;
+        nativeKeyEvent('up', { keyCode: 32, ...up });
+        expect(ups).toBe(1);
+    });
+
+    it('a mouse button released after a rebind ends its hold', () => {
+        binding = { keyCode: 5, ctrl: false, alt: false, shift: false, label: 'Mouse 4' };
+        window.dispatchEvent(new MouseEvent('mousedown', { button: 3, bubbles: true, cancelable: true }));
+        expect(downs).toBe(1);
+        binding = B;
+        window.dispatchEvent(new MouseEvent('mouseup', { button: 3, bubbles: true, cancelable: true }));
+        expect(ups).toBe(1);
+    });
+
+    it('the trash button: a binding cleared while held is released by the save', () => {
+        key('keydown', 32);
+        binding = null;
+        save();
+        expect(ups, 'unbound, nothing could ever release it again').toBe(1);
+        key('keyup', 32); // the key coming up later must not fire it twice
+        expect(ups).toBe(1);
+    });
+
+    it('Reset: a binding moved to another key is released by the save', () => {
+        nativeKeyEvent('down', { keyCode: 32, ...up });
+        binding = B;
+        save();
+        expect(ups).toBe(1);
+        // The new key is a fresh press with a release of its own.
+        nativeKeyEvent('down', { keyCode: 66, ...up });
+        expect(downs).toBe(2);
+        nativeKeyEvent('up', { keyCode: 66, ...up });
+        expect(ups).toBe(2);
+    });
+
+    it('positive control: a save that leaves the key alone leaves the hold alone', () => {
+        key('keydown', 32);
+        save();
+        expect(ups).toBe(0);
+        // Nor does it matter that only the modifiers changed: the same key
+        // still has to come up, and it will.
+        binding = { ...SPACE, ctrl: true };
+        save();
+        expect(ups).toBe(0);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('the key the binding moved to does not end a hold it did not start', () => {
+        key('keydown', 32);
+        binding = B;
+        key('keyup', 66);
+        expect(ups).toBe(0);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it("a host's hold has no key: a save leaves it to the host's lease", () => {
+        expect(holdFromHost('voice.ptt', true)).toBe(true);
+        binding = null;
+        save();
+        expect(ups).toBe(0);
+        holdFromHost('voice.ptt', false);
+        expect(ups).toBe(1);
+    });
+
+    it("a key's release still ends a host's hold, as every release does", () => {
+        holdFromHost('voice.ptt', true);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('a native release reaches an action the feed no longer covers', () => {
+        // A save narrows the allow-list BEFORE it re-registers, and the release
+        // the native side owes for a key it stops watching arrives after that.
+        // The list keeps a global key from STARTING an in-app action. A release
+        // starts nothing, and the key really is up.
+        key('keydown', 32);
+        setNativeFeedStateForTest(true, []);
+        handleNativeHotkeyPayload({ keyCode: 32, ...up, down: false, foreground: false });
+        expect(ups).toBe(1);
+    });
+
+    it('positive control: the same list still refuses a press', () => {
+        setNativeFeedStateForTest(true, []);
+        handleNativeHotkeyPayload({ keyCode: 32, ...up, down: true, foreground: false });
+        expect(downs).toBe(0);
     });
 });

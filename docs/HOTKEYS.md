@@ -11,6 +11,7 @@ time", and how to prove they work now.
 | `frontend/src-tauri/src/hotkeys.rs` | The native feed. A dedicated **time-critical** thread installs a `WH_KEYBOARD_LL` hook — plus a `WH_MOUSE_LL` hook **only while a mouse button is bound** (every mouse event on the machine waits on a mouse hook, so none is installed that nothing reads; a rebind mid-call adds or removes it in place on that thread) — and pumps messages. The hook callbacks do microseconds of work (a watch-slot lookup, an edge check against a down-state bitmap, a channel append). Two timers on that thread: a **20 ms key-state poll** and a **60 s hook re-arm**. Two other threads keep everything else off it: the **emitter** (the Tauri `emit`, and every log line the hook thread has to write) and the **foreground probe** (once a second; it opens another process and reads its token, which is far too much for the thread Windows times). |
 | `frontend/src/api/hotkeys.ts` | The registry. Hold actions (PTT/PTM) and press actions (toggles), fed by the in-app `keydown`/`keyup` listeners and, on the desktop, by the native feed's `global-hotkey` events. |
 | `frontend/src/api/hotkeyScope.ts` | Which binds are watched system-wide (the switch, or a bind the user chose). |
+| `frontend/src/api/hotkeyReport.ts` | The `--- voice hotkeys ---` section of **Send diagnostics** and **Copy diagnostics**. |
 | `frontend/src/components/VoicePanel.tsx` | Arms the feed while in a call; re-syncs on every settings save. |
 | `frontend/src/components/HotkeyBlockedBanner.tsx` | "Voice hotkeys can't reach *game*" when the window in front runs elevated. |
 
@@ -62,6 +63,40 @@ input-mode change now swaps the watch list in place.
 With "swap mouse buttons" on, VK 1 and 2 are left to the hook alone: the
 poll reads *physical* buttons, the hook *logical* ones, and they would
 disagree forever.
+
+## A save while a key is held
+
+A save can change the watch list while a key is down, without anyone touching
+that key. `computeNativeWatch` builds the list in order (Toggle Mute, Toggle
+Deafen, then push-to-talk or push-to-mute, then save-clip), so turning on **Use
+Mute and Deafen from other apps**, or **Reset** on Toggle Mute, moves the
+push-to-talk key to another slot. A save that leaves the list as it was, which
+is most of them (a slider drag saves on every tick), touches nothing.
+
+**A set DOWN bit is a release the page is owed.** The rewrite used to clear the
+bit of every slot that changed and send nothing. The page still held the key,
+the key-up then read as "up, and already up" and was dropped, and the poll agreed
+with that, so the person stayed muted or live until their next press. It took a
+release within about 40 ms of the save: any later and the poll had put the bit
+back by supplying a press, which was also read as proof of a dead hook and
+re-armed for nothing. What happens now, while a key is held:
+
+| A save that... | Does this |
+|---|---|
+| moves the key to another slot | its down bit and its injection mask move with it (`rewrite_watch`). No edge is sent, and its release arrives as usual |
+| stops watching the key | the native side sends its release on the spot (`native.releases_on_rewrite`), because no later edge can come for it. The page honours a release for an action the feed no longer covers: that list stops a global key *starting* an action, and a release starts nothing |
+| moves the binding to another key, or clears it | the page ends the hold at the save. **Reset** and the trash button do not go through capture, and with the binding cleared nothing else could ever have ended it |
+| changes only the binding's modifiers | nothing: the same key still has to come up |
+
+A hold ends when the key that **started** it comes up, so a release is matched
+against that key and not against the binding as it is by then. Capture still
+releases every hold when it starts, because dispatch is suspended from there on.
+
+Two more ways a feed can change under a held key, both handled by the page: a
+re-registration that **fails** while the feed is live releases what was held (no
+native key-up can come now, and the blur that would have released it already
+happened), and a **stop** releases it too. `stop()` in `hotkeys.rs` clears its
+bits and sends nothing, relying on exactly that.
 
 ## The poll must never see our own injections
 
@@ -143,6 +178,51 @@ process exits, or when the call ends. `native.foreground_blocker` reports the
 latched answer for the same reason: a snapshot is read with Púca in front,
 where a fresh probe is empty by definition.
 
+## Settling a report of a stuck key
+
+`puca.log` and **Send diagnostics** (or **Copy diagnostics**) are enough, and
+**neither ever holds a key that is not a bound hotkey**. The hook callbacks see
+every key on the machine and write none of it down; the poll reads only watched
+keys; every key named below came from the watch list or from the person's own
+settings. Tests pin each of those (`rewrite_tests` in `hotkeys.rs`,
+`src/tests/hotkeyReport.test.ts`).
+
+In `puca.log`:
+
+```
+[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=3, 2 more since the last line
+[hotkeys] watch list changed with a key down: still watched vk=[86], released now vk=[77]
+[stream-diag] [hotkeys] voice.ptt released: its keybind changed while it was held
+[stream-diag] [hotkeys] released what was held: the native feed could not be re-registered
+```
+
+The first is at most one line every 10 s, and says how many it held back;
+`poll_releases` still counts every one. It ends `(an elevated window is in front:
+every key reads up)` when that is why. The second appears only when a key was
+down: the list also changes whenever the clip buffer arms, and that is not news.
+
+In the report, under `--- voice hotkeys ---`:
+
+| Line | Says |
+|---|---|
+| `input mode` | what the settings say, and the call's mode too if it differs |
+| `other apps` | the **Use Mute and Deafen from other apps** switch |
+| `bind` | one per action in the Keybinds tab: the combination and its virtual-key number, or `not set`; Toggle Mute and Toggle Deafen also say why they are or are not system-wide (`hotkeyScope.ts`) |
+| `call` | in voice, AFK channel, listen only, clip buffer armed |
+| `feed` | live or not, the actions it covers, what it was last asked to watch |
+| `held now` | the hold actions the page believes are down |
+| `in front` | whether an elevated window is hiding keys. Not its name: the log has that, from when it happened |
+| `presses` | `feed.ownershipDeferrals` and `feed.nativeDispatches` |
+| `native` | a fixed list of `hotkey_diag` fields, numbers and yes/no only, so a field added there later reaches a report only if someone adds it to `NATIVE_FIELDS` in `hotkeyReport.ts` |
+| `feed log` | the last start and stop calls with their reasons |
+
+Reading it: `held now` names an action while `native` has `down_bits=0`, with the
+key up, means the page is waiting for a release nothing is going to send, which
+is a bug. `poll_releases` rising with `held now` empty means the hook is losing
+key-ups and the poll is covering them, as it should. A `bind` that is `not set`
+for the action in `input mode`, or a key missing from `watching`, is a setup
+question and not a stuck key.
+
 ## Reading the diagnostics
 
 In DevTools, in a call:
@@ -161,6 +241,8 @@ await __pucaHotkeysDebug.snapshot()
 | `native.poll_presses` rising | the hook is being removed under load; the poll covered it |
 | `native.poll_releases` rising | key-ups are happening where the hook cannot see them; the poll covered it |
 | `native.down_bits` non-zero at rest | a slot believes its key is held — the poll will clear it within 40 ms |
+| `feed.held` names an action while `native.down_bits` is 0 and the key is up | the page is waiting for a release nothing will send: a bug, see *A save while a key is held* |
+| `native.releases_on_rewrite` | releases sent because a save stopped watching a key that was down |
 | `native.foreground_blocker` non-empty | the app in front runs elevated; nothing here can see its keys |
 | `native.self_injected_bits` non-zero | those slots are held by our OWN remote-control injection; the poll is deliberately blind to them |
 | `native.poll_presses_suppressed` rising | presses the poll refused because the remote-control injector was holding a key. Expected during a device session, and zero otherwise |
@@ -189,17 +271,23 @@ await __pucaHotkeysDebug.snapshot()
    press must work (this is the case that used to eat it).
 6. Toggle mute with its bind from inside the game, ten times. It must
    alternate every time — never skip, never double.
-7. Come back to Púca and run the snapshot. `events_seen` should be well
+7. With Púca's **Settings → Keybinds** open, hold PTT and with the other hand
+   flip **Use Mute and Deafen from other apps**, letting go of PTT straight away.
+   The mic must close. Then hold PTT and press **the trash button** on its own
+   bind: the mic closes the moment you press it, key still down. The log has a
+   `[hotkeys] watch list changed with a key down` line for the first and a
+   `released: its keybind changed` line for the second.
+8. Come back to Púca and run the snapshot. `events_seen` should be well
    above the number of presses (edges, both directions); `poll_releases`
    should be ≥ 1 from step 5; `poll_presses` shows how often the hook was
    dead under load.
-8. Now launch the game **as administrator** and alt-tab in. Hotkeys will
+9. Now launch the game **as administrator** and alt-tab in. Hotkeys will
    not work — that is Windows, not Púca — and on alt-tabbing back the amber
    banner names the game and stays up while you read it. Close the game, or
    click into any ordinary window, and it clears within a second.
-9. If you use My Devices: let someone control this machine and have them
-   type the letter your push-to-talk is bound to. Your mic must stay shut,
-   and `native.self_injected_bits` must be non-zero while they hold it. Your
-   own press of that key must still work while they are connected.
+10. If you use My Devices: let someone control this machine and have them
+    type the letter your push-to-talk is bound to. Your mic must stay shut,
+    and `native.self_injected_bits` must be non-zero while they hold it. Your
+    own press of that key must still work while they are connected.
 
-Anything else is a bug: report the snapshot with it.
+Anything else is a bug: send diagnostics with it, or report the snapshot.

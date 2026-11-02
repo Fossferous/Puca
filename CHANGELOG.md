@@ -6,8 +6,13 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Changed
+
+- **Reports say how your voice hotkeys are set up.** **Send diagnostics** and **Copy diagnostics** now include your voice input mode, the keys you bound as hotkeys, and what is being held right now, and the desktop app's log notes it when Púca had to work out for itself that you let go of a hotkey. A stuck push-to-talk can then be explained from the report. Nothing you type is ever recorded: the only keys named anywhere are the ones you bound.
+
 ### Fixed
 
+- **Push-to-talk and push-to-mute no longer stick when a setting changes while you hold the key.** Turning on **Use Mute and Deafen from other apps**, or pressing **Reset** on a keybind, while holding your push-to-talk or push-to-mute key could lose the moment you let go, if you let go right away. You then stayed muted, or stayed live, until your next press. Removing or resetting the keybind you were holding could be worse: nothing could end it until you left the call or changed input mode. Púca now keeps hold of a key through the change, and lets go at once if the key no longer does anything.
 - **Púca for Steam Deck: sharing your screen shows your game, not black.** A share started from the plugin showed viewers only black, with a game in front, a non-Steam game or Steam's own menus. The Deck's screen capture let through the first frame and dropped every one after it, so no picture ever reached the call. It now sends the game at 30 frames a second, and pauses for menus, the keyboard and notifications as before. One Steam setting still stops it: with **Game Recording** set to **Record in Background**, Steam's own recorder takes the screen while a game runs, and Púca gets no picture. The plugin now tells you so instead of sending black, and asks you to turn that setting off. This is Púca for Steam Deck 0.4.2, which comes separately from Púca: the panel offers it as an update once it is out. (docs/STEAM_DECK.md)
 
 ## 0.9.854 — 2026-10-29
