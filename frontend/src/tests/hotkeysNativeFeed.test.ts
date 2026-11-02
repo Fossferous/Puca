@@ -104,4 +104,14 @@ describe('a key that is down when the native feed changes', () => {
         await stopNativeFeed('left voice');
         expect(ups).toBe(1);
     });
+
+    it('a hold kept through a blocked release: the shell\'s own field reaches it, and stopping still ends it', async () => {
+        registerHold('voice.ptm', () => SPACE, { onDown: () => { /* counted by ups */ }, onUp: () => { ups++; } }, { keepOnBlockedRelease: true });
+        await startNativeFeed(['voice.ptm'], [32]);
+        hotkeyListener.current?.({ payload: { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false, down: true, foreground: false, blocked: false } });
+        hotkeyListener.current?.({ payload: { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false, down: false, foreground: false, blocked: true } });
+        expect(ups, 'the key may still be down').toBe(0);
+        await stopNativeFeed('left voice');
+        expect(ups, 'nothing can answer for it after this').toBe(1);
+    });
 });

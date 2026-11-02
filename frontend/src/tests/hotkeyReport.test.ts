@@ -7,6 +7,9 @@
  * action names and the keys the person bound, nothing else.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 const { nativeAnswer } = vi.hoisted(() => ({ nativeAnswer: vi.fn() }));
 
@@ -86,8 +89,23 @@ describe('what the section says', () => {
     });
 
     it('says what the voice panel knows about the call', () => {
-        setNativeFeedHost(() => ({ isInVoice: true, isAfkChannel: false, listenOnly: true, clipArmed: false }));
-        expect(report()).toContain('in voice: yes, AFK channel: no, listen only: yes, clip buffer armed: no');
+        setNativeFeedHost(() => ({ isInVoice: true, isAfkChannel: false, listenOnly: true, speakDenied: false, clipArmed: false }));
+        expect(report()).toContain('in voice: yes, AFK channel: no, listen only: yes, speak denied: no, clip buffer armed: no');
+    });
+
+    // No SPEAK joins listen-only and drops every mic hotkey, while a plain
+    // listen-only call keeps Toggle Mute watched. Same `listen only: yes`, same
+    // empty feed: without this the first reads as a feed bug.
+    it('tells a channel permission from a listen-only call', () => {
+        setNativeFeedHost(() => ({ isInVoice: true, listenOnly: true, speakDenied: true }));
+        expect(report()).toContain('listen only: yes, speak denied: yes');
+    });
+
+    it('the voice panel really does say whether speaking is denied', () => {
+        const panel = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/VoicePanel.tsx'), 'utf8');
+        const snapshot = panel.slice(panel.indexOf('setNativeFeedHost(() => {'), panel.indexOf('return () => setNativeFeedHost(null)'));
+        expect(snapshot, 'the snapshot is where this looks').toContain('listenOnly: listenOnlyRef.current');
+        expect(snapshot).toContain('speakDenied: speakDeniedRef.current');
     });
 
     it('survives a voice panel that throws, as the debug snapshot always has', () => {
@@ -102,6 +120,43 @@ describe('what the section says', () => {
 
     it('says plainly when there is no native feed to ask', () => {
         expect(report()).toContain('native      none (no global hook in a browser)');
+    });
+
+    // It clears on a click in an ordinary window or at the end of the call, and a
+    // report is often made after both.
+    it('an elevated window that has come and gone is still in the report', () => {
+        expect(report()).not.toContain('elevated windows have come to the front');
+        setCaptureBlockerForTest('game.exe');
+        setCaptureBlockerForTest('');
+        const text = report();
+        expect(text).toContain('in front    nothing known to hide keys; elevated windows have come to the front 1 time(s)');
+        expect(text).not.toContain('game.exe');
+    });
+
+    it('reports how many of the poll releases a hiding window produced, and what is still owed', () => {
+        const text = report({ native: { poll_releases: 3, poll_releases_blocked: 2, releases_owed: 1 } });
+        expect(text).toContain('poll_releases=3 poll_releases_blocked=2 releases_owed=1');
+    });
+
+    // `+8123456 ms` is milliseconds since the page loaded, and nothing else in
+    // the report says how long ago that was.
+    it('places each feed log line in time, on the clock puca.log uses', () => {
+        vi.useFakeTimers({ now: new Date(2026, 10, 2, 12, 0, 0) });
+        try {
+            const feed = hotkeyFeedState();
+            const entry = (agoMs: number, reason: string) => ({
+                at: feed.now - agoMs, kind: 'start' as const, reason, ids: ['voice.ptt'], keys: [86], result: 'hooked',
+            });
+            const text = hotkeyReportLines({
+                settings,
+                feed: { ...feed, log: [entry(2_500, 'recent'), entry(3_600_000, 'old')] },
+                native: { platform: 'web' },
+            }).join('\n');
+            expect(text).toContain('feed log    11:59:57, 2.5 s ago: start (recent): voice.ptt=86 -> hooked');
+            expect(text).toContain('feed log    11:00:00, 60 min ago: start (old): voice.ptt=86 -> hooked');
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
 
@@ -162,7 +217,7 @@ describe('it does not become a keylogger', () => {
         // This object is what could grow, so a new field here is a decision.
         const state = hotkeyFeedState();
         expect(Object.keys(state).sort()).toEqual([
-            'active', 'allowed', 'blocker', 'held', 'host', 'log', 'nativeDispatches',
+            'active', 'allowed', 'blocker', 'blockerSeen', 'held', 'host', 'log', 'nativeDispatches', 'now',
             'ownershipDeferrals', 'registered', 'requested',
         ]);
     });

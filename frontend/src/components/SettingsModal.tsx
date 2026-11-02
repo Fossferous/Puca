@@ -20,7 +20,7 @@ import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
 } from '../api/noiseFilter';
-import { setHotkeyCaptureMode } from '../api/hotkeys';
+import { markKeySpentByCapture, setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
@@ -673,6 +673,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // no route back to that default short of wiping local storage.
             // Ctrl/Alt/Shift+Esc binds normally, and every row has a Reset.
             if (e.key === 'Escape' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+                markKeySpentByCapture(e.keyCode);
                 setCapturingBind(null);
                 setBindConflict(null);
                 return;
@@ -698,6 +699,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // A capture is a choice — recorded, so the desktop-global feed can
             // tell it from an untouched default even when the combination is
             // the same one we ship.
+            // The key is still down, and this save starts watching it: capture
+            // ending must not hand its press to the action.
+            markKeySpentByCapture(next.keyCode);
             commit(current => markVoiceBindProvenance({ ...current, [field]: next }, field, true));
             setCapturingBind(null);
         };
@@ -734,6 +738,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // A capture is a choice — recorded, so the desktop-global feed can
             // tell it from an untouched default even when the combination is
             // the same one we ship.
+            markKeySpentByCapture(next.keyCode);
             commit(current => markVoiceBindProvenance({ ...current, [field]: next }, field, true));
             setCapturingBind(null);
         };
@@ -3005,13 +3010,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Copy diagnostics</label>
                                             <span className="option-hint">
                                                 Copies what the app can measure about your call right now —
-                                                frame rates, the video encoder in use, connection quality, how
-                                                your voice hotkeys are set up — as plain text you can paste to
-                                                whoever is helping. Press it WHILE the problem is happening: the
-                                                numbers describe the moment you press, and say nothing about a
-                                                call that has ended. No messages, names or addresses are
-                                                included, and nothing you type: the only keys it names are the
-                                                ones you bound.
+                                                frame rates, the video encoder in use, connection quality, your
+                                                input mode and the keys you bound in Keybinds — as plain text you
+                                                can paste to whoever is helping. Press it WHILE the problem is
+                                                happening: the numbers describe the moment you press, and say
+                                                nothing about a call that has ended. No messages, names or
+                                                addresses are included, and nothing you type: the only keys it
+                                                names are the ones you bound.
                                             </span>
                                             {diagNote && <span className="option-hint">{diagNote}</span>}
                                         </div>
@@ -3031,10 +3036,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Send diagnostics to the server owner</label>
                                             <span className="option-hint">
                                                 Sends the same measurements, plus this app's log where it keeps
-                                                one (call and stream quality over the last hours), to a server
-                                                owner as an encrypted direct message, so whoever runs the server
-                                                can see what went wrong. No messages, passwords or addresses are
-                                                included.
+                                                one (call and stream quality over the last hours, the names of
+                                                programs whose audio you shared, and any program running as
+                                                administrator that was in front during a call), to a server owner
+                                                as an encrypted direct message, so whoever runs the server can see
+                                                what went wrong. No messages, passwords or addresses are included.
                                             </span>
                                         </div>
                                         <button

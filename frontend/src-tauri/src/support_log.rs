@@ -9,8 +9,9 @@
 //! names of programs (whose audio was shared, or which were in front when a
 //! hotkey could not be heard), and which bound hotkey the poll had to release.
 //! It never held messages, encryption keys or addresses, and it never holds a
-//! key press: hotkeys.rs names only keys the person bound. The one personal thing a path can carry, the Windows account name in
-//! `C:\Users\<name>\…`, is replaced before the text leaves this module.
+//! key press: hotkeys.rs names only keys the person bound. The one personal
+//! thing a path can carry, the Windows account name in `C:\Users\<name>\…`, is
+//! replaced before the text leaves this module.
 
 use std::path::{Path, PathBuf};
 

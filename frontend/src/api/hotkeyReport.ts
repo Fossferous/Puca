@@ -21,8 +21,9 @@ import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
 /** Of everything `hotkey_diag` answers (hotkeys.rs, diag), what a report carries. */
 const NATIVE_FIELDS = [
     'active', 'hook_live', 'mouse_hook_wanted', 'mouse_hook_live', 'watching', 'events_seen',
-    'starts', 'stops', 'rearms', 'rearms_on_evidence', 'poll_presses', 'poll_releases',
-    'poll_presses_suppressed', 'releases_on_rewrite', 'injected_inputs_held', 'down_bits', 'self_injected_bits',
+    'starts', 'stops', 'rearms', 'rearms_on_evidence', 'poll_presses', 'poll_releases', 'poll_releases_blocked',
+    'releases_owed', 'poll_presses_suppressed', 'releases_on_rewrite', 'injected_inputs_held', 'down_bits',
+    'self_injected_bits',
 ] as const;
 
 /** Enough of the start/stop history to see what a save did. */
@@ -62,6 +63,16 @@ function nativeLine(native: unknown): string {
     return `native      ${fields.join(' ') || '(no answer)'}`;
 }
 
+/** A feed log entry's time as something a reader can use: the local clock, which
+ *  is what puca.log prints, and how long before this report that was. `at` alone
+ *  is milliseconds since the page loaded, which no one reading a file can place. */
+function feedLogWhen(now: number, at: number): string {
+    const age = Math.max(0, now - at);
+    const clock = new Date(Date.now() - age).toTimeString().slice(0, 8);
+    const seconds = age / 1000;
+    return `${clock}, ${seconds < 120 ? `${seconds.toFixed(1)} s` : `${Math.round(seconds / 60)} min`} ago`;
+}
+
 export interface HotkeyReportInput {
     settings: Settings;
     feed: HotkeyFeedState;
@@ -76,21 +87,24 @@ export function hotkeyReportLines({ settings, feed, native }: HotkeyReportInput)
         lines.push(`            this call is in ${host.voiceInputMode}`);
     }
     lines.push(`other apps  ${settings.globalVoiceHotkeys === true ? 'on' : 'off'} (Use Mute and Deafen from other apps)`);
+    // Every row of the Keybinds tab, not only the voice ones: a non-voice row is
+    // what shows an overlap with a voice bind.
     for (const [field, name] of BIND_FIELDS) {
         const scope = isVoiceBindField(field) ? `, ${voiceBindScope(settings, field)}` : '';
         lines.push(`bind        ${name}: ${describeBinding(settings[field])}${settings[field] ? scope : ''}`);
     }
     lines.push(host && !('error' in host)
-        ? `call        in voice: ${yesNo(host.isInVoice)}, AFK channel: ${yesNo(host.isAfkChannel)}, listen only: ${yesNo(host.listenOnly)}, clip buffer armed: ${yesNo(host.clipArmed)}`
+        ? `call        in voice: ${yesNo(host.isInVoice)}, AFK channel: ${yesNo(host.isAfkChannel)}, listen only: ${yesNo(host.listenOnly)}, speak denied: ${yesNo(host.speakDenied)}, clip buffer armed: ${yesNo(host.clipArmed)}`
         : 'call        (the voice panel has not said)');
     lines.push(`feed        live: ${yesNo(feed.active)}, covers: ${feed.allowed?.join(' ') || 'nothing'}, last asked to watch: ${watchPairs(feed.requested)}`);
     lines.push(`held now    ${feed.held.join(' ') || 'nothing'}`);
-    lines.push(`in front    ${feed.blocker ? 'an elevated window: no capture method can see its keys' : 'nothing known to hide keys'}`);
+    const history = feed.blockerSeen > 0 ? `; elevated windows have come to the front ${feed.blockerSeen} time(s) since the app started` : '';
+    lines.push(`in front    ${feed.blocker ? 'an elevated window: no capture method can see its keys' : 'nothing known to hide keys'}${history}`);
     lines.push(`presses     deferred to the native feed: ${feed.ownershipDeferrals}, fired by it: ${feed.nativeDispatches}`);
     lines.push(nativeLine(native));
     for (const entry of feed.log.slice(-FEED_LOG_LINES)) {
         const watch = entry.ids && entry.keys ? watchPairs({ ids: entry.ids, keys: entry.keys }) : 'nothing';
-        lines.push(`feed log    +${entry.at} ms ${entry.kind} (${entry.reason}): ${watch} -> ${entry.result}`);
+        lines.push(`feed log    ${feedLogWhen(feed.now, entry.at)}: ${entry.kind} (${entry.reason}): ${watch} -> ${entry.result}`);
     }
     return lines;
 }
