@@ -1593,7 +1593,9 @@ pub async fn evict_user_from_voice_room(
     // LiveKit then pushes the forced removal to the browser over its own
     // socket — which fires the client's "SFU disconnected, leave voice" path.
     // With the cut first, that teardown routinely beat this directive and the
-    // move collapsed into a plain disconnect on every SFU channel.
+    // move collapsed into a plain disconnect on every SFU channel. This order only
+    // makes that rare: they are two sockets, and nothing orders them on arrival, so
+    // the client copes with the removal coming first (utils/voiceMove.ts, movedOutOfHere).
     match notice {
         SelfNotice::Gone => {
             state.send_to_user(

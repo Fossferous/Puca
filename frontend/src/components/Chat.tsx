@@ -162,7 +162,7 @@ import './Chat.css';
 import { parseServerTimestampSecs } from '../utils/serverTime';
 import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
-import { canMoveVoiceMember, userMenuVoiceModeration } from '../utils/voiceMove';
+import { canMoveVoiceMember, movedOutOfHere, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
 import {
     useServers,
@@ -873,6 +873,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
     const currentVoiceChannelRef = useRef<Channel | null>(null);
+    // Where the server last cut this device's LiveKit session. See handleVoiceMoved.
+    const sfuCutRef = useRef<SfuCut | null>(null);
     // The mode a ServerModeChanged just ended, for the RoomLeft that follows it.
     const endedModeNameRef = useRef<string | null>(null);
     useEffect(() => { currentVoiceChannelRef.current = currentVoiceChannel; }, [currentVoiceChannel]);
@@ -2854,7 +2856,9 @@ export function Chat({ onLogout }: ChatProps) {
             // with no network hop to wait for. Judging the move on `prev` alone
             // therefore saw null and dropped it: every move on an SFU channel
             // silently became a disconnect, under a toast that said otherwise.
-            const wasInSource = currentVoiceChannelRef.current?.id === payload.from_channel_id;
+            // The removal can also get here BEFORE this frame, so it leaves a
+            // note of where it cut us (movedOutOfHere).
+            const wasInSource = movedOutOfHere(payload.from_channel_id, currentVoiceChannelRef.current?.id, sfuCutRef.current, Date.now());
             if (!wasInSource) return; // stale, duplicated, or for another device
             /** Destination unreachable: say so and leave voice, rather than
              *  rendering a call the server has already taken us out of. */
@@ -5701,7 +5705,10 @@ export function Chat({ onLogout }: ChatProps) {
                             currentUsername={currentUser?.username || 'Unknown'}
                             memberAvatars={new Map(allMembers.map(m => [m.id, m.avatar_file_id || null]))}
                             memberSounds={voiceMemberSounds}
-                            onDisconnect={() => setCurrentVoiceChannel(null)}
+                            onDisconnect={(cutByServer) => {
+                                if (cutByServer) sfuCutRef.current = { channelId: currentVoiceChannel.id, at: Date.now() };
+                                setCurrentVoiceChannel(null);
+                            }}
                             // The voice channel may belong to a different server than the
                             // one currently viewed — resolve its own server's policy.
                             serverRequireMediaE2ee={

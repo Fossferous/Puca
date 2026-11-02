@@ -135,7 +135,7 @@ interface VoicePanelProps {
      *  memberAvatars, this covers the VIEWED server; a voice channel on another
      *  server degrades to the chime. */
     memberSounds?: Map<number, { join: string | null; leave: string | null }>;
-    onDisconnect?: () => void; // called when the user hangs up
+    onDisconnect?: (cutByServer?: boolean) => void; // called when the user hangs up, or when the server cut their LiveKit session
     /** Server-admin policy: this server requires media E2EE for calls. OR'd into
      *  the per-user setting (fail-closed — either source turns enforcement on). */
     serverRequireMediaE2ee?: boolean;
@@ -2258,11 +2258,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // error here (capacity, no channel key, no insertable-streams
             // support) aborts the join — never a plaintext fallback.
             if (sfuMode) {
-                sfuManager.setOnDisconnected(() => {
+                sfuManager.setOnDisconnected((cutByServer) => {
                     if (isInVoiceRef.current) {
                         console.log('[VoicePanel] SFU disconnected — leaving voice');
                         leaveVoiceRef.current();
-                        onDisconnectRef.current?.();
+                        onDisconnectRef.current?.(cutByServer);
                     }
                 });
                 // P2P INPUT over the SFU (R3): hand controlDc a publisher so

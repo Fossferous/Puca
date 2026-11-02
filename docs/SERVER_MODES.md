@@ -266,4 +266,9 @@ Clients ship before the backend, so all four combinations have to make sense:
   tab, the role editor's positive masks, the personal switch.
 - `frontend/e2e/modes-walk.mjs`: the whole story live through a real backend, two
   accounts, a 1280x800 desktop and a 390x844 coarse-pointer phone, all eight themes with
-  and without high contrast.
+  and without high contrast. With a loopback LiveKit (header of the file) it also runs on
+  channels with `sfu_mode` on and asks LiveKit's `ListParticipants` who is in each
+  `sfu_<id>` room: a switch takes everyone out, including a client that ignores being told
+  and a session whose socket died; a channel shared with the next mode keeps the same
+  session; Call everyone back moves them; the auto-off counts a person in a call and a
+  session with no room entry, and not a stream-only account.

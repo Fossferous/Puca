@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canMoveVoiceMember, voiceMoveTargets, type VoiceMoveChannel } from '../utils/voiceMove';
+import { canMoveVoiceMember, MOVE_AFTER_CUT_MS, movedOutOfHere, voiceMoveTargets, type VoiceMoveChannel } from '../utils/voiceMove';
 
 const ch = (id: number, opts: Partial<VoiceMoveChannel> = {}): VoiceMoveChannel => ({
     id,
@@ -56,6 +56,37 @@ describe('canMoveVoiceMember', () => {
         // Callers that already filtered to voice channels pass partial rows.
         const verdict = canMoveVoiceMember({ id: 1, name: 'a' }, { id: 2, name: 'b' });
         expect(verdict).toEqual({ ok: true });
+    });
+});
+
+describe('movedOutOfHere', () => {
+    const NOW = 1_000_000;
+
+    it('is about this device when it is in the channel', () => {
+        expect(movedOutOfHere(7, 7, null, NOW)).toBe(true);
+    });
+
+    it('is not when this device is in no call, or in another', () => {
+        expect(movedOutOfHere(7, null, null, NOW)).toBe(false);
+        expect(movedOutOfHere(7, undefined, null, NOW)).toBe(false);
+        expect(movedOutOfHere(7, 8, null, NOW)).toBe(false);
+    });
+
+    it('still is when LiveKit\'s removal got here first', () => {
+        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - 200 }, NOW)).toBe(true);
+    });
+
+    it('not for a removal from another channel', () => {
+        expect(movedOutOfHere(7, null, { channelId: 8, at: NOW - 200 }, NOW)).toBe(false);
+    });
+
+    it('not once the removal is old: a device that left long ago is not this call', () => {
+        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - MOVE_AFTER_CUT_MS }, NOW)).toBe(false);
+        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - MOVE_AFTER_CUT_MS + 1 }, NOW)).toBe(true);
+    });
+
+    it('not when the person has already gone somewhere else', () => {
+        expect(movedOutOfHere(7, 9, { channelId: 7, at: NOW - 200 }, NOW)).toBe(false);
     });
 });
 

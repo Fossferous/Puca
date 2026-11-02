@@ -33,7 +33,13 @@
 //      menu is inside the window.
 //   9. a message toast about a hidden channel on another server opens it; a picture over
 //      the limit arrives as a JPEG of at most 1920 px, a GIF is refused, a picture nobody
-//      can read is treated as black and white; the real personal-switch checkbox.
+//      can read is treated as black and white; the real personal-switch checkbox;
+//  10. with LK_API, on channels with sfu_mode on, by what LiveKit's ListParticipants says
+//      (rooms are sfu_<id>): turning off takes everyone out, a client that ignores being
+//      told and a session whose socket died among them; a channel shared with the next
+//      mode keeps the very same session; Call everyone back moves them; Turn off when
+//      empty sees a person in an SFU call and a session with no room entry, and not a
+//      stream-only account. A call in a channel no mode names is the control throughout.
 // Each check prints PASS/FAIL; the exit code is the number of failures. Screenshots
 // go to OUT (SHOT <file>): look at them.
 //
@@ -42,10 +48,18 @@
 // APP started with VITE_API_URL=API (the walk imports /src/api/* modules through vite
 // to set the fixture up). It refuses to start unless both are loopback and the page
 // really talks to API: it creates accounts. Silent: --mute-audio and fake media devices.
+// Step 10 also needs that backend's LIVEKIT_* pointing at a loopback-only LiveKit (config
+// in share-adapt-shaped.mjs's header, plus a webhook to API/livekit/webhook; check its
+// sockets, a firewall prompt is what a mistake there costs), LK_API / LK_KEY / LK_SECRET
+// for that LiveKit, and PGDB / PGPORT for the backend's database, whose clock it moves
+// back to make a tick judge a mode. A tick is once a minute, so it takes about 6 minutes.
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5421 API=http://127.0.0.1:5321 OUT=<dir> node e2e/modes-walk.mjs
+//   ... LK_API=http://127.0.0.1:7895 LK_KEY=... LK_SECRET=... PGDB=... PGPORT=... [SFU_ONLY=1] node e2e/modes-walk.mjs
 import { chromium } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -55,6 +69,14 @@ const OUT = process.env.OUT || 'e2e/shots-modes';
 const isLoopback = (url) => { try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(url).hostname); } catch { return false; } };
 if (!isLoopback(APP) || !isLoopback(API)) {
     console.error(`modes-walk creates accounts: APP and API must both be loopback (APP=${APP} API=${API})`);
+    process.exit(2);
+}
+const LK = process.env.LK_API && process.env.LK_KEY && process.env.LK_SECRET
+    ? { api: process.env.LK_API, key: process.env.LK_KEY, secret: process.env.LK_SECRET } : null; // the throwaway LiveKit's
+const PG = { db: process.env.PGDB, port: process.env.PGPORT || '5432' };
+const PSQL = process.env.PSQL || 'C:\\Program Files\\PostgreSQL\\16\\bin\\psql.exe';
+if (LK && (!isLoopback(LK.api) || !PG.db)) {
+    console.error(`the SFU run needs a loopback LK_API and PGDB (LK_API=${LK.api} PGDB=${PG.db})`);
     process.exit(2);
 }
 const PASS = 'Password123!pw';
@@ -349,8 +371,264 @@ function keepSockets() {
     };
 }
 
+/**
+ * Every WebSocket the page opens, with three things a test can do to the app's alone: ignore
+ * frames matching `window.__ignoreFrames` (a client that does not act on what it is told),
+ * hold back those matching `window.__lateFrames` for 800 ms (LiveKit's removal then always
+ * gets there first), and refuse a new one while `window.__noAppSocket` holds (a page in a
+ * LiveKit call whose socket to the app is gone). LiveKit's own socket is left alone.
+ */
+function appSockets(origin) {
+    const Native = window.WebSocket;
+    window.__appSockets = [];
+    window.WebSocket = class extends Native {
+        constructor(url, ...rest) {
+            const app = String(url).startsWith(origin);
+            super(app && window.__noAppSocket ? 'ws://127.0.0.1:9/' : url, ...rest);
+            this.__app = app;
+            if (app) window.__appSockets.push(this);
+        }
+        set onmessage(fn) {
+            super.onmessage = !fn || !this.__app ? fn : (e) => {
+                if (window.__ignoreFrames?.test(String(e.data))) return;
+                if (window.__lateFrames?.test(String(e.data))) setTimeout(() => fn(e), 800);
+                else fn(e);
+            };
+        }
+    };
+}
+
+/** Who LiveKit itself says is in `room`. A query it refuses throws: it cannot read as nobody. */
+async function lkPeople(room) {
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const body = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ iss: LK.key, sub: 'modes-walk', nbf: now - 5, exp: now + 300, video: { roomAdmin: true, roomList: true, room } })}`;
+    const jwt = `${body}.${crypto.createHmac('sha256', LK.secret).update(body).digest('base64url')}`;
+    const r = await fetch(`${LK.api}/twirp/livekit.RoomService/ListParticipants`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` }, body: JSON.stringify({ room }),
+    });
+    if (r.status === 404) return [];
+    if (!r.ok) throw new Error(`ListParticipants ${room}: ${r.status}`);
+    return ((await r.json()).participants || []).map(p => ({ identity: p.identity, sid: p.sid }));
+}
+
+/** The walk's story again on channels with sfu_mode on, asking LiveKit who is in each room. */
+async function sfuRun() {
+    const ctxOf = async (tag, sockets) => {
+        const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+        if (sockets) await ctx.addInitScript(appSockets, API.replace(/^http/, 'ws'));
+        return signIn(ctx, `${tag}_${stamp}`, tag);
+    };
+    const O = await ctxOf('sfo');
+    const P = await ctxOf('sfp', true);
+    const Q = await ctxOf('sfq', true);
+    const S = await ctxOf('sfs');
+    const uidOf = (page) => page.evaluate(() => JSON.parse(atob(localStorage.getItem('auth_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub);
+    const [oId, pId, qId, sId] = await Promise.all([O, P, Q, S].map(uidOf));
+
+    const srvName = 'sfu_' + stamp;
+    const srv = await servers(O, 'createServer', [srvName]);
+    const voice = async (name, parent) => {
+        const c = await servers(O, 'createChannel', parent ? [srv.id, name, 1, parent] : [srv.id, name, 1]);
+        await servers(O, 'updateChannel', [c.id, { sfu_mode: true }]);
+        return c;
+    };
+    const town = await voice('Town Square');
+    const cottage = await voice('Cottage');
+    const shared = await voice('Shared');
+    const keep = await voice('Keep');
+    const rooms = await servers(O, 'createChannel', [srv.id, 'Rooms', 2]);
+    const attic = await voice('Attic', rooms.id);
+    const inv = await servers(O, 'createInvite', [srv.id, {}]);
+    for (const page of [P, Q, S]) await servers(page, 'joinViaInvite', [inv.code]);
+    const clock = await modesApi(O, 'createMode', [srv.id, { name: 'Clocktower', channel_ids: [town.id, cottage.id, shared.id, rooms.id], home_channel_id: town.id }]);
+    await modesApi(O, 'createMode', [srv.id, { name: 'Werewolf', channel_ids: [shared.id], home_channel_id: shared.id }]);
+
+    const sql = (text) => execFileSync(PSQL, ['-h', '127.0.0.1', '-p', PG.port, '-U', 'postgres', '-d', PG.db, '-t', '-A', '-c', text],
+        { encoding: 'utf8', windowsHide: true, env: { ...process.env, PGPASSWORD: process.env.PGPASSWORD || 'postgres' } }).trim();
+    if (sql(`SELECT count(*) FROM servers WHERE id = '${srv.id}'`) !== '1') throw new Error(`PGDB=${PG.db} is not the database API=${API} uses`);
+    /** Where the auto-off stands: seconds since it last saw someone (null: nobody yet), and the mode on. */
+    const autoOff = () => {
+        const [mode, age] = sql(`SELECT active_mode_id, EXTRACT(EPOCH FROM NOW() - active_mode_occupied_at)::int FROM servers WHERE id = '${srv.id}'`).split('|');
+        return { mode: mode === '' ? null : Number(mode), age: age === '' ? null : Number(age) };
+    };
+    /** Make it look empty for 40 minutes, and wait for a tick (once a minute) to judge it. */
+    const nextVerdict = async () => {
+        sql(`UPDATE servers SET active_mode_occupied_at = NOW() - interval '40 minutes' WHERE id = '${srv.id}'`);
+        return until(() => { const a = autoOff(); return a.mode === null || a.age < 300 ? a : null; }, 80000, 1000);
+    };
+
+    const afresh = async (page) => {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await sleep(2500);
+        await dismiss(page);
+        await page.locator(`.server-icon[title="${srvName}"]`).click();
+        await sleep(600);
+    };
+    for (const page of [O, P, Q, S]) await afresh(page);
+
+    const sessions = async (channel, user) => (await lkPeople(`sfu_${channel.id}`)).filter(p => p.identity.startsWith(`u${user}#`));
+    const row = (page, channel) => page.locator(`[data-testid="voice-channel"][data-channel-id="${channel.id}"]`).first();
+    /** Join by the real row; the session LiveKit lists for them, once it has exactly one. */
+    const enter = async (page, channel, user) => {
+        await row(page, channel).click();
+        return until(async () => { const s = await sessions(channel, user); return s.length === 1 ? s[0] : null; }, 30000, 500);
+    };
+    const gone = (channel, user) => until(async () => (await sessions(channel, user)).length === 0, 15000, 250);
+    const inCall = async (page) => (await page.locator('.voice-panel-compact .voice-connected-label').count()) > 0;
+    const leave = async (page) => {
+        if (await inCall(page)) await page.locator('[title="Disconnect"]').first().click();
+        await until(async () => !(await inCall(page)), 10000);
+    };
+    const room = (page) => page.evaluate(async () => {
+        const live = (await import('/src/api/rtc/sfuManager.ts')).sfuManager?.room;
+        return live ? { name: live.name, state: live.state } : null;
+    });
+    const told = (page, name) => until(async () => (await page.evaluate(() => document.body.innerText)).includes(`${name} ended, so this call ended`), 8000);
+    const auditRow = async (action) => (await servers(O, 'listAuditLog', [srv.id])).find(r => r.action_type === action);
+    /** On from the owner's real selector, and arrived at the page that needs its rows. */
+    const turnOn = async (name, page, channel) => {
+        await pick(O, false, name);
+        await until(() => row(page, channel).count(), 8000);
+    };
+
+    // A control that stays through every step: a call in a channel no mode names.
+    const keepSession = await enter(O, keep, oId);
+    check('SFU: the owner\'s call in a channel no mode names is in LiveKit, in a room named for it', !!keepSession, await lkPeople(`sfu_${keep.id}`));
+    const keptCall = async () => (await sessions(keep, oId))[0]?.sid === keepSession?.sid;
+
+    // ── Turning off. One person's client does what it is told. The other's ignores it, so
+    //    only the server can take them out, and they are in a room under the collection.
+    await turnOn('Clocktower', Q, attic);
+    const pTown = await enter(P, town, pId);
+    const qAttic = await enter(Q, attic, qId);
+    check('SFU: LiveKit lists the person in the main channel and the one under the collection', !!pTown && !!qAttic, { pTown, qAttic });
+    await Q.evaluate(() => { window.__ignoreFrames = /"type":"(RoomLeft|ServerModeChanged)"/; });
+    let warned = dialogs.length;
+    await pick(O, false, 'Off');
+    check('SFU: turning off warns of the two, and not of the call elsewhere', await until(() => dialogs.length > warned, 4000) && /^sfo: 2 people are in .*disconnected/.test(dialogs[dialogs.length - 1]), dialogs.slice(warned));
+    check('SFU: turning off takes the main channel\'s session out of LiveKit', !!await gone(town, pId), await lkPeople(`sfu_${town.id}`));
+    check('SFU: and the session of a client that ignored being told, under the collection: only the server can do that', !!await gone(attic, qId), await lkPeople(`sfu_${attic.id}`));
+    check('SFU: the client that listened ended its call and says why', !!await until(async () => !(await inCall(P)), 10000) && !!await told(P, 'Clocktower'));
+    await sleep(4000);
+    check('SFU: four seconds on, nobody is back in LiveKit', (await lkPeople(`sfu_${town.id}`)).length === 0 && (await lkPeople(`sfu_${attic.id}`)).length === 0);
+    check('SFU control: the call in a channel no mode names is the same session', await keptCall(), await lkPeople(`sfu_${keep.id}`));
+    await Q.evaluate(() => { window.__ignoreFrames = null; });
+    await afresh(Q);
+    await leave(P);
+
+    // ── A channel the next mode also shows keeps its call, the very session.
+    await turnOn('Clocktower', Q, cottage);
+    await until(() => row(P, shared).count(), 8000);
+    const pShared = await enter(P, shared, pId);
+    const qCottage = await enter(Q, cottage, qId);
+    check('SFU: one person in the channel both modes show, one in a channel only this one does', !!pShared && !!qCottage, { pShared, qCottage });
+    warned = dialogs.length;
+    await pick(O, false, 'Werewolf');
+    check('SFU: switching warns of the one it ends, and not of the one it keeps', await until(() => dialogs.length > warned, 4000) && /^sfo: 1 person is in .*disconnected/.test(dialogs[dialogs.length - 1]), dialogs.slice(warned));
+    check('SFU: the switch takes the other channel\'s session out of LiveKit', !!await gone(cottage, qId), await lkPeople(`sfu_${cottage.id}`));
+    check('SFU control: and that person\'s client is told why', !!await told(Q, 'Clocktower'));
+    await sleep(5000);
+    const stillShared = await sessions(shared, pId);
+    check('SFU: the channel shared with the next mode keeps its call in LiveKit, the same session', stillShared.length === 1 && stillShared[0].sid === pShared?.sid, { pShared, stillShared });
+    const pRoom = await room(P);
+    check('SFU: its client is still connected to that room, and nothing told it the call ended', pRoom?.name === `sfu_${shared.id}` && pRoom.state === 'connected' && await inCall(P)
+        && !(await P.evaluate(() => document.body.innerText)).includes('so this call ended'), pRoom);
+    check('SFU control: the call elsewhere is the same session', await keptCall());
+    await leave(P);
+
+    // ── Call everyone back: out of a private room and a room under the collection.
+    await turnOn('Clocktower', Q, attic);
+    await until(() => row(P, cottage).count(), 8000);
+    check('SFU: one person in a private room, one under the collection', !!await enter(P, cottage, pId) && !!await enter(Q, attic, qId));
+    // Two sockets, nothing ordering them: for one of them LiveKit's removal arrives first.
+    await Q.evaluate(() => { window.__lateFrames = /"type":"VoiceMoved"/; });
+    await pick(O, false, 'Call everyone to Town Square');
+    const moved = await until(async () => {
+        const [p, q] = await Promise.all([sessions(town, pId), sessions(town, qId)]);
+        return p.length === 1 && q.length === 1 ? { p, q } : null;
+    }, 30000, 500);
+    check('SFU: Call everyone back moves both into the main channel, by LiveKit\'s own list', !!moved, await lkPeople(`sfu_${town.id}`));
+    check('SFU: and out of where they were, with one session each', !!await gone(cottage, pId) && !!await gone(attic, qId), { cottage: await lkPeople(`sfu_${cottage.id}`), attic: await lkPeople(`sfu_${attic.id}`) });
+    const movedTo = [await room(P), await room(Q)];
+    check('SFU: both clients are connected to the main channel\'s room', movedTo.every(r => r?.name === `sfu_${town.id}` && r.state === 'connected'), movedTo);
+    check('SFU: and each is told who moved them', (await Promise.all([P, Q].map(p => until(async () => (await p.evaluate(() => document.body.innerText)).includes('moved you to Town Square'), 8000)))).every(Boolean));
+    check('SFU control: the caller\'s own call elsewhere did not move', await keptCall());
+    await shot(O, 'sfu-01-called-back');
+    await Q.evaluate(() => { window.__lateFrames = null; });
+    await leave(Q);
+
+    // ── Turn off when empty. A person in an SFU call keeps a stale mode on.
+    let verdict = await nextVerdict();
+    check('SFU: Turn off when empty sees a person in an SFU call: a tick judged it and the mode stayed on', verdict?.mode === clock.id && verdict.age < 300, verdict);
+    const pBefore = (await sessions(town, pId))[0];
+    const voiceRow = () => O.locator('.voice-channel-container', { hasText: 'Town Square' }).first().innerText();
+    check('SFU control: everyone lists the person in the main channel', !!await until(async () => (await voiceRow()).includes('sfp_'), 8000), await voiceRow().catch(String));
+    // Then the socket goes and the LiveKit session stays: the room has lost track of them.
+    const closed = await P.evaluate(() => {
+        window.__noAppSocket = true;
+        const open = window.__appSockets.filter(s => s.readyState === WebSocket.OPEN);
+        for (const s of open) s.close();
+        return open.length;
+    });
+    check('SFU: the person\'s socket to the app is gone', closed >= 1, closed);
+    check('SFU: the room has lost track of them (past the rejoin grace, everyone stops listing them)', !!await until(async () => !(await voiceRow()).includes('sfp_'), 25000), await voiceRow().catch(String));
+    const pAfter = (await sessions(town, pId))[0];
+    check('SFU control: LiveKit still has that session', !!pBefore && pAfter?.sid === pBefore.sid, { pBefore, pAfter });
+    verdict = await nextVerdict();
+    check('SFU: Turn off when empty counts a LiveKit session with no room entry', verdict?.mode === clock.id && verdict.age < 300, verdict);
+    await pick(O, false, 'Off');
+    check('SFU: turning off cuts a LiveKit session with no room entry', !!await gone(town, pId), await lkPeople(`sfu_${town.id}`));
+    await until(async () => (await auditRow('mode_switch'))?.details === 'Clocktower off, 1 disconnected', 5000);
+    const offRow = await auditRow('mode_switch');
+    check('SFU: and the audit log counts them', offRow?.details === 'Clocktower off, 1 disconnected', offRow);
+    await P.evaluate(() => { window.__noAppSocket = false; });
+    await afresh(P);
+
+    // ── The same tick with only a stream-only account there: it is nobody, so it turns off.
+    const role = await servers(O, 'createRole', [srv.id, { name: 'Stream only', permissions: (1 << 11) | (1 << 29) }]);
+    await call(O, '/src/api/channels.ts', 'putChannelOverwrite', [town.id, role.id, 1 | (1 << 8), 0]);
+    await servers(O, 'assignRole', [srv.id, sId, role.id]);
+    await afresh(S);
+    await turnOn('Clocktower', Q, town);
+    await until(() => row(S, town).count(), 8000);
+    check('SFU: someone uses the mode and goes', !!await enter(Q, town, qId));
+    await leave(Q);
+    await gone(town, qId);
+    check('SFU: joining stamped the mode', autoOff().age !== null, autoOff());
+    const sSession = await enter(S, town, sId);
+    check('SFU: the stream-only account is in LiveKit', !!sSession, await lkPeople(`sfu_${town.id}`));
+    verdict = await nextVerdict();
+    check('SFU: Turn off when empty does not count a stream-only account: the mode turned itself off', verdict?.mode === null, verdict);
+    check('SFU: and took its session out of LiveKit', !!await gone(town, sId), await lkPeople(`sfu_${town.id}`));
+    await until(async () => (await auditRow('mode_auto_off'))?.details === 'Clocktower off, 1 disconnected', 5000);
+    const autoRow = await auditRow('mode_auto_off');
+    check('SFU: the audit log says the mode did it, and how many', autoRow?.details === 'Clocktower off, 1 disconnected' && autoRow.actor_id === null, autoRow);
+    await O.locator('.server-settings-btn').first().click();
+    await O.locator('.server-settings-nav .nav-item', { hasText: 'Moderation' }).click();
+    await O.locator('.mod-tab', { hasText: 'Audit Log' }).click();
+    const autoLine = O.locator('.mod-item', { hasText: 'mode_auto_off' }).first();
+    await autoLine.waitFor({ timeout: 8000 });
+    const autoText = await autoLine.innerText();
+    check('SFU: the real Audit Log tab says the channels stayed empty, and names nobody', /stayed empty/.test(autoText) && !/deleted user| by /.test(autoText), autoText);
+    await O.locator('.server-settings-content .close-btn').click();
+    check('SFU control: the call in a channel no mode names kept its session, and never kept a mode on', await keptCall());
+}
+
 const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
 const MODE = 'Blood on the Clocktower';
+
+if (process.env.SFU_ONLY === '1') {
+    try {
+        await sfuRun();
+    } catch (e) {
+        check('the SFU run ran to the end', false, String(e?.stack || e).slice(0, 800));
+    } finally {
+        await browser.close();
+    }
+    console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);
+    process.exit(failures);
+}
 
 try {
     const probe = await browser.newContext();
@@ -1058,6 +1336,9 @@ try {
     await shot(B, '12-phone-many-modes');
 
     check('a channel in no mode stayed listed to the end', lists(await listed(B), 'Lobby'), lobby.id);
+
+    if (LK) await sfuRun();
+    else console.log('SKIP  the SFU run (LK_API / LK_KEY / LK_SECRET not set)');
 } catch (e) {
     check('the walk ran to the end', false, String(e?.stack || e).slice(0, 800));
 } finally {
