@@ -1455,6 +1455,9 @@ pub enum SelfNotice {
     /// The room is gone — tear the call down locally. Right for a disconnect
     /// and for voice exclusivity.
     Gone,
+    /// `Gone`, because the server mode this channel belongs to ended: the connections
+    /// that held the call are told so (`MODE_ENDED`) and refused a replay of it.
+    ModeEnded,
     /// Join this channel instead.
     ///
     /// Deliberately NOT accompanied by a `RoomLeft`. `VoicePanel`'s RoomLeft
@@ -1590,7 +1593,9 @@ pub async fn evict_user_from_voice_room(
     // LiveKit then pushes the forced removal to the browser over its own
     // socket — which fires the client's "SFU disconnected, leave voice" path.
     // With the cut first, that teardown routinely beat this directive and the
-    // move collapsed into a plain disconnect on every SFU channel.
+    // move collapsed into a plain disconnect on every SFU channel. This order only
+    // makes that rare: they are two sockets, and nothing orders them on arrival, so
+    // the client copes with the removal coming first (utils/voiceMove.ts, movedOutOfHere).
     match notice {
         SelfNotice::Gone => {
             state.send_to_user(
@@ -1601,6 +1606,26 @@ pub async fn evict_user_from_voice_room(
                     by: None,
                 },
             );
+        }
+        SelfNotice::ModeEnded => {
+            // The reason only to a connection that held the call: it is what makes
+            // that device say why. Tombstoned, so a device that slept through this
+            // cannot replay itself back into a channel the list no longer shows.
+            for c in state.conn_ids_of(user_id) {
+                let held = held_by.contains(&c);
+                state.send_to_conn(
+                    user_id,
+                    c,
+                    ServerMessage::RoomLeft {
+                        room_id: room_id.to_string(),
+                        reason: held.then(|| MODE_ENDED.to_string()),
+                        by: None,
+                    },
+                );
+                if let Some(sid) = held.then(|| state.session_sid(user_id, c)).flatten() {
+                    state.tombstone_voice(user_id, &sid, room_id, MODE_ENDED, None);
+                }
+            }
         }
         SelfNotice::MoveTo {
             server_id,
@@ -1933,6 +1958,26 @@ fn tombstone_recent_voice_drops(
         if sid != actor_sid && only_room.is_none_or(|r| r == room) {
             state.tombstone_voice(user_id, &sid, &room, why.reason(), by);
         }
+    }
+}
+
+/// `RoomLeft::reason` for a call a server mode ended (docs/SERVER_MODES.md).
+pub(crate) const MODE_ENDED: &str = "mode_ended";
+
+/// Tombstone every session whose socket died in `room_id` (within `voice_drops`'
+/// window): it is out of the room already, so an eviction cannot find it, and its
+/// replay on reconnecting would put it back in a call that was ended for everyone.
+/// A deliberate join clears this, like any tombstone.
+pub(crate) fn tombstone_dropped_from(state: &Arc<AppState>, room_id: &str, reason: &'static str) {
+    // Collected first: tombstone_voice takes other maps' locks.
+    let dropped: Vec<(UserId, String)> = state
+        .voice_drops
+        .iter()
+        .filter(|e| e.value().0 == room_id && e.value().1.elapsed() < crate::state::VOICE_DROP_TTL)
+        .map(|e| e.key().clone())
+        .collect();
+    for (user_id, sid) in dropped {
+        state.tombstone_voice(user_id, &sid, room_id, reason, None);
     }
 }
 
@@ -3052,7 +3097,7 @@ pub(crate) fn valid_message_content(content: &str) -> bool {
 
 /// Handle a single client message. `joined_rooms` tracks the rooms THIS
 /// connection has joined, so we can bound them per-connection.
-async fn handle_message(
+pub(crate) async fn handle_message(
     state: &Arc<AppState>,
     user_id: UserId,
     conn_id: u64,
@@ -3429,6 +3474,10 @@ async fn handle_message(
                 let may_play = matches!(&access_after, ChannelPermAccess::Allowed { perms, .. }
                     if perms.has(Permissions::CONNECT) && perms.has(Permissions::PLAY_GAMES));
                 state.games.on_join(state, &room_id, user_id, conn_id, may_play);
+                // A stream-only account is nobody being there (the auto-off's rule).
+                if !matches!(&access_after, ChannelPermAccess::Allowed { perms, .. } if perms.is_stream_only()) {
+                    crate::mode_handlers::note_voice_join(state, cid).await;
+                }
             }
 
             // Send existing streams to the joining connection

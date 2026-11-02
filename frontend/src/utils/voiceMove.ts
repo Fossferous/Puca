@@ -8,6 +8,32 @@
  * refuse.
  */
 
+/** How long after the server cut this device's LiveKit session a VoiceMoved for that channel is still about this device. */
+export const MOVE_AFTER_CUT_MS = 3000;
+
+/** The channel the server last cut this device's LiveKit session in, and when. */
+export interface SfuCut {
+    channelId: number;
+    at: number;
+}
+
+/**
+ * Is a VoiceMoved out of `from` about the call on this device? It goes to every device of
+ * the account, so being in that channel is the test. An SFU call adds one case: the server
+ * sends the directive before it cuts the session, but on another socket, and nothing orders
+ * the two on arrival. LiveKit's removal can get here first and end the call, and dropping
+ * the directive then would leave someone out of voice who was only being moved.
+ */
+export function movedOutOfHere(
+    from: number,
+    inCallId: number | null | undefined,
+    cut: SfuCut | null,
+    now: number,
+): boolean {
+    if (inCallId === from) return true;
+    return inCallId == null && cut?.channelId === from && now - cut.at < MOVE_AFTER_CUT_MS;
+}
+
 /** The subset of `Channel` these rules need. */
 export interface VoiceMoveChannel {
     id: number;
@@ -100,6 +126,9 @@ export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
     rosterOf: (channelId: number) => ReadonlyArray<{ id: number }>;
     /** The viewer holds MOVE_MEMBERS (or owns the server). */
     canMoveVoiceMembers: boolean;
+    /** Does the channel list show this channel? A menu offers what a drag could reach,
+     *  and a drag reaches only rendered rows. Who is where is still searched in all. */
+    isListed?: (channel: C) => boolean;
 }): { voiceChannel: C | null; canMoveMembers: boolean; targets: C[] } {
     const voiceChannel = opts.channels.find(c =>
         c.channel_type === 1 && opts.rosterOf(c.id).some(u => u.id === opts.userId)) ?? null;
@@ -108,7 +137,7 @@ export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
         voiceChannel,
         canMoveMembers: opts.canMoveVoiceMembers,
         targets: opts.canMoveVoiceMembers
-            ? voiceMoveTargets(opts.channels.filter(c => c.channel_type === 1), voiceChannel)
+            ? voiceMoveTargets(opts.channels.filter(c => c.channel_type === 1 && (opts.isListed?.(c) ?? true)), voiceChannel)
             : [],
     };
 }

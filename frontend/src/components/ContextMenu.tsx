@@ -30,18 +30,21 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
     useEffect(() => {
         // Adjust position to stay within viewport
         if (menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
+            // offsetWidth/Height, not getBoundingClientRect: the menu is scaling in
+            // from 95% right now, and a rect would measure it 5% short and leave its
+            // end past the window's edge.
+            const { offsetWidth, offsetHeight } = menuRef.current;
             const viewportWidth = window.innerWidth;
             const viewportHeight = window.innerHeight;
 
             let x = position.x;
             let y = position.y;
 
-            if (x + rect.width > viewportWidth) {
-                x = viewportWidth - rect.width - 8;
+            if (x + offsetWidth > viewportWidth) {
+                x = viewportWidth - offsetWidth - 8;
             }
-            if (y + rect.height > viewportHeight) {
-                y = viewportHeight - rect.height - 8;
+            if (y + offsetHeight > viewportHeight) {
+                y = viewportHeight - offsetHeight - 8;
             }
 
             // eslint-disable-next-line react-hooks/set-state-in-effect -- reposition after measuring the rendered menu

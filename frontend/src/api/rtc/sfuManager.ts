@@ -610,7 +610,7 @@ export class SfuManager {
      *  blip while the publication lives on). */
     private onCameraEnded: ((userId: number) => void) | null = null;
     private onPeerDisconnected: ((userId: number, terminal: boolean) => void) | null = null;
-    private onDisconnected: (() => void) | null = null;
+    private onDisconnected: ((cutByServer: boolean) => void) | null = null;
     private onActiveSpeakers: ((userIds: number[]) => void) | null = null;
 
     setOnRemoteStream(cb: RemoteStreamCallback | null) { this.onRemoteStream = cb; }
@@ -618,7 +618,7 @@ export class SfuManager {
     setOnCameraStream(cb: RemoteStreamCallback | null) { this.onCameraStream = cb; }
     setOnCameraEnded(cb: ((userId: number) => void) | null) { this.onCameraEnded = cb; }
     setOnPeerDisconnected(cb: ((userId: number, terminal: boolean) => void) | null) { this.onPeerDisconnected = cb; }
-    setOnDisconnected(cb: (() => void) | null) { this.onDisconnected = cb; }
+    setOnDisconnected(cb: ((cutByServer: boolean) => void) | null) { this.onDisconnected = cb; }
     setOnActiveSpeakers(cb: ((userIds: number[]) => void) | null) { this.onActiveSpeakers = cb; }
 
     get connected(): boolean {
@@ -2450,8 +2450,8 @@ export class SfuManager {
                 // out the 30 s poll. Idempotent; throttled upstream (~1/s).
                 if (this.keyProvider) void this.refreshEpochKey(this.keyProvider);
             })
-            .on(RoomEvent.Disconnected, () => {
-                this.onDisconnected?.();
+            .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+                this.onDisconnected?.(reason !== undefined && reason === DisconnectReason.PARTICIPANT_REMOVED);
             })
             // The moments between the minute line's numbers (rtcEventLog.ts):
             // the server pausing a watched share for this viewer, and the

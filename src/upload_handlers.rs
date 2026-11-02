@@ -116,6 +116,45 @@ pub async fn sweep_clip_parts(state: &Arc<AppState>) {
     }
 }
 
+/// Uploads of deleted accounts whose grace period has passed. Anything a SERVER
+/// asset has picked up since the stamp is skipped.
+pub(crate) const UPLOADS_DUE_FOR_PURGE_SQL: &str = "SELECT id::text, stored_name FROM uploaded_files \
+     WHERE purge_after IS NOT NULL AND purge_after < NOW() \
+       AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT background_file_id FROM server_modes WHERE background_file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL) \
+     ORDER BY purge_after LIMIT 200";
+
+/// Does anything still point at this file as an asset: an avatar, a sound, a
+/// server icon, a mode background or an emoji?
+pub(crate) async fn file_is_referenced(pool: &sqlx::PgPool, file_id: &str) -> Result<bool, sqlx::Error> {
+    let referenced: Option<(i32,)> = sqlx::query_as(
+        r#"
+        SELECT 1 WHERE EXISTS (SELECT 1 FROM users WHERE avatar_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM users WHERE join_sound_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM users WHERE leave_sound_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM servers WHERE icon_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM server_modes WHERE background_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM server_emojis WHERE file_id = $1)
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(referenced.is_some())
+}
+
+/// [`remove_file`] for a reclaim hook, called once the hook has cleared its own
+/// reference: only when nothing else still points at the file, since one upload can be
+/// an icon, a mode's background and an avatar at once. Scoped like `remove_file`. A
+/// failed check keeps the file: an orphan is harmless, a broken picture is not.
+pub async fn reclaim_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) {
+    if matches!(file_is_referenced(pool, file_id).await, Ok(false)) {
+        remove_file(pool, file_id, owner_id).await;
+    }
+}
+
 /// Delete an uploaded file (DB row + on-disk blob), scoped to its uploader so a
 /// caller can only remove files they own. Best-effort: it logs but never fails
 /// the caller if the on-disk unlink races. Used by deletion hooks (e.g. avatar
@@ -214,17 +253,19 @@ pub async fn delete_file(
     // (409) rather than unknown (404). A file the caller does not own must be
     // indistinguishable from one that does not exist. An invalid uuid string
     // errors on the cast -> treated as no row -> 404.
-    let mine: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+    // id::text: the cast accepts other spellings of a uuid, and the in-use check below
+    // compares text, so DELETE /files/<upper case> must not read as unreferenced.
+    let mine: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
     )
     .bind(&file_id)
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
-    if mine.is_none() {
+    let Some((file_id,)) = mine else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
 
     // Refuse while something still points at it. `users.avatar_file_id` and
     // `servers.icon_file_id` are plain TEXT with NO foreign key (001_init.sql,
@@ -239,23 +280,10 @@ pub async fn delete_file(
     // replacement, emoji deletion) each clear their reference BEFORE calling
     // remove_file, so they must stay able to remove a blob this check would
     // have blocked a moment earlier.
-    let referenced: Option<(i32,)> = sqlx::query_as(
-        r#"
-        SELECT 1 WHERE EXISTS (SELECT 1 FROM users WHERE avatar_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM users WHERE join_sound_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM users WHERE leave_sound_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM servers WHERE icon_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM server_emojis WHERE file_id = $1)
-        "#,
-    )
-    .bind(&file_id)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
-    if referenced.is_some() {
+    if file_is_referenced(&state.pool, &file_id).await.unwrap_or(false) {
         return (
             StatusCode::CONFLICT,
-            "That file is still in use as an avatar, join/leave sound, server icon or emoji. Replace or remove it there first.",
+            "That file is still in use as an avatar, join/leave sound, server icon, mode background or emoji. Replace or remove it there first.",
         )
             .into_response();
     }
@@ -678,8 +706,8 @@ async fn cap_era_start(pool: &sqlx::PgPool) -> Result<Option<DateTime<Utc>>, sql
 ///   an avatar or join/leave sound of an account in the caller's identity
 ///   context (friends, a shared server, or a conversation that account
 ///   started — the same rule that lets the caller see that account at all),
-///   an icon or emoji of a server the caller belongs to (or a public one,
-///   which `/discover` already shows everyone), or a part of a clip posted
+///   an icon, mode background or emoji of a server the caller belongs to (or a
+///   public one, which `/discover` already shows everyone), or a part of a clip posted
 ///   in a channel the caller can VIEW, or
 /// - it predates capabilities (see `cap_era_start`), or
 /// - the operator turned enforcement off (`FILES_ENFORCE_CAP=0`), the same
@@ -699,7 +727,7 @@ fn uncapped_decision(is_uploader: bool, visible_as_asset: bool, is_legacy: bool,
 /// database error (logged), like the membership probes in permissions.rs.
 /// Checks run cheapest and most common first, so the everyday avatar fetch
 /// never reaches the migration-table lookup.
-async fn uncapped_file_visible(
+pub(crate) async fn uncapped_file_visible(
     pool: &sqlx::PgPool,
     file_id: &str,
     uploader_id: i64,
@@ -723,6 +751,7 @@ async fn uncapped_file_visible(
                AND u.deleted_at IS NULL LIMIT 1), \
            EXISTS (SELECT 1 FROM servers s \
                     WHERE (s.icon_file_id = $1 \
+                           OR s.id IN (SELECT server_id FROM server_modes WHERE background_file_id = $1) \
                            OR s.id IN (SELECT server_id FROM server_emojis WHERE file_id = $1) \
                            OR s.id IN (SELECT server_id FROM custom_emojis WHERE file_id = $1)) \
                       AND (s.is_public \

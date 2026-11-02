@@ -141,6 +141,7 @@ describe('nothing goes around the door', () => {
         expect(importers).toEqual([
             'api/attachments.ts', // the sealed ciphertext (octet-stream: never parsed)
             'api/serverTemplates.ts', 'components/EmojiSettings.tsx', 'components/ServerSettingsModal.tsx', 'components/UserProfileSettings.tsx',
+            'components/modes/ModesSettings.tsx', // a server mode's background: a plain server asset, like the icon
         ]);
         // ...and the seal strips before it encrypts.
         const att = sources.find(s => s.rel === 'api/attachments.ts')!.text;

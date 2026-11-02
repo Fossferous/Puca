@@ -49,6 +49,10 @@ pub struct ServerResponse {
     /// default (migration 073). The client offers a table only when this is
     /// on AND the socket confirmed `games`.
     pub games_enabled: bool,
+    /// The server mode that is on (docs/SERVER_MODES.md), None for none. Its
+    /// presence is also how a client knows this backend has modes at all: an
+    /// older one omits the field, and the client then offers none.
+    pub active_mode_id: Option<i64>,
 }
 
 // --- ICE Configuration DTOs ---
@@ -233,7 +237,8 @@ pub async fn create_server(
         // (docs/GAMES.md, owner decision 2026-10-03), so the creator's
         // launcher shows without a refetch. Pinned to the row by
         // games::tests::db::games_are_on_by_default_for_new_and_existing_servers.
-        "games_enabled": true
+        "games_enabled": true,
+        "active_mode_id": null
     }))
     .into_response()
 }
@@ -298,9 +303,9 @@ pub async fn list_servers(
     // owner_id is INTEGER (i32), also include icon_file_id, description, and the E2EE policy.
     // Rail order is per-member (server_members.position, migration 036):
     // dragged-into-place servers first, never-ordered ones after by join age.
-    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32, bool)> = sqlx::query_as(
+    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32, bool, Option<i32>)> = sqlx::query_as(
         r#"
-        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false), s.afk_timeout_minutes, s.games_enabled
+        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false), s.afk_timeout_minutes, s.games_enabled, s.active_mode_id
         FROM servers s
         JOIN server_members sm ON s.id = sm.server_id
         WHERE sm.user_id = $1
@@ -316,7 +321,7 @@ pub async fn list_servers(
     // query); a member's rail is short, and the alternative — the raw column —
     // is the hidden-channel id leak described on visible_clip_channel_id.
     let mut response: Vec<ServerResponse> = Vec::with_capacity(servers.len());
-    for (id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes, games_enabled) in servers {
+    for (id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes, games_enabled, active_mode_id) in servers {
         let clip_channel_id = visible_clip_channel_id(&state.pool, claims.sub as i32, &id, clip_channel_id).await;
         response.push(ServerResponse {
             id,
@@ -332,6 +337,7 @@ pub async fn list_servers(
             is_public,
             afk_timeout_minutes,
             games_enabled,
+            active_mode_id: active_mode_id.map(|m| m as i64),
         });
     }
 
@@ -817,17 +823,21 @@ pub async fn update_server_settings(
     // remove it on their behalf). An empty string clears the icon and is
     // allowed; any non-empty id must resolve to an upload owned by claims.sub.
     // An invalid-uuid string fails the ::uuid cast → None → refused.
+    //
+    // id::text is what gets stored: the cast accepts other spellings of a uuid, and
+    // every guard on the column compares text.
+    let mut canonical_icon: Option<String> = None;
     if let Some(ref icon_id) = payload.icon_file_id {
         if !icon_id.is_empty() {
-            let owns: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+            let owns: Option<(String,)> = sqlx::query_as(
+                "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
             )
             .bind(icon_id)
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
             .unwrap_or(None);
-            if owns.is_none() {
+            let Some((canonical,)) = owns else {
                 tracing::warn!(
                     "update_server_settings: user {} tried to set server {} icon to file {} they do not own",
                     claims.sub, server_id, icon_id
@@ -837,7 +847,8 @@ pub async fn update_server_settings(
                     "Server icon must be a file you uploaded",
                 )
                     .into_response();
-            }
+            };
+            canonical_icon = Some(canonical);
         }
     }
 
@@ -999,16 +1010,16 @@ pub async fn update_server_settings(
         if any {
             qb.push(", ");
         }
-        qb.push("icon_file_id = ").push_bind(icon_id);
+        qb.push("icon_file_id = ").push_bind(canonical_icon.as_ref().unwrap_or(icon_id));
         any = true;
     }
 
     // M15 deletion hook, mirroring the avatar one: remember the icon we are
     // about to replace so its blob can be reclaimed after a successful update.
-    // A server icon has exactly one referent, so unlike a message attachment
-    // (which forwarding can duplicate) removing it is unambiguous. Reclaim is
-    // CALLER-scoped (see the remove_file call below) — never the old blob's
-    // uploader — so replacing an icon can only ever delete the caller's own file.
+    // The reclaim keeps a file that also backs something else, like a mode's
+    // background. It is CALLER-scoped (see the reclaim_file call below) — never the
+    // old blob's uploader — so replacing an icon can only ever delete the caller's
+    // own file.
     let old_icon: Option<(Option<String>,)> = if payload.icon_file_id.is_some() {
         sqlx::query_as("SELECT icon_file_id FROM servers WHERE id = $1")
             .bind(&server_id)
@@ -1080,7 +1091,7 @@ pub async fn update_server_settings(
                     // icon was always uploaded by the caller, so caller-scoped
                     // reclaim still frees it; an icon uploaded by someone else is
                     // left as a (GC-able) orphan rather than deleted.
-                    crate::upload_handlers::remove_file(&state.pool, old, claims.sub).await;
+                    crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                 }
             }
             StatusCode::OK.into_response()
@@ -1505,6 +1516,12 @@ pub async fn get_all_unread_counts(
     for (server_id, channel_id, unread) in rows {
         by_server.entry(server_id).or_default().push((channel_id, unread));
     }
+    // A channel the mode that is on hides is left out of the rail's bubble: nothing
+    // in that server's list could clear it (docs/SERVER_MODES.md). Its row stays, so
+    // the reconnect catch-up, which diffs rows, does not read an old unread as new
+    // when a mode comes on during a gap. A failed read keeps it in the total, as a
+    // badge too many beats losing one.
+    let hidden = crate::mode_handlers::channels_hidden_from(&state.pool, claims.sub).await.unwrap_or_default();
     let mut servers: Vec<ServerAggregateUnread> = Vec::with_capacity(by_server.len());
     for (server_id, channels) in by_server {
         let ids: Vec<i64> = channels.iter().map(|&(id, _)| id).collect();
@@ -1538,8 +1555,8 @@ pub async fn get_all_unread_counts(
                 unread_count: unread,
             })
             .collect();
-        let total: i64 = permitted.iter().map(|c| c.unread_count).sum();
-        if total > 0 {
+        let total: i64 = permitted.iter().filter(|c| !hidden.contains(&c.channel_id)).map(|c| c.unread_count).sum();
+        if !permitted.is_empty() {
             servers.push(ServerAggregateUnread {
                 server_id,
                 unread_count: total,

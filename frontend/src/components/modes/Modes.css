@@ -1,0 +1,165 @@
+/* Server modes (docs/SERVER_MODES.md): the selector under the server's name and
+   the notice when a mode starts. */
+
+.mode-selector {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: calc(100% - 16px);
+    margin: 8px 8px 0;
+    padding: 6px 10px;
+    border: 1px solid var(--border-faint);
+    border-radius: 8px;
+    background: var(--bg-modifier-hover);
+    color: var(--text-normal);
+    font: inherit;
+    text-align: left;
+    box-sizing: border-box;
+}
+
+button.mode-selector {
+    cursor: pointer;
+}
+
+button.mode-selector:hover {
+    background: var(--bg-modifier-active);
+}
+
+/* The hover background is lighter than what --text-muted is made for, on the tinted themes. */
+button.mode-selector:hover .mode-selector-kicker {
+    color: var(--text-normal);
+}
+
+button.mode-selector:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 1px;
+}
+
+.mode-selector-on {
+    border-color: var(--brand-primary);
+}
+
+.mode-selector-icon {
+    flex: none;
+    display: inline-flex;
+    color: var(--text-muted);
+}
+
+.mode-selector-on .mode-selector-icon {
+    color: var(--brand-primary);
+}
+
+.mode-selector-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.2;
+}
+
+.mode-selector-kicker {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.mode-selector-name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mode-notice {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin: 8px 16px 0;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--brand-primary);
+    /* Not --bg-floating: the light theme leaves that dark while its text goes
+       dark too, which put black ink on black here. */
+    background: var(--bg-secondary);
+    color: var(--text-normal);
+}
+
+.mode-notice-icon {
+    flex: none;
+    display: inline-flex;
+    color: var(--brand-primary);
+}
+
+.mode-notice-text {
+    flex: 1 1 160px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mode-notice-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    min-width: 0;
+}
+
+.mode-notice-btn {
+    max-width: 100%;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-modifier-hover);
+    color: var(--text-normal);
+    font: inherit;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The darkest brand token, as the activity notice uses: a white label on the yellow
+   theme's --brand-primary is 2.9:1. */
+.mode-notice-primary {
+    background: var(--brand-active);
+    color: #fff;
+}
+
+.mode-notice-primary:hover {
+    filter: brightness(0.9);
+}
+
+.mode-notice-close {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.mode-notice-close:hover {
+    background: var(--bg-modifier-hover);
+    color: var(--text-normal);
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .mode-selector {
+        min-height: 44px;
+    }
+
+    .mode-notice-btn {
+        min-height: 44px;
+    }
+
+    .mode-notice-close {
+        width: 44px;
+        height: 44px;
+    }
+}

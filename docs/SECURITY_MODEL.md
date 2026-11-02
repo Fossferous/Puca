@@ -117,6 +117,9 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events, and when each
   of your devices last went quiet or came back (idle/away presence, below)
+- A server's modes (docs/SERVER_MODES.md): their names and which channels they
+  list, which one is on, when it switched, and when its voice channels last had
+  someone in them
 - For a personal note (Púca Notes, migration 065): whether it has text,
   pictures or a voice note and roughly how much (the sealed envelopes' sizes,
   which also hint at how many pictures), the encrypted uploads themselves as
@@ -392,7 +395,7 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   notes, including a note's photo sealed offline). Two other doors are covered the same way:
   `uploadFile` in [`uploads.ts`](../frontend/src/api/uploads.ts), through which every picture
   the server stores in the clear passes (avatar, server icon, the create-a-server wizard's icon,
-  emoji), and `fileTransferManager.offerFile`, the peer-to-peer path a DM file over the 25 MB
+  emoji, a server mode's background), and `fileTransferManager.offerFile`, the peer-to-peer path a DM file over the 25 MB
   upload cap takes instead of the seal. The cap is checked on the file as chosen, before the
   strip. A test walks the source and fails if anything else posts to `/upload`. The recipients of an attachment are exactly the
   people its EXIF would be shown to, and end-to-end encryption does nothing about them. It is
@@ -1351,8 +1354,8 @@ messages: the server cannot see which channel a file was shared in, so it
 cannot warn anyone — the delay is the warning, and the deletion confirmation
 says so. An operator can clear `purge_after` within the window to undo a
 mistaken deletion's file loss; nothing else about the tombstone is reversible.
-Server icons and custom emoji you uploaded are NOT purged: they belong to the
-server now and its members still see them.
+Server icons, custom emoji and mode backgrounds you uploaded are NOT purged: they
+belong to the server now and its members still see them.
 
 If that changes, it needs to change as a product decision with three parts: the
 deletion confirmation must say what happens to files you shared, there should be
@@ -1676,7 +1679,9 @@ whole room. A ping from a connection that is not in the room, or anything
 that is not a ping, keeps the full gate. Moving or disconnecting someone from
 voice requires the moderator to be able to VIEW the channel the target is in
 (`move_member_voice`), with the route's existing "not in a voice channel"
-answer otherwise; reporting a message requires being able to VIEW its channel
+answer otherwise; a server mode's switch is the exception, ending the calls in
+the channels it hides whether or not whoever presses it can see them, and
+counting for them only the ones they can (docs/SERVER_MODES.md); reporting a message requires being able to VIEW its channel
 (`create_report`, through `check_message_view`), with the same 400 as an
 unknown id. A server's pinned clips channel is reported as `null` to members
 who cannot VIEW it (`visible_clip_channel_id`,

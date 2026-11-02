@@ -162,14 +162,15 @@ import './Chat.css';
 import { parseServerTimestampSecs } from '../utils/serverTime';
 import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
-import { canMoveVoiceMember, userMenuVoiceModeration } from '../utils/voiceMove';
+import { canMoveVoiceMember, movedOutOfHere, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
 import {
     useServers,
     useChannels,
     useServerMembers,
     fetchMembersWithPresence,
-    keys
+    keys,
+    useServerModes,
 } from '../hooks/queries';
 import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
@@ -188,6 +189,13 @@ import { useOpenWhile } from './games/useOpenWhile';
 import { GAME_NAMES } from '../api/games/gameWords';
 import { ActivityPicker } from './games/ActivityPicker';
 import { ActivityNotice } from './games/ActivityNotice';
+import { ModeNotice, ModeSelector } from './modes/ModeSelector';
+import { endedCallsWarning, modeMenuItems, noticeJoinName } from './modes/modeMenu';
+import { useModeLook } from './modes/useModeLook';
+import {
+    adoptModeFrame, callEveryoneBack, channelInMode, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
+    listedNow, notificationNav, setActiveMode, shownByMode, shownWithParent, usableHome, type ServerModes,
+} from '../api/serverModes';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
 import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedChannelsStore';
@@ -638,6 +646,18 @@ export function Chat({ onLogout }: ChatProps) {
 
     // Dependent queries
     const { data: channels = [], isFetched: channelsFetched } = useChannels(currentServer?.id || '');
+    // Server modes (docs/SERVER_MODES.md). The server row says which mode is on:
+    // it is pushed live, and its absence means a backend that predates modes.
+    const modesSupported = currentServer?.active_mode_id !== undefined;
+    const activeModeId = currentServer?.active_mode_id ?? null;
+    const { data: modesData } = useServerModes(currentServer?.id || '', modesSupported);
+    const activeMode = modesData?.modes.find(m => m.id === activeModeId) ?? null;
+    // What the mode that is on lists. Only for lists of places to go: `channels`
+    // stays whole, so a #mention or a notification can still open a hidden one.
+    const modeShownChannels = useMemo(
+        () => channels.filter(c => shownWithParent(c, channels, activeModeId)),
+        [channels, activeModeId],
+    );
     const { data: allMembers = [] } = useServerMembers(currentServer?.id || '');
     // Always-fresh view of the member list for WS handlers. The ChatMessage
     // handler lives in an effect keyed on the channel/server ids, so its
@@ -853,6 +873,10 @@ export function Chat({ onLogout }: ChatProps) {
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
     const currentVoiceChannelRef = useRef<Channel | null>(null);
+    // Where the server last cut this device's LiveKit session. See handleVoiceMoved.
+    const sfuCutRef = useRef<SfuCut | null>(null);
+    // The mode a ServerModeChanged just ended, for the RoomLeft that follows it.
+    const endedModeNameRef = useRef<string | null>(null);
     useEffect(() => { currentVoiceChannelRef.current = currentVoiceChannel; }, [currentVoiceChannel]);
 
     // Members of the server the VOICE CHANNEL belongs to — which is not always
@@ -1301,6 +1325,9 @@ export function Chat({ onLogout }: ChatProps) {
     // Tasks view is built for.
     const notesInApp = isTauri() && !isMobile;
     const notesOnScreen = notesInApp && showNotesView;
+    // A mode's look belongs to its server's own screen. These paint over that slot with
+    // currentServer still set, and the accent is on the document.
+    const modeLookStyle = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);
     // The message list can be what the shared scroller holds and still not be
     // SEEN: Notes lies over the chat as a view of its own, without touching
     // the scroller, so showingMessageList — which the scroll state follows —
@@ -1586,11 +1613,31 @@ export function Chat({ onLogout }: ChatProps) {
     // `handleChannelClick` directly would capture whichever versions existed
     // when the handler was registered, and a click could then jump to a channel
     // list from minutes ago.
-    const openChannelRef = useRef<(channelId: number) => void>(() => { });
+    const openChannelRef = useRef<(channelId: number, serverId?: string) => void>(() => { });
     useEffect(() => {
-        openChannelRef.current = (channelId: number) => {
+        openChannelRef.current = (channelId: number, serverId?: string) => {
             const ch = channels.find(c => c.id === channelId);
-            if (ch) handleChannelClick(ch);
+            if (ch) {
+                handleChannelClick(ch);
+                return;
+            }
+            // Another server's channel. Fetched rather than left to that server's list:
+            // a channel a mode hides has no row there to press.
+            const server = serverId ? servers.find(s => s.id === serverId) : undefined;
+            if (!server) return;
+            void queryClient.fetchQuery({
+                queryKey: keys.channels(server.id),
+                queryFn: () => listChannels(server.id),
+                staleTime: 30_000,
+            }).then((list: Channel[]) => {
+                const target = list.find(c => c.id === channelId);
+                if (!target) return;
+                setShowFriendsPanel(false);
+                setShowDevicesView(false);
+                setShowNotesView(false);
+                switchServer(server);
+                handleChannelClick(target);
+            }).catch(() => { /* stays where it is, like a click on a channel that is gone */ });
         };
     });
 
@@ -1752,7 +1799,7 @@ export function Chat({ onLogout }: ChatProps) {
     const hideMutedHere = currentServer ? isHideMutedChannels(currentServer.id) : false;
 
     // Context menu for channels, messages, users
-    const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
+    const { contextMenu, showContextMenu, showContextMenuAt, hideContextMenu } = useContextMenu();
 
     // User context menu state (for voice users and member list)
     const [userContextMenuTarget, setUserContextMenuTarget] = useState<{
@@ -1780,7 +1827,7 @@ export function Chat({ onLogout }: ChatProps) {
             // If we deleted the current channel, switch to another
             if (currentChannel?.id === channelId) {
                 // accessing channels from cache would be ideal, but we can look at local state 'channels'
-                const remaining = channels.filter(c => c.id !== channelId && c.channel_type === 0);
+                const remaining = modeShownChannels.filter(c => c.id !== channelId && c.channel_type === 0);
                 setCurrentChannel(remaining[0] || null);
             }
         } catch (error) {
@@ -1838,7 +1885,7 @@ export function Chat({ onLogout }: ChatProps) {
                     (mm.display_name || '').toLowerCase().includes(q) ||
                     (mm.server_nickname || '').toLowerCase().includes(q);
             }).slice(0, 8)
-            : channels.filter(c => c.channel_type === 0 && c.name.toLowerCase().includes(autocomplete.query.toLowerCase())).slice(0, 8);
+            : modeShownChannels.filter(c => c.channel_type === 0 && c.name.toLowerCase().includes(autocomplete.query.toLowerCase())).slice(0, 8);
 
     /**
      * Search the OPEN conversation (channel or DM).
@@ -2035,11 +2082,13 @@ export function Chat({ onLogout }: ChatProps) {
             // channels opened for it and may read none of them: opening one as
             // the text view would join a room the server refuses it (an alert)
             // and fetch history it refuses too. It gets no text view at all.
-            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : channels[0];
-            const textChannel = channels.find(c => c.channel_type === 0) || fallback;
+            // Nor into a channel a mode hides: entering a server would otherwise open
+            // it for every member, and being open would keep it listed.
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
+            const textChannel = modeShownChannels.find(c => c.channel_type === 0) || fallback;
             if (textChannel) setCurrentChannel(textChannel);
         }
-    }, [currentServer, channels, currentChannel, currentCollection]);
+    }, [currentServer, channels, modeShownChannels, currentChannel, currentCollection]);
 
     // DM loading handled by hooks, skipping specific DM init for now or relying on defaults
 
@@ -2474,7 +2523,9 @@ export function Chat({ onLogout }: ChatProps) {
         async function loadCollectionMessages() {
             try {
                 // Get all subchannels of this collection
-                const subchannels = channels.filter(c => c.parent_id === currentCollection!.id && c.channel_type === 0);
+                // Not one a mode hides: the list does not show it, so neither does its feed.
+                const subchannels = channels.filter(c => c.parent_id === currentCollection!.id && c.channel_type === 0
+                    && shownByMode(c, activeModeId));
                 console.debug('[Chat] Loading collection messages for', subchannels.length, 'subchannels');
 
                 if (subchannels.length === 0) {
@@ -2522,7 +2573,7 @@ export function Chat({ onLogout }: ChatProps) {
         loadCollectionMessages();
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
-    }, [currentCollection?.id, channels]);
+    }, [currentCollection?.id, channels, activeModeId]);
 
     // Presence (UserOnline / UserOffline / UserStatus) is no longer patched
     // into the members query here: the presence store hears every frame
@@ -2752,7 +2803,7 @@ export function Chat({ onLogout }: ChatProps) {
             // this device was in that call: say why it ended rather than
             // dropping silently. VoicePanel's own RoomLeft handler does the
             // teardown, exactly as for any eviction.
-            const notice = roomLeftNotice(msg.payload);
+            const notice = roomLeftNotice(msg.payload, endedModeNameRef.current);
             if (notice) showToast(notice);
         };
 
@@ -2805,7 +2856,9 @@ export function Chat({ onLogout }: ChatProps) {
             // with no network hop to wait for. Judging the move on `prev` alone
             // therefore saw null and dropped it: every move on an SFU channel
             // silently became a disconnect, under a toast that said otherwise.
-            const wasInSource = currentVoiceChannelRef.current?.id === payload.from_channel_id;
+            // The removal can also get here BEFORE this frame, so it leaves a
+            // note of where it cut us (movedOutOfHere).
+            const wasInSource = movedOutOfHere(payload.from_channel_id, currentVoiceChannelRef.current?.id, sfuCutRef.current, Date.now());
             if (!wasInSource) return; // stale, duplicated, or for another device
             /** Destination unreachable: say so and leave voice, rather than
              *  rendering a call the server has already taken us out of. */
@@ -2936,7 +2989,11 @@ export function Chat({ onLogout }: ChatProps) {
                 queryClient.fetchQuery({ queryKey: keys.channels(serverId), queryFn: () => listChannels(serverId), staleTime: 30_000 }),
                 fetchVoiceUsers(serverId).catch(() => ({ voice_users: [] })),
             ]);
-            return list.filter(c => c.channel_type === 1).map(c => ({
+            const active = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === serverId)?.active_mode_id;
+            // What the channel list shows: docs/EMBEDDING.md.
+            const occupants = (id: number) => voice.voice_users.filter(v => v.room_id === `voice_${id}`).length;
+            const here = { voiceChannelId: currentVoiceChannelRef.current?.id, occupants };
+            return list.filter(c => c.channel_type === 1 && listedNow(c, list, active, here)).map(c => ({
                 id: c.id,
                 name: c.name,
                 canConnect: hasPerm(c.my_permissions, PERM.CONNECT),
@@ -3026,10 +3083,16 @@ export function Chat({ onLogout }: ChatProps) {
                 title: `${p.author.username} sent a message`,
                 isOwn: false,           // already returned above if it were ours
                 isMuted: muted,
-                // Android: collapse per server, tap lands on that server.
+                // Android: collapse per server, tap lands on that server (or on the
+                // channel, when a mode leaves no row for it there).
                 notifyKey: `chan:${p.server_id}`,
-                nav: `server:${p.server_id}`,
-                onActivate: () => openChannelRef.current(p.channel_id),
+                nav: notificationNav(
+                    p.server_id,
+                    p.channel_id,
+                    queryClient.getQueryData<Channel[]>(keys.channels(p.server_id)),
+                    queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === p.server_id)?.active_mode_id,
+                ),
+                onActivate: () => openChannelRef.current(p.channel_id, p.server_id),
             });
             if (chatOnScreen && currentChannel?.id === p.channel_id) return;
             // Rail bubble: live nudge for anything not on screen. Deliberately
@@ -3044,13 +3107,13 @@ export function Chat({ onLogout }: ChatProps) {
             if (appIsForeground() && loadSettings().messageToasts) {
                 pushMessageToast({
                     title: `${p.author.username} sent a message`,
-                    onClick: () => openChannelRef.current(p.channel_id),
+                    onClick: () => openChannelRef.current(p.channel_id, p.server_id),
                 });
             }
         };
         wsClient.on('MessageNotification', handleMessageNotification);
         return () => wsClient.off('MessageNotification', handleMessageNotification);
-    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen]);
+    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen, queryClient]);
 
     // Somebody joined a server you are in.
     //
@@ -4080,6 +4143,94 @@ export function Chat({ onLogout }: ChatProps) {
         wsClient.on('MediaE2eeRequired', onMediaE2eeRequired);
         return () => wsClient.off('MediaE2eeRequired', onMediaE2eeRequired);
     }, [queryClient]);
+    // A server's mode was switched: its channels and its look change at once, for
+    // everyone online, with no reload. Someone in a voice channel the switch hid
+    // gets a RoomLeft right after this frame, whose reason says why; this remembers
+    // what to call the mode that ended.
+    const [modeNotice, setModeNotice] = useState<{ serverId: string; modeId: number } | null>(null);
+    useEffect(() => {
+        const onSwitched = (msg: ServerMessage) => {
+            const f = parseServerModeChanged(msg as { type: string; payload?: unknown });
+            if (!f) return;
+            const known = queryClient.getQueryData<ServerModes>(keys.modes(f.server_id))?.modes;
+            endedModeNameRef.current = known?.find(m => m.id === f.previous_mode_id)?.name ?? null;
+            adoptModeFrame<Server>(queryClient, keys.servers, f);
+            void queryClient.invalidateQueries({ queryKey: keys.modes(f.server_id) });
+            setModeNotice(prev => {
+                const quiet = f.active_mode_id === null || f.by === currentUserId || isServerMuted(f.server_id);
+                if (quiet) return prev?.serverId === f.server_id ? null : prev;
+                return { serverId: f.server_id, modeId: f.active_mode_id as number };
+            });
+        };
+        const onEdited = (msg: ServerMessage) => {
+            const serverId = parseServerModesEdited(msg as { type: string; payload?: unknown });
+            if (!serverId) return;
+            void queryClient.invalidateQueries({ queryKey: keys.modes(serverId) });
+            void queryClient.invalidateQueries({ queryKey: keys.channels(serverId) });
+        };
+        // Roles changed: may this person still switch, edit, call everyone back?
+        const onPermsChanged = (msg: ServerMessage) => {
+            const serverId = (msg.payload as { server_id?: string } | undefined)?.server_id;
+            if (serverId) void queryClient.invalidateQueries({ queryKey: keys.modes(serverId) });
+        };
+        // A switch while this device had no socket: the server rows say what is on
+        // now (keys.servers is the prefix of each server's modes and channels too).
+        const onConnected = () => {
+            endedModeNameRef.current = null;
+            void queryClient.invalidateQueries({ queryKey: keys.servers });
+        };
+        wsClient.on('ServerModeChanged', onSwitched);
+        wsClient.on('ServerModesEdited', onEdited);
+        wsClient.on('ChannelPermsChanged', onPermsChanged);
+        window.addEventListener('wsConnected', onConnected);
+        return () => {
+            wsClient.off('ServerModeChanged', onSwitched);
+            wsClient.off('ServerModesEdited', onEdited);
+            wsClient.off('ChannelPermsChanged', onPermsChanged);
+            window.removeEventListener('wsConnected', onConnected);
+        };
+    }, [queryClient, showToast, currentUserId]);
+    const noticeServer = modeNotice ? servers.find(s => s.id === modeNotice.serverId) : undefined;
+    const { data: noticeModes } = useServerModes(modeNotice?.serverId ?? '', !!modeNotice);
+    const noticeMode = noticeModes?.modes.find(m => m.id === modeNotice?.modeId) ?? null;
+    const activeHome = usableHome(activeMode, channels);
+    const noticeHome = modeNotice?.serverId === currentServer?.id ? usableHome(noticeMode, channels) : null;
+    const [settingsInitialTab, setSettingsInitialTab] = useState<'overview' | 'modes'>('overview');
+
+    const switchMode = async (modeId: number | null) => {
+        if (!currentServer || !modesData || modeId === activeModeId) return;
+        const people = channelsEndedBySwitch(channels, activeModeId, modeId)
+            .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
+        const warning = endedCallsWarning(activeMode, people);
+        if (warning && !confirm(warning)) return;
+        try {
+            await setActiveMode(currentServer.id, modeId);
+        } catch {
+            showToast("Couldn't switch the mode. Try again in a moment.");
+        }
+    };
+    const callBackToHome = async () => {
+        if (!currentServer || !activeHome) return;
+        try {
+            const { moved, skipped } = await callEveryoneBack(currentServer.id);
+            // The server moves everyone but the person asking: walk over like them.
+            const inCall = currentVoiceChannelRef.current;
+            const row = inCall && (channels.find(c => c.id === inCall.id) ?? inCall);
+            if (row && activeMode && row.id !== activeHome.id && channelInMode(row, channels, activeMode.id)) {
+                handleChannelClick(activeHome);
+            }
+            const held = skipped > 0 ? ` ${skipped} could not be moved: ranked at or above you, or not allowed in.` : '';
+            showToast(`Moved ${moved} to ${activeHome.name}.${held}`);
+        } catch {
+            showToast("Couldn't call everyone back. Try again in a moment.");
+        }
+    };
+    const listed = (c: Channel): boolean => listedNow(c, channels, activeModeId, {
+        openChannelId: currentChannel?.id ?? currentCollection?.id,
+        voiceChannelId: currentVoiceChannel?.id,
+        occupants: (id) => getVoiceUsersInRoom(`voice_${id}`).length,
+    });
+
     const voiceGamesGate = gamesGate({
         feature: callActivity.feature,
         gamesEnabled: voiceGamesEnabled,
@@ -4196,6 +4347,7 @@ export function Chat({ onLogout }: ChatProps) {
             channels,
             rosterOf: (channelId) => getVoiceUsersInRoom(`voice_${channelId}`),
             canMoveVoiceMembers,
+            isListed: listed,
         })
         : null;
     const userContextMenuVoiceChannel = userContextMenuVoice?.voiceChannel ?? null;
@@ -4314,6 +4466,16 @@ export function Chat({ onLogout }: ChatProps) {
                         .catch(() => { /* the deferred target waits for the next attempt */ });
                 }
                 // else: refetched and still absent — genuinely gone; stay put.
+            } else if (target.startsWith('channel:')) {
+                // A channel the server's list would not show (api/serverModes.ts
+                // notificationNav). 'channel:<server id>:<channel id>'.
+                const [, serverId, channelId] = target.split(':');
+                if (servers.some(sv => sv.id === serverId)) {
+                    openChannelRef.current(Number(channelId), serverId);
+                    if (isMobile) setMobilePanel('chat');
+                } else if (isServersLoading || servers.length === 0) {
+                    deferNav(target);
+                }
             } else if (target.startsWith('server:')) {
                 const server = servers.find(sv => sv.id === target.slice(7));
                 if (server) {
@@ -4723,7 +4885,7 @@ export function Chat({ onLogout }: ChatProps) {
                     // could be saved onto B.
                     key={currentServer.id}
                     isOpen={showSettingsModal}
-                    onClose={() => setShowSettingsModal(false)}
+                    onClose={() => { setShowSettingsModal(false); setSettingsInitialTab('overview'); }}
                     onSave={async () => {
                         // `currentServer` is a useState SNAPSHOT taken at switch time and
                         // the rail reads the react-query cache, so a save must refresh the
@@ -4756,6 +4918,8 @@ export function Chat({ onLogout }: ChatProps) {
                     initialAfkTimeoutMinutes={currentServer.afk_timeout_minutes}
                     // Games (docs/GAMES.md): undefined = a pre-games backend.
                     initialGamesEnabled={currentServer.games_enabled}
+                    modesSupported={modesSupported}
+                    initialTab={settingsInitialTab}
                 />
             )}
 
@@ -5136,6 +5300,21 @@ export function Chat({ onLogout }: ChatProps) {
                         </button>
                     </div>
                 )}
+                {currentServer && modesSupported && (
+                    <ModeSelector
+                        data={modesData}
+                        activeModeId={activeModeId}
+                        homeName={activeHome?.name ?? null}
+                        onOpen={(at) => modesData && showContextMenuAt(at, modeMenuItems({
+                            data: modesData,
+                            activeModeId,
+                            homeName: activeHome?.name ?? null,
+                            onSwitch: (id) => { void switchMode(id); },
+                            onCallBack: () => { void callBackToHome(); },
+                            onManage: () => { setSettingsInitialTab('modes'); setShowSettingsModal(true); },
+                        }))}
+                    />
+                )}
 
                 {/* Scrollable middle: channel/DM sections. Scrolls on its own so
                     the voice panel + profile bar below stay pinned and visible
@@ -5162,7 +5341,7 @@ export function Chat({ onLogout }: ChatProps) {
 
                         {/* Server-wide "All checklists" board — only when the server
                             has at least one checklist channel. */}
-                        {channels.some(c => c.has_checklist) && (
+                        {modeShownChannels.some(c => c.has_checklist) && (
                             <li
                                 className={`channel ${showAllChecklists ? 'active' : ''}`}
                                 onClick={() => {
@@ -5188,6 +5367,8 @@ export function Chat({ onLogout }: ChatProps) {
                             never vanish from under the reader. */}
                         {channels
                             .filter(c => (c.channel_type === 0 || c.channel_type === 2) && !c.parent_id)
+                            // A hidden collection stays as the header of an open subchannel.
+                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && currentChannel?.id === sub.id))
                             .filter(c => {
                                 if (!hideMutedHere || !isChannelMuted(c.id) || currentChannel?.id === c.id) return true;
                                 // A muted COLLECTION must not drag its children out of
@@ -5205,6 +5386,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
                                 const subchannels = channels.filter(sub => sub.parent_id === channel.id)
+                                    .filter(listed)
                                     .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || currentChannel?.id === sub.id);
 
                                 return (
@@ -5307,6 +5489,7 @@ export function Chat({ onLogout }: ChatProps) {
                     >
                         {channels
                             .filter(c => c.channel_type === 1)
+                            .filter(listed)
                             // AFK is always pinned last; the rest keep server order.
                             .sort((a, b) => (a.is_afk ? 1 : 0) - (b.is_afk ? 1 : 0))
                             .map(channel => {
@@ -5522,7 +5705,10 @@ export function Chat({ onLogout }: ChatProps) {
                             currentUsername={currentUser?.username || 'Unknown'}
                             memberAvatars={new Map(allMembers.map(m => [m.id, m.avatar_file_id || null]))}
                             memberSounds={voiceMemberSounds}
-                            onDisconnect={() => setCurrentVoiceChannel(null)}
+                            onDisconnect={(cutByServer) => {
+                                if (cutByServer) sfuCutRef.current = { channelId: currentVoiceChannel.id, at: Date.now() };
+                                setCurrentVoiceChannel(null);
+                            }}
                             // The voice channel may belong to a different server than the
                             // one currently viewed — resolve its own server's policy.
                             serverRequireMediaE2ee={
@@ -5640,7 +5826,7 @@ export function Chat({ onLogout }: ChatProps) {
             </aside>
 
             {/* Main Chat Area */}
-            <main className="chat-main">
+            <main className="chat-main" style={currentDM ? undefined : modeLookStyle}>
                 <header className="chat-header">
                     {currentDM ? (
                         <>
@@ -5788,6 +5974,22 @@ export function Chat({ onLogout }: ChatProps) {
                     />
                 )}
 
+                {/* "<mode> is on - Join <channel>" (docs/SERVER_MODES.md): the
+                    activity notice's shape. No focus taken, no sound. */}
+                {modeNotice && noticeMode && noticeServer?.active_mode_id === modeNotice.modeId && (
+                    <ModeNotice
+                        modeName={noticeMode.name}
+                        otherServerName={modeNotice.serverId !== currentServer?.id ? noticeServer.name : null}
+                        joinName={noticeJoinName(noticeHome, currentVoiceChannel?.id)}
+                        onJoin={() => {
+                            setModeNotice(null);
+                            if (noticeHome) handleChannelClick(noticeHome);
+                        }}
+                        onOpenServer={() => { if (noticeServer) switchServer(noticeServer); }}
+                        onDismiss={() => setModeNotice(null)}
+                    />
+                )}
+
                 {/* "<name> started Poker - Join / Watch" (docs/GAMES.md,
                     *Activities*): to everyone in the call when an activity
                     starts. A status line, not a dialog - no focus taken, no
@@ -5831,7 +6033,7 @@ export function Chat({ onLogout }: ChatProps) {
                         /* Server-wide "All checklists" board */
                         <AllChecklistsView
                             serverName={currentServer?.name || 'Server'}
-                            channels={channels}
+                            channels={modeShownChannels}
                             onOpenChannel={(ch) => { setShowAllChecklists(false); handleChannelClick(ch); }}
                             currentUserId={currentUserId}
                             resolveUserName={resolveMemberName}

@@ -948,6 +948,20 @@ pub async fn move_member_voice(
             .into_response();
     }
 
+    perform_voice_move(state, server_id, &claims, user_id, payload).await
+}
+
+/// [`move_member_voice`] once the caller is known to hold MOVE_MEMBERS and the
+/// target is someone else: every check that depends on the target and the
+/// rooms, then the move. Call everyone back (mode_handlers) runs each person
+/// through this, so the two entry points cannot disagree about who may be moved.
+pub(crate) async fn perform_voice_move(
+    state: Arc<AppState>,
+    server_id: String,
+    claims: &Claims,
+    user_id: i64,
+    payload: VoiceMoveRequest,
+) -> axum::response::Response {
     // The target must be a member of THIS server. Every check that follows
     // passes for a server owner against ANY user id on the instance
     // (ADMINISTRATOR satisfies MOVE_MEMBERS, can_moderate short-circuits for an
@@ -1257,6 +1271,20 @@ pub async fn log_audit_action(
     server_id: &str,
     action_type: &str,
     actor_id: i64,
+    target_id: Option<i64>,
+    target_type: Option<&str>,
+    details: Option<&str>,
+) {
+    log_audit_row(pool, server_id, action_type, Some(actor_id), target_id, target_type, details).await;
+}
+
+/// [`log_audit_action`] where nobody may have acted: `actor_id` None is the
+/// server doing it itself (a mode turning itself off).
+pub async fn log_audit_row(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    action_type: &str,
+    actor_id: Option<i64>,
     target_id: Option<i64>,
     target_type: Option<&str>,
     details: Option<&str>,

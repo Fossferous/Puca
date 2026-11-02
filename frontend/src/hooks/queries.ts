@@ -1,6 +1,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import * as api from '../api/servers';
+import { listModes } from '../api/serverModes';
 import { ingestPresenceSnapshot } from '../api/presenceStore';
 
 // --- Keys ---
@@ -10,6 +11,7 @@ export const keys = {
     server: (id: string) => [...keys.servers, id] as const,
     channels: (serverId: string) => [...keys.server(serverId), 'channels'] as const,
     members: (serverId: string) => [...keys.server(serverId), 'members'] as const,
+    modes: (serverId: string) => [...keys.server(serverId), 'modes'] as const,
     messages: (channelId: number) => ['channels', channelId, 'messages'] as const,
 };
 
@@ -27,6 +29,18 @@ export function useChannels(serverId: string) {
         queryKey: keys.channels(serverId),
         queryFn: () => api.listChannels(serverId),
         enabled: !!serverId,
+    });
+}
+
+/**
+ * A server's modes (docs/SERVER_MODES.md). `supported`: the server row says this
+ * backend has them. An older one has no such route, so it is never asked.
+ */
+export function useServerModes(serverId: string, supported: boolean) {
+    return useQuery({
+        queryKey: keys.modes(serverId),
+        queryFn: () => listModes(serverId),
+        enabled: !!serverId && supported,
     });
 }
 

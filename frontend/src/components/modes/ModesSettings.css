@@ -1,0 +1,260 @@
+/* Server Settings, Modes (docs/SERVER_MODES.md). Sits inside the settings modal's
+   content column and reuses its .form-group, .setting-help and buttons. */
+
+.modes-intro {
+    display: block;
+    margin: 0 0 12px;
+}
+
+.mode-add {
+    display: flex;
+    gap: 8px;
+    margin: 16px 0;
+}
+
+.mode-add input {
+    flex: 1;
+    min-width: 0;
+}
+
+.mode-card {
+    margin: 16px 0;
+    padding: 16px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.mode-field-label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.mode-on-now {
+    color: var(--text-positive);
+}
+
+.mode-channel-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+/* Two classes: `.form-group label` would otherwise make these a block of small
+   capitals. */
+.modes-settings .mode-channel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin: 0;
+    padding: 4px 6px;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 14px;
+    font-weight: 400;
+    text-transform: none;
+    cursor: pointer;
+}
+
+/* A checkbox is its own size, not a share of the row: the modal's inputs are wide,
+   which left a channel's name a few letters. */
+.modes-settings .mode-channel input[type="checkbox"] {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+}
+
+/* The same rule hides the switch's track: an inline span has no width. */
+.modes-settings .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    color: var(--text-normal);
+    font-size: 14px;
+    font-weight: 400;
+    text-transform: none;
+}
+
+.modes-settings .toggle-switch {
+    flex: none;
+    display: inline-block;
+}
+
+.modes-settings .mode-channel:hover {
+    background: var(--bg-modifier-hover);
+}
+
+.mode-channel-icon {
+    flex: none;
+    display: inline-flex;
+    color: var(--text-muted);
+}
+
+.modes-settings .mode-channel-sub {
+    padding-left: 28px;
+}
+
+.mode-channel-parent {
+    /* The name is what the row is for: this one gives way. */
+    flex: 1 1 0;
+    min-width: 0;
+    padding-left: 8px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* Red and green text miss AA on half the themes. The tint says which it is. */
+.modes-settings .notice.error,
+.modes-settings .notice.success {
+    color: var(--text-normal);
+}
+
+.mode-channel-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mode-background-row,
+.mode-accent-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.mode-background-preview {
+    width: 128px;
+    height: 72px;
+    flex: none;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+}
+
+.mode-background-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.mode-background-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.modes-settings .secondary-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-normal);
+    font: inherit;
+    cursor: pointer;
+}
+
+.modes-settings .secondary-btn:hover:not(:disabled) {
+    background: var(--bg-modifier-hover);
+}
+
+.modes-settings .secondary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.mode-accent-row input[type="color"] {
+    width: 44px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+}
+
+.mode-accent-sample {
+    padding: 6px 12px;
+    border-radius: 4px;
+    background: var(--brand-primary);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.mode-accent-none {
+    display: inline;
+}
+
+.mode-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.mode-card-actions .danger-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* The app's red is 3.4:1 on the light theme's card. */
+[data-theme="light"] .mode-card-actions .danger-btn:not(:hover) {
+    color: #b3261e;
+    border-color: #b3261e;
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .mode-add {
+        flex-direction: column;
+    }
+
+    .mode-add input,
+    .mode-card input[type="text"],
+    .mode-card select {
+        font-size: 16px;
+        min-height: 44px;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .mode-channel-list {
+        grid-template-columns: 1fr;
+    }
+
+    .modes-settings .mode-channel {
+        min-height: 44px;
+    }
+
+    .modes-settings .mode-channel input[type="checkbox"] {
+        width: 20px;
+        height: 20px;
+    }
+
+    .modes-settings .primary-btn,
+    .modes-settings .danger-btn,
+    .modes-settings .secondary-btn {
+        min-height: 44px;
+    }
+
+    .mode-accent-row input[type="color"] {
+        height: 44px;
+    }
+}

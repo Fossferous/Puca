@@ -12,6 +12,7 @@ import { inviteLink } from '../api/pendingInvite';
 import { statusOf } from '../api/client';
 import type { Invite, Ban, Report, AuditLogEntry, Channel } from '../api/servers';
 import { RoleSettingsModal } from './RoleSettingsModal';
+import { ModesSettings } from './modes/ModesSettings';
 import { EmojiSettings } from './EmojiSettings';
 import { CardsIcon, CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, MoonIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
 import { AFK_TIMEOUT_CHOICES_MIN } from '../utils/afkIdle';
@@ -68,6 +69,11 @@ interface ServerSettingsModalProps {
     /** Games in voice calls (docs/GAMES.md). undefined = the backend
      *  predates games: render the switch disabled and never send it. */
     initialGamesEnabled?: boolean;
+    /** The backend has server modes (docs/SERVER_MODES.md): show their tab. */
+    modesSupported?: boolean;
+    /** The tab to open on, when opened from somewhere that knows (the selector's
+     *  Manage modes). */
+    initialTab?: 'overview' | 'modes';
 }
 
 export function ServerSettingsModal({
@@ -87,8 +93,10 @@ export function ServerSettingsModal({
     initialClipChannelId = null,
     initialAfkTimeoutMinutes,
     initialGamesEnabled,
+    modesSupported = false,
+    initialTab = 'overview',
 }: ServerSettingsModalProps) {
-    const [activeTab, setActiveTab] = useState<'overview' | 'roles' | 'emoji' | 'invites' | 'moderation'>('overview');
+    const [activeTab, setActiveTab] = useState<'overview' | 'roles' | 'modes' | 'emoji' | 'invites' | 'moderation'>(initialTab);
 
     // Overview state
     const [name, setName] = useState(serverName);
@@ -156,7 +164,7 @@ export function ServerSettingsModal({
         const opening = isOpen && !wasOpenRef.current;
         wasOpenRef.current = isOpen;
         if (!opening) return;
-        setActiveTab('overview');
+        setActiveTab(initialTab);
         setName(serverName);
         setIsPublic(initialIsPublic);
         setRequireMediaE2ee(initialRequireMediaE2ee);
@@ -389,6 +397,11 @@ export function ServerSettingsModal({
                         <button className={`nav-item ${activeTab === 'roles' ? 'active' : ''}`} onClick={() => setActiveTab('roles')}>
                             Roles
                         </button>
+                        {modesSupported && (
+                            <button className={`nav-item ${activeTab === 'modes' ? 'active' : ''}`} onClick={() => setActiveTab('modes')}>
+                                Modes
+                            </button>
+                        )}
                         <button className={`nav-item ${activeTab === 'emoji' ? 'active' : ''}`} onClick={() => setActiveTab('emoji')}>
                             Emoji
                         </button>
@@ -623,6 +636,8 @@ export function ServerSettingsModal({
 
                     {/* Emoji Tab — custom emoji upload/delete. The component
                         existed, complete, with no way to reach it. */}
+                    {activeTab === 'modes' && modesSupported && <ModesSettings serverId={serverId} />}
+
                     {activeTab === 'emoji' && (
                         <div className="tab-content emoji-tab">
                             <h2>Emoji</h2>
@@ -764,7 +779,9 @@ export function ServerSettingsModal({
                                                 <div className="mod-item-main">
                                                     <span className="mod-item-title">
                                                         <span className={`audit-badge ${entry.action_type}`}>{entry.action_type}</span>
-                                                        {' by '}{entry.actor_username ?? `user ${entry.actor_id}`}
+                                                        {entry.action_type === 'mode_auto_off'
+                                                            ? ' (its voice channels stayed empty)'
+                                                            : <>{' by '}{entry.actor_username ?? `user ${entry.actor_id}`}</>}
                                                         {entry.target_id != null ? ` → ${entry.target_type ?? 'target'} ${entry.target_id}` : ''}
                                                     </span>
                                                     <span className="mod-item-sub">

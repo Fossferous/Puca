@@ -644,7 +644,8 @@
     }
 
     .server-settings-sidebar {
-        width: 100%;
+        /* Stops short of the pinned close button, so no tab scrolls under it. */
+        width: calc(100% - 56px);
         flex-shrink: 0;
         padding: calc(var(--safe-area-top, 0px) + 8px) 8px 8px;
         overflow-x: auto;

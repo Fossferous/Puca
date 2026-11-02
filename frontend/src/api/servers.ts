@@ -28,6 +28,9 @@ export interface Server {
      *  default (migration 073). Absent ⇒ the server predates games: the
      *  client offers no table and the toggle renders disabled. */
     games_enabled?: boolean;
+    /** The server mode that is on (docs/SERVER_MODES.md), null for none. Absent
+     *  (not null) means the backend predates modes: the client offers none. */
+    active_mode_id?: number | null;
 }
 
 export interface Channel {
@@ -46,6 +49,9 @@ export interface Channel {
     sfu_mode?: boolean;
     /** Resolved effective permission bits for the requesting user (see api/permissionBits.ts). */
     my_permissions?: number;
+    /** The server modes this channel belongs to. Empty or absent: always listed.
+     *  Otherwise listed only while one of them is on (api/serverModes.ts). */
+    mode_ids?: number[];
 }
 
 export interface FeedMessage {

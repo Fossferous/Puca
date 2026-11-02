@@ -36,6 +36,22 @@ describe('userMenuVoiceModeration', () => {
         expect(v.targets.map(c => c.id)).toEqual([lounge.id, afk.id]);
     });
 
+    it('offers only what the list shows (a drag reaches only rendered rows), and still finds who is where', () => {
+        const listedOnly = (c: VoiceMoveChannel) => c.id !== lounge.id;
+        const v = userMenuVoiceModeration({
+            userId: MEMBER, channels, canMoveVoiceMembers: true,
+            rosterOf: rosters({ [gaming.id]: [MEMBER] }),
+            isListed: listedOnly,
+        });
+        expect(v.targets.map(c => c.id)).toEqual([afk.id]);
+        const hiddenCall = userMenuVoiceModeration({
+            userId: MEMBER, channels, canMoveVoiceMembers: true,
+            rosterOf: rosters({ [lounge.id]: [MEMBER] }),
+            isListed: listedOnly,
+        });
+        expect(hiddenCall.voiceChannel?.id, 'someone in a hidden channel is still found').toBe(lounge.id);
+    });
+
     // The helper takes no viewer input at all, by design; that the MEMBER LIST
     // reaches it whatever call the viewer is in is pinned through the real Chat
     // in chatMemberListVoiceModeration.test.tsx. This case pins only that the

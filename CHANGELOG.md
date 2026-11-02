@@ -6,8 +6,20 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+
+- **Server modes: channels that only show when you need them.** A mode is a set of channels that are listed only while it is on, such as the town square and private rooms of a game of Blood on the Clocktower. Set one up under **Server Settings > Modes** (Manage Channels), then pick it from **Mode** under the server's name. A new **Switch Modes** permission decides who can do that, so someone can run a game without being able to delete channels. One mode is on at a time, and everyone online sees the change at once. **Turning a mode off disconnects everyone in its voice channels**, with a warning first; messages in its text channels are kept and come back with it. A mode can also have:
+    - a **background** behind the chat, dimmed as far as that picture needs for messages to stay readable on each person's theme. It is stored unencrypted, like the server icon;
+    - an **accent colour**, adjusted for each person's theme so button labels stay readable;
+    - a **main voice channel**, with a quiet notice and a **Join** button when the mode starts, and **Call everyone to** it, to pull people out of the private rooms;
+    - **Turn off when empty**, after 30 minutes with nobody in its voice channels.
+
+  A mode tidies the list. It does not keep anyone out: anyone allowed to see a channel can still open it from a mention, a notification or a link, and people on an older version see every channel. Use channel permissions to keep someone out. High Contrast hides the background and colour, and anyone can turn them off under **Settings > Server Backgrounds and Colours**. Needs the new server. (docs/SERVER_MODES.md)
+
 ### Fixed
 
+- **Being moved between voice channels no longer drops you from voice.** On a channel using the media server, a move could reach you after the media server had already ended your call. The move was then ignored, and you were left out of voice.
+- **Menus are readable on the Light theme.** Right-click menus, the server icon's among them, put dark text on their dark background.
 - **Púca for Steam Deck: sharing your screen shows your game, not black.** A share started from the plugin showed viewers only black, with a game in front, a non-Steam game or Steam's own menus. The Deck's screen capture let through the first frame and dropped every one after it, so no picture ever reached the call. It now sends the game at 30 frames a second, and pauses for menus, the keyboard and notifications as before. One Steam setting still stops it: with **Game Recording** set to **Record in Background**, Steam's own recorder takes the screen while a game runs, and Púca gets no picture. The plugin now tells you so instead of sending black, and asks you to turn that setting off. This is Púca for Steam Deck 0.4.2, which comes separately from Púca: the panel offers it as an update once it is out. (docs/STEAM_DECK.md)
 
 ## 0.9.854 — 2026-10-29
