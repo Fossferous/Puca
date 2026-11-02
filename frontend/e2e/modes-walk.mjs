@@ -338,6 +338,17 @@ async function menuLegible(page, label) {
     await page.locator('.context-menu').waitFor({ state: 'detached', timeout: 5000 });
 }
 
+function keepSockets() {
+    const Native = window.WebSocket;
+    window.__sockets = [];
+    window.WebSocket = class extends Native {
+        constructor(...args) {
+            super(...args);
+            window.__sockets.push(this);
+        }
+    };
+}
+
 const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
 const MODE = 'Blood on the Clocktower';
 
@@ -353,6 +364,9 @@ try {
 
     const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const phoneCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
+    // Every WebSocket the page opens, so a test can drop the app's without asking the app:
+    // going offline does not end one that is already open.
+    await phoneCtx.addInitScript(keepSockets);
     const storyCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const A = await signIn(desktop, 'mda_' + stamp, 'owner');
     const B = await signIn(phoneCtx, 'mdb_' + stamp, 'phone');
@@ -360,6 +374,7 @@ try {
     const moverCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     // This one is also an embedding host (docs/EMBEDDING.md), for what the host is listed.
     await moverCtx.addInitScript(() => { window.__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'modes walk' }; });
+    await moverCtx.addInitScript(keepSockets);
     const D = await signIn(moverCtx, 'mdd_' + stamp, 'mover');
 
     // ── Fixture: a server with the channels of a game, and two ordinary ones.
@@ -923,10 +938,15 @@ try {
     check('control: the other device still shows the notice', await D.locator('[data-testid="mode-notice"]').count() === 1);
     const dropSocket = async (ctx, page) => {
         await ctx.setOffline(true);
-        await page.evaluate(async () => { (await import('/src/api/websocket.ts')).wsClient.ws?.close(); });
+        // Only the app's own: vite reloads a page whose hot-reload socket comes back.
+        return page.evaluate((origin) => {
+            const open = window.__sockets.filter(s => s.url.startsWith(origin) && s.readyState === WebSocket.OPEN);
+            for (const s of open) s.close();
+            return open.length;
+        }, API.replace(/^http/, 'ws'));
     };
-    await dropSocket(phoneCtx, B);
-    await dropSocket(moverCtx, D);
+    const dropped = [await dropSocket(phoneCtx, B), await dropSocket(moverCtx, D)];
+    check('each device had a socket to drop', dropped.every(n => n >= 1), dropped);
     check('the phone\'s socket is really gone: it left the room', !!await until(async () =>
         !(await A.locator('.voice-channel-container', { hasText: 'Town Square' }).first().innerText()).includes('mdb_'), 25000));
     // Off leaves no notice behind. The owner still has the one the storyteller's switch
@@ -936,10 +956,11 @@ try {
     check('no notice is left behind when the mode ends', !!await until(async () => (await A.locator('[data-testid="mode-notice"]').count()) === 0, 5000));
     await phoneCtx.setOffline(false);
     await moverCtx.setOffline(false);
+    // The toast first: it only stays a few seconds, and reconnecting backs off for longer.
+    check('the phone reconnects and is told its call ended and why', !!await until(async () => /ended, so this call ended/.test(await B.evaluate(() => document.body.innerText)), 45000));
+    check('it is out of the ended call, not back in it', !!await until(async () =>
+        (await B.locator('.voice-panel-compact .voice-connected-label').count()) === 0, 8000));
     check('a device that missed the frame drops the notice once it reconnects', !!await until(async () => (await D.locator('[data-testid="mode-notice"]').count()) === 0, 45000));
-    check('the phone reconnected and is out of the ended call, not back in it', !!await until(async () =>
-        (await B.locator('.voice-panel-compact .voice-connected-label').count()) === 0, 45000));
-    check('and it is told why', !!await until(async () => /ended, so this call ended/.test(await B.evaluate(() => document.body.innerText)), 8000));
     await sleep(2000);
     check('it stayed out: nobody is back in the hidden channel', !lists(await listed(A), 'Town Square'), await listed(A));
 
