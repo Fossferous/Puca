@@ -22,15 +22,13 @@ vi.mock('../api/servers', async (importOriginal) => ({
 }));
 
 const { useChannelSources } = await import('../notes/model/notesQueries');
-type Sources = ReturnType<typeof useChannelSources>['sources'];
 
 let root: Root;
 let container: HTMLDivElement;
-let sources: Sources = [];
 
 function Probe() {
-    sources = useChannelSources().sources;
-    return null;
+    const { sources } = useChannelSources();
+    return <pre>{JSON.stringify(Object.fromEntries(sources.map(s => [s.title, s.hiddenByMode])))}</pre>;
 }
 
 async function mount() {
@@ -39,11 +37,10 @@ async function mount() {
     for (let i = 0; i < 8; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 }
 
-const hidden = () => Object.fromEntries(sources.map(s => [s.title, s.hiddenByMode]));
+const hidden = () => JSON.parse(container.textContent || '{}');
 
 beforeEach(() => {
     activeMode = null;
-    sources = [];
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
