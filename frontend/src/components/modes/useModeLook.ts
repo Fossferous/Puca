@@ -76,6 +76,8 @@ export function useModeLook(mode: ServerMode | null): CSSProperties | undefined 
     }, [fileId, loaded?.fileId]);
 
     return useMemo(() => {
+        // The theme decides how far the picture has to be dimmed.
+        void look;
         if (!fileId || loaded?.fileId !== fileId) return undefined;
         const surface = readThemeColor('--bg-primary');
         const texts = ['--text-normal', '--text-muted', '--text-link'].map(readThemeColor).filter((c): c is Rgb => c !== null);
@@ -87,6 +89,5 @@ export function useModeLook(mode: ServerMode | null): CSSProperties | undefined 
             backgroundSize: 'cover',
             backgroundPosition: 'center',
         } satisfies CSSProperties;
-        // `look`: the theme decides how far the picture has to be dimmed.
     }, [fileId, loaded, look]);
 }

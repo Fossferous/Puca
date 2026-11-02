@@ -189,7 +189,8 @@ import { useOpenWhile } from './games/useOpenWhile';
 import { GAME_NAMES } from '../api/games/gameWords';
 import { ActivityPicker } from './games/ActivityPicker';
 import { ActivityNotice } from './games/ActivityNotice';
-import { ModeNotice, ModeSelector, endedCallsWarning, modeMenuItems } from './modes/ModeSelector';
+import { ModeNotice, ModeSelector } from './modes/ModeSelector';
+import { endedCallsWarning, modeMenuItems } from './modes/modeMenu';
 import { useModeLook } from './modes/useModeLook';
 import {
     applyActiveMode, callEveryoneBack, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
@@ -2055,9 +2056,9 @@ export function Chat({ onLogout }: ChatProps) {
             // channels opened for it and may read none of them: opening one as
             // the text view would join a room the server refuses it (an alert)
             // and fetch history it refuses too. It gets no text view at all.
-            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
-            // Not into a channel a mode hides: entering a server would otherwise open
+            // Nor into a channel a mode hides: entering a server would otherwise open
             // it for every member, and being open would keep it listed.
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
             const textChannel = modeShownChannels.find(c => c.channel_type === 0) || fallback;
             if (textChannel) setCurrentChannel(textChannel);
         }

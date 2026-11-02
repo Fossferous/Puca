@@ -51,7 +51,8 @@ vi.mock('../api/servers', async (importOriginal) => ({
     updateRole: (...a: unknown[]) => updateRole(...(a as [])),
 }));
 
-const { ModeNotice, ModeSelector, endedCallsWarning, modeMenuItems } = await import('../components/modes/ModeSelector');
+const { ModeNotice, ModeSelector } = await import('../components/modes/ModeSelector');
+const { endedCallsWarning, modeMenuItems } = await import('../components/modes/modeMenu');
 const { ModesSettings } = await import('../components/modes/ModesSettings');
 const { RoleSettingsModal } = await import('../components/RoleSettingsModal');
 const { PERMISSIONS, unsignedMask } = await import('../api/permissionBits');

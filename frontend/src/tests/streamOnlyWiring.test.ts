@@ -258,7 +258,7 @@ const PINS: Pin[] = [
     {
         name: 'a stream-only account is not given a voice channel as its text view (the server refuses that room)',
         src: 'chat',
-        holds: (c) => /const fallback = isRestricted\(channels\[0\]\.my_permissions, PERM\.STREAM_ONLY\) \? undefined : channels\[0\];\s*const textChannel = channels\.find\(c => c\.channel_type === 0\) \|\| fallback;\s*if \(textChannel\) setCurrentChannel\(textChannel\);/.test(c),
+        holds: (c) => /const fallback = isRestricted\(channels\[0\]\.my_permissions, PERM\.STREAM_ONLY\) \? undefined : modeShownChannels\[0\];\s*const textChannel = modeShownChannels\.find\(c => c\.channel_type === 0\) \|\| fallback;\s*if \(textChannel\) setCurrentChannel\(textChannel\);/.test(c),
         mutants: [
             ['the first channel, whatever it is', replace('|| fallback;', '|| channels[0];')],
         ],
