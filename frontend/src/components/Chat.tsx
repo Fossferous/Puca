@@ -164,6 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, movedOutOfHere, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
+import { deleteChannelQuestion, drawnUnderCollection, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -1815,13 +1816,14 @@ export function Chat({ onLogout }: ChatProps) {
     // Handle channel deletion
     const handleDeleteChannel = async (channelId: number) => {
         if (!currentServer) return;
-        if (!confirm('Are you sure you want to delete this channel?')) return;
+        if (!confirm(deleteChannelQuestion(channels, channelId))) return;
 
         try {
             await deleteChannel(channelId);
-            // Update cache
+            // Update cache. A collection's channels went with it: a voice room is
+            // drawn apart from its collection, so it would otherwise stay listed.
             queryClient.setQueryData(keys.channels(currentServer.id), (old: Channel[] | undefined) => {
-                return (old || []).filter(c => c.id !== channelId);
+                return withoutDeletedChannel(old || [], channelId);
             });
 
             // If we deleted the current channel, switch to another
@@ -4003,42 +4005,21 @@ export function Chat({ onLogout }: ChatProps) {
             console.log('[MOUSE DRAG] Mouse up - dragging:', draggingChannelId, 'over:', dragOverChannelId);
 
             if (draggingChannelId && dragOverChannelId && currentServer) {
-                const draggedChannel = channels.find(c => c.id === draggingChannelId);
-                const targetChannel = channels.find(c => c.id === dragOverChannelId);
+                const newOrder = reorderedChannelIds(channels, draggingChannelId, dragOverChannelId);
 
-                if (draggedChannel && targetChannel && draggedChannel.parent_id === targetChannel.parent_id) {
-                    // Reorder siblings of the same kind: voice channels only move
-                    // among voice channels (AFK stays pinned and never moves),
-                    // text/collections among text/collections.
-                    const isVoiceDrag = draggedChannel.channel_type === 1;
-                    const siblings = channels.filter(c =>
-                        c.parent_id === draggedChannel.parent_id &&
-                        (isVoiceDrag
-                            ? c.channel_type === 1 && !c.is_afk
-                            : (c.channel_type === 0 || c.channel_type === 2)));
-                    const oldIndex = siblings.findIndex(c => c.id === draggedChannel.id);
-                    const newIndex = siblings.findIndex(c => c.id === targetChannel.id);
+                if (newOrder) {
+                    console.log('[MOUSE DRAG] Reordering to:', newOrder);
 
-                    if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
-                        // Reorder array
-                        const reordered = [...siblings];
-                        reordered.splice(oldIndex, 1);
-                        reordered.splice(newIndex, 0, draggedChannel);
-                        const newOrder = reordered.map(c => c.id);
-
-                        console.log('[MOUSE DRAG] Reordering to:', newOrder);
-
-                        // Call API
-                        try {
-                            await reorderChannels(currentServer.id, newOrder);
-                            queryClient.invalidateQueries({ queryKey: keys.channels(currentServer.id) });
-                        } catch (err) {
-                            console.error('Failed to reorder channels:', err);
-                            // Refetch so the sidebar shows the server's real
-                            // order rather than the optimistic one that failed.
-                            queryClient.invalidateQueries({ queryKey: keys.channels(currentServer.id) });
-                            alert('Could not save the new channel order. You may not have permission.');
-                        }
+                    // Call API
+                    try {
+                        await reorderChannels(currentServer.id, newOrder);
+                        queryClient.invalidateQueries({ queryKey: keys.channels(currentServer.id) });
+                    } catch (err) {
+                        console.error('Failed to reorder channels:', err);
+                        // Refetch so the sidebar shows the server's real
+                        // order rather than the optimistic one that failed.
+                        queryClient.invalidateQueries({ queryKey: keys.channels(currentServer.id) });
+                        alert('Could not save the new channel order. You may not have permission.');
                     }
                 }
             }
@@ -5368,7 +5349,7 @@ export function Chat({ onLogout }: ChatProps) {
                         {channels
                             .filter(c => (c.channel_type === 0 || c.channel_type === 2) && !c.parent_id)
                             // A hidden collection stays as the header of an open subchannel.
-                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && currentChannel?.id === sub.id))
+                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && currentChannel?.id === sub.id))
                             .filter(c => {
                                 if (!hideMutedHere || !isChannelMuted(c.id) || currentChannel?.id === c.id) return true;
                                 // A muted COLLECTION must not drag its children out of
@@ -5378,14 +5359,16 @@ export function Chat({ onLogout }: ChatProps) {
                                 // hide the very channel being read — breaking the
                                 // never-hide-the-open-channel rule this feature promises.
                                 // Mute is per channel; the parent stays as the group
-                                // header for whatever is still visible beneath it.
-                                return channels.some(sub => sub.parent_id === c.id
+                                // header for whatever is still visible beneath it,
+                                // which a voice room is not: it is drawn in its own section.
+                                return channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub)
                                     && (!isChannelMuted(sub.id) || currentChannel?.id === sub.id));
                             })
                             .map(channel => {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
                                 const subchannels = channels.filter(sub => sub.parent_id === channel.id)
+                                    .filter(drawnUnderCollection)
                                     .filter(listed)
                                     .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || currentChannel?.id === sub.id);
 
@@ -6246,6 +6229,19 @@ export function Chat({ onLogout }: ChatProps) {
                                     <div className="channel-welcome-icon">#</div>
                                     <h2>Welcome to #{currentChannel.name}!</h2>
                                     <p>This is the start of the #{currentChannel.name} channel.</p>
+                                </div>
+                            )}
+                            {/* A collection's page is the feed of its text channels (the
+                                same filter as its loader), so with none it would be blank. */}
+                            {currentCollection && !channels.some(c => c.parent_id === currentCollection.id && c.channel_type === 0 && shownByMode(c, activeModeId)) && (
+                                <div className="channel-welcome" data-testid="collection-empty">
+                                    <div className="channel-welcome-icon"><FolderIcon /></div>
+                                    <h2>{currentCollection.name}</h2>
+                                    <p>
+                                        {channels.some(c => c.parent_id === currentCollection.id && c.channel_type === 1 && listed(c))
+                                            ? 'This collection holds voice channels, so there is nothing to read here. You can join them under Voice Channels.'
+                                            : 'There is nothing to read here yet. A text channel in this collection would show up here.'}
+                                    </p>
                                 </div>
                             )}
                             {messages.length >= 50 && (

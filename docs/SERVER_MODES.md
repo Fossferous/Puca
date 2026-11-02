@@ -12,7 +12,8 @@ deleting and recreating them loses their permissions and history.
   of it comes and goes together. A voice channel under a ticked collection is in the
   mode everywhere: hidden with it, warned about, disconnected when it ends, counted by
   Turn off when empty and reached by Call everyone back. This is the usual layout for
-  a game's private rooms.
+  a game's private rooms. Its row stays under Voice Channels, like any other voice
+  channel: the collection's own list and feed are for its text channels.
 - **One mode is on at a time.** Picking a mode replaces the current one.
 
 The user-facing description is in [USER_GUIDE.md](USER_GUIDE.md#server-modes); the

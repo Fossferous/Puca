@@ -301,16 +301,20 @@
     justify-content: flex-start;
 }
 
-.toggle-switch {
+/* Scoped to this menu's rows: unscoped, this and the settings switch (.toggle-row) each
+   styled the other, by load order. A colour, not a theme token: this menu's background is
+   dark on every theme. */
+.has-toggle .toggle-switch {
+    flex: none;
     margin-left: auto;
     width: 40px;
     height: 22px;
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.35);
     border-radius: 11px;
     position: relative;
 }
 
-.toggle-switch::after {
+.has-toggle .toggle-switch::after {
     content: '';
     position: absolute;
     width: 18px;
@@ -322,11 +326,11 @@
     transition: transform 0.2s ease;
 }
 
-.toggle-switch.active {
+.has-toggle .toggle-switch.active {
     background: #5865f2;
 }
 
-.toggle-switch.active::after {
+.has-toggle .toggle-switch.active::after {
     transform: translateX(18px);
 }
 

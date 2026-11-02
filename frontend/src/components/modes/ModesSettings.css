@@ -70,21 +70,6 @@
     margin: 0;
 }
 
-/* The same rule hides the switch's track: an inline span has no width. */
-.modes-settings .toggle-row {
-    display: flex;
-    justify-content: space-between;
-    color: var(--text-normal);
-    font-size: 14px;
-    font-weight: 400;
-    text-transform: none;
-}
-
-.modes-settings .toggle-switch {
-    flex: none;
-    display: inline-block;
-}
-
 .modes-settings .mode-channel:hover {
     background: var(--bg-modifier-hover);
 }

@@ -68,7 +68,7 @@ A small module (`frontend/src/api/platform.ts`) detects which shell it's in and 
 
 **How it works.**
 - **Servers** (`server_handlers.rs`, table `servers`). Creating one also creates a `general` channel, an `@everyone` role, and an `Owner` role, and makes you the owner. Owners can rename, toggle public/private, set a description, and upload a server icon (stored as an uploaded file, served from `/files/:id`). A hard‑coded "Main Server" auto‑joins every new user so nobody starts on an empty screen.
-- **Channels** (`channel_handlers.rs`, table `channels`) come in three types: **text**, **voice**, and **collection** (an aggregated feed of its child channels). They can nest under a parent and sit inside categories, support drag‑to‑reorder, per‑channel **slowmode**, and an optional **checklist**. Creating a channel broadcasts a realtime `ChannelCreated` event so everyone's sidebar updates instantly.
+- **Channels** (`channel_handlers.rs`, table `channels`) come in three types: **text**, **voice**, and **collection** (an aggregated feed of its child text channels). They can nest under a parent and sit inside categories (a voice channel under a collection is still listed once, with the other voice channels; the collection is what modes read), support drag‑to‑reorder, per‑channel **slowmode**, and an optional **checklist**. Creating a channel broadcasts a realtime `ChannelCreated` event so everyone's sidebar updates instantly.
 - **Categories** (`category_handlers.rs`) group channels; deleting a category just un‑files its channels.
 
 ---
