@@ -215,6 +215,7 @@ import { repinOnGrowth } from './repinOnGrowth';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 import { useUnsentWork } from '../api/workInFlight';
+import { askConfirm, askText, leaveNotice, tellUser } from '../api/appDialogs';
 
 /** A file that may be a HEIC (its type or name says so, or it has no type:
  *  what Windows gives a .heic); its first bytes decide (api/heif.ts). */
@@ -292,6 +293,19 @@ interface DisplayMessage {
     encState?: MessageEncState;
     /** Server-stamped consent record on a clip post (docs/CLIPS.md). */
     clip_consent?: ClipConsent | null;
+}
+
+/** What the composer held when a send began: all that goes back if it does not go. */
+interface UnsentMessage {
+    text: string;
+    chips: PendingAttachment[];
+    replyTo: DisplayMessage | null;
+    channelId: number | null;
+    dmId: string | null;
+    /** conversationVisitRef when it was sent. */
+    visit: number;
+    /** How to name the conversation, if the person has left it by then. */
+    where: string;
 }
 
 interface User {
@@ -556,7 +570,7 @@ function MessageToolbar({ messageId, onQuote, onForward, onReply, onEdit, onPin,
             notifyReactionChanged(messageId);
         } catch (err) {
             console.error('Failed to add reaction:', err);
-            alert('Could not add that reaction. Please try again.');
+            tellUser('Could not add that reaction. Please try again.');
         }
     };
 
@@ -717,6 +731,16 @@ export function Chat({ onLogout }: ChatProps) {
     // Live view of the open channel id, for async handlers (loadOlderMessages)
     // that must notice a switch happening across their awaits.
     const currentChannelIdRef = useRef<number | null>(null);
+    const currentDmIdRef = useRef<string | null>(null);
+    /** Goes up each time the conversation on screen changes, which replaces the
+     *  message list and any bubble in it. */
+    const conversationVisitRef = useRef(0);
+    /** Channel sends nothing has confirmed yet, by their bubble's id: not the answer
+     *  to the request, not the socket's echo. */
+    const unconfirmedSendsRef = useRef(new Set<string>());
+    /** What each DM still on screen as a bubble held, by the bubble's id. A DM's only
+     *  refusal is a frame that names no message (the Error handler). */
+    const unsentDmsRef = useRef(new Map<string, UnsentMessage>());
     const [showJumpLatest, setShowJumpLatest] = useState(false);
     const [missedCount, setMissedCount] = useState(0);
     const AT_BOTTOM_SLOP = 120; // px of slack that still counts as "at the bottom"
@@ -1099,7 +1123,7 @@ export function Chat({ onLogout }: ChatProps) {
         // still UPLOADING has no href yet; flag it so settleUpload discards
         // the ciphertext the moment the upload lands.
         if (chip?.status === 'uploading') abandonedUploadsRef.current.add(localId);
-        const fileId = chip?.href ? parseEncAttachment(chip.href)?.id : null;
+        const fileId = chip?.href && !chip.mayBeSent ? parseEncAttachment(chip.href)?.id : null;
         if (fileId) discardUpload(fileId);
         pendingFilesRef.current.delete(localId);
         setPendingAttachments(prev => removeAttachment(prev, localId));
@@ -1114,7 +1138,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (chip.previewUrl) URL.revokeObjectURL(chip.previewUrl);
             if (opts.discardUploads) {
                 if (chip.status === 'uploading') abandonedUploadsRef.current.add(chip.localId);
-                if (chip.href) {
+                if (chip.href && !chip.mayBeSent) {
                     const fileId = parseEncAttachment(chip.href)?.id;
                     if (fileId) discardUpload(fileId);
                 }
@@ -1551,25 +1575,10 @@ export function Chat({ onLogout }: ChatProps) {
     // screen forever and told the sender nothing. DMs persist only through the
     // WS path, so this was silent data loss on the private path.
     //
-    // A toast, never an alert(): this frame answers ANY frame the client sent,
-    // background ones included, and reaches someone who may be in a call or a
-    // game. A modal would take the focus and stop the page's JavaScript until
-    // it was answered.
-    useEffect(() => {
-        const onServerError = (msg: ServerMessage) => {
-            const text = (msg.payload as { message?: string } | undefined)?.message
-                ?? 'The server rejected that action.';
-            console.warn('[WS] server error:', text);
-            // Drop any optimistic DM bubbles that can no longer land. They are
-            // the only fire-and-forget sends (channel messages go over REST and
-            // surface their own errors), and they are identifiable by prefix.
-            setDmMessages(prev => prev.filter(m => !String(m.id).startsWith('local_')));
-            showToast(text);
-        };
-        wsClient.on('Error', onServerError);
-        return () => wsClient.off('Error', onServerError);
-    }, [showToast]);
-
+    // A notice that waits, never an alert(): this frame answers ANY frame the client
+    // sent, background ones included, and reaches someone who may be in a call or a
+    // game. A modal would take the focus and stop the page's JavaScript until it was
+    // answered; a toast would expire behind whatever they went to.
     /**
      * Leave on the "You're in Lounge on your PC" banner: end the account's
      * call on its other device. The server takes that device out and tells
@@ -1588,6 +1597,75 @@ export function Chat({ onLogout }: ChatProps) {
 
     // Reply state
     const [replyingTo, setReplyingTo] = useState<DisplayMessage | null>(null);
+
+    // A message that did not go, and what to say about it. The send cleared the
+    // composer and took the chips, so without this the words are gone along with the
+    // bubble. Back where it was written, ahead of anything typed since; into another
+    // conversation's composer it would be one Enter from being sent to the wrong
+    // people, so if they have moved on the notice carries the words instead.
+    const giveBackUnsent = useCallback((unsent: UnsentMessage, reason: string, options?: { mayHaveLanded?: boolean }): string => {
+        const mayHaveLanded = options?.mayHaveLanded === true;
+        const stillHere = unsent.channelId === currentChannelIdRef.current && unsent.dmId === currentDmIdRef.current;
+        if (!stillHere) {
+            // Nothing will ever name these uploads now, unless the message did land.
+            if (!mayHaveLanded) {
+                for (const chip of unsent.chips) {
+                    const fileId = chip.href ? parseEncAttachment(chip.href)?.id : null;
+                    if (fileId) discardUpload(fileId);
+                }
+            }
+            const attachments = unsent.chips.length > 0 ? ' Its attachments were not sent either.' : '';
+            return unsent.text.trim()
+                ? `${reason}${attachments}\n\nWhat you wrote in ${unsent.where}:\n${unsent.text}`
+                : `${reason}${attachments}`;
+        }
+        setInput(prev => (prev.trim() ? `${unsent.text}\n${prev}` : unsent.text));
+        // takeSentAttachments revoked the previews; the uploads themselves stand.
+        const chips = unsent.chips.map(chip => ({ ...chip, previewUrl: null, mayBeSent: mayHaveLanded }));
+        setPendingAttachments(prev => [...chips, ...prev]);
+        if (unsent.replyTo) setReplyingTo(prev => prev ?? unsent.replyTo);
+        return reason;
+    }, []);
+
+    // Server-side rejections of a WS send (ServerMessage::Error) had NO handler
+    // at all: the socket layer dispatches strictly by type, so a rejected DM —
+    // the friends-only privacy flag, or a block — left the optimistic bubble on
+    // screen forever and told the sender nothing. DMs persist only through the
+    // WS path, so this was silent data loss on the private path.
+    //
+    // A notice that waits, never an alert(): this frame answers ANY frame the client
+    // sent, background ones included, and reaches someone who may be in a call or a
+    // game. A modal would take the focus and stop the page's JavaScript until it was
+    // answered; a toast would expire behind whatever they went to.
+    useEffect(() => {
+        const onServerError = (msg: ServerMessage) => {
+            const text = (msg.payload as { message?: string } | undefined)?.message
+                ?? 'The server rejected that action.';
+            console.warn('[WS] server error:', text);
+            // Drop any optimistic DM bubbles that can no longer land. They are
+            // the only fire-and-forget sends (channel messages go over REST and
+            // surface their own errors), and they are identifiable by prefix.
+            let dropped: string[] = [];
+            setDmMessages(prev => {
+                dropped = prev.filter(m => String(m.id).startsWith('local_')).map(m => String(m.id));
+                return prev.filter(m => !String(m.id).startsWith('local_'));
+            });
+            // After the updater has run, as the channel send's give-up does. Their words
+            // go back like any send's. This frame may be about something else entirely,
+            // so one of them may have landed: its uploads are left alone.
+            setTimeout(() => {
+                let notice = text;
+                for (const id of dropped) {
+                    const unsent = unsentDmsRef.current.get(id);
+                    if (unsent) notice = giveBackUnsent(unsent, notice, { mayHaveLanded: true });
+                }
+                unsentDmsRef.current.clear();
+                leaveNotice(notice);
+            }, 0);
+        };
+        wsClient.on('Error', onServerError);
+        return () => wsClient.off('Error', onServerError);
+    }, [giveBackUnsent]);
 
     // A reply target belongs to ONE conversation: clear it whenever the active
     // channel / DM / collection changes, so a reply drafted in A can't be sent
@@ -1820,7 +1898,7 @@ export function Chat({ onLogout }: ChatProps) {
     // Handle channel deletion
     const handleDeleteChannel = async (channelId: number) => {
         if (!currentServer) return;
-        if (!confirm('Are you sure you want to delete this channel?')) return;
+        if (!await askConfirm('Are you sure you want to delete this channel?')) return;
 
         try {
             await deleteChannel(channelId);
@@ -1837,7 +1915,7 @@ export function Chat({ onLogout }: ChatProps) {
             }
         } catch (error) {
             console.error('Failed to delete channel:', error);
-            alert('Could not delete the channel. You may not have permission.');
+            tellUser('Could not delete the channel. You may not have permission.');
         }
     };
 
@@ -2698,6 +2776,7 @@ export function Chat({ onLogout }: ChatProps) {
                             && m.sender.id === payload.sender.id
                             && m.content === displayContent);
                         if (i !== -1) {
+                            unconfirmedSendsRef.current.delete(String(prev[i].id));
                             const next = [...prev];
                             next[i] = { ...next[i], id, ...(payload.clip_consent ? { clip_consent: payload.clip_consent } : {}) };
                             return next;
@@ -3236,6 +3315,9 @@ export function Chat({ onLogout }: ChatProps) {
         // this one (loadOlderMessages racing a switch).
         pendingRestoreRef.current = null;
         currentChannelIdRef.current = currentChannel?.id ?? null;
+        currentDmIdRef.current = currentDM?.id ?? null;
+        conversationVisitRef.current++;
+        unsentDmsRef.current.clear();
         setShowJumpLatest(false);
         setMissedCount(0);
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id]);
@@ -3363,7 +3445,7 @@ export function Chat({ onLogout }: ChatProps) {
             setShowPins(true);
         } catch (err) {
             console.error('Failed to load pinned messages:', err);
-            alert('Could not load pinned messages. Check your connection and try again.');
+            tellUser('Could not load pinned messages. Check your connection and try again.');
         }
     };
 
@@ -3374,7 +3456,7 @@ export function Chat({ onLogout }: ChatProps) {
             setPinnedMessages(prev => prev.filter(p => p.id !== messageId));
         } catch (err) {
             console.error('Failed to unpin:', err);
-            alert('Could not unpin that message. Please try again.');
+            tellUser('Could not unpin that message. Please try again.');
         }
     };
 
@@ -3422,7 +3504,7 @@ export function Chat({ onLogout }: ChatProps) {
             });
         } catch (err) {
             console.error('Failed to load older messages:', err);
-            alert('Could not load older messages. Check your connection and try again.');
+            tellUser('Could not load older messages. Check your connection and try again.');
         } finally {
             setLoadingOlder(false);
         }
@@ -3457,7 +3539,7 @@ export function Chat({ onLogout }: ChatProps) {
                 console.error('Failed to set nickname:', err);
                 // The command already cleared the input, so silence here loses
                 // what the user typed AND tells them nothing.
-                alert('Could not set your nickname. You may not have permission on this server.');
+                tellUser('Could not set your nickname. You may not have permission on this server.');
             }
             return;
         }
@@ -3469,7 +3551,7 @@ export function Chat({ onLogout }: ChatProps) {
                 await queryClient.invalidateQueries({ queryKey: keys.members(currentServer.id) });
             } catch (err) {
                 console.error('Failed to clear nickname:', err);
-                alert('Could not clear your nickname. Please try again.');
+                tellUser('Could not clear your nickname. Please try again.');
             }
             return;
         }
@@ -3477,6 +3559,15 @@ export function Chat({ onLogout }: ChatProps) {
         // Typed text + the ready chips' markdown, built ONLY now — the
         // sovereign-enc hrefs (which carry file keys) never touch the textarea.
         const content = buildOutgoingContent(input, pendingAttachments);
+        const unsent: UnsentMessage = {
+            text: input,
+            chips: pendingAttachments.filter(a => a.status === 'ready'),
+            replyTo: replyToMessage,
+            channelId: currentChannel?.id ?? null,
+            dmId: currentDM?.id ?? null,
+            visit: conversationVisitRef.current,
+            where: currentDM ? `your conversation with ${currentDM.other_username}` : `#${currentChannel?.name ?? ''}`,
+        };
 
         setInput('');
         setReplyingTo(null); // Clear reply state
@@ -3495,6 +3586,7 @@ export function Chat({ onLogout }: ChatProps) {
                 created_at: new Date().toISOString(),
             };
             setDmMessages(prev => [...prev, optimisticDMMessage]);
+            unsentDmsRef.current.set(optimisticDMMessage.id, unsent);
 
             // Encrypt for the recipient, then send via WebSocket for realtime
             // delivery. The optimistic bubble above already shows our plaintext.
@@ -3520,13 +3612,15 @@ export function Chat({ onLogout }: ChatProps) {
             } catch (err) {
                 console.error('Failed to send DM:', err);
                 setDmMessages(prev => prev.filter(m => m.id !== optimisticDMMessage.id));
-                alert(
+                unsentDmsRef.current.delete(optimisticDMMessage.id);
+                tellUser(giveBackUnsent(
+                    unsent,
                     err instanceof OfflineSendError
                         ? 'Not connected — reconnecting. Try again in a moment.'
                         : err instanceof SecureSendError
                             ? err.message
-                            : 'Message failed to send. Check your connection and try again.'
-                );
+                            : 'Message failed to send. Check your connection and try again.',
+                ));
             }
             return;
         }
@@ -3550,6 +3644,7 @@ export function Chat({ onLogout }: ChatProps) {
             is_completed: false,
         };
         setMessages(prev => [...prev, optimisticMessage]);
+        unconfirmedSendsRef.current.add(optimisticMessage.id);
 
         // Save to database via REST API (encrypted under the channel group key).
         // The backend broadcasts the stored wire content to the channel room, so
@@ -3558,6 +3653,7 @@ export function Chat({ onLogout }: ChatProps) {
         // plaintext fallback over the socket.
         try {
             const sent = await sendChannelMessageEncrypted(currentChannel.id, content, replyToMessage?.id, isTaskMode);
+            unconfirmedSendsRef.current.delete(optimisticMessage.id);
             // The WS echo can land BEFORE this response (the server broadcasts
             // before serializing the reply) and may have already adopted
             // sent.id into the bubble — in that case drop the stale optimistic
@@ -3582,17 +3678,24 @@ export function Chat({ onLogout }: ChatProps) {
             // and say so, or the user walks away believing it sent.
             if (isNetworkError(error)) {
                 setTimeout(() => {
-                    let stillUnconfirmed = false;
+                    // A bubble gone from the list normally means the echo took it.
+                    // Not if the person has been to another conversation since: that
+                    // replaced the list, and the echo may never come to a room they
+                    // left. There the record of the echo is what says.
+                    const neverEchoed = unconfirmedSendsRef.current.delete(optimisticMessage.id);
+                    const listReplaced = conversationVisitRef.current !== unsent.visit;
+                    let stillUnconfirmed = listReplaced && neverEchoed;
                     setMessages(prev => {
-                        stillUnconfirmed = prev.some(m => m.id === optimisticMessage.id);
-                        return stillUnconfirmed
-                            ? prev.filter(m => m.id !== optimisticMessage.id)
-                            : prev;
+                        if (prev.some(m => m.id === optimisticMessage.id)) stillUnconfirmed = true;
+                        return prev.filter(m => m.id !== optimisticMessage.id);
                     });
                     setTimeout(() => {
                         if (stillUnconfirmed) {
-                            // A toast: ten seconds on, the person may be anywhere.
-                            showToast('Message failed to send. Check your connection and try again.');
+                            // Ten seconds on, the person may be anywhere, and this is the
+                            // only copy of what they wrote: the composer gets it back, and
+                            // the notice waits for them. Nothing confirmed it landed, and
+                            // nothing says it did not.
+                            leaveNotice(giveBackUnsent(unsent, 'Message failed to send. Check your connection and try again.', { mayHaveLanded: true }));
                         }
                     }, 0);
                 }, 10_000);
@@ -3601,8 +3704,9 @@ export function Chat({ onLogout }: ChatProps) {
             // Surface the failure instead of silently keeping a phantom message.
             // A SecureSendError (fail-closed E2EE, audit H4) carries a specific,
             // actionable reason — show it verbatim.
+            unconfirmedSendsRef.current.delete(optimisticMessage.id);
             setMessages(prev => prev.filter(m => m.id !== optimisticMessage.id));
-            alert(error instanceof SecureSendError ? error.message : 'Message failed to send. Check your connection and try again.');
+            tellUser(giveBackUnsent(unsent, error instanceof SecureSendError ? error.message : 'Message failed to send. Check your connection and try again.'));
         }
     };
 
@@ -3634,7 +3738,7 @@ export function Chat({ onLogout }: ChatProps) {
         // raw content put each file's key and fetch capability in the box and
         // let one stray keystroke break the attachment.
         const { text, refs } = splitEditableContent(msg.content);
-        const edited = prompt(refs.length ? 'Edit message (attachments are kept):' : 'Edit message:', text);
+        const edited = await askText(refs.length ? 'Edit message (attachments are kept):' : 'Edit message:', text);
         if (edited === null || edited === text) return;
         const newContent = joinEditedContent(edited, refs);
         if (newContent && newContent !== msg.content) {
@@ -3656,7 +3760,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // A 409 carries the server's own explanation (an envelope-version
                 // refusal, or the body changed underneath the edit) — show it.
                 const explained = err instanceof SecureSendError || (err instanceof ApiError && err.status === 409);
-                alert(explained ? (err as Error).message : 'Failed to edit message. Please try again.');
+                tellUser(explained ? (err as Error).message : 'Failed to edit message. Please try again.');
             }
         }
     };
@@ -3719,13 +3823,13 @@ export function Chat({ onLogout }: ChatProps) {
         const ask = own
             ? 'Delete this message for everyone?'
             : `Delete this message by ${msg.sender.username} for everyone?`;
-        if (!confirm(ask)) return;
+        if (!await askConfirm(ask)) return;
         try {
             await deleteMessageApi(channelId, msg.id);
             setMessages(prev => prev.filter(m => m.id !== msg.id));
         } catch (err) {
             console.error('Failed to delete:', err);
-            alert('Could not delete that message. Please try again.');
+            tellUser('Could not delete that message. Please try again.');
         }
     };
 
@@ -3734,12 +3838,13 @@ export function Chat({ onLogout }: ChatProps) {
         if (!channelId) return;
         try {
             await pinMessage(channelId, msg.id);
-            alert('Message pinned!');
+            // Never a dialog, on any platform: nobody should have to answer every pin.
+            leaveNotice('Message pinned.', { brief: true });
         } catch (err) {
             console.error('Failed to pin:', err);
-            // Success already alerts; staying silent only on FAILURE was the
+            // Success already says so; staying silent only on FAILURE was the
             // worst of both — the user learns nothing went wrong.
-            alert('Could not pin that message. You may not have permission.');
+            tellUser('Could not pin that message. You may not have permission.');
         }
     };
 
@@ -3869,7 +3974,7 @@ export function Chat({ onLogout }: ChatProps) {
                 const refusal = err instanceof ApiError && err.status === 403 && err.message
                     ? `${err.message}. Send them a friend request, or join a server they are in.`
                     : null;
-                alert(refusal ?? 'Could not start that conversation. You may be offline.');
+                tellUser(refusal ?? 'Could not start that conversation. You may be offline.');
             });
     };
 
@@ -3965,7 +4070,7 @@ export function Chat({ onLogout }: ChatProps) {
         } catch (error) {
             console.error('Failed to create channel:', error);
             // The modal deliberately stays open so the typed name isn't lost.
-            alert('Could not create the channel. You may not have permission, or the name may be taken.');
+            tellUser('Could not create the channel. You may not have permission, or the name may be taken.');
         }
     };
 
@@ -4043,7 +4148,7 @@ export function Chat({ onLogout }: ChatProps) {
                             // Refetch so the sidebar shows the server's real
                             // order rather than the optimistic one that failed.
                             queryClient.invalidateQueries({ queryKey: keys.channels(currentServer.id) });
-                            alert('Could not save the new channel order. You may not have permission.');
+                            tellUser('Could not save the new channel order. You may not have permission.');
                         }
                     }
                 }
@@ -4208,7 +4313,7 @@ export function Chat({ onLogout }: ChatProps) {
         const people = channelsEndedBySwitch(channels, activeModeId, modeId)
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
-        if (warning && !confirm(warning)) return;
+        if (warning && !await askConfirm(warning)) return;
         try {
             await setActiveMode(currentServer.id, modeId);
         } catch {
@@ -4603,7 +4708,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (isMobile) setMobilePanel('channels');
         } catch (error) {
             console.error('Failed to create server:', error);
-            alert('Could not create the server. Check your connection and try again.');
+            tellUser('Could not create the server. Check your connection and try again.');
         }
     };
 
@@ -4964,7 +5069,7 @@ export function Chat({ onLogout }: ChatProps) {
                                         setNickEditServer(null);
                                     } catch (err) {
                                         console.error('Failed to set nickname:', err);
-                                        alert('Could not set your nickname. You may not have permission on this server.');
+                                        tellUser('Could not set your nickname. You may not have permission on this server.');
                                     } finally {
                                         setNickSaving(false);
                                     }
@@ -5081,7 +5186,7 @@ export function Chat({ onLogout }: ChatProps) {
                             queryClient.invalidateQueries({ queryKey: keys.members(currentServer.id) });
                         } catch (err) {
                             console.error('Failed to toggle custom sounds:', err);
-                            alert('Failed to update custom sounds. You may not have permission.');
+                            tellUser('Failed to update custom sounds. You may not have permission.');
                         }
                     }}
                     onClose={() => setUserContextMenuTarget(null)}
@@ -5096,25 +5201,25 @@ export function Chat({ onLogout }: ChatProps) {
                     onKick={async () => {
                         if (!currentServer) return;
                         const { userId, username } = userContextMenuTarget;
-                        if (!confirm(`Kick ${username} from ${currentServer.name}? They can rejoin with a new invite.`)) return;
+                        if (!await askConfirm(`Kick ${username} from ${currentServer.name}? They can rejoin with a new invite.`)) return;
                         try {
                             await kickMember(currentServer.id, userId);
                             queryClient.invalidateQueries({ queryKey: keys.members(currentServer.id) });
                         } catch (err) {
                             console.error('Failed to kick member:', err);
-                            alert('Failed to kick member. You may not have permission.');
+                            tellUser('Failed to kick member. You may not have permission.');
                         }
                     }}
                     onBan={async () => {
                         if (!currentServer) return;
                         const { userId, username } = userContextMenuTarget;
-                        if (!confirm(`Ban ${username} from ${currentServer.name}? They cannot rejoin unless unbanned.`)) return;
+                        if (!await askConfirm(`Ban ${username} from ${currentServer.name}? They cannot rejoin unless unbanned.`)) return;
                         try {
                             await banMember(currentServer.id, userId);
                             queryClient.invalidateQueries({ queryKey: keys.members(currentServer.id) });
                         } catch (err) {
                             console.error('Failed to ban member:', err);
-                            alert('Failed to ban member. You may not have permission.');
+                            tellUser('Failed to ban member. You may not have permission.');
                         }
                     }}
                 />
@@ -5209,7 +5314,7 @@ export function Chat({ onLogout }: ChatProps) {
                             if (nickFetchServerRef.current === server.id) {
                                 nickFetchServerRef.current = null;
                                 setNickEditServer(null);
-                                alert('Could not load your current nickname for that server. Try again.');
+                                tellUser('Could not load your current nickname for that server. Try again.');
                             }
                         })
                         .finally(() => {
@@ -5264,7 +5369,7 @@ export function Chat({ onLogout }: ChatProps) {
                         }
                     } catch (error) {
                         console.error('Failed to leave server:', error);
-                        alert('Failed to leave server');
+                        tellUser('Failed to leave server');
                     }
                 }}
                 onDisbandServer={async (server) => {
@@ -5285,7 +5390,7 @@ export function Chat({ onLogout }: ChatProps) {
                         }
                     } catch (error) {
                         console.error('Failed to delete server:', error);
-                        alert('Failed to delete server');
+                        tellUser('Failed to delete server');
                     }
                 }}
             />
@@ -6470,7 +6575,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                                     ));
                                                                 } catch (err) {
                                                                     console.error('Failed to toggle task:', err);
-                                                                    alert('Could not update that task. You may not have permission.');
+                                                                    tellUser('Could not update that task. You may not have permission.');
                                                                 }
                                                             }}
                                                         >

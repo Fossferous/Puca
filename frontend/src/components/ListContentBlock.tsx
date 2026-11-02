@@ -33,6 +33,7 @@ import { forgetNoteKeys } from '../notes/model/notesPrefs';
 import { ChevronDownIcon, ChevronRightIcon, TrashIcon } from './Icons';
 import { type RunWrite, uncounted } from './writesInFlight';
 import './NoteImages.css';
+import { askConfirm } from '../api/appDialogs';
 
 interface BlockProps {
     list: TaskList;
@@ -175,7 +176,7 @@ export function ListContentBlock({ list, features, onPatch, coarse, runWrite = u
     };
 
     const remove = async (item: GalleryItem) => {
-        if (!window.confirm('Remove this picture? It is deleted for good.')) return;
+        if (!await askConfirm('Remove this picture? It is deleted for good.')) return;
         setBusy(true);
         try { await saveRefs(withoutItem(refs, item), refsOfItem(item)); } finally { setBusy(false); }
     };
@@ -239,7 +240,7 @@ export function TasksTrash({ features, trashed, onRestored, runWrite = uncounted
         }
     });
     const forever = async (l: TaskList) => {
-        if (!window.confirm(`Delete “${l.title}” forever? Its tasks, pictures and attachments go with it. This can’t be undone.`)) return;
+        if (!await askConfirm(`Delete “${l.title}” forever? Its tasks, pictures and attachments go with it. This can’t be undone.`)) return;
         await runWrite(async () => {
             try {
                 await deleteListForever(l);

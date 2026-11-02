@@ -23,7 +23,7 @@ const NATIVE_FIELDS = [
     'active', 'hook_live', 'mouse_hook_wanted', 'mouse_hook_live', 'watching', 'events_seen',
     'starts', 'stops', 'rearms', 'rearms_on_evidence', 'poll_presses', 'poll_releases', 'poll_releases_blocked',
     'releases_owed', 'poll_presses_suppressed', 'releases_on_rewrite', 'injected_inputs_held', 'down_bits',
-    'self_injected_bits', 'foreground_is_us',
+    'self_injected_bits', 'foreground_is_us', 'foreground_unreadable',
 ] as const;
 
 /** Enough of the start/stop history to see what a save did. */

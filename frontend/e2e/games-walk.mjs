@@ -102,7 +102,7 @@ const alerts = [];
 function watch(page, tag) {
     page.on('console', m => fs.appendFileSync(path.join(OUT, 'console.txt'), `${new Date().toISOString()} ${tag} ${m.type()} ${m.text().slice(0, 400)}\n`));
     page.on('pageerror', e => console.log(`  [${tag} pageerror]`, e.message.slice(0, 200)));
-    // A refusal shown the wrong way is the generic Error frame: a toast, which
+    // A refusal shown the wrong way is the generic Error frame: a notice, which
     // Chat logs in these words, so it is counted with the alerts.
     page.on('console', m => { if (m.text().startsWith('[WS] server error:')) { alerts.push(`${tag}: ${m.text()}`); console.log(`  [${tag} SERVER ERROR]`, m.text()); } });
     page.on('dialog', d => {

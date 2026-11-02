@@ -12,7 +12,7 @@
  * frame, and is reset whenever the socket goes away (websocket.ts). The frame
  * comes only from a server that also understands `LeaveOwnVoice` and
  * `JoinRoom { take_over }` — an older server (a rollback host, say) answers an
- * unknown client frame with an Error, which the client shows as an error toast.
+ * unknown client frame with an Error, which the client shows as an error notice.
  * So nothing that sends either may run unless `supported` is true.
  *
  * Wire contract pinned by `tests/fixtures/ownVoiceState.json` (the server's

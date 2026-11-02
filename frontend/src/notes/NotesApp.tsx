@@ -28,6 +28,7 @@ import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
 import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api/notesCacheScrub';
 import { currentUserIdFromToken } from '../api/auth';
 import { signOutWebPush } from '../api/webPushLocal';
+import { askConfirm } from '../api/appDialogs';
 
 export function NotesApp() {
     return (
@@ -174,7 +175,7 @@ function SessionGate() {
         // Colours and labels get one last push first (bounded).
         const prefsLeft = prefsUnsynced() ? await flushNotesPrefs() : false;
         const warning = notesSignOutWarning({ ops: pendingOutboxCount(), prefs: prefsLeft });
-        if (warning !== null && !window.confirm(warning)) return;
+        if (warning !== null && !await askConfirm(warning)) return;
         // logout() clears the token, the seed, the DM/channel/blob caches and
         // scrubs the per-account device-local stores (Notes' included). It
         // also revokes this browser's DEVICE enrolment: the id is derived from

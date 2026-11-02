@@ -1,5 +1,5 @@
 /**
- * The desktop app keeps the browser's own window.confirm and window.alert.
+ * Nothing in the desktop app answers a question for the person.
  *
  * tauri-plugin-dialog was added in 0.8.134 for one thing, the Save As dialog, and
  * its init() also registers an init script in every webview on every desktop
@@ -13,9 +13,17 @@
  * second shows why it must not. The Save As dialog is the shell's own command
  * now (src-tauri/src/save_dialog.rs); the third keeps the two ends of that
  * stringly typed call agreeing, which no compiler does.
+ *
+ * The fourth holds the rule that replaced the sites' own calls: every question is
+ * awaited, because a Promise is truthy, and nothing but api/appDialogs.ts calls the
+ * page's blocking functions, because on the desktop one of them stops the JavaScript
+ * that closes a push-to-talk microphone and carries relayed input
+ * (scripts/check-dialog-calls.mjs, which `npm run lint` runs).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -154,4 +162,92 @@ describe('the shell\'s Save As, as the page calls it', () => {
         expect(fake).toMatch(/'choose_save_path': \(args\) =>/);
         expect(fake).not.toMatch(/plugin:dialog/);
     });
+});
+
+describe('every question is awaited, and nothing else stops the page', () => {
+    const SCRIPT = join(FRONTEND, 'scripts', 'check-dialog-calls.mjs');
+    const check = (dir?: string) => spawnSync(process.execPath, dir ? [SCRIPT, dir] : [SCRIPT], { cwd: FRONTEND, encoding: 'utf8' });
+
+    /** The check run over these files; which of them it named, and how often. */
+    function flagged(files: Record<string, string>): { named: Record<string, number>; status: number | null; output: string } {
+        const dir = mkdtempSync(join(tmpdir(), 'puca-dialog-calls-'));
+        try {
+            for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+            const run = check(dir);
+            const named: Record<string, number> = {};
+            for (const line of run.stderr.split(/\r?\n/)) {
+                const file = line.match(/^([^:]+\.tsx?):\d+:\d+ /)?.[1];
+                if (file) named[file] = (named[file] ?? 0) + 1;
+            }
+            return { named, status: run.status, output: run.stdout + run.stderr };
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    }
+
+    it('the app passes', () => {
+        const run = check();
+        expect(run.stdout + run.stderr).toMatch(/every question awaited, no native dialog/);
+        expect(run.status).toBe(0);
+    }, 60_000);
+
+    it('every shape of the bug fails', () => {
+        const bad: Record<string, string> = {
+            // The bug, as every destructive handler had it.
+            'not.ts': 'export async function f() { if (!askConfirm("x")) return; go(); }',
+            'truthy.ts': 'export function f() { if (askConfirm("x")) go(); }',
+            'or.ts': 'export function f(a: boolean) { if (a || askConfirm("x")) go(); }',
+            'kept.ts': 'export function f() { const ok = askConfirm("x"); if (ok) go(); }',
+            'then.ts': 'export function f() { void askText("x").then(go); }',
+            'returned.ts': 'export function f() { return askConfirm("x"); }',
+            'passed.ts': 'export function f() { return g(askConfirm); }',
+            'renamed.ts': 'const ask = askConfirm; export const f = () => ask("x");',
+            'wait.ts': 'export function f() { tellUserAndWait("x"); }',
+            'jsx.tsx': 'export const F = () => <button onClick={() => { if (!askConfirm("x")) return; go(); }} />;',
+            // What stops the page.
+            'bare.ts': 'export function f() { if (confirm("x")) go(); }',
+            'alert.ts': 'export function f() { alert("x"); }',
+            'prompt.ts': 'export function f() { return prompt("x"); }',
+            'window.ts': 'export function f() { window.confirm("x"); }',
+            'global.ts': 'export const f = globalThis.alert;',
+            'indexed.ts': 'export function f() { window["prompt"]("x"); }',
+            'taken.ts': 'const { confirm } = window; export const f = confirm;',
+        };
+        const { named, status, output } = flagged(bad);
+        expect(status, output).toBe(1);
+        expect(Object.keys(bad).filter(file => !named[file]), output).toEqual([]);
+    }, 60_000);
+
+    it('CONTROL: what is right passes, or the failures above prove nothing', () => {
+        const { named, status, output } = flagged({
+            'awaited.ts': 'import { askConfirm } from "./a"; export async function f() { if (!await askConfirm("x")) return; go(); }',
+            'or.ts': 'export async function f(a: boolean) { if (a || await askConfirm("x")) go(); }',
+            'brackets.ts': 'export async function f() { return await (askText("x")); }',
+            'jsx.tsx': 'export const F = () => <button onClick={async () => { if (await askConfirm("x")) go(); }} />;',
+            // An install prompt's own method, a comment and a string are nobody's dialog.
+            'install.ts': 'export function f(e: { prompt(): void }) { e.prompt(); }',
+            'words.ts': '// alert("x") and if (!askConfirm("x"))\nexport const a = "javascript:alert(1)";',
+        });
+        expect(named, output).toEqual({});
+        expect(status, output).toBe(0);
+    }, 60_000);
+
+    it('taking the await off ANY real site fails, at that site: all of them', () => {
+        const sources = readdirSync(join(FRONTEND, 'src'), { recursive: true, encoding: 'utf8' })
+            .map(f => f.replaceAll('\\', '/'))
+            .filter(f => /\.tsx?$/.test(f) && !f.startsWith('tests/') && !/\.(test|spec)\./.test(f) && f !== 'api/appDialogs.ts');
+        const mutated: Record<string, string> = {};
+        for (const file of sources) {
+            const text = read('src', ...file.split('/'));
+            for (const site of text.matchAll(/await (askConfirm|askText|tellUserAndWait)\(/g)) {
+                const name = `${file.replace(/[/.]/g, '_')}_${site.index}${file.endsWith('x') ? '.tsx' : '.ts'}`;
+                mutated[name] = text.slice(0, site.index) + text.slice(site.index + 'await '.length);
+            }
+        }
+        // CONTROL: this found the sites. Every destructive action in the app is one.
+        expect(Object.keys(mutated).length).toBeGreaterThan(45);
+        const { named, status, output } = flagged(mutated);
+        expect(status).toBe(1);
+        expect(Object.keys(mutated).filter(file => named[file] !== 1), output.slice(0, 2000)).toEqual([]);
+    }, 60_000);
 });

@@ -78,6 +78,7 @@ import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanne
 import { useNotesOutbox, useOutboxPending, useQueuedListDeletes } from '../model/notesOutbox';
 import { useNotesCachePersistence } from '../model/notesCache';
 import { isGridPath, useBulkPending, useNoteSelection } from './useNoteSelection';
+import { askConfirm } from '../../api/appDialogs';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -765,7 +766,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
         return typeof u === 'string' && u ? u : 'you';
     })();
     const signOutEverywhere = async () => {
-        if (!window.confirm('Sign out of every device? Every phone and computer signed in to this account will need to sign in again.')) return;
+        if (!await askConfirm('Sign out of every device? Every phone and computer signed in to this account will need to sign in again.')) return;
         // Last chance for colours and labels while this session still works.
         if (prefsUnsynced()) await flushNotesPrefs();
         try {

@@ -23,7 +23,7 @@
  *
  * Send nothing from here until `wsClient.hasServerFeature(GAMES_FEATURE)`:
  * an older server answers an unknown frame with an Error, which the chat view
- * shows as an error toast.
+ * shows as an error notice.
  */
 
 /** The capability name in `/ws?caps=` and `ServerFeatures`. */
@@ -86,7 +86,7 @@ export type GameClientFrame =
     | { type: 'GameShowCards'; payload: TableRef }
     | { type: 'GameResync'; payload: TableRef }
     | { type: 'GameClose'; payload: TableRef }
-    | { type: 'GameRemovePlayer'; payload: TableRef & { seat: number } };
+    | { type: 'GameRemovePlayer'; payload: TableRef & { seat: number; user_id: number } };
 
 /** Builders for every client frame, exactly as the server parses them. */
 export const gameFrames = {
@@ -120,10 +120,11 @@ export const gameFrames = {
     resync: (room_id: string, table_id: number): GameClientFrame => ({ type: 'GameResync', payload: { room_id, table_id } }),
     /** MOVE_MEMBERS. */
     close: (room_id: string, table_id: number): GameClientFrame => ({ type: 'GameClose', payload: { room_id, table_id } }),
-    /** MOVE_MEMBERS. */
-    removePlayer: (room_id: string, table_id: number, seat: number): GameClientFrame => ({
+    /** MOVE_MEMBERS. `user_id` is who the moderator was asked about: the seat may
+     *  have changed hands by the time they answer, and the server then refuses. */
+    removePlayer: (room_id: string, table_id: number, seat: number, user_id: number): GameClientFrame => ({
         type: 'GameRemovePlayer',
-        payload: { room_id, table_id, seat },
+        payload: { room_id, table_id, seat, user_id },
     }),
 };
 

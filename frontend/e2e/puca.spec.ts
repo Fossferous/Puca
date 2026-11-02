@@ -402,9 +402,6 @@ test.describe('Puca End-to-End Chat App Tests', () => {
         await expect(pageA.locator('.message', { hasText: 'Hello from User A [EDITED]' })).not.toBeVisible();
 
         // 3.7 Pin message
-        pageA.once('dialog', async dialog => {
-            await dialog.accept(); // Message pinned alert
-        });
         const msgToPin = pageA.locator('.message', { hasText: '@user_b' }).last();
         await msgToPin.hover();
         await msgToPin.locator('.msg-action-btn[title="Pin Message"]').click();

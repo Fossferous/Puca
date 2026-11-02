@@ -224,6 +224,15 @@ describe('it does not become a keylogger', () => {
         expect(report({ native: { hook_live: true, foreground_is_us: false } })).toContain('foreground_is_us=false');
     });
 
+    // `poll_releases_blocked` rising under a window that was never read can be the
+    // hook losing a key-up (docs/HOTKEYS.md): this is the one field that says so.
+    it('carries whether the window in front could be read', () => {
+        const blocked = { hook_live: true, poll_releases_blocked: 1, releases_owed: 1 };
+        expect(report({ native: { ...blocked, foreground_unreadable: true } })).toContain('foreground_unreadable=true');
+        // CONTROL: the other answer is printed too, not only a true.
+        expect(report({ native: { ...blocked, foreground_unreadable: false } })).toContain('foreground_unreadable=false');
+    });
+
     it('the state it reads has no slot for a key press', () => {
         // This object is what could grow, so a new field here is a decision.
         const state = hotkeyFeedState();

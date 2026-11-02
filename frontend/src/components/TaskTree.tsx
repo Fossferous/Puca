@@ -35,7 +35,6 @@ import { encryptAndUploadRef } from '../api/attachments';
 import { HeifNotSendableError, convertHeifForUpload } from '../api/heif';
 import { ImageMetadataError } from '../api/imageMetadata';
 import { ApiError } from '../api/client';
-import { pushMessageToast } from './messageToastBus';
 import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
 import { useDragReorder } from '../hooks/useDragReorder';
@@ -58,6 +57,7 @@ import {
     subscribePlaces, unassignTasks,
 } from '../api/taskPlaces';
 import { currentPosition, mobileLocationAvailable } from '../api/mobileLocation';
+import { askConfirm, leaveNotice, tellUser } from '../api/appDialogs';
 
 // Shared 30-second clock for overdue styling. The snapshot is quantized so it
 // is referentially stable between ticks (useSyncExternalStore re-renders only
@@ -391,18 +391,21 @@ export function TaskTree({
      * has for it (Remove due time, below) instead of hiding a reminder
      * nobody could stop.
      */
-    const turnIntoHeading = (task: Task, text: string) => {
+    const turnIntoHeading = async (task: Task, text: string) => {
         const label = headingLabel(text);
         const name = label.length > 40 ? `${label.slice(0, 39)}…` : label;
         if (task.is_completed && !canComplete) {
-            // A toast: a commit on blur gets here too, when the window lost focus.
-            pushMessageToast({ title: `“${name}” is ticked, and only someone who may tick items can turn it into a heading.` });
+            // Not a question for a press: a commit on blur gets here too, when the
+            // window lost focus.
+            leaveNotice(`“${name}” is ticked, and only someone who may tick items can turn it into a heading.`);
             return;
         }
         const scheduled = task.schedule !== undefined && task.schedule !== null;
         if (scheduled || task.due_at) {
             const what = scheduled ? 'date & repeat' : 'due time';
-            if (!window.confirm(`A heading has no ${what}. Turn “${name}” into a heading and remove its ${what}?`)) return;
+            if (!await askConfirm(`A heading has no ${what}. Turn “${name}” into a heading and remove its ${what}?`)) return;
+            // On the desktop the page runs on behind a question: it may be gone by now.
+            if (!tasksRef.current.some(t => t.id === task.id)) return;
         }
         if (task.is_completed) onToggle(task, false);
         if (scheduled && onSetSchedule) onSetSchedule(task, null, null);
@@ -440,7 +443,7 @@ export function TaskTree({
         // "## Something" typed over a top-level item makes it a heading —
         // the same rule as the add row, with the same question about a time.
         if (task.parent_id === null && isHeadingText(text)) {
-            turnIntoHeading(task, text);
+            void turnIntoHeading(task, text);
             return;
         }
         onEdit(task, text);
@@ -497,11 +500,11 @@ export function TaskTree({
         if (!task || files.length === 0) return;
         // Already uploading to this task — don't start an overlapping replace.
         if (uploadingIds.has(task.id)) return;
-        if (isAttachmentsLocked(task.attachments)) { alert(LOCKED_MSG); return; }
+        if (isAttachmentsLocked(task.attachments)) { tellUser(LOCKED_MSG); return; }
 
         const startExisting = parseTaskAttachments(task.attachments);
         if (startExisting.length + files.length > MAX_TASK_ATTACHMENTS) {
-            alert(`A task can hold at most ${MAX_TASK_ATTACHMENTS} attachments.`);
+            tellUser(`A task can hold at most ${MAX_TASK_ATTACHMENTS} attachments.`);
             return;
         }
 
@@ -534,16 +537,16 @@ export function TaskTree({
             // click-time snapshot — re-check the lock and dedupe by href so a
             // concurrent change isn't clobbered.
             const current = tasksRef.current.find(t => t.id === task.id) ?? task;
-            if (isAttachmentsLocked(current.attachments)) { pushMessageToast({ title: LOCKED_MSG }); return; }
+            if (isAttachmentsLocked(current.attachments)) { leaveNotice(LOCKED_MSG); return; }
             const existing = parseTaskAttachments(current.attachments);
             const byHref = new Map<string, TaskAttachmentRef>();
             for (const r of [...existing, ...added]) if (!byHref.has(r.href)) byHref.set(r.href, r);
             onSetAttachments(task, Array.from(byHref.values()).slice(0, MAX_TASK_ATTACHMENTS));
         }
-        // Toasts, here and for the lock above: this is the end of an upload that
-        // can take a while, and the person has often gone elsewhere by now.
+        // Notices that wait, here and for the lock above: this is the end of an upload
+        // that can take a while, and the person has often gone elsewhere by now.
         if (failures.length > 0) {
-            pushMessageToast({ title: `Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}` });
+            leaveNotice(`Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}`);
         }
     };
 

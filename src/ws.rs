@@ -654,7 +654,7 @@ async fn handle_socket(
                             //
                             // A DROPPED WAKE ANSWERS ON THE WAKE CHANNEL. The
                             // generic Error frame is only listened for by the
-                            // chat view, which toasts; the wake card would never
+                            // chat view, which shows a notice; the wake card would never
                             // hear it and would keep counting down for three
                             // minutes — exactly the symptom this whole branch
                             // was added to stop.
@@ -3129,7 +3129,7 @@ pub(crate) async fn handle_message(
 
         // Games (docs/GAMES.md; src/games.rs). Every refusal is a typed
         // GameRefused to this connection, never an Error (the client would
-        // show it as a toast); a connection that did not announce `games`
+        // show it as a notice); a connection that did not announce `games`
         // is sent nothing at all.
         game @ (ClientMessage::GameCreate { .. }
         | ClientMessage::GameSit { .. }
@@ -4630,7 +4630,7 @@ pub(crate) async fn handle_message(
             // another of the user's machines, which will hand them to a socket.
             // EVERY REFUSAL BELOW ANSWERS ON THE WAKE CHANNEL rather than as a
             // bare `Error`. The generic frame is listened for only by the chat
-            // view, which toasts; the wake card never heard it, so a request
+            // view, which shows a notice; the wake card never heard it, so a request
             // refused outright — no waker online, a device asking to wake
             // itself — was indistinguishable from one in flight, and the card
             // counted down for three minutes before blaming the BIOS for a

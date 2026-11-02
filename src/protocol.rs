@@ -325,7 +325,7 @@ pub enum ClientMessage {
     // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
     // the pieces are in crate::games_wire). Sent ONLY on a socket whose server
     // confirmed `games` in ServerFeatures — an older server answers an unknown
-    // variant with an Error, which the client shows as a toast. Every frame
+    // variant with an Error, which the client shows as a notice. Every frame
     // names the call (`room_id`, `voice_<channel_id>`) and, after the first,
     // the table (`table_id`, from GameTable); a frame naming a table that is
     // not open in that room is answered with GameEnded { reason: "gone" }.
@@ -378,7 +378,18 @@ pub enum ClientMessage {
     GameClose { room_id: String, table_id: u64 },
     /// Moderation (`MOVE_MEMBERS`): get the player in `seat` up from the
     /// table (the engine's `leave`, exactly as if they had stood).
-    GameRemovePlayer { room_id: String, table_id: u64, seat: usize },
+    ///
+    /// `user_id` is who the moderator was asked about. Seats are chosen by the
+    /// players, so by the time they answer, that seat may hold someone else, who
+    /// must not be the one removed: refused `SeatEmpty` when it does not hold this
+    /// person. Absent from a client older than the check, which it then skips.
+    GameRemovePlayer {
+        room_id: String,
+        table_id: u64,
+        seat: usize,
+        #[serde(default)]
+        user_id: Option<UserId>,
+    },
 }
 
 /// Messages sent from the server to the client
@@ -949,7 +960,7 @@ pub enum ServerMessage {
     ///
     /// WHY THIS EXISTS AT ALL. Every refusal on the wake path used to be a bare
     /// `ServerMessage::Error`, and the only listener for that frame in the whole
-    /// frontend is the chat view, whose toast has nothing to do with the
+    /// frontend is the chat view, whose notice has nothing to do with the
     /// device card. So a wake that was refused outright — an offline waker, a
     /// rate-limit drop, a device asking to wake itself — looked exactly like a
     /// wake in progress: the card counted down for a full three minutes and then
@@ -2154,7 +2165,7 @@ mod games_frame_tests {
             ClientMessage::GameShowCards { room_id: room(), table_id: TABLE },
             ClientMessage::GameResync { room_id: room(), table_id: TABLE },
             ClientMessage::GameClose { room_id: room(), table_id: TABLE },
-            ClientMessage::GameRemovePlayer { room_id: room(), table_id: TABLE, seat: 4 },
+            ClientMessage::GameRemovePlayer { room_id: room(), table_id: TABLE, seat: 4, user_id: Some(7) },
         ];
         assert_eq!(frames.len(), expected.len(), "one fixture entry per expected frame");
         for (i, (f, want)) in frames.iter().zip(&expected).enumerate() {

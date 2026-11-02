@@ -32,6 +32,7 @@ import {
     MoonIcon,
     FlagIcon,
 } from './Icons';
+import { askConfirm } from '../api/appDialogs';
 
 export interface UserContextMenuProps {
     userId: number;
@@ -218,7 +219,7 @@ export function UserContextMenu({
         // voice on this device. Reversible right here (or in Settings →
         // Privacy & Safety), but confirm — a misclick silently breaks
         // messaging with that person.
-        if (!window.confirm(`Block ${username}? They won't be able to message you, `
+        if (!await askConfirm(`Block ${username}? They won't be able to message you, `
             + `their messages will be hidden and their voice muted. `
             + `You can unblock them from this menu or Settings → Privacy & Safety.`)) return;
         setBlockStatus('working');

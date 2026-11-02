@@ -296,9 +296,11 @@ const browser = await chromium.launch({ args: [
 ] });
 
 const pageErrors = [];
+const nativeDialogs = [];
 function watch(page, tag) {
-    // Accept any confirm (App's sign-out asks one only when something is unsent).
-    page.on('dialog', d => { d.accept().catch(() => {}); });
+    // Under the shell a question is in the page (api/appDialogs.ts). A native dialog
+    // here is a call that went around it, on the path that stops push-to-talk.
+    page.on('dialog', d => { nativeDialogs.push(`${tag}: ${d.message()}`); d.accept().catch(() => {}); });
     page.on('pageerror', e => { pageErrors.push(`${tag}: ${String(e).slice(0, 300)}`); console.log(`[pageerror ${tag}]`, String(e).slice(0, 300)); });
     page.on('console', m => { if (m.type() === 'error') console.log(`[console.error ${tag}]`, m.text().slice(0, 200)); });
     page.on('response', r => { if (r.status() >= 400) console.log(`[http ${tag}] ${r.status()} ${r.request().method()} ${r.url().slice(0, 160)}`); });
@@ -438,7 +440,18 @@ ck('invite to a server you are in: Join Server closes the dialog and lists the s
     joinPressed && joinClosed && await page.locator(`.server-icons .server-icon[title="${SERVER}"]`).count() === 1 && await railIcons() === railBefore,
     `${await railIcons()} rail icons, were ${railBefore}`);
 
-await otherAnchor.click();
+// A point that is really the link's, with the toolbar showing: at 1280x800 the hover
+// toolbar can cover its middle, and it wraps where the walk's random names put it.
+await linkMessage.hover();
+const otherPoint = await otherAnchor.evaluate(el => {
+    for (const r of el.getClientRects()) {
+        const y = r.top + r.height / 2;
+        for (let x = r.left + 2; x < r.right; x += 6) if (el.contains(document.elementFromPoint(x, y))) return { x, y };
+    }
+    return null;
+});
+ck('ordinary link: some of it can be clicked', otherPoint !== null);
+await page.mouse.click(otherPoint.x, otherPoint.y);
 await until(page, n => window.__shell.opened.length > n, openedBeforeInvite, 5000);
 await sleep(500);
 const afterOther = (await shellOpened()).slice(openedBeforeInvite);
@@ -888,6 +901,35 @@ await page.getByRole('button', { name: 'Close', exact: true }).click({ timeout: 
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // =============================================================================
+// 7c. A question, in the page: Discard on a note with text in it
+//
+// Cancel is a press outside the composer's root, whose own listener saves and closes
+// on one (QuickAdd's outside press). That is why a press in the question stays in it,
+// and only this walk has the real composer under the real question.
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Asked about');
+// Only text, a picture or a recording is worth a question: a title alone is not.
+await page.click('button[aria-label="Text note"]');
+await page.fill('.notes-quickadd-body', 'Words worth asking about');
+await page.click('button[aria-label="Discard note"]');
+const discardAsked = await page.waitForSelector('dialog.app-question', { timeout: 5000 }).then(() => true).catch(() => false);
+ck('discard: asks in the page, in the top layer', discardAsked
+    && await page.evaluate(() => document.querySelector('dialog.app-question')?.matches(':modal') === true));
+const discardNative = nativeDialogs.length;
+ck('discard: nothing is discarded while it is open', await page.inputValue('.notes-quickadd-title') === 'Asked about');
+await page.locator('dialog.app-question .app-question-btn', { hasText: 'Cancel' }).click();
+await until(page, () => !document.querySelector('dialog.app-question'), null, 3000);
+ck('discard: Cancel keeps the composer, open, with its text, and saves nothing',
+    await page.locator('.notes-quickadd-open').count() === 1 && await page.inputValue('.notes-quickadd-title') === 'Asked about');
+await page.click('button[aria-label="Discard note"]');
+await page.waitForSelector('dialog.app-question', { timeout: 5000 });
+await page.locator('dialog.app-question .app-question-ok').click();
+await until(page, () => !document.querySelector('.notes-quickadd-open') && !document.querySelector('dialog.app-question'), null, 3000);
+ck('discard: OK closes it', await page.locator('.notes-quickadd-open').count() === 0);
+await sleep(300);
+ck('discard: and it left no note behind', await page.locator('.notes-desktop-view').getByText('Asked about', { exact: true }).count() === 0);
+ck('discard: no native dialog on the way', nativeDialogs.length === discardNative && nativeDialogs.length === 0, nativeDialogs.join(' | '));
+
 // 8. Sign out from Notes: Púca's login, and nothing of Notes left
 // =============================================================================
 const held = await page.evaluate(() => {
@@ -916,6 +958,8 @@ control('"no sealed Notes cache on this device" answers false while signed in', 
 await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 }).catch(() => {});
 await page.locator('.notes-menu').getByRole('button', { name: 'Sign out', exact: true }).click();
+// App's sign-out asks only when something is unsent.
+await page.locator('dialog.app-question .app-question-ok').click({ timeout: 1500 }).catch(() => {});
 const toLogin = await page.waitForURL('**/login', { timeout: 20000 }).then(() => true).catch(() => false);
 await page.waitForSelector('.toggle-mode', { timeout: 10000 }).catch(() => {});
 ck('sign-out: Púca\'s login screen', toLogin && await page.locator('#username').count() === 1, page.url());
@@ -966,6 +1010,7 @@ ck('web: Notes\' desktop chunk is never fetched', webChunk.length === 0, webChun
 await web.close();
 
 ck('no uncaught errors on any page', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
+ck('no native dialog on any page under the shell: each one stops the page\'s JavaScript', nativeDialogs.length === 0, nativeDialogs.slice(0, 3).join(' | '));
 await browser.close();
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAIL`}`);

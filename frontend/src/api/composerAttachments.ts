@@ -28,6 +28,9 @@ export interface PendingAttachment {
     spoiler: boolean;
     /** Why it failed, for the chip's tooltip. */
     error?: string;
+    /** Back from a send that lost its answer: the message may have landed with this
+     *  file in it, so removing the chip must not delete the upload. */
+    mayBeSent?: boolean;
 }
 
 let nextLocalId = 1;

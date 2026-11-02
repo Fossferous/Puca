@@ -18,6 +18,7 @@ import { TasksIcon, MembersIcon, MessageIcon, CheckIcon, CloseIcon, SettingsIcon
 import { PresenceDot } from './PresenceDot';
 import { ingestPresenceSnapshot, presenceOf, usePresenceKey, PRESENCE_LABEL, type PresenceStatus } from '../api/presenceStore';
 import './FriendsPanel.css';
+import { askConfirm } from '../api/appDialogs';
 
 interface FriendsPanelProps {
     onStartDM: (conversation: DMConversation) => void;
@@ -132,7 +133,7 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
     };
 
     const handleRemoveFriend = async (userId: number) => {
-        if (!confirm('Remove this friend?')) return;
+        if (!await askConfirm('Remove this friend?')) return;
         setPanelStatus(null);
         try {
             await removeFriend(userId);

@@ -173,7 +173,7 @@ describe('the Trash view', () => {
         expect(post).not.toHaveBeenCalled();
     });
 
-    it('a queued move: its Restore and Delete forever are off; the other note’s are on', () => {
+    it('a queued move: its Restore and Delete forever are off; the other note’s are on', async () => {
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
         const { restoreNote, content, button } = renderTrash(new Set([5]));
         expect(button(5, 'Restore').disabled).toBe(true);
@@ -183,16 +183,16 @@ describe('the Trash view', () => {
         act(() => { button(5, 'Restore').click(); button(5, 'Delete forever').click(); });
         expect(restoreNote).not.toHaveBeenCalled();
         expect(content.deleteForever).not.toHaveBeenCalled();
-        act(() => { button(6, 'Delete forever').click(); });
+        await act(async () => { button(6, 'Delete forever').click(); });
         expect(content.deleteForever).toHaveBeenCalledWith(expect.objectContaining({ id: 6 }));
         confirm.mockRestore();
     });
 
-    it('Empty trash leaves a queued note alone, and says so; with only queued notes it is off', () => {
+    it('Empty trash leaves a queued note alone, and says so; with only queued notes it is off', async () => {
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
         const queued = new Set([5]);
         const { content, empty } = renderTrash(queued);
-        act(() => { empty().click(); });
+        await act(async () => { empty().click(); });
         expect(confirm.mock.calls[0][0]).toMatch(/Delete 1 note in the trash forever\? Notes still being moved there are left alone/);
         expect(content.emptyTrash).toHaveBeenCalledWith(queued);
         confirm.mockRestore();

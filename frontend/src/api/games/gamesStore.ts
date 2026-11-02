@@ -37,7 +37,7 @@
  *
  * Nothing is sent unless this socket's server confirmed `games` in
  * ServerFeatures: an older server answers an unknown frame with an Error,
- * which the chat view shows as an error toast.
+ * which the chat view shows as an error notice.
  */
 import {
     GAMES_FEATURE,

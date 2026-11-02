@@ -9,6 +9,7 @@ import { statusOf } from '../../api/client';
 import { AuthedImg } from '../AuthedImg';
 import { FolderIcon, HashIcon, MoonIcon, SpeakerIcon, TrashIcon, UploadIcon } from '../Icons';
 import './ModesSettings.css';
+import { askConfirm } from '../../api/appDialogs';
 
 /** What the color input starts from when a mode has no accent yet. */
 const DEFAULT_ACCENT = '#7a1f3d';
@@ -93,7 +94,7 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
         const warning = isActive
             ? `Delete ${mode.name}? It is on right now: anyone in its voice channels will be disconnected. Its channels and their messages are kept.`
             : `Delete ${mode.name}? Its channels and their messages are kept, and show all the time from now on.`;
-        if (!confirm(warning)) return;
+        if (!await askConfirm(warning)) return;
         setBusy(true);
         setError('');
         try {

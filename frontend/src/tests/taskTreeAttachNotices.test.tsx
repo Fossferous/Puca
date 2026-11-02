@@ -2,9 +2,10 @@
 /**
  * The end of a task's attachment upload: encrypted and sent one file at a time,
  * so tens of seconds after the person chose the files, and often with them
- * somewhere else by now. What went wrong is a toast, not a native alert() that
- * would take the focus from whatever they went to. A refusal at the moment they
- * chose the files is still the alert it was.
+ * somewhere else by now. What went wrong is a notice that waits for them: not a
+ * native alert() that would take the focus from whatever they went to, and not a
+ * toast that expires behind it. A refusal at the moment they chose the files is
+ * still the alert it was.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -24,7 +25,7 @@ vi.mock('../api/heif', async importOriginal => ({
 
 import { TaskTree } from '../components/TaskTree';
 import type { Task } from '../api/tasks';
-import { setMessageToastSink } from '../components/messageToastBus';
+import { mountAppDialogs } from './appDialogsHost';
 import { ENC_KEY_UNAVAILABLE } from '../api/decryptMarkers';
 
 const task = (id: number, description: string, o: Partial<Task> = {}): Task => ({
@@ -34,7 +35,7 @@ const task = (id: number, description: string, o: Partial<Task> = {}): Task => (
 
 let root: Root;
 let host: HTMLDivElement;
-let toasts: string[];
+let dialogs: ReturnType<typeof mountAppDialogs>;
 let alertSpy: ReturnType<typeof vi.spyOn>;
 const onSetAttachments = vi.fn();
 
@@ -72,8 +73,7 @@ beforeEach(() => {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
-    toasts = [];
-    setMessageToastSink(t => { toasts.push(t.title); });
+    dialogs = mountAppDialogs();
     alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     onSetAttachments.mockReset();
     HTMLInputElement.prototype.click = function click() {};
@@ -81,16 +81,16 @@ beforeEach(() => {
 afterEach(() => {
     act(() => root.unmount());
     host.remove();
-    setMessageToastSink(null);
+    dialogs.unmount();
     vi.restoreAllMocks();
 });
 
 describe('the end of an attachment upload', () => {
-    it('a file that failed is named in a toast, and no modal appears', async () => {
+    it('a file that failed is named in a notice, and no modal appears', async () => {
         h.upload = async () => { throw new Error('too big'); };
         render([task(1, 'Buy milk')]);
         await choose('Buy milk', [file('a.png')]);
-        expect(toasts).toEqual(['Failed to attach: a.png. Files must be under 10 MB.']);
+        expect(dialogs.notices()).toEqual(['Failed to attach: a.png. Files must be under 10 MB.']);
         expect(alertSpy).not.toHaveBeenCalled();
     });
 
@@ -102,10 +102,10 @@ describe('the end of an attachment upload', () => {
         render([task(1, 'Buy milk')]);
         await choose('Buy milk', [file('good.png'), file('bad.png')]);
         expect(onSetAttachments).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), [{ href: 'sovereign-enc:good.png', name: 'good.png' }]);
-        expect(toasts).toEqual(['Failed to attach: bad.png. Files must be under 10 MB.']);
+        expect(dialogs.notices()).toEqual(['Failed to attach: bad.png. Files must be under 10 MB.']);
     });
 
-    it('sidecar locked while the upload ran: a toast, and nothing is overwritten', async () => {
+    it('sidecar locked while the upload ran: a notice, and nothing is overwritten', async () => {
         let finishUpload: (ref: { href: string; name: string }) => void = () => {};
         h.upload = () => new Promise(resolve => { finishUpload = resolve; });
         render([task(1, 'Buy milk')]);
@@ -114,8 +114,8 @@ describe('the end of an attachment upload', () => {
         // device does not hold.
         render([task(1, 'Buy milk', { attachments: ENC_KEY_UNAVAILABLE })]);
         await act(async () => { finishUpload({ href: 'sovereign-enc:a', name: 'a.png' }); await new Promise(r => setTimeout(r, 0)); });
-        expect(toasts).toHaveLength(1);
-        expect(toasts[0]).toMatch(/can't be read yet/);
+        expect(dialogs.notices()).toHaveLength(1);
+        expect(dialogs.notices()[0]).toMatch(/can't be read yet/);
         expect(alertSpy).not.toHaveBeenCalled();
         expect(onSetAttachments).not.toHaveBeenCalled();
     });
@@ -125,6 +125,6 @@ describe('the end of an attachment upload', () => {
         render([task(1, 'Buy milk')]);
         await choose('Buy milk', Array.from({ length: 50 }, (_, i) => file(`${i}.png`)));
         expect(alertSpy).toHaveBeenCalledTimes(1);
-        expect(toasts).toEqual([]);
+        expect(dialogs.notices()).toEqual([]);
     });
 });

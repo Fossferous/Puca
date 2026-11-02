@@ -44,6 +44,7 @@ import { hideNativeKeyboard, raiseNativeKeyboard } from '../native/notesNative';
 import { AttachmentImg } from '../../components/AttachmentImg';
 import '../../components/NoteImages.css';
 import '../noteContent.css';
+import { askConfirm } from '../../api/appDialogs';
 
 /**
  * Something waiting in the composer. A picture carries an on-device preview
@@ -486,8 +487,8 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         onDismiss?.();
     };
 
-    const discard = () => {
-        if ((pictures.length > 0 || clip || body.trim()) && !window.confirm('Discard this note?')) return;
+    const discard = async () => {
+        if ((pictures.length > 0 || clip || body.trim()) && !await askConfirm('Discard this note?')) return;
         // A save still waiting for the transcript is off, and the composer
         // must stop claiming to be saving a note that no longer exists.
         closeToken.current++;

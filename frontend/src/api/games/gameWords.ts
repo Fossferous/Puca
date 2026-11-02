@@ -32,7 +32,7 @@ export function refusalText(op: GameOp | 'other', r: GameRefusal, kind: GameKind
         case 'config_locked': return 'The settings can’t change after the first hand.';
         case 'seat_out_of_range': return 'That seat doesn’t exist.';
         case 'seat_taken': return 'Someone just took that seat.';
-        case 'seat_empty': return 'Nobody is in that seat.';
+        case 'seat_empty': return op === 'remove_player' ? 'That player is no longer in that seat.' : 'Nobody is in that seat.';
         case 'already_seated': return 'You already have a seat.';
         case 'not_your_turn': return 'It isn’t your turn.';
         case 'stale_turn': return 'That turn has passed.';

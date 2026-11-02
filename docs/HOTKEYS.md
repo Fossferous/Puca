@@ -224,9 +224,15 @@ push-to-mute ignore that edge.
 
 A window whose integrity level cannot be read (a protected process, anti-cheat,
 another user) is treated the same way for this decision, because it may be above
-ours. The banner still says nothing about it, since nothing was read. If its keys
-are in fact visible, the hook still works there, so a press and release clears the
-hold, and so does leaving the window.
+ours. The banner still says nothing about it, since nothing was read. That holds
+until a press is reported with that window in front, by the hook or by the poll:
+no source can report one from behind a window that hides keys, so its table is
+believed from then on. A press and release there clears a kept hold, even when the
+poll is the only source for that key (Mouse 4 with `WH_MOUSE_LL` refused, or a failed
+re-arm), and a key-up the hook loses costs the usual 40 ms. A key pressed before the
+window came to the front has no such press to go on: its hold stays until the next
+press and release, or until the window is left. Only the last window a press was
+seen in counts, so one that lost the front to another has to show its keys again.
 
 Once a second the blocker thread looks at the owed keys, if the table can be read
 again. A key whose DOWN bit is set has been pressed since: its release is owed by
@@ -257,9 +263,12 @@ In `puca.log`:
 [stream-diag] [hotkeys] released what was held: the native feed could not be re-registered
 ```
 
-The first two say different things: the hook lost a key-up, or a window hid the
-key, in which case the second is the one written and it may not have been a release
-at all. Each is at most one line every 10 s, says how many of its own kind it held
+The first two say different things: the hook lost a key-up, or a window may have
+hidden the key, in which case the second is the one written and it may not have been
+a release at all. Under an unreadable window that second line can still be the hook
+losing a key-up, of a key pressed before the window came to the front:
+`foreground_unreadable=true` on the report's `native` line is what says so. Each is
+at most one line every 10 s, says how many of its own kind it held
 back, and does not rate-limit the other; `poll_releases` still counts every one. The
 key's edge goes out before the line is written, so a stalled disk never delays a
 microphone closing. The third appears only when a key was down: the list also
@@ -284,8 +293,11 @@ Reading it: `held now` names an action while `native` has `down_bits=0` and
 `releases_owed=0`, with the key up, means the page is waiting for a release nothing
 is going to send, which is a bug. `poll_releases` rising faster than
 `poll_releases_blocked`, with `held now` empty, means the hook is losing key-ups and
-the poll is covering them, as it should. `poll_releases_blocked` rising is not the
-hook: a window was hiding keys. `listen only: yes` with `speak denied: yes` and an
+the poll is covering them, as it should. `poll_releases_blocked` rising with
+`foreground_unreadable=false` is not the hook: an elevated window or a secure screen
+was hiding keys. With `foreground_unreadable=true` nothing was read, so it can be
+either, and `in front` saying `nothing known to hide keys` beside it is no
+contradiction. `listen only: yes` with `speak denied: yes` and an
 empty feed is the channel's permission (no SPEAK drops every mic hotkey), where
 plain listen-only would keep Toggle Mute and Toggle Deafen watched. A `bind` that is
 `not set` for the action in `input mode`, or a key missing from `watching`, is a
@@ -316,7 +328,7 @@ await __pucaHotkeysDebug.snapshot()
 | `native.foreground_blocker` non-empty | the app in front runs elevated; nothing here can see its keys |
 | `native.self_injected_bits` non-zero | those slots are held by our OWN remote-control injection; the poll is deliberately blind to them |
 | `native.poll_presses_suppressed` rising | presses the poll refused because the remote-control injector was holding a key. Expected during a device session, and zero otherwise |
-| `native.foreground_unreadable` true | the foreground process could not be inspected at all (protected, anti-cheat, another user). NOT a blocker for the banner: nothing is claimed about it. A held key's missed release is still treated as one that may be false, see *A key held when such a window comes to the front* |
+| `native.foreground_unreadable` true | the foreground process could not be inspected at all (protected, anti-cheat, another user). NOT a blocker for the banner: nothing is claimed about it. A held key's missed release is still treated as one that may be false until a press has been seen in that window, see *A key held when such a window comes to the front*. Also in a report's `native` line, because it is sticky across a look at Púca's own window, which is where a report is made |
 | `feed.ownershipDeferrals` climbing while `feed.nativeDispatches` does not | the in-app feed is standing down for a native feed that has gone quiet — the one failure mode the single-owner rule can have |
 | `feed.blocker` | the same, as the frontend last heard it (drives the banner) |
 | `native.rearms` | re-installs so far (60 s clock plus evidence) |

@@ -37,6 +37,7 @@ import { IcsImportDialog } from '../../components/calendar/IcsImportDialog';
 import { fileStamp } from '../model/noteText';
 import { asLiteralItemText, isHeadingTask } from '../../api/taskHeading';
 import '../timing.css';
+import { askConfirm } from '../../api/appDialogs';
 
 const VIEWS: CalView[] = ['month', 'week', 'day', 'agenda'];
 
@@ -183,7 +184,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
 
     // --- Export / import ----------------------------------------------------------------
     const exportIcs = async () => {
-        if (!window.confirm('The .ics file is NOT encrypted: titles, times and places are in it as plain text. Export?')) return;
+        if (!await askConfirm('The .ics file is NOT encrypted: titles, times and places are in it as plain text. Export?')) return;
         let uidFor: (id: number) => string;
         try { uidFor = currentIcsUid(); } catch (err) { pushMessageToast({ title: err instanceof Error ? err.message : String(err) }); return; }
         const items: IcsItem[] = [];
@@ -237,9 +238,9 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
         return [{
             id: 'phone-cal',
             label: 'Add to phone calendar',
-            onClick: () => {
+            onClick: async () => {
                 if (!prefs.phoneCalendarNoticeSeen) {
-                    const ok = window.confirm('Your phone’s calendar app may sync this item’s title and time to its provider (Google, Samsung…). It is a one-way copy: later changes in Púca do not follow. Continue?');
+                    const ok = await askConfirm('Your phone’s calendar app may sync this item’s title and time to its provider (Google, Samsung…). It is a one-way copy: later changes in Púca do not follow. Continue?');
                     if (!ok) return;
                     setCalendarPrefs({ phoneCalendarNoticeSeen: true });
                 }

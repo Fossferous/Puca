@@ -235,7 +235,8 @@
     "payload": {
       "room_id": "voice_42",
       "table_id": 4503599627370497,
-      "seat": 4
+      "seat": 4,
+      "user_id": 7
     }
   }
 ]

@@ -72,7 +72,9 @@
 //! A BLANK TABLE IS NOT A RELEASE. With such a window in front, or a secure
 //! screen (a UAC prompt, the lock screen), every key reads up whatever the finger
 //! is doing, so the poll "supplies a release" for a key that may still be down. A
-//! window whose level cannot be read might be either, so it counts as one too.
+//! window whose level cannot be read might be either, so it counts as one too,
+//! until a press has been reported with that window in front: nothing reports one
+//! from behind a window that hides keys, so its table can be believed from then on.
 //! Push-to-talk wants that: closing a microphone costs nothing. Push-to-mute does
 //! not, because there the release OPENS it. So that release goes out marked
 //! `blocked`, for the page to judge per action, and the key stays owed: once the
@@ -440,7 +442,7 @@ mod imp {
         WM_TIMER_MSG, WM_WATCH_CHANGED,
     };
     use crate::ll_hook::{HookStep, Win32LowLevelHooks};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use tauri::{AppHandle, Emitter};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
@@ -769,8 +771,10 @@ mod imp {
     /// happening where the hook cannot see them.
     static POLL_PRESSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static POLL_RELEASES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    /// Of `POLL_RELEASES`, those made while the foreground hid every key: not
-    /// evidence about the hook, and maybe not a release at all.
+    /// Of `POLL_RELEASES`, those made while the foreground may have hidden every
+    /// key: maybe not a release at all. Behind a window above us they are no evidence
+    /// about the hook. Behind an unreadable window they may be: a key pressed before
+    /// it came to the front, whose key-up the hook then lost, lands here too.
     static POLL_RELEASES_BLOCKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     /// Releases sent because a save stopped watching a key that was down.
     static RELEASES_ON_REWRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1163,20 +1167,45 @@ mod imp {
         /// rides along so the caller can tell later whether it is still running.
         Above { name: String, pid: u32 },
         /// Its level could not be read: a protected process, anti-cheat, another
-        /// user. It may be above us or not.
-        Unreadable,
+        /// user. It may be above us or not. The window rides along for
+        /// `hides_keys`.
+        Unreadable { window: isize },
     }
 
     impl ForegroundLook {
         /// May the key-state table read up for every key right now?
         ///
-        /// Unreadable counts as yes. If that window is in fact above us, believing
+        /// Unreadable counts as yes: if that window is in fact above us, believing
         /// the table would open a held push-to-mute with the finger still down.
-        /// If it is not, the cost is small: the hook still sees its keys, so a
-        /// press and release there clears the hold, and so does leaving it.
-        fn hides_keys(&self) -> bool {
-            !matches!(self, Self::NotAbove)
+        /// Until a press has been reported with that very window in front
+        /// (`keys_shown_in`, the last window one was): the hooks and the table are
+        /// all blind behind a window that hides keys, so that press says this one
+        /// does not, whichever of them reported it. From there its releases are
+        /// true, so a press and release clears a hold kept for it, and a key-up the
+        /// hook lost costs 40 ms as it does anywhere else.
+        ///
+        /// What stays is a key pressed BEFORE the window came to the front, with
+        /// no press since: nothing has been seen to say the window shows its keys.
+        /// Its hold waits for the next press and release, or for leaving the window.
+        fn hides_keys(&self, keys_shown_in: isize) -> bool {
+            match self {
+                Self::NotAbove => false,
+                Self::Unreadable { window } => *window != keys_shown_in,
+                Self::NoWindow | Self::Above { .. } => true,
+            }
         }
+    }
+
+    /// The last foreground window a press was reported in, by the hook or the poll.
+    /// One window, not a list: another window's press costs at most a press and
+    /// release when the person comes back, and a handle can be reused.
+    static KEYS_SHOWN_IN: AtomicIsize = AtomicIsize::new(0);
+
+    /// What reading a foreground process found, from the process's side.
+    enum ProcessRead {
+        NotAbove,
+        Above { name: String },
+        Unreadable,
     }
 
     /// The name and pid of a foreground process above our integrity level, for
@@ -1189,17 +1218,35 @@ mod imp {
         }
     }
 
+    /// One foreground window, from what was asked about it. The syscalls are
+    /// parameters so a test drives this exact decision.
+    fn look_from(window: isize, pid: u32, own_pid: u32, read_process: impl FnOnce(u32) -> ProcessRead) -> ForegroundLook {
+        if window == 0 {
+            return ForegroundLook::NoWindow;
+        }
+        if pid == 0 || pid == own_pid {
+            return ForegroundLook::NotAbove;
+        }
+        match read_process(pid) {
+            ProcessRead::NotAbove => ForegroundLook::NotAbove,
+            ProcessRead::Above { name } => ForegroundLook::Above { name, pid },
+            ProcessRead::Unreadable => ForegroundLook::Unreadable { window },
+        }
+    }
+
     fn look_at_foreground() -> ForegroundLook {
         unsafe {
             let hwnd = GetForegroundWindow();
-            if hwnd == HWND::default() {
-                return ForegroundLook::NoWindow;
-            }
             let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == 0 || pid == std::process::id() {
-                return ForegroundLook::NotAbove;
+            if hwnd != HWND::default() {
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
             }
+            look_from(hwnd.0 as isize, pid, std::process::id(), read_foreground_process)
+        }
+    }
+
+    fn read_foreground_process(pid: u32) -> ProcessRead {
+        unsafe {
             let ours = integrity_level_of(GetCurrentProcess()).unwrap_or(0x2000);
             let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
                 // Cannot open it at all: unknown, not "elevated". Recorded so
@@ -1207,7 +1254,7 @@ mod imp {
                 // as a process name (a banner reading "pid 4312 runs as
                 // administrator" is a guess wearing a fact's clothes).
                 FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
-                return ForegroundLook::Unreadable;
+                return ProcessRead::Unreadable;
             };
             let theirs = integrity_level_of(process);
             let name = {
@@ -1226,15 +1273,15 @@ mod imp {
                 // The only case we claim: a level was READ and it is higher.
                 Some(level) if level > ours => {
                     FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
-                    ForegroundLook::Above { name, pid }
+                    ProcessRead::Above { name }
                 }
                 Some(_) => {
                     FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
-                    ForegroundLook::NotAbove
+                    ProcessRead::NotAbove
                 }
                 None => {
                     FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
-                    ForegroundLook::Unreadable
+                    ProcessRead::Unreadable
                 }
             }
         }
@@ -1290,16 +1337,16 @@ mod imp {
     }
 
     /// May the key-state table read up for every key right now? True with a window
-    /// above our integrity level in front, with one whose level cannot be read, and
-    /// with no foreground window to ask about: a secure screen (a UAC prompt, the
-    /// lock screen) takes the whole desktop away, and GetAsyncKeyState documents
-    /// zero for that too. A window losing activation also reads as no window for a
-    /// moment, which at worst delays a push-to-mute release until the next look at
-    /// the owed keys.
+    /// above our integrity level in front, with one whose level cannot be read and
+    /// that has not been seen to show its keys, and with no foreground window to ask
+    /// about: a secure screen (a UAC prompt, the lock screen) takes the whole desktop
+    /// away, and GetAsyncKeyState documents zero for that too. A window losing
+    /// activation also reads as no window for a moment, which at worst delays a
+    /// push-to-mute release until the next look at the owed keys.
     ///
     /// Not for the hook thread (`BLOCKER_THREAD` says why).
     fn foreground_hides_keys() -> bool {
-        look_at_foreground().hides_keys()
+        look_at_foreground().hides_keys(KEYS_SHOWN_IN.load(Ordering::SeqCst))
     }
 
     /// Answer what a blank table left owing, once the table can be read again.
@@ -1455,9 +1502,11 @@ mod imp {
             "poll_every_ms": POLL_EVERY_MS,
             "poll_presses": POLL_PRESSES.load(Ordering::Relaxed),
             "poll_releases": POLL_RELEASES.load(Ordering::Relaxed),
-            // Of those, how many a window hiding every key produced: maybe not
-            // releases at all, and no evidence about the hook. `releases_owed` is
-            // how many of those keys still await a reading of the table.
+            // Of those, how many came while a window may have been hiding every
+            // key: maybe not releases at all. With `foreground_unreadable` false,
+            // no evidence about the hook; with it true they may be its lost
+            // key-ups. `releases_owed` is how many of those keys still await a
+            // reading of the table.
             "poll_releases_blocked": POLL_RELEASES_BLOCKED.load(Ordering::Relaxed),
             "releases_owed": OWED_RELEASES.lock().unwrap_or_else(|e| e.into_inner()).len(),
             // Releases sent because a save stopped watching a key that was
@@ -1483,7 +1532,9 @@ mod imp {
             "foreground_blocker": BLOCKER.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "foreground_is_us": foreground_is_us(),
             // True = the foreground process could not be inspected at all
-            // (protected, or another user). NOT the same as blocked.
+            // (protected, or another user). NOT the same as blocked. The one field
+            // that tells a window hiding a key from a hook losing one behind a
+            // window that hid nothing, so a report carries it (`NATIVE_FIELDS`).
             "foreground_unreadable": FOREGROUND_UNREADABLE.load(Ordering::SeqCst),
         })
     }
@@ -1632,9 +1683,26 @@ mod imp {
     /// wants edges. Runs in the hook callback — everything here must be cheap
     /// and lock-free (atomics, GetAsyncKeyState, a channel append).
     unsafe fn emit_transition(slot: usize, vk: u32, is_down: bool) {
-        if take_edge(&DOWN, slot, is_down) {
+        if take_reported_edge(&DOWN, &KEYS_SHOWN_IN, slot, is_down, || GetForegroundWindow().0 as isize) {
             send_edge(vk, is_down);
         }
+    }
+
+    /// `take_edge` for an edge the hook or the poll has just seen on the key: a press
+    /// also says the window in front shows its keys (`ForegroundLook::hides_keys`).
+    /// The window is read only for that, and it is one cheap call on the hook thread.
+    fn take_reported_edge(
+        down: &AtomicU32,
+        keys_shown_in: &AtomicIsize,
+        slot: usize,
+        is_down: bool,
+        foreground_window: impl FnOnce() -> isize,
+    ) -> bool {
+        let is_edge = take_edge(down, slot, is_down);
+        if is_edge && is_down {
+            keys_shown_in.store(foreground_window(), Ordering::SeqCst);
+        }
+        is_edge
     }
 
     /// The edge detector: is this report a change from what the page was last
@@ -2141,17 +2209,21 @@ mod imp {
     #[cfg(test)]
     mod rewrite_tests {
         use super::{
-            apply_watch_list, dedupe_slots, deliver_poll_release, poll_release_line, poll_tick, rewrite_log_line,
-            settle_owed, slot_of, take_edge, ForegroundLook, KeyEvent, NoteLimiter, PollAction, PollView, ReleaseNotes, WatchRewrite,
-            POLL_CONFIRM, POLL_RELEASE_LOG_MIN_MS, WATCH_SLOTS,
+            apply_watch_list, dedupe_slots, deliver_poll_release, look_from, poll_release_line, poll_tick,
+            read_foreground_process, rewrite_log_line, settle_owed, slot_of, take_edge, take_reported_edge, ForegroundLook,
+            KeyEvent, NoteLimiter, PollAction, PollView, ProcessRead, ReleaseNotes, WatchRewrite, POLL_CONFIRM,
+            POLL_RELEASE_LOG_MIN_MS, WATCH_SLOTS,
         };
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
         const V: u32 = 0x56; // the push-to-mute key in these stories
         const M: u32 = 0x4D; // Toggle Mute
         const D: u32 = 0x44; // Toggle Deafen
         const B: u32 = 0x42;
         const TYPED: u32 = 0x41; // A: bound to nothing, however often it is pressed
+        const ORDINARY: isize = 0x100; // window handles
+        const ELEVATED: isize = 0x200;
+        const UNREADABLE: isize = 0x300;
 
         struct Rig {
             watch: [AtomicU32; WATCH_SLOTS],
@@ -2166,9 +2238,14 @@ mod imp {
             heard: Vec<(u32, bool)>,
             injector_holding: bool,
             last_rewrite: WatchRewrite,
-            /// A window hides every key: the table reads up, and the emitter's
-            /// probe says so.
+            /// A window hides every key: the table reads up, whatever the finger
+            /// is doing. What the window IS comes separately: an unreadable window
+            /// may or may not do this, and the emitter decides on `front` alone.
             blank_table: bool,
+            /// What `look_at_foreground` answers, and the handle it was asked about.
+            front: ForegroundLook,
+            front_window: isize,
+            keys_shown_in: AtomicIsize,
             /// Releases the page heard marked `blocked`. It keeps the key on these,
             /// as a push-to-mute page does.
             heard_blocked: Vec<u32>,
@@ -2188,6 +2265,9 @@ mod imp {
                     injector_holding: false,
                     last_rewrite: WatchRewrite::default(),
                     blank_table: false,
+                    front: ForegroundLook::NotAbove,
+                    front_window: ORDINARY,
+                    keys_shown_in: AtomicIsize::new(0),
                     heard_blocked: Vec::new(),
                     owed: Vec::new(),
                 };
@@ -2214,10 +2294,31 @@ mod imp {
             fn hook(&mut self, vk: u32, is_down: bool) {
                 self.finger(vk, is_down);
                 if let Some(slot) = slot_of(&self.watch, vk) {
-                    if take_edge(&self.down, slot, is_down) {
+                    let window = self.front_window;
+                    if take_reported_edge(&self.down, &self.keys_shown_in, slot, is_down, || window) {
                         self.page_hears(vk, is_down);
                     }
                 }
+            }
+
+            /// An elevated window comes to the front: its keys reach nothing.
+            fn elevated_window_in_front(&mut self) {
+                self.front = ForegroundLook::Above { name: "game.exe".into(), pid: 1 };
+                self.front_window = ELEVATED;
+                self.blank_table = true;
+            }
+
+            /// A window whose level cannot be read, hiding its keys or not.
+            fn unreadable_window_in_front(&mut self, shows_its_keys: bool) {
+                self.front = ForegroundLook::Unreadable { window: UNREADABLE };
+                self.front_window = UNREADABLE;
+                self.blank_table = !shows_its_keys;
+            }
+
+            fn ordinary_window_in_front(&mut self) {
+                self.front = ForegroundLook::NotAbove;
+                self.front_window = ORDINARY;
+                self.blank_table = false;
             }
 
             /// A settings save reaching `start()`, and what `start()` sends for it.
@@ -2229,9 +2330,12 @@ mod imp {
                 }
             }
 
-            /// The blocker thread's look at the owed keys, once the table is
-            /// readable again (`settle_owed_releases`).
+            /// The blocker thread's look at the owed keys (`settle_owed_releases`):
+            /// nothing until the table can be read again.
             fn settle(&mut self) {
+                if self.front.hides_keys(self.keys_shown_in.load(Ordering::SeqCst)) {
+                    return;
+                }
                 let physical = self.physical.clone();
                 let watch = &self.watch;
                 let down = &self.down;
@@ -2261,10 +2365,20 @@ mod imp {
                 for (slot, vk, action) in acted {
                     match action {
                         PollAction::Emit(is_down) => {
-                            if take_edge(&self.down, slot, is_down) {
-                                if !is_down && self.blank_table {
+                            let window = self.front_window;
+                            let edge = if is_down {
+                                take_reported_edge(&self.down, &self.keys_shown_in, slot, true, || window)
+                            } else {
+                                // The poll's own release path (`poll_watched_keys`).
+                                take_edge(&self.down, slot, false)
+                            };
+                            if edge {
+                                // The emitter's decision (`Out::PollRelease`).
+                                if !is_down && self.front.hides_keys(self.keys_shown_in.load(Ordering::SeqCst)) {
                                     self.heard_blocked.push(vk);
-                                    self.owed.push(vk);
+                                    if !self.owed.contains(&vk) {
+                                        self.owed.push(vk);
+                                    }
                                 } else {
                                     self.page_hears(vk, is_down);
                                 }
@@ -2453,7 +2567,7 @@ mod imp {
         fn held_when_the_table_went_blank() -> Rig {
             let mut rig = Rig::watching(&[V]);
             rig.hook(V, true);
-            rig.blank_table = true;
+            rig.elevated_window_in_front();
             rig.ticks(POLL_CONFIRM);
             assert_eq!(rig.heard_blocked, [V], "the poll said up, and said it might not be");
             assert_eq!(rig.page, [V], "the page kept the hold");
@@ -2464,7 +2578,7 @@ mod imp {
         fn a_key_released_behind_the_window_gets_its_real_release_when_the_window_goes() {
             let mut rig = held_when_the_table_went_blank();
             rig.finger(V, false); // nothing can see this
-            rig.blank_table = false;
+            rig.ordinary_window_in_front();
             rig.settle();
             assert_eq!(rig.page, [] as [u32; 0], "or the person stays muted until their next press");
             assert_eq!(rig.owed, [] as [u32; 0]);
@@ -2473,7 +2587,7 @@ mod imp {
         #[test]
         fn a_key_still_down_when_the_window_goes_keeps_its_hold_to_the_end() {
             let mut rig = held_when_the_table_went_blank();
-            rig.blank_table = false;
+            rig.ordinary_window_in_front();
             rig.ticks(POLL_CONFIRM); // the table reads down again: the poll supplies a press
             rig.settle();
             assert_eq!(rig.heard, [(V, true), (V, true)], "no release in between");
@@ -2489,7 +2603,7 @@ mod imp {
         #[test]
         fn a_key_read_down_before_the_poll_has_it_stays_owed() {
             let mut rig = held_when_the_table_went_blank();
-            rig.blank_table = false;
+            rig.ordinary_window_in_front();
             rig.settle();
             assert_eq!(rig.owed, [V]);
             assert_eq!(rig.page, [V]);
@@ -2509,7 +2623,7 @@ mod imp {
         fn a_press_the_table_has_not_caught_up_with_gets_no_release() {
             let mut rig = held_when_the_table_went_blank();
             rig.finger(V, false); // let go behind the window, which then goes
-            rig.blank_table = false;
+            rig.ordinary_window_in_front();
             rig.hook(V, true);
             rig.finger(V, false); // the hook has run; the table has not been updated
             let heard_before = rig.heard.len();
@@ -2523,29 +2637,162 @@ mod imp {
 
         /// What the emitter and the blocker thread decide on.
         #[test]
-        fn a_window_we_cannot_read_counts_as_hiding_keys() {
-            assert!(ForegroundLook::Unreadable.hides_keys());
-            assert!(ForegroundLook::NoWindow.hides_keys());
-            assert!(ForegroundLook::Above { name: "game.exe".into(), pid: 1 }.hides_keys());
+        fn a_window_we_cannot_read_counts_as_hiding_keys_until_it_has_shown_one() {
+            let unreadable = ForegroundLook::Unreadable { window: UNREADABLE };
+            assert!(unreadable.hides_keys(0));
+            assert!(unreadable.hides_keys(ORDINARY), "a press in another window says nothing about this one");
+            assert!(!unreadable.hides_keys(UNREADABLE));
+            // No press can say this about these: a press seen a moment before the
+            // window came to the front must not read as the window showing keys.
+            assert!(ForegroundLook::NoWindow.hides_keys(0));
+            assert!(ForegroundLook::Above { name: "game.exe".into(), pid: 1 }.hides_keys(ELEVATED));
             // Or a key let go in an ordinary window would never be released.
-            assert!(!ForegroundLook::NotAbove.hides_keys());
+            assert!(!ForegroundLook::NotAbove.hides_keys(0));
         }
 
-        /// The price of counting an unreadable window: when its keys are in fact
-        /// visible, the poll's release was real and the hold is kept for nothing.
-        /// The hook still works there, so a press and release clears it, and the
-        /// look after the window goes finds nothing left to do.
+        /// What each answer about the foreground window becomes.
         #[test]
-        fn a_hold_kept_for_a_window_that_shows_its_keys_clears_on_a_re_press() {
-            let mut rig = held_when_the_table_went_blank();
+        fn the_look_says_unreadable_only_for_a_process_it_could_not_read() {
+            let never = |_: u32| -> ProcessRead { panic!("no process to read") };
+            assert!(matches!(look_from(0, 0, 7, never), ForegroundLook::NoWindow));
+            assert!(matches!(look_from(ORDINARY, 7, 7, never), ForegroundLook::NotAbove), "our own window");
+            assert!(matches!(look_from(ORDINARY, 0, 7, never), ForegroundLook::NotAbove), "a window already gone");
+            assert!(matches!(
+                look_from(UNREADABLE, 9, 7, |_| ProcessRead::Unreadable),
+                ForegroundLook::Unreadable { window: UNREADABLE },
+            ));
+            assert!(matches!(look_from(ORDINARY, 9, 7, |_| ProcessRead::NotAbove), ForegroundLook::NotAbove));
+            assert!(matches!(
+                look_from(ELEVATED, 9, 7, |_| ProcessRead::Above { name: "game.exe".into() }),
+                ForegroundLook::Above { pid: 9, .. },
+            ));
+        }
+
+        /// The real calls: a pid nothing can have cannot be opened, the case the
+        /// first half of this exists for. CONTROL: this process can be read.
+        #[test]
+        fn a_process_that_cannot_be_opened_reads_as_unreadable() {
+            assert!(matches!(read_foreground_process(0xFFFF_FFFC), ProcessRead::Unreadable));
+            assert!(matches!(read_foreground_process(std::process::id()), ProcessRead::NotAbove));
+        }
+
+        /// Both decisions go through `foreground_hides_keys`, and it asks the look.
+        /// Each is one line no test can run (it needs a real foreground window), and
+        /// changing one of them is how an unreadable window goes back to counting
+        /// as an ordinary one with every test above still green.
+        #[test]
+        fn both_decisions_ask_the_look_at_the_foreground() {
+            let source = include_str!("hotkeys.rs");
+            let body_of = |start: &str, end: &str| {
+                let from = source.find(start).unwrap_or_else(|| panic!("no {start}")) + start.len();
+                source[from..].split(end).next().unwrap().to_string()
+            };
+            let hides = body_of("fn foreground_hides_keys() -> bool {", "}");
+            assert_eq!(hides.trim(), "look_at_foreground().hides_keys(KEYS_SHOWN_IN.load(Ordering::SeqCst))");
+            assert!(body_of("Out::PollRelease { ev, total } => {", "let now_ms").contains("let blocked = foreground_hides_keys();"));
+            assert!(body_of("fn settle_owed_releases() {", "settle_owed(").contains("nothing_owed || foreground_hides_keys()"));
+            // The look goes through the decision the tests drive.
+            assert!(body_of("fn look_at_foreground() -> ForegroundLook {", "fn read_foreground_process").contains("look_from("));
+            // And a press from either source says the window shows its keys: the
+            // hook's and the poll's both come through `emit_transition`.
+            assert!(body_of("unsafe fn emit_transition(", "///").contains("take_reported_edge("));
+            assert!(body_of("PollAction::Emit(true) => {", "PollAction::Emit(false)").contains("emit_transition(slot, vk, true)"));
+            assert!(body_of("unsafe extern \"system\" fn kbd_proc(", "CallNextHookEx").contains("emit_transition("));
+        }
+
+        /// THE PRICE of counting an unreadable window, and the way out. The bound key
+        /// reaches us only through the poll (Mouse 4 with WH_MOUSE_LL refused, or a
+        /// failed re-arm), so nothing but the table can say the window shows its keys.
+        /// Press and release there and the release counts: fails if a press the poll
+        /// supplied says nothing about the window, which left the person muted for as
+        /// long as it stayed in front, with no key press clearing it.
+        #[test]
+        fn a_poll_only_press_and_release_in_an_unreadable_window_clears_the_hold() {
+            let mut rig = Rig::watching(&[V]);
+            rig.unreadable_window_in_front(true);
+            rig.finger(V, true);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [V], "the poll supplied the press");
             rig.finger(V, false);
-            rig.blank_table = false;
-            rig.hook(V, true);
-            rig.hook(V, false);
-            assert_eq!(rig.page, [] as [u32; 0], "no longer muted");
-            rig.settle();
-            assert_eq!(rig.page, [] as [u32; 0]);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [] as [u32; 0], "and the release is believed");
+            assert_eq!(rig.heard_blocked, [] as [u32; 0]);
             assert_eq!(rig.owed, [] as [u32; 0]);
+        }
+
+        /// The same, for a hold from before the window came: its first release cannot
+        /// be told from a table gone blank, and the next press settles it.
+        #[test]
+        fn a_hold_kept_for_an_unreadable_window_that_shows_its_keys_clears_on_a_re_press() {
+            let mut rig = Rig::watching(&[V]);
+            rig.finger(V, true);
+            rig.ticks(POLL_CONFIRM);
+            rig.unreadable_window_in_front(true);
+            rig.finger(V, false);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.heard_blocked, [V], "nothing has shown this window's keys yet");
+            assert_eq!(rig.page, [V], "the page kept the hold");
+            rig.finger(V, true);
+            rig.ticks(POLL_CONFIRM);
+            rig.finger(V, false);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [] as [u32; 0], "no longer muted");
+            assert_eq!(rig.heard_blocked, [V], "and that release was not held back");
+            rig.settle();
+            assert_eq!(rig.page, [] as [u32; 0], "the look after it finds nothing left to do");
+            assert_eq!(rig.owed, [] as [u32; 0]);
+        }
+
+        /// The everyday form: the hook is alive and loses one key-up.
+        #[test]
+        fn a_key_up_the_hook_lost_in_an_unreadable_window_still_costs_only_the_poll() {
+            let mut rig = Rig::watching(&[V]);
+            rig.unreadable_window_in_front(true);
+            rig.hook(V, true);
+            rig.finger(V, false);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [] as [u32; 0]);
+            assert_eq!(rig.heard_blocked, [] as [u32; 0]);
+        }
+
+        /// NEGATIVE CONTROL: the unreadable window that really does hide keys. Nothing
+        /// can report a press from behind it, so the finger still holding push-to-mute
+        /// stays muted, whatever was pressed before it came.
+        #[test]
+        fn an_unreadable_window_that_hides_keys_keeps_the_hold() {
+            let mut rig = Rig::watching(&[V, M]);
+            rig.hook(M, true);
+            rig.hook(M, false); // a press seen, in the window before this one
+            rig.hook(V, true);
+            rig.unreadable_window_in_front(false);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.heard_blocked, [V]);
+            assert_eq!(rig.page, [V], "the release may be false, so the mic stays shut");
+            rig.settle();
+            assert_eq!(rig.page, [V], "and the table cannot be read here");
+            rig.ordinary_window_in_front();
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.page, [V]);
+            rig.hook(V, false);
+            assert_eq!(rig.page, [] as [u32; 0], "the real release, once it can be seen");
+        }
+
+        /// A press in the unreadable window says nothing once another window has been
+        /// in front: that one's press is the last seen, and the handle may be gone.
+        #[test]
+        fn another_windows_press_takes_the_proof_away() {
+            let mut rig = Rig::watching(&[V, M]);
+            rig.unreadable_window_in_front(true);
+            rig.hook(M, true);
+            rig.hook(M, false);
+            rig.ordinary_window_in_front();
+            rig.hook(M, true);
+            rig.hook(M, false);
+            rig.hook(V, true);
+            rig.unreadable_window_in_front(true);
+            rig.finger(V, false);
+            rig.ticks(POLL_CONFIRM);
+            assert_eq!(rig.heard_blocked, [V]);
         }
 
         #[test]
@@ -2554,7 +2801,7 @@ mod imp {
             rig.save(&[B]);
             assert_eq!(rig.last_rewrite.released, [] as [u32; 0], "its bit went with the blocked release");
             rig.finger(V, false);
-            rig.blank_table = false;
+            rig.ordinary_window_in_front();
             rig.settle();
             assert_eq!(rig.page, [] as [u32; 0]);
         }

@@ -85,7 +85,7 @@ describe('client frames are exactly what the server parses', () => {
             gameFrames.showCards(ROOM, TABLE),
             gameFrames.resync(ROOM, TABLE),
             gameFrames.close(ROOM, TABLE),
-            gameFrames.removePlayer(ROOM, TABLE, 4),
+            gameFrames.removePlayer(ROOM, TABLE, 4, 7),
         ];
         expect(built).toHaveLength(clientFrames.length);
         built.forEach((b, i) => expect(JSON.parse(JSON.stringify(b)), `#${i} ${b.type}`).toEqual(clientFrames[i]));

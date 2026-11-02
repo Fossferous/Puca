@@ -121,6 +121,7 @@ import { DeviceShareModal } from './DeviceShareModal';
 import { DeviceAudioHubPanel } from './DeviceAudioHubPanel';
 import { BanIcon, CloseIcon, Icon, MonitorIcon, SettingsIcon, ShieldCheckIcon, TrashIcon, WarningIcon, type IconName } from './Icons';
 import './DevicesView.css';
+import { askConfirm } from '../api/appDialogs';
 
 /** How often the list re-checks presence while the view is open. Same cadence
  *  as FriendsPanel, for the same reason: online/offline flips have no WS push
@@ -835,7 +836,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     // key outlives the switch, so someone who has already turned it off is
     // exactly the person with no other way to remove it.
     const doForgetThisMachine = async () => {
-        const ok = window.confirm(
+        const ok = await askConfirm(
             'Erase this computer’s key?\n\n'
             + 'Lock-screen access will be turned off and this computer’s own key, '
             + 'passphrase record and connection details will be deleted from it.\n\n'

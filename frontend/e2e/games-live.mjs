@@ -127,7 +127,7 @@ function makeRec(label, page, phone) {
     });
     page.on('console', m => fs.appendFileSync(path.join(OUT, 'console.txt'), `${new Date().toISOString()} ${label} ${m.type()} ${m.text().slice(0, 300)}\n`));
     page.on('pageerror', e => console.log(`  [${label} pageerror]`, e.message.slice(0, 200)));
-    // A refusal shown the wrong way is the generic Error frame: a toast, which
+    // A refusal shown the wrong way is the generic Error frame: a notice, which
     // Chat logs in these words, so it is counted with the alerts.
     page.on('console', m => { if (m.text().startsWith('[WS] server error:')) { alerts.push(`${label}: ${m.text()}`); console.log(`  [${label} SERVER ERROR]`, m.text()); } });
     page.on('dialog', d => {

@@ -43,6 +43,7 @@ import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipPropos
 import { API_BASE_URL } from './api/config';
 import { ClipApprovalPrompt } from './components/ClipApprovalPrompt';
 import './App.css';
+import { askConfirm } from './api/appDialogs';
 
 const MAX_AUTO_RETRIES = RETRY_DELAYS_MS.length;
 
@@ -93,7 +94,7 @@ function App() {
     // browser go with any sign-out (logout() scrubs them); ask first, as
     // Notes' own sign-out does (api/notesCacheScrub.ts).
     const notesWarning = notesSignOutWarning(readNotesUnsynced(currentUserIdFromToken()));
-    if (notesWarning !== null && !window.confirm(notesWarning)) return;
+    if (notesWarning !== null && !(await askConfirm(notesWarning))) return;
     // FIRST, before logout() drops the JWT: unregistering the push token needs
     // it. Fire-and-forget — the synchronous prefix captures the token, and the
     // server's FCM UNREGISTERED pruning is the backstop if the request loses.

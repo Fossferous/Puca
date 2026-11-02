@@ -121,6 +121,7 @@ import './VoicePanel.css';
 
 
 import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers } from './voiceState';
+import { tellUser, tellUserAndWait } from '../api/appDialogs';
 
 interface VoicePanelProps {
     roomId: string;
@@ -3847,12 +3848,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         try {
                             const { invoke } = await import('@tauri-apps/api/core');
                             const result = await invoke<string>('clear_webview_permissions');
-                            alert(result);
+                            await tellUserAndWait(result);
                             // Close app after showing message
                             const { exit } = await import('@tauri-apps/plugin-process');
                             await exit(0);
                         } catch (e) {
-                            alert('Failed to reset permissions: ' + e);
+                            tellUser('Failed to reset permissions: ' + e);
                         }
                     }}
                 />

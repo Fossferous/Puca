@@ -31,6 +31,7 @@ import {
 import { ArrowUpCircleIcon } from './Icons';
 import { isSelfInVoice, subscribeSelfInVoice } from './voiceState';
 import './UpdateBanner.css';
+import { askConfirm } from '../api/appDialogs';
 
 // Poll every 10 min while the app stays continuously focused (a release
 // published just after launch shouldn't sit unseen for long). The /app-version
@@ -150,11 +151,11 @@ export function UpdateBanner() {
         return null;
     }
 
-    const handleUpdate = () => {
+    const handleUpdate = async () => {
         // Race guard: a call can start between render and click. Updating
         // relaunches the app, which drops the call — say so first.
         if (isSelfInVoice()
-            && !window.confirm('You are in a voice call — updating restarts Púca and disconnects you. Update now?')) {
+            && !await askConfirm('You are in a voice call — updating restarts Púca and disconnects you. Update now?')) {
             return;
         }
         runInstall(update);

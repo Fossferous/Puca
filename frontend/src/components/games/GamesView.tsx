@@ -16,6 +16,7 @@ import { HoldemTable } from './HoldemTable';
 import { BlackjackTable } from './BlackjackTable';
 import './PlayingCard.css';
 import './GamesView.css';
+import { askConfirm } from '../../api/appDialogs';
 
 interface GamesViewProps {
     /** The call: `voice_<channel_id>`. */
@@ -211,8 +212,8 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                         <button
                             type="button"
                             className="games-btn games-btn-ghost games-header-btn"
-                            onClick={() => {
-                                if (confirm('Close this table for everyone? Every hand in play ends and all chips are gone.')) {
+                            onClick={async () => {
+                                if (await askConfirm('Close this table for everyone? Every hand in play ends and all chips are gone.')) {
                                     send(gameFrames.close(roomId, table.table_id));
                                 }
                             }}
