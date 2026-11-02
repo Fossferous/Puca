@@ -36,6 +36,7 @@ mod list_content;
 mod message_handlers;
 mod middleware;
 mod migrator;
+mod mode_handlers;
 mod models;
 mod moderation_handlers;
 mod permissions;
@@ -619,6 +620,23 @@ async fn main() -> anyhow::Result<()> {
             "/servers/:server_id/reports/:report_id",
             patch(moderation_handlers::resolve_report),
         )
+        // Server modes (docs/SERVER_MODES.md)
+        .route(
+            "/servers/:server_id/modes",
+            get(mode_handlers::list_modes).post(mode_handlers::create_mode),
+        )
+        .route(
+            "/servers/:server_id/modes/active",
+            axum::routing::put(mode_handlers::set_active_mode),
+        )
+        .route(
+            "/servers/:server_id/modes/active/call-back",
+            post(mode_handlers::call_everyone_back),
+        )
+        .route(
+            "/servers/:server_id/modes/:mode_id",
+            patch(mode_handlers::update_mode).delete(mode_handlers::delete_mode),
+        )
         // Category endpoints
         .route(
             "/servers/:server_id/categories",
@@ -1071,6 +1089,20 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // A mode that opted in turns itself off once its voice channels have been
+    // empty for a while (docs/SERVER_MODES.md).
+    {
+        let state_for_modes = app_state.clone();
+        tokio::spawn(async move {
+            mode_handlers::auto_off_after_restart(&state_for_modes).await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                mode_handlers::auto_off_tick(&state_for_modes).await;
+            }
+        });
+    }
+
     // Sweep abandoned peer-to-peer transfers. An offer nobody answers, or a
     // transfer whose sender vanished, would otherwise hold a registry entry for
     // the process lifetime — and since transfers are capped per user, enough of
@@ -1193,14 +1225,7 @@ async fn main() -> anyhow::Result<()> {
                 // skipped: those rows are referenced by servers/emoji (FKs with
                 // no ON DELETE), so deleting them would fail after the file was
                 // already gone — a broken emoji for everyone, forever.
-                let due: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT id::text, stored_name FROM uploaded_files \
-                     WHERE purge_after IS NOT NULL AND purge_after < NOW() \
-                       AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL) \
-                       AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL) \
-                       AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL) \
-                     ORDER BY purge_after LIMIT 200",
-                )
+                let due: Vec<(String, String)> = sqlx::query_as(upload_handlers::UPLOADS_DUE_FOR_PURGE_SQL)
                 .fetch_all(&pool)
                 .await
                 .unwrap_or_default();

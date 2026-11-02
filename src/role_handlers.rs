@@ -45,7 +45,7 @@ impl RoleAuthority {
     /// one: they decide whose keys and whose media an account receives.
     fn mask_permissions(&self, requested: i64) -> i64 {
         if self.is_privileged() {
-            requested
+            known_bits(requested)
         } else {
             ((requested as u64) & self.perms.bits() & !Permissions::RESTRICTING.bits()) as i64
         }
@@ -56,13 +56,32 @@ impl RoleAuthority {
     /// restricting bit - the role keeps whichever it had. Without that, a
     /// manager recolouring a stream-only role (the editor sends the whole
     /// mask) would silently lift the cap.
+    ///
+    /// SWITCH_MODES likewise, for an editor who does not hold it: nobody gets it by
+    /// default, so a manager without it is the usual case, and recolouring a
+    /// Storyteller role would otherwise take the role's one right away, with the
+    /// editor still showing it ticked.
     fn edited_permissions(&self, requested: i64, existing: i64) -> i64 {
         if self.is_privileged() {
-            requested
+            known_bits(requested)
         } else {
-            self.mask_permissions(requested) | (existing & Permissions::RESTRICTING.bits() as i64)
+            let kept = if self.perms.contains(Permissions::SWITCH_MODES) {
+                Permissions::RESTRICTING
+            } else {
+                Permissions::RESTRICTING | Permissions::SWITCH_MODES
+            };
+            self.mask_permissions(requested) | (existing & kept.bits() as i64)
         }
     }
+}
+
+/// The mask a role is stored with: the bits that exist, as a positive number.
+/// A client's editor computes masks with JavaScript's 32-bit operators, so once
+/// a role holds SWITCH_MODES (bit 31) any edit of it arrives negative, sign
+/// extended through bits 32-63, from this version's editor and from every older
+/// one. The low 32 bits are right; this drops the extension.
+fn known_bits(requested: i64) -> i64 {
+    Permissions::from_bits_truncate(requested as u64).bits() as i64
 }
 
 /// A restricting bit on @everyone would cap (or deafen) every member at once,
@@ -903,6 +922,46 @@ mod tests {
             perms,
             highest_position,
         }
+    }
+
+    /// A client's editor works in JavaScript's 32-bit operators, so a role holding
+    /// SWITCH_MODES comes back negative and sign-extended, from every client that
+    /// edits it, this one's if it forgets and every older one's regardless. Stored
+    /// as it arrives it would read back negative and every later mask would be
+    /// wrong; the low 32 bits are right, and they are what is kept.
+    #[test]
+    fn a_negative_mask_from_javascript_is_stored_as_the_bits_it_means() {
+        let wanted = Permissions::SWITCH_MODES | Permissions::SPEAK;
+        let from_js = wanted.bits() as u32 as i32 as i64;
+        assert!(from_js < 0, "what `mask | bit` gives in JavaScript");
+        let owner = authority(true, Permissions::empty(), 0);
+        assert_eq!(owner.mask_permissions(from_js), wanted.bits() as i64);
+        assert_eq!(owner.edited_permissions(from_js, 0), wanted.bits() as i64);
+        // An editor who holds it, and one who does not.
+        let holder = authority(false, Permissions::MANAGE_ROLES | Permissions::SWITCH_MODES | Permissions::SPEAK, 5);
+        assert_eq!(holder.mask_permissions(from_js), wanted.bits() as i64);
+        let lacks = authority(false, Permissions::MANAGE_ROLES | Permissions::SPEAK, 5);
+        assert_eq!(lacks.mask_permissions(from_js), Permissions::SPEAK.bits() as i64, "cannot grant what they lack");
+        // Bits that do not exist are not kept either.
+        assert_eq!(known_bits(-1), Permissions::all().bits() as i64);
+        assert!(known_bits(-1) > 0);
+    }
+
+    /// A manager without Switch Modes recolours a Storyteller role: the editor sends
+    /// the whole mask, and masking it against the manager's own bits used to take the
+    /// role's one right away, while the editor went on showing it ticked.
+    #[test]
+    fn an_editor_without_switch_modes_neither_grants_nor_removes_it() {
+        let held = (Permissions::SWITCH_MODES | Permissions::SPEAK).bits() as i64;
+        let not_held = Permissions::SPEAK.bits() as i64;
+        let lacks = authority(false, Permissions::MANAGE_ROLES | Permissions::SPEAK, 5);
+        assert_eq!(lacks.edited_permissions(held, held), held, "a recolour leaves it");
+        assert_eq!(lacks.edited_permissions(not_held, held), held, "unticking does not remove it");
+        assert_eq!(lacks.edited_permissions(held, not_held), not_held, "ticking does not grant it");
+        // An editor who holds it may do both.
+        let holder = authority(false, Permissions::MANAGE_ROLES | Permissions::SWITCH_MODES | Permissions::SPEAK, 5);
+        assert_eq!(holder.edited_permissions(not_held, held), not_held);
+        assert_eq!(holder.edited_permissions(held, not_held), held);
     }
 
     #[test]

@@ -116,6 +116,35 @@ pub async fn sweep_clip_parts(state: &Arc<AppState>) {
     }
 }
 
+/// Uploads of deleted accounts whose grace period has passed. Anything a SERVER
+/// asset has picked up since the stamp is skipped.
+pub(crate) const UPLOADS_DUE_FOR_PURGE_SQL: &str = "SELECT id::text, stored_name FROM uploaded_files \
+     WHERE purge_after IS NOT NULL AND purge_after < NOW() \
+       AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT background_file_id FROM server_modes WHERE background_file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL) \
+       AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL) \
+     ORDER BY purge_after LIMIT 200";
+
+/// Does anything still point at this file as an asset: an avatar, a sound, a
+/// server icon, a mode background or an emoji?
+pub(crate) async fn file_is_referenced(pool: &sqlx::PgPool, file_id: &str) -> Result<bool, sqlx::Error> {
+    let referenced: Option<(i32,)> = sqlx::query_as(
+        r#"
+        SELECT 1 WHERE EXISTS (SELECT 1 FROM users WHERE avatar_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM users WHERE join_sound_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM users WHERE leave_sound_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM servers WHERE icon_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM server_modes WHERE background_file_id = $1)
+                    OR EXISTS (SELECT 1 FROM server_emojis WHERE file_id = $1)
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(referenced.is_some())
+}
+
 /// Delete an uploaded file (DB row + on-disk blob), scoped to its uploader so a
 /// caller can only remove files they own. Best-effort: it logs but never fails
 /// the caller if the on-disk unlink races. Used by deletion hooks (e.g. avatar
@@ -239,23 +268,10 @@ pub async fn delete_file(
     // replacement, emoji deletion) each clear their reference BEFORE calling
     // remove_file, so they must stay able to remove a blob this check would
     // have blocked a moment earlier.
-    let referenced: Option<(i32,)> = sqlx::query_as(
-        r#"
-        SELECT 1 WHERE EXISTS (SELECT 1 FROM users WHERE avatar_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM users WHERE join_sound_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM users WHERE leave_sound_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM servers WHERE icon_file_id = $1)
-                    OR EXISTS (SELECT 1 FROM server_emojis WHERE file_id = $1)
-        "#,
-    )
-    .bind(&file_id)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
-    if referenced.is_some() {
+    if file_is_referenced(&state.pool, &file_id).await.unwrap_or(false) {
         return (
             StatusCode::CONFLICT,
-            "That file is still in use as an avatar, join/leave sound, server icon or emoji. Replace or remove it there first.",
+            "That file is still in use as an avatar, join/leave sound, server icon, mode background or emoji. Replace or remove it there first.",
         )
             .into_response();
     }
@@ -699,7 +715,7 @@ fn uncapped_decision(is_uploader: bool, visible_as_asset: bool, is_legacy: bool,
 /// database error (logged), like the membership probes in permissions.rs.
 /// Checks run cheapest and most common first, so the everyday avatar fetch
 /// never reaches the migration-table lookup.
-async fn uncapped_file_visible(
+pub(crate) async fn uncapped_file_visible(
     pool: &sqlx::PgPool,
     file_id: &str,
     uploader_id: i64,
@@ -723,6 +739,7 @@ async fn uncapped_file_visible(
                AND u.deleted_at IS NULL LIMIT 1), \
            EXISTS (SELECT 1 FROM servers s \
                     WHERE (s.icon_file_id = $1 \
+                           OR s.id IN (SELECT server_id FROM server_modes WHERE background_file_id = $1) \
                            OR s.id IN (SELECT server_id FROM server_emojis WHERE file_id = $1) \
                            OR s.id IN (SELECT server_id FROM custom_emojis WHERE file_id = $1)) \
                       AND (s.is_public \

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { listChannels, sendChannelMessageEncrypted, type Server, type Channel } from '../api/servers';
+import { shownWithParent } from '../api/serverModes';
 import { encryptDMContent, type DMConversation } from '../api/dms';
 import { SecureSendError } from '../api/e2ee';
 import { wsClient } from '../api/websocket';
@@ -51,8 +52,8 @@ export function ForwardModal({ content, servers, dmConversations, onClose, onSen
     // checklist channels hide the composer (their feed is a task list).
     const channelTargets = useMemo(() => servers.map(server => ({
         server,
-        channels: (channelsByServer.get(server.id) ?? []).filter(c =>
-            c.channel_type === 0 && !c.has_checklist &&
+        channels: (channelsByServer.get(server.id) ?? []).filter((c, _, all) =>
+            c.channel_type === 0 && !c.has_checklist && shownWithParent(c, all, server.active_mode_id) &&
             (!q || c.name.toLowerCase().includes(q) || server.name.toLowerCase().includes(q))
         ),
     })).filter(group => group.channels.length > 0), [servers, channelsByServer, q]);

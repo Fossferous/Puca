@@ -44,6 +44,10 @@ export const defaultSettings = {
     highContrast: false,
     /** Always underline links in messages (don't rely on colour alone). */
     underlineLinks: false,
+    /** Show the background and accent colour a server's mode sets
+     *  (docs/SERVER_MODES.md). Someone else's picture behind your messages is
+     *  yours to decline. */
+    serverLooks: true,
 
     // Notifications
     desktopNotifications: true,
@@ -900,6 +904,7 @@ export function applyAppearance(s: Settings = loadSettings()): void {
     root.setAttribute('data-animations', String(s.animationsEnabled !== false));
     root.setAttribute('data-contrast', s.highContrast ? 'high' : 'normal');
     root.setAttribute('data-underline-links', String(!!s.underlineLinks));
+    root.setAttribute('data-server-looks', s.serverLooks === false ? 'off' : 'on');
     // Icons subscribe to this store rather than reading a root attribute — CSS
     // can hide an element but cannot swap an <svg> for an emoji.
     setIconStyle(s.iconStyle === 'classic' ? 'classic' : 'modern');

@@ -789,6 +789,26 @@ pub enum ServerMessage {
     /// drops every frame type it does not know; so does a delivery socket.
     MediaE2eeRequired { server_id: String, require_media_e2ee: bool },
 
+    /// A server's mode was switched (docs/SERVER_MODES.md). Clients show or hide
+    /// the mode's channels and its look at once, with no reload. Sent after the
+    /// change committed, to every connection of every member, BEFORE anyone is
+    /// disconnected from the channels the switch hid. An older client registers
+    /// no handler for it and drops it, as it drops every frame type it does not
+    /// know, and goes on listing every channel. `by` is None when the mode
+    /// turned itself off; `previous_mode_id` lets a client say what ended.
+    ServerModeChanged {
+        server_id: String,
+        active_mode_id: Option<i64>,
+        previous_mode_id: Option<i64>,
+        by: Option<i64>,
+    },
+
+    /// A server's modes were edited: clients refetch them and the channel list.
+    /// SERVER ID ONLY, for the reason `ChannelUpdated` gives: this reaches
+    /// members who cannot see every channel in a mode, and the refetch applies
+    /// the reader's own permissions.
+    ServerModesEdited { server_id: String },
+
     // --- Remote control (host receives these; see ClientMessage above) ---
     /// A viewer is asking to control this (host) user's shared screen. Username
     /// included so the host's approval prompt can name the requester. `eph` is

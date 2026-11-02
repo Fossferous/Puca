@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { listRoles, createRole, updateRole, deleteRole, listMembersWithRoles, type Role } from '../api/servers';
-import { PERMISSIONS } from '../api/permissionBits';
+import { PERMISSIONS, unsignedMask } from '../api/permissionBits';
 import { getToken, decodeJwtPayload } from '../api/auth';
 import { CloseIcon, CrownIcon } from './Icons';
 import { StreamOnlyRoleSection } from './StreamOnlyRoleSection';
@@ -93,6 +93,7 @@ const PERMISSION_CATEGORIES = [
             { key: 'KICK_MEMBERS', label: 'Kick Members', desc: 'Remove members from the server' },
             { key: 'BAN_MEMBERS', label: 'Ban Members', desc: 'Permanently ban members' },
             { key: 'CREATE_INVITE', label: 'Create Invites', desc: 'Create invite links for this server' },
+            { key: 'SWITCH_MODES', label: 'Switch Modes', desc: 'Turn a server mode on or off. Turning one off disconnects everyone in its voice channels' },
             { key: 'ADMINISTRATOR', label: 'Administrator', desc: 'Full access to all permissions' },
         ],
     },
@@ -293,9 +294,9 @@ export function RoleSettingsModal({
     const togglePermission = (permKey: string) => {
         const bit = PERMISSIONS[permKey as keyof typeof PERMISSIONS];
         if (editPermissions & bit) {
-            setEditPermissions(editPermissions & ~bit);
+            setEditPermissions(unsignedMask(editPermissions & ~bit));
         } else {
-            setEditPermissions(editPermissions | bit);
+            setEditPermissions(unsignedMask(editPermissions | bit));
         }
     };
 

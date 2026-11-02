@@ -74,6 +74,15 @@ export function hasPerm(bits: number | null | undefined, flag: number): boolean 
     return (bits & PERM.ADMINISTRATOR) !== 0 || (bits & flag) !== 0;
 }
 
+/**
+ * A permission mask as the positive number it is. Needed after `|`, `&` or `~` on
+ * any mask that may hold bit 31 (SWITCH_MODES). The server cleans up a negative
+ * one too, because older clients send them.
+ */
+export function unsignedMask(mask: number): number {
+    return mask >>> 0;
+}
+
 // Full flag map (matching backend permissions.rs) for the role editors.
 export const PERMISSIONS = {
     // General
@@ -115,4 +124,9 @@ export const PERMISSIONS = {
     // Automated streaming accounts (restricting; server-scoped, owner/admin only)
     STREAM_ONLY: 1 << 29,
     NO_RECEIVE: 1 << 30,
+    // Server modes (docs/SERVER_MODES.md): the switch. Server-scoped. Bit 31 is
+    // the sign bit of JavaScript's 32-bit operators, so this constant is NEGATIVE
+    // and `mask | bit` comes out negative too. Testing it with `&` is exact; a
+    // mask being kept or sent goes through unsignedMask().
+    SWITCH_MODES: 1 << 31,
 } as const;

@@ -2017,6 +2017,20 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </div>
                                     <div className="settings-option">
                                         <div className="option-info">
+                                            <label>Server Backgrounds and Colours</label>
+                                            <span className="option-hint">
+                                                Show the background picture and accent colour a server sets while one of its modes is on. High Contrast always hides them.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            aria-label="Show server backgrounds and colours"
+                                            checked={settings.serverLooks !== false}
+                                            onChange={(e) => updateSetting('serverLooks', e.target.checked)}
+                                        />
+                                    </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
                                             <label>Underline Links</label>
                                             <span className="option-hint">
                                                 Always underline links instead of relying on colour alone.

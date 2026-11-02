@@ -392,7 +392,7 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   notes, including a note's photo sealed offline). Two other doors are covered the same way:
   `uploadFile` in [`uploads.ts`](../frontend/src/api/uploads.ts), through which every picture
   the server stores in the clear passes (avatar, server icon, the create-a-server wizard's icon,
-  emoji), and `fileTransferManager.offerFile`, the peer-to-peer path a DM file over the 25 MB
+  emoji, a server mode's background), and `fileTransferManager.offerFile`, the peer-to-peer path a DM file over the 25 MB
   upload cap takes instead of the seal. The cap is checked on the file as chosen, before the
   strip. A test walks the source and fails if anything else posts to `/upload`. The recipients of an attachment are exactly the
   people its EXIF would be shown to, and end-to-end encryption does nothing about them. It is
@@ -1351,8 +1351,8 @@ messages: the server cannot see which channel a file was shared in, so it
 cannot warn anyone — the delay is the warning, and the deletion confirmation
 says so. An operator can clear `purge_after` within the window to undo a
 mistaken deletion's file loss; nothing else about the tombstone is reversible.
-Server icons and custom emoji you uploaded are NOT purged: they belong to the
-server now and its members still see them.
+Server icons, custom emoji and mode backgrounds you uploaded are NOT purged: they
+belong to the server now and its members still see them.
 
 If that changes, it needs to change as a product decision with three parts: the
 deletion confirmation must say what happens to files you shared, there should be

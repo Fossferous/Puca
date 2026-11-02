@@ -31,6 +31,7 @@
  * interval while a SHARED note is open and the stream is down, and the
  * explicit refresh button.
  */
+import { shownWithParent } from '../../api/serverModes';
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { QueryClient, useQueries, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
@@ -249,7 +250,8 @@ export function useSendTargets(enabled: boolean): { channels: SendChannelTarget[
     // the list is a handful of channels — the sheet is the only consumer.
     const channels = servers.flatMap((server: Server, i: number) =>
         ((channelQueries[i]?.data as Channel[] | undefined) ?? [])
-            .filter(c => c.channel_type === 0 && !c.has_checklist && hasPerm(c.my_permissions, PERM.SEND_MESSAGES))
+            .filter((c, _, all) => c.channel_type === 0 && !c.has_checklist && hasPerm(c.my_permissions, PERM.SEND_MESSAGES)
+                && shownWithParent(c, all, server.active_mode_id))
             .map(channel => ({ server, channel })));
     return {
         channels,

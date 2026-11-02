@@ -88,6 +88,18 @@ bitflags! {
         // independent of it. JavaScript's `1 << 30` is exact (positive).
         const NO_RECEIVE         = 1 << 30;
 
+        // Turning a server mode on or off (docs/SERVER_MODES.md). SERVER-scoped:
+        // not OVERWRITABLE. Not in DEFAULT_MEMBER and granted to nobody by
+        // migration 076, so a role carries it only when someone ticked it.
+        // Defining a mode is MANAGE_CHANNELS, this is only the switch, so a
+        // Storyteller role can run a game without being able to delete
+        // channels. Bit 31 is the LAST one JavaScript's 32-bit bit operators
+        // reach, and they read it as the sign: `perms | x` on a role holding it
+        // comes out NEGATIVE. A negative mask reaches role_handlers from every
+        // client that edits such a role, the older ones included, so
+        // known_bits() there is what keeps the column positive.
+        const SWITCH_MODES       = 1 << 31;
+
         // Default member permissions
         const DEFAULT_MEMBER = Self::VIEW_CHANNEL.bits()
                              | Self::SEND_MESSAGES.bits()
@@ -744,7 +756,9 @@ impl Permissions {
                 // of a channel: an overwrite allow of STREAM_ONLY would cap a
                 // member in one channel only, and a deny would lift the cap.
                 | Self::STREAM_ONLY.bits()
-                | Self::NO_RECEIVE.bits()),
+                | Self::NO_RECEIVE.bits()
+                // Server-scoped: a mode switches for the whole server.
+                | Self::SWITCH_MODES.bits()),
     );
 }
 

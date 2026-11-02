@@ -70,7 +70,7 @@ On a phone the same areas are tabs along the bottom (**Chat**, **Members**, …)
 2. **Overview** holds the server name, description and icon (**Change**). Only the owner can edit them
 3. Click **Save Changes**
 
-The same dialog has **Roles**, **Emoji**, **Invites** and, for the owner, **Moderation** tabs.
+The same dialog has **Roles**, **Modes**, **Emoji**, **Invites** and, for the owner, **Moderation** tabs.
 
 ### Server menu
 Right-click a server icon in the rail for **Mark as Read**, **Invite People**,
@@ -78,6 +78,54 @@ Right-click a server icon in the rail for **Mark as Read**, **Invite People**,
 **Server Settings**, **Edit Server Profile** (your nickname on that server),
 **Leave Server** and **Copy Server ID**. The owner sees **Disband Server**
 instead of Leave.
+
+### Server modes
+A mode is a set of channels that only show in the channel list while it is on,
+with an optional background picture and accent colour. It suits channels you only
+need for one thing, such as the town square and private rooms of a game of Blood on
+the Clocktower. One mode is on at a time.
+
+**Set one up** (Manage Channels). In **Server Settings**, open **Modes**, type a
+name and press **Add mode**. Then tick the channels it should show, and press
+**Save**. A collection's subchannels show and hide with it. You can also choose:
+
+- **Main voice channel**: where **Join** goes when the mode starts, and where **Call
+  everyone back** brings people.
+- **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat on a
+  dimmed layer, dimmed as far as that picture needs for messages to stay readable on
+  each person's theme. It is stored unencrypted, like the server icon, so whoever
+  runs the server can see it. Animated pictures are not supported.
+- **Accent colour**: recolours buttons and highlights while the mode is on. It is
+  lightened or darkened for each person's theme so button labels stay readable.
+- **Turn off when empty**: on by default. The mode turns itself off once its voice
+  channels and its main voice channel have been empty for 30 minutes, counted only
+  after someone has been in them.
+
+**Switch it** (the **Switch Modes** permission, which the owner and administrators
+have and nobody else has until a role is given it). Press **Mode** under the server's
+name and pick a mode, or **Off**. Everyone online sees the channels and the look
+change at once, and gets a quiet notice with a **Join** button. It makes no sound and
+sends no phone notification, and you won't see it for a server you have muted.
+
+**Turning a mode off disconnects everyone in its voice channels**, and you are warned
+first if anyone is in them. Switching straight to another mode does the same, except in
+channels both modes share. Messages in its text channels are kept and come back with
+the mode.
+
+**Call everyone back** (Move Members) is in the same menu while a mode is on: it pulls
+everyone in the mode's voice channels into its main voice channel. It can't move anyone
+ranked at or above you, and tells you how many it left.
+
+**A mode tidies the list. It does not keep anyone out.** Anyone allowed to see a channel
+can still open it from a mention, a notification or a link, and people on an older
+version of Púca see every channel. To keep someone out of a channel, use its permissions
+(*Channel permissions*, below). A voice channel with people in it stays listed even while
+hidden, so a call is never invisible.
+
+**Don't want other people's backgrounds?** Turn off **Server Backgrounds and Colours** in
+Settings, under Accessibility. **High Contrast** also hides them.
+
+For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 
 ---
 
@@ -789,8 +837,9 @@ The role editor groups them; the labels are: View Channels, Attach Files,
 Add Reactions, Send Messages, Read Message History, Manage Messages, Add
 Tasks, Complete Tasks, Manage Tasks, Connect, Speak, Video, Stream, Mute
 Members, Move Members, Create Clips, Manage Channels, Manage Roles, Manage
-Server, Kick Members, Ban Members, Create Invites, and Administrator (full
-access to all permissions). Under **Automated Streaming**, the owner and
+Server, Kick Members, Ban Members, Create Invites, Switch Modes (turn a server
+mode on or off, see *Server modes*), and Administrator (full access to all
+permissions). Under **Automated Streaming**, the owner and
 administrators also see **Stream only** and **No receive** (next section).
 
 ### Automated streaming accounts (Owner)

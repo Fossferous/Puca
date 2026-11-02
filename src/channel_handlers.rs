@@ -63,6 +63,11 @@ pub struct ChannelResponse {
     /// (roles + overwrites). An ADMINISTRATOR bit means the UI treats
     /// everything as granted.
     pub my_permissions: i64,
+    /// The server modes this channel belongs to (docs/SERVER_MODES.md). Empty:
+    /// always listed. Otherwise the client lists it only while one of these is
+    /// on. Tidiness, not access: an older client ignores this and lists it, and
+    /// every permission still applies exactly as it reads.
+    pub mode_ids: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +204,14 @@ pub async fn list_channels(
         }
     };
 
+    let mut mode_ids = match crate::mode_handlers::channel_mode_ids(&state.pool, &server_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("  Failed to read channel modes: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list channels").into_response();
+        }
+    };
+
     let response: Vec<ChannelResponse> = channels
         .into_iter()
         .filter_map(
@@ -233,6 +246,7 @@ pub async fn list_channels(
                     has_checklist,
                     sfu_mode,
                     my_permissions: perms.bits() as i64,
+                    mode_ids: mode_ids.remove(&id).unwrap_or_default(),
                 })
             },
         )
@@ -430,6 +444,7 @@ pub async fn create_channel(
                 has_checklist,
                 sfu_mode: false,
                 my_permissions: my_permissions.bits() as i64,
+                mode_ids: Vec::new(),
             })
             .into_response()
         }
@@ -561,6 +576,20 @@ pub async fn update_channel(
 
     match result {
         Ok(_) => {
+            // An idle member is moved into the AFK channel, so it can't be hidden:
+            // a channel made AFK leaves its modes (docs/SERVER_MODES.md).
+            if payload.is_afk == Some(true) {
+                let left_a_mode = sqlx::query("DELETE FROM server_mode_channels WHERE channel_id = $1")
+                    .bind(channel_id as i32)
+                    .execute(&state.pool)
+                    .await
+                    .map(|r| r.rows_affected() > 0)
+                    .unwrap_or(false);
+                if left_a_mode {
+                    crate::mode_handlers::announce_edit(&state, &server_id).await;
+                }
+            }
+
             // TELL EVERYONE, not just the editor. Every member refetches the
             // channel list, and the refetch applies each reader's own
             // permissions — which is why this carries the server id and not

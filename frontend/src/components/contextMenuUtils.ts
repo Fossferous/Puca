@@ -190,11 +190,17 @@ export function useContextMenu() {
         });
     }, []);
 
+    /** The same menu, anchored to a place rather than to the pointer: under the
+     *  control that opens it, whichever way it was pressed. */
+    const showContextMenuAt = useCallback((position: { x: number; y: number }, items: ContextMenuItem[]) => {
+        setContextMenu({ items, position });
+    }, []);
+
     const hideContextMenu = useCallback(() => {
         setContextMenu(null);
     }, []);
 
-    return { contextMenu, showContextMenu, hideContextMenu };
+    return { contextMenu, showContextMenu, showContextMenuAt, hideContextMenu };
 }
 
 // Pre-built menu item generators

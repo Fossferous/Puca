@@ -49,6 +49,24 @@ in this file is not registered there, so what IS listed is real.
 
 ---
 
+## Server modes
+
+A mode is a named set of channels the client lists only while it is on, with an
+optional background and accent colour ([SERVER_MODES.md](SERVER_MODES.md)). **It is
+not access control:** a hidden channel is still in `GET /servers/:id/channels` (its
+`mode_ids` say why it is not listed), and every other route treats it as it always did.
+`GET /servers` carries `active_mode_id` on each server row: a number, or `null` for
+none. A backend that predates modes omits it, and a client must then offer none.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/servers/:id/modes` | ✅ | The server's modes, for any member: `{active_mode_id, can_switch, can_edit, can_call_back, modes: [{id, name, background_file_id, accent_color, home_channel_id, auto_off, channel_ids}]}`. `channel_ids` and `home_channel_id` name only channels the caller can see. 403 for a non-member |
+| POST | `/servers/:id/modes` | ✅ | Create a mode (Manage Channels), at most 32 per server. Body as for PATCH with `name` required. Answers 201 `{id}` |
+| PATCH | `/servers/:id/modes/:mode_id` | ✅ | Edit a mode (Manage Channels). A field left out is left alone. `name` (64 bytes); `channel_ids` replaces the channels the caller can see, and channels hidden from them stay; `background_file_id`, a JPEG, PNG or WebP of at most 4 MiB that the caller uploaded (`""` clears it, and a replaced file is deleted if it was the caller's and nothing else uses it); `accent_color` as `#rrggbb` (`""` clears it); `home_channel_id`, a voice channel of this server that is not AFK (0 clears it); `auto_off`. The AFK channel cannot belong to a mode, and a channel made AFK leaves its modes. A collection's subchannels are hidden with it. An edit disconnects nobody. Pushes `ServerModesEdited {server_id}` to every member |
+| DELETE | `/servers/:id/modes/:mode_id` | ✅ | Delete a mode (Manage Channels). Its channels are kept. Deleting the mode that is on turns it off first, with everything that means |
+| PUT | `/servers/:id/modes/active` | ✅ | Turn a mode on, replacing the current one, or (`{"mode_id": null}`) off (Switch Modes). **Anyone in a voice channel the switch hides is disconnected:** one in the mode that was on and not in the one coming on. Pushes `ServerModeChanged {server_id, active_mode_id, previous_mode_id, by}` to every connection of every member first (`by` is null when a mode turned itself off), so a client knows why its call is ending. Answers `{active_mode_id, disconnected}`: how many people left channels the caller can see, so a room hidden from them reads like no call at all, or null if the disconnects were still going after 10 s; they carry on regardless, and so does all of it if the request is dropped after the commit. The same mode again is not a switch. An older client has no handler for these frames and drops them |
+| POST | `/servers/:id/modes/active/call-back` | ✅ | Call everyone back (Move Members): move everyone in the active mode's voice channels the caller can see into its main voice channel, each through the checks of `/servers/:id/voice-move/:user_id`, except the caller. Answers `{moved, skipped}`, where `skipped` is who those checks refused. 409 when no mode is on, or it has no main channel the caller can see and the mode lists |
+
 ## Channels
 
 | Method | Endpoint | Auth | Description |
@@ -91,7 +109,7 @@ in this file is not registered there, so what IS listed is real.
 |--------|----------|------|-------------|
 | GET | `/servers/:id/roles` | ✅ | List roles |
 | POST | `/servers/:id/roles` | ✅ | Create role |
-| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role. The two restricting bits, `STREAM_ONLY` (`1 << 29`) and `NO_RECEIVE` (`1 << 30`, see [STREAM_ONLY.md](STREAM_ONLY.md)), are refused on @everyone with 400 `Stream only and No receive cannot be set on @everyone`; an editor who is not the owner or an administrator can neither add nor remove them (the role keeps what it had) |
+| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role. `permissions` is stored as the bits it means: since `SWITCH_MODES` is `1 << 31`, a JavaScript client's mask for a role holding it can arrive negative (sign-extended), and this route keeps its low 32 bits. The two restricting bits, `STREAM_ONLY` (`1 << 29`) and `NO_RECEIVE` (`1 << 30`, see [STREAM_ONLY.md](STREAM_ONLY.md)), are refused on @everyone with 400 `Stream only and No receive cannot be set on @everyone`; an editor who is not the owner or an administrator can neither add nor remove them (the role keeps what it had) |
 | DELETE | `/servers/:id/roles/:role_id` | ✅ | Delete role |
 | PUT | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Assign role. Needs Manage Roles, a role below your highest, and no bit you lack. A caller who is not an administrator (or the owner) may not target **themselves**: 403 `Cannot change your own roles`. A role's channel overwrites are not bits, so without this a Manage Roles holder could give themselves a permission-less role whose allow overwrite opens a hidden channel. |
 | DELETE | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Remove role. Same rules as assign, including the self-target refusal — removing from yourself the role that carries a deny overwrite would restore the channel it hides. |
