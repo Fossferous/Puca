@@ -75,7 +75,7 @@ pub struct BeginResult {
 
 /// Strip everything that could escape the download directory or confuse
 /// Windows. The name arrives from a peer, so it is untrusted input.
-fn sanitize_file_name(raw: &str) -> String {
+pub(crate) fn sanitize_file_name(raw: &str) -> String {
     // Take the last path segment: a peer sending "../../x" or "C:\\x" must not
     // get any say in the directory.
     let base = raw
@@ -448,8 +448,8 @@ fn percent_decode(s: &str) -> String {
 /// Folders worth offering when the person at this machine is choosing what to
 /// expose to a remote session.
 ///
-/// `tauri-plugin-dialog` is not registered in this app, so there is no native
-/// folder picker to call. Rather than make the user type an absolute path from
+/// There is no native folder picker in this app (the one OS dialog it opens is
+/// Save As, save_dialog.rs). Rather than make the user type an absolute path from
 /// memory — and get "that is not a folder" back from the agent when they get it
 /// wrong — offer the handful of directories that actually exist, resolved here
 /// where the OS knows where they are.

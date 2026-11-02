@@ -10,16 +10,18 @@
  *    Púca Notes' export (notes/model/noteText.ts): always, through
  *    saveTextAs below, because the user is choosing to take it out.
  *
- * The plugin is registered for `dialog:allow-save` and nothing else (no
- * open/message/ask).
+ * The dialog is the shell's own command (src-tauri/src/save_dialog.rs), not
+ * tauri-plugin-dialog: that plugin replaces window.confirm and window.alert
+ * in every webview, and from 0.8.134 until it went that silenced every question
+ * and error message the desktop app had (src/tests/desktopScriptDialogs.test.ts).
  *
  * `null` = the user cancelled. Callers treat that as a decline, and the
  * dialog runs BEFORE any bytes are fetched or any sender is answered, so a
  * cancel costs nobody anything.
  */
 export async function chooseSavePath(suggestedName: string): Promise<string | null> {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const chosen = await save({ defaultPath: suggestedName, title: 'Save file' });
+    const { invoke } = await import('@tauri-apps/api/core');
+    const chosen = await invoke<string | null>('choose_save_path', { suggestedName });
     return chosen ?? null;
 }
 

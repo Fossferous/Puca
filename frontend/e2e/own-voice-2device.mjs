@@ -100,6 +100,8 @@ function watch(page, tag) {
 `));
     page.on('pageerror', e => { consoleErrors.push(`${tag} pageerror ${e.message}`); console.log(`  [${tag} pageerror]`, e.message.slice(0, 200)); });
     page.on('dialog', d => { consoleErrors.push(`${tag} dialog ${d.message()}`); console.log(`  [${tag} DIALOG]`, d.message()); d.dismiss().catch(() => {}); });
+    // A generic Error frame (a re-claim the server refused) is a toast, which Chat logs in these words.
+    page.on('console', m => { if (m.text().startsWith('[WS] server error:')) { consoleErrors.push(`${tag} ${m.text()}`); console.log(`  [${tag} SERVER ERROR]`, m.text()); } });
 }
 
 /** Overlays that arrive on their own timers and swallow clicks. */

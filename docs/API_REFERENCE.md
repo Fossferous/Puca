@@ -525,7 +525,7 @@ the same pair as offline.
 **Idle and away presence.** A client announces it by putting `presence` in
 its `caps` list (see *Client capabilities and device kind* above) — not by a
 frame, because an older server answers an unknown client→server **frame**
-with an `Error` (which the stock client shows as an alert). The announcement is
+with an `Error` (which the stock client shows as a toast). The announcement is
 latched for the life of the socket. A server that supports a capability
 confirms it to that connection only, right after connect:
 

@@ -48,6 +48,8 @@ mod privacy_screen;
 mod power;
 #[cfg(feature = "remote-control")]
 mod remote_control;
+// NOT gated: Save As serves received files, attachments and exports in both variants.
+mod save_dialog;
 mod session_events;
 // NOT gated: the one lookup for the agent sidecar beside the app, plus whether
 // THIS build is supposed to ship one. Lite (no sidecar by design) and dev runs
@@ -1379,7 +1381,8 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init())
+        // No dialog plugin: its init script would replace window.confirm and
+        // window.alert (save_dialog.rs says what that cost).
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Pop-out windows keep their OWN per-slot geometry (popout.rs): left to
         // this plugin too, two restorers would fight over the same window.
@@ -1847,6 +1850,7 @@ pub fn run() {
             rc_leftovers::rc_leftovers_status,
             rc_leftovers::rc_leftovers_remove,
             file_transfer::attachment_save,
+            save_dialog::choose_save_path,
             #[cfg(feature = "remote-control")]
             file_transfer::shareable_folders,
         ])

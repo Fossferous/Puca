@@ -17,6 +17,7 @@ import { TaskTree } from '../components/TaskTree';
 import type { Task } from '../api/tasks';
 import { isHeadingText } from '../api/taskHeading';
 import { readPastedItems } from '../notes/model/noteContent';
+import { setMessageToastSink } from '../components/messageToastBus';
 
 const task = (id: number, description: string, o: Partial<Task> = {}): Task => ({
     id, channel_id: null, list_id: 1, parent_id: null, description, is_completed: false,
@@ -216,6 +217,64 @@ function retype(text: string, value: string) {
     act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
 }
 
+/**
+ * Alt-Tab, or a game coming to the front, blurs the field being edited. Real
+ * Edge reports the difference this rests on: the field is still the active
+ * element when the WINDOW lost focus, and is not when focus moved inside the
+ * page. A question at that moment would pull the person back out of their game.
+ */
+describe('committing "## x" over an item with a time, on a blur', () => {
+    function typeHeadingOverDatedItem() {
+        render([task(1, 'Standup', { due_at: '2026-09-30T09:00:00Z' })]);
+        act(() => { (rowOf('Standup').querySelector('.tt-description') as HTMLElement).click(); });
+        const input = host.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+        act(() => { input.focus(); });
+        typeInto(input, '## Section');
+        return input;
+    }
+    const blur = (input: HTMLInputElement) => act(() => { input.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+
+    it('the WINDOW losing focus asks nothing and changes nothing: the edit stays open', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const input = typeHeadingOverDatedItem();
+        expect(document.activeElement).toBe(input);
+        blur(input);
+        expect(confirm).not.toHaveBeenCalled();
+        expect(onEdit).not.toHaveBeenCalled();
+        expect(onSetDue).not.toHaveBeenCalled();
+        expect(host.querySelector<HTMLInputElement>('input.tt-edit-input')?.value, 'still there for when they return').toBe('## Section');
+    });
+
+    it('and pressing Enter on their return asks', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const input = typeHeadingOverDatedItem();
+        blur(input);
+        act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+        expect(confirm).toHaveBeenCalledTimes(1);
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Section');
+    });
+
+    it('POSITIVE CONTROL: focus moving elsewhere in the page is a click they made, and asks', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+        const input = typeHeadingOverDatedItem();
+        act(() => { input.blur(); });
+        expect(document.activeElement).not.toBe(input);
+        expect(confirm).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: the window losing focus still saves an ordinary edit, which asks nothing', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        render([task(1, 'Standup', { due_at: '2026-09-30T09:00:00Z' })]);
+        act(() => { (rowOf('Standup').querySelector('.tt-description') as HTMLElement).click(); });
+        const input = host.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+        act(() => { input.focus(); });
+        typeInto(input, 'Standup moved');
+        blur(input);
+        expect(confirm).not.toHaveBeenCalled();
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), 'Standup moved');
+    });
+});
+
 describe('a heading is never ticked, never timed, and a "# " label can go back to being an item', () => {
     it('"## x" typed over a TICKED item unticks it as it becomes a heading (a ticked one could never be dragged)', () => {
         const calls: string[] = [];
@@ -237,11 +296,15 @@ describe('a heading is never ticked, never timed, and a "# " label can go back t
 
     it('someone who may edit but not tick is told why, and nothing is written', () => {
         const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+        const toasts: string[] = [];
+        setMessageToastSink(t => { toasts.push(t.title); });
         // Their own item (creator may edit), in a channel where they hold no
         // right to tick (myPerms 0).
         render([task(1, 'Open item'), task(2, 'Done item', { is_completed: true })], { myPerms: 0, currentUserId: 1 });
         retype('Done item', '## Section');
-        expect(alert).toHaveBeenCalledTimes(1);
+        setMessageToastSink(null);
+        expect(toasts).toEqual(['“Section” is ticked, and only someone who may tick items can turn it into a heading.']);
+        expect(alert, 'a commit on blur gets here too, with the window gone').not.toHaveBeenCalled();
         expect(onEdit).not.toHaveBeenCalled();
         expect(onToggle).not.toHaveBeenCalled();
         // POSITIVE CONTROL: an open item of theirs still becomes a heading.

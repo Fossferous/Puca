@@ -484,7 +484,7 @@ stops sending to a connection the moment it is no longer in the room.
   `act`, `bet`, `clear_bet`, `sit_out`, `sit_in`, `rebuy`, `show_cards`,
   `resync`, `close`, `remove_player`); `code` and any numbers it carries are
   flattened into the payload. Expected refusals are ALWAYS this, never the
-  generic `Error` the client shows as an alert; `Error` remains only for a
+  generic `Error` the client shows as a toast; `Error` remains only for a
   frame that does not parse (a broken client).
 - **`GamesEnabled { server_id, games_enabled }`** (added 2026-10-03) — the
   owner switched games on or off for that server. Not a table frame (no

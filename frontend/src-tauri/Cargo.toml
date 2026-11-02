@@ -54,8 +54,12 @@ tauri-plugin-log = "2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-notification = "2.4.0"
 # The OS Save As dialog for received files / attachments ("Ask where to
-# save files"). Registered for dialog:allow-save only — see capabilities.
-tauri-plugin-dialog = "2"
+# save files"), called from save_dialog.rs. NOT tauri-plugin-dialog, whose init
+# script replaces window.confirm and window.alert in every webview: that left the
+# desktop app with no question before a destructive action from 0.8.134 on
+# (save_dialog.rs). No default features: those are the XDG portal and its runtime;
+# gtk3 is the Linux backend the plugin used, and does nothing on Windows.
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 # In-place auto-update: banner click downloads the signed installer and
 # relaunches (no manual reinstall). Manifest at https://download.example.com/latest.json.
 # No `zip` feature (a default): it unpacks .zip/.tar.gz update archives, and

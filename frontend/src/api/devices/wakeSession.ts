@@ -121,7 +121,7 @@ let wakeResultInstalled = false;
  *
  * WITHOUT THIS the refusal is invisible. Every server-side wake refusal used to
  * be a generic `Error` frame, and the only listener for that in the frontend is
- * the chat view, which pops an alert with no connection to the device card — so
+ * the chat view, whose message had no connection to the device card — so
  * "that device isn't online to send the wake packet" and "you are sending that
  * too quickly" both presented as a wake in progress, and the card counted down
  * for three minutes before advising a BIOS change.

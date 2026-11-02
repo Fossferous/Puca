@@ -23,7 +23,7 @@
  *
  * Send nothing from here until `wsClient.hasServerFeature(GAMES_FEATURE)`:
  * an older server answers an unknown frame with an Error, which the chat view
- * shows as an alert.
+ * shows as an error toast.
  */
 
 /** The capability name in `/ws?caps=` and `ServerFeatures`. */

@@ -935,26 +935,6 @@ export function Chat({ onLogout }: ChatProps) {
         };
     }, []);
 
-    // Server-side rejections of a WS send (ServerMessage::Error) had NO handler
-    // at all: the socket layer dispatches strictly by type, so a rejected DM —
-    // the friends-only privacy flag, or a block — left the optimistic bubble on
-    // screen forever and told the sender nothing. DMs persist only through the
-    // WS path, so this was silent data loss on the private path.
-    useEffect(() => {
-        const onServerError = (msg: ServerMessage) => {
-            const text = (msg.payload as { message?: string } | undefined)?.message
-                ?? 'The server rejected that action.';
-            console.warn('[WS] server error:', text);
-            // Drop any optimistic DM bubbles that can no longer land. They are
-            // the only fire-and-forget sends (channel messages go over REST and
-            // surface their own errors), and they are identifiable by prefix.
-            setDmMessages(prev => prev.filter(m => !String(m.id).startsWith('local_')));
-            alert(text);
-        };
-        wsClient.on('Error', onServerError);
-        return () => wsClient.off('Error', onServerError);
-    }, []);
-
     // App shortcuts (Keybinds tab): open settings, focus message search.
     // Bindings are read per keypress, so a rebind applies live.
     useEffect(() => {
@@ -1564,6 +1544,31 @@ export function Chat({ onLogout }: ChatProps) {
     const showToast = useCallback((text: string) => {
         setToast(prev => ({ text, seq: (prev?.seq ?? 0) + 1 }));
     }, []);
+
+    // Server-side rejections of a WS send (ServerMessage::Error) had NO handler
+    // at all: the socket layer dispatches strictly by type, so a rejected DM —
+    // the friends-only privacy flag, or a block — left the optimistic bubble on
+    // screen forever and told the sender nothing. DMs persist only through the
+    // WS path, so this was silent data loss on the private path.
+    //
+    // A toast, never an alert(): this frame answers ANY frame the client sent,
+    // background ones included, and reaches someone who may be in a call or a
+    // game. A modal would take the focus and stop the page's JavaScript until
+    // it was answered.
+    useEffect(() => {
+        const onServerError = (msg: ServerMessage) => {
+            const text = (msg.payload as { message?: string } | undefined)?.message
+                ?? 'The server rejected that action.';
+            console.warn('[WS] server error:', text);
+            // Drop any optimistic DM bubbles that can no longer land. They are
+            // the only fire-and-forget sends (channel messages go over REST and
+            // surface their own errors), and they are identifiable by prefix.
+            setDmMessages(prev => prev.filter(m => !String(m.id).startsWith('local_')));
+            showToast(text);
+        };
+        wsClient.on('Error', onServerError);
+        return () => wsClient.off('Error', onServerError);
+    }, [showToast]);
 
     /**
      * Leave on the "You're in Lounge on your PC" banner: end the account's
@@ -3586,7 +3591,8 @@ export function Chat({ onLogout }: ChatProps) {
                     });
                     setTimeout(() => {
                         if (stillUnconfirmed) {
-                            alert('Message failed to send. Check your connection and try again.');
+                            // A toast: ten seconds on, the person may be anywhere.
+                            showToast('Message failed to send. Check your connection and try again.');
                         }
                     }, 0);
                 }, 10_000);

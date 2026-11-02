@@ -19,7 +19,7 @@
  *
  * Never sent unless THIS socket's server confirmed `presence` in
  * ServerFeatures: an older server answers an unknown frame with an Error,
- * which the chat view shows as a blocking alert. Every socket that confirms
+ * which the chat view shows as an error toast. Every socket that confirms
  * it is told the current state once (a fresh server session starts active).
  */
 import { wsClient } from './websocket';
@@ -59,7 +59,7 @@ export interface ActivityInputs {
  * person any more), a shown one after REPORT_AFTER_SECS without input.
  *
  * Always whole seconds: the server reads `inactive_secs` as an integer and
- * answers anything else with an Error frame, which Chat shows as an alert.
+ * answers anything else with an Error frame, which Chat shows as a toast.
  * An embedding host's idle time comes with fractions.
  */
 export function decideReport(i: ActivityInputs): number | null {

@@ -325,7 +325,7 @@ pub enum ClientMessage {
     // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
     // the pieces are in crate::games_wire). Sent ONLY on a socket whose server
     // confirmed `games` in ServerFeatures — an older server answers an unknown
-    // variant with an Error, which the client shows as an alert. Every frame
+    // variant with an Error, which the client shows as a toast. Every frame
     // names the call (`room_id`, `voice_<channel_id>`) and, after the first,
     // the table (`table_id`, from GameTable); a frame naming a table that is
     // not open in that room is answered with GameEnded { reason: "gone" }.
@@ -949,7 +949,7 @@ pub enum ServerMessage {
     ///
     /// WHY THIS EXISTS AT ALL. Every refusal on the wake path used to be a bare
     /// `ServerMessage::Error`, and the only listener for that frame in the whole
-    /// frontend is the chat view, which pops an `alert()` unconnected to the
+    /// frontend is the chat view, whose toast has nothing to do with the
     /// device card. So a wake that was refused outright — an offline waker, a
     /// rate-limit drop, a device asking to wake itself — looked exactly like a
     /// wake in progress: the card counted down for a full three minutes and then

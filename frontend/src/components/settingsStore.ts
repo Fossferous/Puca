@@ -459,9 +459,8 @@ export const defaultSettings = {
     /**
      * Desktop: open the OS Save As dialog before writing a received file or a
      * downloaded attachment, instead of dropping everything into
-     * <Downloads>/Puca. OFF keeps the old behaviour exactly. The dialog is
-     * tauri-plugin-dialog's `save`, registered for that one permission and
-     * nothing else (api/savePath.ts).
+     * <Downloads>/Puca. OFF keeps the old behaviour exactly. The dialog is the
+     * shell's `choose_save_path` command (api/savePath.ts).
      */
     askWhereToSaveFiles: false,
 };

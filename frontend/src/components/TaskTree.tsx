@@ -35,6 +35,7 @@ import { encryptAndUploadRef } from '../api/attachments';
 import { HeifNotSendableError, convertHeifForUpload } from '../api/heif';
 import { ImageMetadataError } from '../api/imageMetadata';
 import { ApiError } from '../api/client';
+import { pushMessageToast } from './messageToastBus';
 import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
 import { useDragReorder } from '../hooks/useDragReorder';
@@ -394,7 +395,8 @@ export function TaskTree({
         const label = headingLabel(text);
         const name = label.length > 40 ? `${label.slice(0, 39)}…` : label;
         if (task.is_completed && !canComplete) {
-            window.alert(`“${name}” is ticked, and only someone who may tick items can turn it into a heading.`);
+            // A toast: a commit on blur gets here too, when the window lost focus.
+            pushMessageToast({ title: `“${name}” is ticked, and only someone who may tick items can turn it into a heading.` });
             return;
         }
         const scheduled = task.schedule !== undefined && task.schedule !== null;
@@ -414,6 +416,14 @@ export function TaskTree({
      *  (asLiteralItemText), or the row would stay a heading. */
     const turnIntoItem = (task: Task) => {
         onEdit(task, asLiteralItemText(headingLabel(task.description)));
+    };
+
+    /** Would committing the open edit stop at turnIntoHeading's question? */
+    const commitWouldAskAboutTime = (task: Task) => {
+        const text = editText.trim();
+        return task.parent_id === null && !isHeadingTask(task) && text !== task.description && isHeadingText(text)
+            && !(task.is_completed && !canComplete)
+            && ((task.schedule !== undefined && task.schedule !== null) || Boolean(task.due_at));
     };
 
     const commitEdit = (task: Task) => {
@@ -524,14 +534,16 @@ export function TaskTree({
             // click-time snapshot — re-check the lock and dedupe by href so a
             // concurrent change isn't clobbered.
             const current = tasksRef.current.find(t => t.id === task.id) ?? task;
-            if (isAttachmentsLocked(current.attachments)) { alert(LOCKED_MSG); return; }
+            if (isAttachmentsLocked(current.attachments)) { pushMessageToast({ title: LOCKED_MSG }); return; }
             const existing = parseTaskAttachments(current.attachments);
             const byHref = new Map<string, TaskAttachmentRef>();
             for (const r of [...existing, ...added]) if (!byHref.has(r.href)) byHref.set(r.href, r);
             onSetAttachments(task, Array.from(byHref.values()).slice(0, MAX_TASK_ATTACHMENTS));
         }
+        // Toasts, here and for the lock above: this is the end of an upload that
+        // can take a while, and the person has often gone elsewhere by now.
         if (failures.length > 0) {
-            alert(`Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}`);
+            pushMessageToast({ title: `Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}` });
         }
     };
 
@@ -583,7 +595,15 @@ export function TaskTree({
                     autoFocus
                     aria-label={heading ? 'Heading' : undefined}
                     onChange={e => setEditText(e.target.value)}
-                    onBlur={() => commitEdit(task)}
+                    onBlur={e => {
+                        // The window losing focus blurs this field too (Alt-Tab, a
+                        // game coming to the front), and it stays the active
+                        // element then. A question about the item's time would
+                        // pull the person back from whatever they went to, so the
+                        // edit waits, still open, for when they return.
+                        if (document.activeElement === e.currentTarget && commitWouldAskAboutTime(task)) return;
+                        commitEdit(task);
+                    }}
                     onKeyDown={e => {
                         if (e.key === 'Enter') commitEdit(task);
                         if (e.key === 'Escape') setEditingId(null);

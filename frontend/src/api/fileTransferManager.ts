@@ -424,7 +424,7 @@ class FileTransferManager {
             if ((err as TransferError).code === 'cancelled') return id; // cancel() already reported
             // NOT this.fail(): that frees the server-side slot, and no slot
             // exists yet — the server learning a transfer id from FileComplete
-            // answers "Unknown transfer", which alerts and wipes optimistic DM
+            // answers "Unknown transfer", which toasts and wipes optimistic DM
             // bubbles (see dismiss). Nothing to tear down either: no pc, no
             // channel, no sink.
             t.state = 'failed';

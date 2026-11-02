@@ -185,7 +185,7 @@ const FAKE_SHELL = `(() => {
             const dest = headers['x-dest-path'];
             return dest ? decodeURIComponent(dest) : 'C:\\\\Users\\\\walk\\\\Downloads\\\\Puca\\\\' + decodeURIComponent(headers['x-file-name'] || 'attachment');
         },
-        'plugin:dialog|save': (args) => { shell.dialogs.push(args && args.options); return SAVE_AS; },
+        'choose_save_path': (args) => { shell.dialogs.push(args); return SAVE_AS; },
         'plugin:notification|is_permission_granted': () => false,
         'plugin:notification|request_permission': () => 'denied',
         'plugin:notification|notify': (args) => { shell.notifications.push(args); return null; },
@@ -829,7 +829,7 @@ const save = shellState.saves[0];
 /** The export check: one raw write through the shell whose bytes hold `want`. */
 const exportHas = (want) => shellState.saves.length === 1 && !!save && save.raw && want.every(w => save.text.includes(w));
 ck('export: the Save As dialog is asked first, with the export\'s name',
-    shellState.dialogs.length === 1 && /^puca-notes-\d{4}-\d{2}-\d{2}\.md$/.test(shellState.dialogs[0]?.defaultPath ?? ''),
+    shellState.dialogs.length === 1 && /^puca-notes-\d{4}-\d{2}-\d{2}\.md$/.test(shellState.dialogs[0]?.suggestedName ?? ''),
     JSON.stringify(shellState.dialogs));
 ck('export: written through attachment_save, with the notes in the bytes',
     exportHas(['# Groceries', '- [ ] Milk', '- [ ] Bread', '- [ ] Eggs', MESSAGE, '# Set up the new router', '- [ ] Unplug the old router', 'labels: Home']),
