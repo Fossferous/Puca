@@ -2874,7 +2874,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // unregisterHold fires onUp for a held key, so leaving voice (or
             // switching modes) mid-press releases cleanly through this path.
             onUp: () => { holdKeyDownRef.current = false; setHoldKeyDown(false); applyMicGate(); },
-        });
+            // Push-to-mute: holding is what keeps the mic shut, so a release that
+            // may not be one (hotkeys.ts, HoldOptions) does not end it.
+        }, { keepOnBlockedRelease: voiceInputMode === 'pushToMute' });
         return () => unregisterHold(action);
     }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, applyMicGate]);
 
@@ -2910,6 +2912,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 isInVoice: isInVoiceRef.current,
                 isAfkChannel: isAfkChannelRef.current,
                 listenOnly: listenOnlyRef.current,
+                // No SPEAK also joins listen-only, and drops every mic hotkey
+                // (hotkeyScope.ts): this tells that permission from a feed bug.
+                speakDenied: speakDeniedRef.current,
                 voiceInputMode: voiceInputModeRef.current,
                 clipArmed: isBufferingRef.current,
                 globalVoiceHotkeys: s.globalVoiceHotkeys === true,

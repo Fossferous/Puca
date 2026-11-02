@@ -41,13 +41,16 @@ export const ENCODER_SIZES: ReadonlyArray<readonly [width: number, height: numbe
 /** Sections that run under STEP_TIMEOUT_MS: version, SFU stats, mesh stats. */
 export const STEP_SECTIONS = 3;
 
+/** Sections that run under QUICK_TIMEOUT_MS: the native hotkey feed's answer. */
+export const QUICK_SECTIONS = 1;
+
 /** Room for the work between the steps (building strings, the shell's answer
  *  to one that is just slow). */
 export const REPORT_SLACK_MS = 9000;
 
 /** The longest buildDiagnosticsReport can take when every step runs to its cap. */
 export const REPORT_WORST_CASE_MS =
-    STEP_SECTIONS * STEP_TIMEOUT_MS + ENCODER_CODECS.length * ENCODER_SIZES.length * QUICK_TIMEOUT_MS;
+    STEP_SECTIONS * STEP_TIMEOUT_MS + (ENCODER_CODECS.length * ENCODER_SIZES.length + QUICK_SECTIONS) * QUICK_TIMEOUT_MS;
 
 /** What a caller waiting for the whole report should allow. */
 export const REPORT_BUDGET_MS = REPORT_WORST_CASE_MS + REPORT_SLACK_MS;

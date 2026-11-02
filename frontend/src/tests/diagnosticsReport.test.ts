@@ -10,16 +10,21 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { voiceDiagnostics, meshDiagnostics, currentAppVersion, writeText } = vi.hoisted(() => ({
+const { voiceDiagnostics, meshDiagnostics, currentAppVersion, writeText, nativeDiag } = vi.hoisted(() => ({
     voiceDiagnostics: vi.fn(),
     meshDiagnostics: vi.fn(),
     currentAppVersion: vi.fn(),
     writeText: vi.fn(),
+    nativeDiag: vi.fn(),
 }));
 
 vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics } }));
 vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics } }));
 vi.mock('../api/appVersion', () => ({ currentAppVersion }));
+vi.mock('../api/hotkeys', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../api/hotkeys')>(),
+    nativeDiag,
+}));
 
 import { REPORT_BUDGET_MS, REPORT_WORST_CASE_MS } from '../api/diagnosticsBudget';
 import { buildDiagnosticsReport, copyDiagnostics, environmentLines, encodingSupportLines, QUICK_TIMEOUT_MS, STEP_TIMEOUT_MS } from '../api/diagnosticsReport';
@@ -29,6 +34,7 @@ beforeEach(() => {
     meshDiagnostics.mockReset().mockResolvedValue([]);
     currentAppVersion.mockReset().mockResolvedValue('0.9.805');
     writeText.mockReset().mockResolvedValue(undefined);
+    nativeDiag.mockReset().mockResolvedValue({ platform: 'web' });
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
 });
 
@@ -89,6 +95,23 @@ describe('the diagnostics report', () => {
         expect(text).toContain('H.264 High');
         expect(text).toContain('hardware=');
         expect(isConfigSupported).toHaveBeenCalled();
+    });
+
+    it('puts the voice hotkeys IN the report, input mode and bindings both', async () => {
+        // Send diagnostics sends this same report, and a stuck key has to be
+        // settled from the file: hotkeyReport.test.ts holds the section to what
+        // it may say, this holds the report to carrying it.
+        const text = await buildDiagnosticsReport();
+        expect(text).toContain('--- voice hotkeys ---');
+        expect(text).toMatch(/^input mode {2}(open|pushToTalk|pushToMute)$/m);
+        expect(text).toMatch(/^bind {8}Toggle Mute: /m);
+    });
+
+    it('keeps the bindings when the native hotkey feed fails', async () => {
+        nativeDiag.mockRejectedValue(new Error('no hook'));
+        const text = await buildDiagnosticsReport();
+        expect(text).toContain('native      (no hook)');
+        expect(text).toMatch(/^bind {8}Toggle Mute: /m);
     });
 
     it('names the H.264 profiles WebRTC can send, and which of them a hardware encoder takes', async () => {
@@ -248,6 +271,7 @@ describe('the time the whole report may take', () => {
         currentAppVersion.mockImplementation(never);
         voiceDiagnostics.mockImplementation(never);
         meshDiagnostics.mockImplementation(never);
+        nativeDiag.mockImplementation(never);
 
         let text = '';
         const done = buildDiagnosticsReport().then(t => { text = t; });
@@ -261,6 +285,7 @@ describe('the time the whole report may take', () => {
         expect(text).toContain('version unavailable');
         expect(text).toContain('sfu unavailable');
         expect(text).toContain('mesh unavailable');
+        expect(text).toContain('the native hotkey feed gave no answer');
         expect(isConfigSupported).toHaveBeenCalledTimes(10);
         expect(elapsed).toBeLessThanOrEqual(REPORT_BUDGET_MS);
         // The worst case is what the budget is built from: if the report ends

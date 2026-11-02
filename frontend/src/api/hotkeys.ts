@@ -16,7 +16,10 @@
  * carries a modifier (Ctrl+M in the composer is a command; plain M is typing).
  *
  * Bindings are read through a getter on every event, not captured at register
- * time, so a rebind in Settings applies immediately without re-registering.
+ * time, so a rebind in Settings applies immediately without re-registering. A
+ * hold in progress is the exception: it ends when the key that STARTED it comes
+ * up, whatever the binding says by then, and a save that moves its binding to
+ * another key ends it on the spot.
  *
  * Two feeds, one registry:
  *  - the in-app window keydown/keyup pair below (always on), and
@@ -40,6 +43,10 @@
  *  - HOLD actions are dispatched by both feeds; `held` makes that
  *    idempotent, and a release is honoured from whichever feed sees it
  *    (press in the game, release after alt-tabbing back, or the reverse).
+ *    One release is not taken at its word: with a window in front that hides
+ *    every key the native side cannot tell up from unknown, and marks what it
+ *    sends. An action whose hold is the safe state keeps holding through that
+ *    (HoldOptions); the real answer follows once the keys can be read.
  *
  * The native feed also reports when capture is IMPOSSIBLE: the foreground
  * window belongs to a process running above ours (a game launched "as
@@ -59,10 +66,28 @@ type HoldEntry = {
     getBinding: () => KeyBinding | null;
     handler: HoldHandler;
     held: boolean;
+    /** The key or button that took it down: the one whose release ends it. The
+     *  binding can change while it is held, and matching a release against the
+     *  binding as it is NOW left a hold with no release at all. Unset for a
+     *  host's hold, which has no key. */
+    heldKey?: number;
     /** Held by an embedding host's own button (holdFromHost), not a key: a
      *  window blur does not release it, the host's lease does (embedApi.ts).
      *  Cleared by every release, whichever feed delivers it. */
     byHost?: boolean;
+    keepOnBlockedRelease: boolean;
+};
+
+export type HoldOptions = {
+    /**
+     * Holding is the safe state, so a release nobody can vouch for does not end
+     * it: push-to-mute, where letting go opens the microphone. Such a release
+     * comes from the native feed while a window hides every key, when the key may
+     * well still be down (hotkeys.rs, "A blank table is not a release"). The
+     * native side sends the real one once the keys can be read again. Push-to-talk
+     * leaves this off: there, closing at once costs nothing.
+     */
+    keepOnBlockedRelease?: boolean;
 };
 
 type PressEntry = {
@@ -72,6 +97,36 @@ type PressEntry = {
 
 const holdActions = new Map<string, HoldEntry>();
 const pressActions = new Map<string, PressEntry>();
+
+function pressHold(entry: HoldEntry, key: number): void {
+    entry.held = true;
+    entry.heldKey = key;
+    entry.handler.onDown();
+}
+
+function releaseHold(entry: HoldEntry): void {
+    entry.held = false;
+    entry.byHost = false;
+    entry.heldKey = undefined;
+    entry.handler.onUp();
+}
+
+/** Is this key going up the end of this hold? On the KEY alone, ignoring
+ *  modifier state: the user may have let go of Shift before the main key, and a
+ *  hold must never stick. A host's hold has no key of its own, and the bound
+ *  key's release ends it too, as every release does. */
+function endsHold(entry: HoldEntry, key: number): boolean {
+    return entry.held && key === (entry.heldKey ?? entry.getBinding()?.keyCode);
+}
+
+/** A line for puca.log (and the console): action names only, never a key. */
+function logHotkeyNote(line: string): void {
+    console.log(line);
+    if (!isTauri()) return;
+    void import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('log_stream_diag', { line }))
+        .catch(() => { /* best effort: a missing line is not worth an error */ });
+}
 
 /**
  * Does this event match the binding?
@@ -156,9 +211,8 @@ let captureMode = false;
 
 /**
  * Suspend (or resume) hotkey dispatch. Entering capture releases every held
- * action first — otherwise a PTT key held while it is rebound has no release
- * path at all: keyup matches against the NEW binding's keyCode, and on desktop
- * the native hook has already swapped its watch list, so the mic stays open.
+ * action first: dispatch is suspended from here on, so a key held now would
+ * come up unheard and the mic would stay open.
  */
 export function setHotkeyCaptureMode(on: boolean): void {
     if (captureMode === on) return;
@@ -166,14 +220,52 @@ export function setHotkeyCaptureMode(on: boolean): void {
     if (on) releaseAll();
 }
 
+/**
+ * Keys pressed to BE a binding, until they come up: key -> when to stop waiting.
+ *
+ * Capture ends the moment the bind is saved, and that save starts watching the
+ * key. A press normally lasts longer than the 40 ms the poll takes to notice a
+ * watched key that is down, so the same keystroke arrived as a press the hook
+ * missed, with capture over: rebinding Toggle Mute unmuted a muted member. The
+ * native side cannot tell, and must not try: a key that joins the list while
+ * someone really is holding it to talk should reach the page. Only this file
+ * knows that this one was already spent on being captured.
+ */
+const spentKeys = new Map<number, number>();
+/** Only for a key-up nobody hears (released with an elevated window in front). A
+ *  hold outlasting this is still fine: the poll's press comes once, early on. */
+const SPENT_KEY_MAX_MS = 5_000;
+/** The in-app key-up can overtake the native feed's press for the same keystroke,
+ *  which is already on its way. The native key-up cannot: that channel is ordered. */
+const SPENT_KEY_AFTER_IN_APP_UP_MS = 150;
+
+/** This key ended a capture. Called before the save that starts watching it. */
+export function markKeySpentByCapture(key: number): void {
+    spentKeys.set(key, Date.now() + SPENT_KEY_MAX_MS);
+}
+
+function keyIsSpent(key: number): boolean {
+    const until = spentKeys.get(key);
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    spentKeys.delete(key);
+    return false;
+}
+
+function spentKeyUpInApp(key: number): void {
+    if (spentKeys.has(key)) spentKeys.set(key, Date.now() + SPENT_KEY_AFTER_IN_APP_UP_MS);
+}
+
 function onKeyDown(e: KeyboardEvent): void {
     if (captureMode) return;
+    // A first press in this window (not a repeat) is a new keystroke, whatever
+    // happened to the last one's key-up.
+    if (!e.repeat) spentKeys.delete(e.keyCode);
     for (const entry of holdActions.values()) {
         // Repeats keep arriving while held — only the first press transitions.
         if (entry.held || e.repeat) continue;
         if (eventMatchesBinding(e, entry.getBinding(), 'subset')) {
-            entry.held = true;
-            entry.handler.onDown();
+            pressHold(entry, e.keyCode);
         }
     }
     if (e.repeat) return;
@@ -221,15 +313,10 @@ let ownershipDeferrals = 0;
 let nativeDispatches = 0;
 
 function onKeyUp(e: KeyboardEvent): void {
+    spentKeyUpInApp(e.keyCode);
     if (captureMode) return;
     for (const entry of holdActions.values()) {
-        // Release on the KEY alone, ignoring modifier state: the user may have
-        // let go of Shift before the main key, and a hold must never stick.
-        if (entry.held && e.keyCode === entry.getBinding()?.keyCode) {
-            entry.held = false;
-            entry.byHost = false;
-            entry.handler.onUp();
-        }
+        if (endsHold(entry, e.keyCode)) releaseHold(entry);
     }
 }
 
@@ -261,14 +348,14 @@ function onMouseDown(e: MouseEvent): void {
     if (captureMode) return;
     const vk = BUTTON_TO_VK[e.button];
     if (vk === undefined || vk === VK_LBUTTON) return; // left is never a hotkey
+    spentKeys.delete(vk); // a new press, as in onKeyDown
     if (!vkIsBound(vk)) return;
     const evt = { keyCode: vk, ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey };
     let matched = false;
     for (const entry of holdActions.values()) {
         if (entry.held) continue;
         if (eventMatchesBinding(evt, entry.getBinding(), 'subset')) {
-            entry.held = true;
-            entry.handler.onDown();
+            pressHold(entry, vk);
             matched = true;
         }
     }
@@ -294,15 +381,14 @@ function onMouseDown(e: MouseEvent): void {
 }
 
 function onMouseUp(e: MouseEvent): void {
-    if (captureMode) return;
     const vk = BUTTON_TO_VK[e.button];
     if (vk === undefined || vk === VK_LBUTTON) return;
+    spentKeyUpInApp(vk);
+    if (captureMode) return;
     let wasHeld = false;
     for (const entry of holdActions.values()) {
-        if (entry.held && vk === entry.getBinding()?.keyCode) {
-            entry.held = false;
-            entry.byHost = false;
-            entry.handler.onUp();
+        if (endsHold(entry, vk)) {
+            releaseHold(entry);
             wasHeld = true;
         }
     }
@@ -329,10 +415,22 @@ function onMouseAux(e: MouseEvent): void {
  *  Not a host's hold: no key is involved, and its lease ends it. */
 function releaseAll(): void {
     for (const entry of holdActions.values()) {
-        if (entry.held && !entry.byHost) {
-            entry.held = false;
-            entry.handler.onUp();
-        }
+        if (entry.held && !entry.byHost) releaseHold(entry);
+    }
+}
+
+/**
+ * A save took the key out from under a hold: the trash button or Reset on the
+ * Keybinds tab while it is down (neither goes through capture). That key no
+ * longer means this action, so the hold ends now. With the binding cleared
+ * nothing else could ever have ended it: no press can reach an unbound action.
+ * A change of modifiers alone leaves the same key to come up, and it will.
+ */
+function releaseHoldsWhoseKeyChanged(): void {
+    for (const [id, entry] of holdActions) {
+        if (!entry.held || entry.byHost || entry.getBinding()?.keyCode === entry.heldKey) continue;
+        logHotkeyNote(`[hotkeys] ${id} released: its keybind changed while it was held`);
+        releaseHold(entry);
     }
 }
 
@@ -346,6 +444,7 @@ function ensureListeners(): void {
     window.addEventListener('mouseup', onMouseUp, true);
     window.addEventListener('auxclick', onMouseAux, true);
     window.addEventListener('contextmenu', onMouseAux, true);
+    window.addEventListener('settingsChanged', releaseHoldsWhoseKeyChanged);
     // Blur releases held keys ONLY while the in-app listener is the sole feed:
     // without the native hook, alt-tabbing away means we'd never see the
     // keyup. With the native feed running, the global hook still sees it —
@@ -361,19 +460,16 @@ function ensureListeners(): void {
  * Settings take effect live. Re-registering an id replaces the old entry
  * (releasing it first if held).
  */
-export function registerHold(id: string, getBinding: () => KeyBinding | null, handler: HoldHandler): void {
+export function registerHold(id: string, getBinding: () => KeyBinding | null, handler: HoldHandler, options: HoldOptions = {}): void {
     ensureListeners();
     unregisterHold(id);
-    holdActions.set(id, { getBinding, handler, held: false });
+    holdActions.set(id, { getBinding, handler, held: false, keepOnBlockedRelease: options.keepOnBlockedRelease === true });
 }
 
 /** Unregister a hold action, releasing it if currently held. */
 export function unregisterHold(id: string): void {
     const entry = holdActions.get(id);
-    if (entry?.held) {
-        entry.held = false;
-        entry.handler.onUp();
-    }
+    if (entry?.held) releaseHold(entry);
     holdActions.delete(id);
 }
 
@@ -403,9 +499,7 @@ export function holdFromHost(id: string, down: boolean): boolean {
         entry.byHost = true;
         entry.handler.onDown();
     } else if (!down && entry.held && entry.byHost) {
-        entry.held = false;
-        entry.byHost = false;
-        entry.handler.onUp();
+        releaseHold(entry);
     }
     return true;
 }
@@ -424,16 +518,20 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
 }, only?: Set<string>, opts?: {
     /** Our window was the OS foreground window when the edge was delivered. */
     foreground?: boolean;
+    /** A release made while a window hides every key: see HoldOptions. */
+    blocked?: boolean;
 }): void {
+    if (kind === 'up') spentKeys.delete(key.keyCode);
     // Same suspension as the in-app feed: a key pressed to BE a binding must
-    // not also run the action it is replacing.
+    // not also run the action it is replacing. That covers the whole keystroke,
+    // and capture is usually over before it is (spentKeys).
     if (captureMode) return;
     if (kind === 'down') {
+        if (keyIsSpent(key.keyCode)) return;
         for (const [id, entry] of holdActions) {
             if (only && !only.has(id)) continue;
             if (!entry.held && eventMatchesBinding(key, entry.getBinding(), 'subset')) {
-                entry.held = true;
-                entry.handler.onDown();
+                pressHold(entry, key.keyCode);
             }
         }
         for (const [id, entry] of pressActions) {
@@ -474,13 +572,14 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
             entry.onPress();
         }
     } else {
-        for (const [id, entry] of holdActions) {
-            if (only && !only.has(id)) continue;
-            if (entry.held && key.keyCode === entry.getBinding()?.keyCode) {
-                entry.held = false;
-                entry.byHost = false;
-                entry.handler.onUp();
-            }
+        // `only` does not apply: it keeps a global key from STARTING an action
+        // the feed does not cover, and a release starts nothing. It has to get
+        // through, because a save narrows the list before it re-registers, and
+        // the release the native side owes for a key it stops watching arrives
+        // after that (hotkeys.rs, rewrite_watch).
+        for (const entry of holdActions.values()) {
+            if (opts?.blocked && entry.keepOnBlockedRelease) continue;
+            if (endsHold(entry, key.keyCode)) releaseHold(entry);
         }
     }
 }
@@ -503,12 +602,17 @@ let nativeAllow: Set<string> | null = null;
 // cause the moment they come back to Púca asking why the mic stayed shut.
 
 let captureBlockerName = '';
+/** How many times one has come to the front since this page loaded. The name
+ *  clears on an ordinary click or at the end of the call; a report is often made
+ *  after both, about something that happened during them. */
+let captureBlockerSeen = 0;
 const blockerListeners = new Set<(process: string) => void>();
 
 function setCaptureBlocker(process: string): void {
     if (process === captureBlockerName) return;
     captureBlockerName = process;
     if (process) {
+        captureBlockerSeen++;
         console.warn(`[hotkeys] ${process} runs above our integrity level: Windows hides its input from every capture method; voice hotkeys cannot work while it is in front`);
     } else {
         console.log('[hotkeys] foreground input reachable again');
@@ -529,15 +633,15 @@ function setCaptureBlocker(process: string): void {
  */
 export function handleNativeHotkeyPayload(payload: {
     keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean;
-    down: boolean; foreground?: boolean;
+    down: boolean; foreground?: boolean; blocked?: boolean;
 }): void {
     if (!nativeFeedActive || nativeAllow === null) return;
     // Low-volume by construction (watched keys only, edges only): this line
     // is the observable a live verification reads.
     console.log('[hotkeys] native', payload.down ? 'down' : 'up', payload.keyCode,
-        payload.foreground ? '(app in front)' : '');
+        payload.foreground ? '(app in front)' : '', payload.blocked ? '(keys hidden)' : '');
     nativeKeyEvent(payload.down ? 'down' : 'up', payload, nativeAllow,
-        { foreground: payload.foreground === true });
+        { foreground: payload.foreground === true, blocked: payload.blocked === true });
 }
 
 /** The foreground process whose input is invisible to us (runs elevated), or ''. */
@@ -596,6 +700,22 @@ export function setNativeFeedHost(provider: (() => NativeFeedHostSnapshot) | nul
 }
 
 /**
+ * A re-registration failed while the feed was live: no native key-up can come
+ * from here on, and the app may not have focus for the in-app one. The blur
+ * safety net cannot cover it, since that blur already happened with the feed
+ * live. Same reasoning as a stop. With no live feed nothing changed, and the
+ * in-app listeners still own whatever they hold.
+ */
+function nativeFeedFell(): void {
+    const wasLive = nativeFeedActive;
+    nativeFeedActive = false;
+    if (wasLive && [...holdActions.values()].some(e => e.held && !e.byHost)) {
+        logHotkeyNote('[hotkeys] released what was held: the native feed could not be re-registered');
+        releaseAll();
+    }
+}
+
+/**
  * Start (or reconfigure) the desktop-global key feed: the Rust hook watches
  * exactly `watchedKeys` (VK codes) and reports their transitions; matching
  * events dispatch to the actions in `actionIds` only. Safe to call again with
@@ -634,7 +754,7 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
         if (!hooked) {
             console.warn('[hotkeys] no global hook on this platform — keys work while focused');
             recordFeed('start', 'sync', { ids: actionIds, keys: watchedKeys }, 'refused: no hook');
-            nativeFeedActive = false;
+            nativeFeedFell();
             return;
         }
         // Superseded while the command was in flight (a stop, or a newer
@@ -650,7 +770,7 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
             if (!nativeUnlisten) {
                 const un = await listen<{
                     keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean;
-                    down: boolean; foreground: boolean;
+                    down: boolean; foreground: boolean; blocked: boolean;
                 }>('global-hotkey', (e) => handleNativeHotkeyPayload(e.payload));
                 // Never overwrite a live handle: the overwritten one stays
                 // subscribed and unreachable, and every key is then
@@ -684,7 +804,7 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
         // Best-effort, like the kill-switch guard: without the hook, hotkeys
         // still work while the app has focus. nativeFeedActive stays false so
         // the blur handler keeps its release-on-focus-loss safety net.
-        nativeFeedActive = false;
+        nativeFeedFell();
         console.warn('[hotkeys] native feed unavailable:', err);
         recordFeed('start', 'sync', { ids: actionIds, keys: watchedKeys }, 'error: ' + String(err));
     } finally {
@@ -715,7 +835,8 @@ export async function stopNativeFeed(reason = 'unspecified'): Promise<void> {
     // The native side forgets the blocker with the feed; so do we, or the
     // banner would outlive the call it was about.
     setCaptureBlocker('');
-    // No feed can see further keyups — never leave a hold stuck.
+    // No feed can see further keyups — never leave a hold stuck. hotkeys.rs
+    // stop() clears its bits without a word, relying on exactly this.
     releaseAll();
     try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -734,11 +855,13 @@ export function resetHotkeysForTest(): void {
     nativeAllow = null;
     captureMode = false;
     setCaptureBlocker('');
+    captureBlockerSeen = 0;
     // Module state that outlived a reset and leaked between tests: a
     // subscriber for an unmounted banner, a mouse follow-up window, a
     // start still in flight.
     blockerListeners.clear();
     recentMouseMatch.clear();
+    spentKeys.clear();
     nativeStartInFlight = null;
     lastRequested = null;
     feedLog.length = 0;
@@ -786,17 +909,61 @@ export function setCaptureBlockerForTest(process: string): void {
 //   native.events_seen rising      -> the hook sees the key; a later stage
 //                                     drops it (a different bug)
 //   native.rearms                  -> times the watchdog re-installed the hook
+//   feed.held with native.down_bits 0 and native.releases_owed 0
+//                                  -> the page holds a key the native side
+//                                     does not: a release nothing will send
 //
 // Reached through this object, not window.__TAURI__: withGlobalTauri is off
 // on purpose (it would hand full IPC to any injected script), so `invoke`
 // only exists in module code like this. On a build without snapshot(),
 // `await window.__TAURI_INTERNALS__.invoke('hotkey_diag')` gives the native
 // half alone.
-async function nativeDiag(): Promise<unknown> {
+export async function nativeDiag(): Promise<unknown> {
     if (!isTauri()) return { platform: 'web', note: 'no native hook in a browser' };
     const { invoke } = await import('@tauri-apps/api/core');
     return invoke('hotkey_diag');
 }
+
+/**
+ * What the registry and the feed believe right now, for the debug snapshot and
+ * for the diagnostics report (hotkeyReport.ts). Action names, the keys the person
+ * bound, counts: nothing in this file ever records any other key, so nothing here
+ * can hand one on.
+ */
+export function hotkeyFeedState() {
+    let host: NativeFeedHostSnapshot | null = null;
+    try {
+        host = hostProvider ? hostProvider() : null;
+    } catch (err) {
+        host = { error: String(err) };
+    }
+    return {
+        // On the same clock as `log[].at`, which means nothing without it.
+        now: Math.round(performance.now()),
+        host,
+        active: nativeFeedActive,
+        requested: lastRequested,
+        allowed: nativeAllow ? [...nativeAllow] : null,
+        registered: { hold: [...holdActions.keys()], press: [...pressActions.keys()] },
+        // Held right now, by action. Beside native.down_bits it says which side
+        // believes what: held with no bit down is the page waiting on a release
+        // nothing is going to send.
+        held: [...holdActions].filter(([, e]) => e.held).map(([id]) => id),
+        // Non-empty: the app in front runs elevated; no capture method can see
+        // its keys. Not a fault in the feed.
+        blocker: captureBlockerName,
+        // How many times one has come to the front since the page loaded.
+        blockerSeen: captureBlockerSeen,
+        // Presses the in-app feed handed to the native feed, and presses the
+        // native feed actually fired. The first climbing alone means the native
+        // side went quiet.
+        ownershipDeferrals,
+        nativeDispatches,
+        log: [...feedLog],
+    };
+}
+
+export type HotkeyFeedState = ReturnType<typeof hotkeyFeedState>;
 
 if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>).__pucaHotkeysDebug = {
@@ -807,31 +974,8 @@ if (typeof window !== 'undefined') {
         native: nativeDiag,
         /** Everything, in one call. See the reading guide above. */
         snapshot: async () => {
-            let host: NativeFeedHostSnapshot | null = null;
-            try {
-                host = hostProvider ? hostProvider() : null;
-            } catch (err) {
-                host = { error: String(err) };
-            }
-            return {
-                host,
-                feed: {
-                    active: nativeFeedActive,
-                    requested: lastRequested,
-                    allowed: nativeAllow ? [...nativeAllow] : null,
-                    registered: { hold: [...holdActions.keys()], press: [...pressActions.keys()] },
-                    // Non-empty: the app in front runs elevated; no capture
-                    // method can see its keys. Not a fault in the feed.
-                    blocker: captureBlockerName,
-                    // Presses the in-app feed handed to the native feed, and
-                    // presses the native feed actually fired. The first
-                    // climbing alone means the native side went quiet.
-                    ownershipDeferrals,
-                    nativeDispatches,
-                },
-                log: [...feedLog],
-                native: await nativeDiag(),
-            };
+            const { host, log, ...feed } = hotkeyFeedState();
+            return { host, feed, log, native: await nativeDiag() };
         },
     };
 }

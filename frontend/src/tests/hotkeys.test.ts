@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
     eventMatchesBinding,
     matchesRegisteredHotkey,
+    markKeySpentByCapture,
     registerHold,
     unregisterHold,
     registerPress,
+    holdFromHost,
     resetHotkeysForTest,
     nativeKeyEvent,
+    setHotkeyCaptureMode,
     setNativeFeedStateForTest,
     handleNativeHotkeyPayload,
     captureBlocker,
@@ -497,5 +503,326 @@ describe('modifier matching depends on who is in front', () => {
         setNativeFeedStateForTest(true, ['voice.ptt']);
         handleNativeHotkeyPayload({ keyCode: 32, ctrlKey: true, altKey: false, shiftKey: true, down: true, foreground: true });
         expect(downs, 'push-to-talk must never need bare modifiers').toBe(1);
+    });
+});
+
+// THE PAGE'S HALF OF THE STUCK KEY. A hold ends when the key that started it
+// comes up, so that is the key a release is matched against. It used to be
+// matched against the CURRENT binding, read per event: change the binding while
+// the key is down (the Keybinds tab's Reset and trash buttons do not go through
+// capture) and nothing could ever release it, in a push-to-talk that means an
+// open microphone.
+describe('a hold whose binding changes while it is held', () => {
+    const B: KeyBinding = { keyCode: 66, ctrl: false, alt: false, shift: false, label: 'B' };
+    const save = () => window.dispatchEvent(new CustomEvent('settingsChanged'));
+    const up = { ctrlKey: false, altKey: false, shiftKey: false };
+    let binding: KeyBinding | null;
+    let downs = 0;
+    let ups = 0;
+
+    beforeEach(() => {
+        binding = SPACE;
+        downs = 0; ups = 0;
+        registerHold('voice.ptt', () => binding, { onDown: () => { downs++; }, onUp: () => { ups++; } });
+    });
+    afterEach(() => resetHotkeysForTest());
+
+    it('the in-app release matches the key that pressed it, not the binding as it is now', () => {
+        key('keydown', 32);
+        binding = B; // no save event yet: the release alone must be enough
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('the native release does too', () => {
+        nativeKeyEvent('down', { keyCode: 32, ...up });
+        binding = B;
+        nativeKeyEvent('up', { keyCode: 32, ...up });
+        expect(ups).toBe(1);
+    });
+
+    it('a mouse button released after a rebind ends its hold', () => {
+        binding = { keyCode: 5, ctrl: false, alt: false, shift: false, label: 'Mouse 4' };
+        window.dispatchEvent(new MouseEvent('mousedown', { button: 3, bubbles: true, cancelable: true }));
+        expect(downs).toBe(1);
+        binding = B;
+        window.dispatchEvent(new MouseEvent('mouseup', { button: 3, bubbles: true, cancelable: true }));
+        expect(ups).toBe(1);
+    });
+
+    it('the trash button: a binding cleared while held is released by the save', () => {
+        key('keydown', 32);
+        binding = null;
+        save();
+        expect(ups, 'unbound, nothing could ever release it again').toBe(1);
+        key('keyup', 32); // the key coming up later must not fire it twice
+        expect(ups).toBe(1);
+    });
+
+    it('Reset: a binding moved to another key is released by the save', () => {
+        nativeKeyEvent('down', { keyCode: 32, ...up });
+        binding = B;
+        save();
+        expect(ups).toBe(1);
+        // The new key is a fresh press with a release of its own.
+        nativeKeyEvent('down', { keyCode: 66, ...up });
+        expect(downs).toBe(2);
+        nativeKeyEvent('up', { keyCode: 66, ...up });
+        expect(ups).toBe(2);
+    });
+
+    it('positive control: a save that leaves the key alone leaves the hold alone', () => {
+        key('keydown', 32);
+        save();
+        expect(ups).toBe(0);
+        // Nor does it matter that only the modifiers changed: the same key
+        // still has to come up, and it will.
+        binding = { ...SPACE, ctrl: true };
+        save();
+        expect(ups).toBe(0);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('the key the binding moved to does not end a hold it did not start', () => {
+        key('keydown', 32);
+        binding = B;
+        key('keyup', 66);
+        expect(ups).toBe(0);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it("a host's hold has no key: a save leaves it to the host's lease", () => {
+        expect(holdFromHost('voice.ptt', true)).toBe(true);
+        binding = null;
+        save();
+        expect(ups).toBe(0);
+        holdFromHost('voice.ptt', false);
+        expect(ups).toBe(1);
+    });
+
+    it("a key's release still ends a host's hold, as every release does", () => {
+        holdFromHost('voice.ptt', true);
+        key('keyup', 32);
+        expect(ups).toBe(1);
+    });
+
+    it('a native release reaches an action the feed no longer covers', () => {
+        // A save narrows the allow-list BEFORE it re-registers, and the release
+        // the native side owes for a key it stops watching arrives after that.
+        // The list keeps a global key from STARTING an in-app action. A release
+        // starts nothing, and the key really is up.
+        key('keydown', 32);
+        setNativeFeedStateForTest(true, []);
+        handleNativeHotkeyPayload({ keyCode: 32, ...up, down: false, foreground: false });
+        expect(ups).toBe(1);
+    });
+
+    it('positive control: the same list still refuses a press', () => {
+        setNativeFeedStateForTest(true, []);
+        handleNativeHotkeyPayload({ keyCode: 32, ...up, down: true, foreground: false });
+        expect(downs).toBe(0);
+    });
+});
+
+// The save that ends a capture starts watching the key, which is still down: the
+// poll supplies it as a press the hook missed, ~40 ms later, with capture over.
+// In a call, muted, rebinding Toggle Mute then unmuted you. The real modal is in
+// keybindCapture.test.tsx and the real poll in hotkeys.rs; this is the rule.
+describe('a key pressed to be a binding', () => {
+    const K = 75;
+    const BIND: KeyBinding = { keyCode: K, ctrl: false, alt: false, shift: false, label: 'K' };
+    const up = { ctrlKey: false, altKey: false, shiftKey: false };
+    const native = (kind: 'down' | 'up', keyCode = K) => nativeKeyEvent(kind, { keyCode, ...up });
+    let presses = 0;
+
+    /** Capture takes the key and is over before the poll has noticed it. */
+    const captured = (vk = K) => {
+        setHotkeyCaptureMode(true);
+        markKeySpentByCapture(vk);
+        setHotkeyCaptureMode(false);
+    };
+
+    beforeEach(() => {
+        presses = 0;
+        registerPress('voice.toggleMute', () => BIND, () => { presses++; });
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+        resetHotkeysForTest();
+    });
+
+    it('its own press does not run the action', () => {
+        captured();
+        native('down');
+        expect(presses).toBe(0);
+    });
+
+    it('positive control: a key nobody captured does, held or not when the list gained it', () => {
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    it('nor does it start a hold', () => {
+        let downs = 0;
+        registerHold('voice.ptt', () => BIND, { onDown: () => { downs++; }, onUp: () => { /* nothing */ } });
+        captured();
+        native('down');
+        expect(downs).toBe(0);
+    });
+
+    it('the next press does, once the native feed says it came up', () => {
+        captured();
+        native('down');
+        native('up');
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    it('a key that came up before the poll noticed it: the in-app key-up ends it too', () => {
+        vi.useFakeTimers();
+        captured();
+        key('keyup', K);
+        vi.advanceTimersByTime(1_000);
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    // The in-app key-up and the native feed are not ordered against each other:
+    // the poll's press can already be on its way when the key-up lands here.
+    it('a press already on its way when the in-app key-up lands stays spent', () => {
+        vi.useFakeTimers();
+        captured();
+        key('keyup', K);
+        vi.advanceTimersByTime(20);
+        native('down');
+        expect(presses).toBe(0);
+        native('up'); // its own key-up, and that channel IS ordered
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    it('a key-up during capture counts: capture can outlast a fast keystroke', () => {
+        vi.useFakeTimers();
+        setHotkeyCaptureMode(true);
+        markKeySpentByCapture(K);
+        key('keyup', K);
+        setHotkeyCaptureMode(false);
+        vi.advanceTimersByTime(1_000);
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    it('a key-up nobody heard costs a few seconds of that key, not the key', () => {
+        vi.useFakeTimers();
+        captured();
+        vi.advanceTimersByTime(4_000);
+        native('down');
+        expect(presses, 'still waiting for it').toBe(0);
+        vi.advanceTimersByTime(1_001);
+        native('down');
+        expect(presses).toBe(1);
+    });
+
+    it('a first press in the window is a new keystroke, whatever became of the last one', () => {
+        captured();
+        key('keydown', K);
+        expect(presses).toBe(1);
+        native('down');
+        expect(presses, 'and nothing is left waiting').toBe(2);
+    });
+
+    it('auto-repeat is not a new keystroke', () => {
+        captured();
+        key('keydown', K, { repeat: true });
+        expect(presses).toBe(0);
+        native('down');
+        expect(presses).toBe(0);
+    });
+
+    it('another key is not held back', () => {
+        let other = 0;
+        registerPress('voice.toggleDeafen', () => ({ ...BIND, keyCode: 68, label: 'D' }), () => { other++; });
+        captured();
+        native('down', 68);
+        expect(other).toBe(1);
+    });
+
+    it('a mouse button: its own press does not run the action, and its button-up ends that', () => {
+        vi.useFakeTimers();
+        registerPress('voice.saveClip', () => ({ ...BIND, keyCode: 5, label: 'Mouse 4' }), () => { presses++; });
+        captured(5);
+        native('down', 5);
+        expect(presses).toBe(0);
+        window.dispatchEvent(new MouseEvent('mouseup', { button: 3, bubbles: true, cancelable: true }));
+        vi.advanceTimersByTime(1_000);
+        native('down', 5);
+        expect(presses).toBe(1);
+    });
+});
+
+// With an elevated window in front every key reads up, finger or no finger, so
+// the native side's "release" may be nothing of the kind. In push-to-mute that
+// release is what OPENS the microphone, on someone still holding mute.
+describe('a release made while a window hides every key', () => {
+    const V: KeyBinding = { keyCode: 86, ctrl: false, alt: false, shift: false, label: 'V' };
+    const up = { ctrlKey: false, altKey: false, shiftKey: false };
+    const edge = (down: boolean, blocked?: boolean) =>
+        handleNativeHotkeyPayload({ keyCode: 86, ...up, down, foreground: false, blocked });
+    let downs = 0;
+    let ups = 0;
+    const handler = { onDown: () => { downs++; }, onUp: () => { ups++; } };
+
+    beforeEach(() => {
+        downs = 0; ups = 0;
+        setNativeFeedStateForTest(true, ['voice.ptm', 'voice.ptt']);
+    });
+    afterEach(() => resetHotkeysForTest());
+
+    it('does not end a push-to-mute hold', () => {
+        registerHold('voice.ptm', () => V, handler, { keepOnBlockedRelease: true });
+        edge(true);
+        edge(false, true);
+        expect(ups, 'the key may still be down: the mic stays shut').toBe(0);
+    });
+
+    it('its real release does, when the keys can be read again', () => {
+        registerHold('voice.ptm', () => V, handler, { keepOnBlockedRelease: true });
+        edge(true);
+        edge(false, true);
+        edge(false, false);
+        expect(ups).toBe(1);
+    });
+
+    it('the key still down when they can: one hold, start to finish', () => {
+        registerHold('voice.ptm', () => V, handler, { keepOnBlockedRelease: true });
+        edge(true);
+        edge(false, true);
+        edge(true); // the poll supplies the press
+        expect(downs).toBe(1);
+        expect(ups).toBe(0);
+        edge(false);
+        expect(ups).toBe(1);
+    });
+
+    it('closes push-to-talk at once: closing a microphone costs nothing', () => {
+        registerHold('voice.ptt', () => V, handler);
+        edge(true);
+        edge(false, true);
+        expect(ups).toBe(1);
+    });
+
+    it('a kept hold still ends when the call does', () => {
+        registerHold('voice.ptm', () => V, handler, { keepOnBlockedRelease: true });
+        edge(true);
+        edge(false, true);
+        unregisterHold('voice.ptm');
+        expect(ups).toBe(1);
+    });
+
+    it('VoicePanel asks for this on push-to-mute and only there', () => {
+        const panel = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/VoicePanel.tsx'), 'utf8');
+        expect(panel).toMatch(/registerHold\(action, bindingOf, \{[\s\S]{0,800}?\}, \{ keepOnBlockedRelease: voiceInputMode === 'pushToMute' \}\);/);
     });
 });

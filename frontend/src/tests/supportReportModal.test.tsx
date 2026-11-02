@@ -8,6 +8,11 @@ vi.mock('../api/supportReport', async (orig) => ({
     ...(await orig<typeof import('../api/supportReport')>()),
     sendSupportReport: (ownerId: number, note: string, _deps?: unknown, opts?: { signal?: AbortSignal }) => send(ownerId, note, opts?.signal),
 }));
+const platform = vi.hoisted(() => ({ tauri: false }));
+vi.mock('../api/platform', async (orig) => ({
+    ...(await orig<typeof import('../api/platform')>()),
+    isTauri: () => platform.tauri,
+}));
 
 import { SupportReportModal } from '../components/SupportReportModal';
 
@@ -108,5 +113,29 @@ describe('SupportReportModal', () => {
     it('your own server is labelled as yours', () => {
         show([srv('a', 'Alpha', 1)], 1);
         expect(radios().map(r => r.textContent)).toEqual(['AYou (owner of Alpha)']);
+    });
+
+    // This sentence is what the person agrees to when they press Send report.
+    describe('what it says goes out', () => {
+        afterEach(() => { platform.tauri = false; });
+
+        it('every keybind, not only the voice ones: the report lists them all', () => {
+            show([srv('a', 'Alpha', 5)], 1);
+            expect(host.textContent).toContain('the keys you bound in Keybinds');
+            expect(host.textContent).not.toContain('voice hotkeys');
+        });
+
+        it('on desktop, the programs the log can name', () => {
+            platform.tauri = true;
+            show([srv('a', 'Alpha', 5)], 1);
+            expect(host.textContent).toContain('the names of programs whose audio you shared');
+            expect(host.textContent).toContain('any program running as administrator that was in front during a call');
+        });
+
+        it('without a log, no program names at all', () => {
+            show([srv('a', 'Alpha', 5)], 1);
+            expect(host.textContent).not.toContain('programs');
+            expect(host.textContent).not.toContain('administrator');
+        });
     });
 });

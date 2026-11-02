@@ -16,10 +16,17 @@ one-line summary; this file is the full story. Versions follow
 
   A mode tidies the list. It does not keep anyone out: anyone allowed to see a channel can still open it from a mention, a notification or a link, and people on an older version see every channel. Use channel permissions to keep someone out. High Contrast hides the background and colour, and anyone can turn them off under **Settings > Server Backgrounds and Colours**. Needs the new server. (docs/SERVER_MODES.md)
 
+### Changed
+
+- **Reports say how your voice hotkeys are set up.** **Send diagnostics** and **Copy diagnostics** now include your voice input mode, the keys you bound as hotkeys, and what is being held right now, and the desktop app's log notes it when Púca had to work out for itself that you let go of a hotkey. A stuck push-to-talk can then be explained from the report. Nothing you type is ever recorded: the only keys named anywhere are the ones you bound.
+
 ### Fixed
 
 - **Being moved between voice channels no longer drops you from voice.** On a channel using the media server, a move could reach you after the media server had already ended your call. The move was then ignored, and you were left out of voice.
 - **Menus are readable on the Light theme.** Right-click menus, the server icon's among them, put dark text on their dark background.
+- **Push-to-talk and push-to-mute no longer stick when a setting changes while you hold the key.** Turning on **Use Mute and Deafen from other apps**, or pressing **Reset** on a keybind, while holding your push-to-talk or push-to-mute key could lose the moment you let go, if you let go right away. You then stayed muted, or stayed live, until your next press. Removing or resetting the keybind you were holding could be worse: nothing could end it until you left the call or changed input mode. Púca now keeps hold of a key through the change, and lets go at once if the key no longer does anything.
+- **Choosing a new key for a keybind no longer presses it.** In a call, picking a new key for **Toggle Mute** could unmute you, and the same went for Toggle Deafen or a moment of push-to-talk, because the keypress that chose the key also counted as using it. Only your next press does anything now.
+- **Push-to-mute keeps you muted when a program running as administrator comes to the front.** Windows hides every key from Púca while such a program is in front, which read as letting go of the key and opened your microphone while you were still holding it. You now stay muted until Púca can see the key again, within a second of leaving that program. Push-to-talk still closes straight away.
 - **Púca for Steam Deck: sharing your screen shows your game, not black.** A share started from the plugin showed viewers only black, with a game in front, a non-Steam game or Steam's own menus. The Deck's screen capture let through the first frame and dropped every one after it, so no picture ever reached the call. It now sends the game at 30 frames a second, and pauses for menus, the keyboard and notifications as before. One Steam setting still stops it: with **Game Recording** set to **Record in Background**, Steam's own recorder takes the screen while a game runs, and Púca gets no picture. The plugin now tells you so instead of sending black, and asks you to turn that setting off. This is Púca for Steam Deck 0.4.2, which comes separately from Púca: the panel offers it as an update once it is out. (docs/STEAM_DECK.md)
 
 ## 0.9.854 — 2026-10-29
