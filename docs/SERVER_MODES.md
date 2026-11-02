@@ -229,6 +229,12 @@ secondary text nearly white and message text white, which is what readability fo
 theme's own `--text-muted`, a picture could never be brighter than a luminance of about 0.03.
 Links keep their hue and get paler. The rest of the window keeps the theme's colours.
 
+Text the app writes in the brand colour (a link, a name with no role colour, who a reply
+answers) takes a reading colour made from it (`--mode-brand-text`), because an accent is chosen
+to carry a white label: over a picture it measured 1.28:1. `@everyone` reads in the warning
+colour that holds, and Light's darkened amber and red on the not-encrypted tag give way to it. A
+file's chip, whose colours for saved and failed are fixed, gets a surface of its own.
+
 Everything translucent over the picture leans away from the text, so that it can only add
 contrast: the composer (`--mode-composer-bg`, the theme's surface at 55%, so the picture runs
 behind it; the header was already clear), hover and selection (`--bg-modifier-*`), and a row

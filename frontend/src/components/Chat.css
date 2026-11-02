@@ -823,7 +823,7 @@
 }
 
 .collection-channel-header .channel-name {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
 }
 
 /* Vertical rhythm of the message list. Rows are separated by their own
@@ -935,7 +935,7 @@
 
 .message-author {
     font-weight: 600;
-    color: var(--mode-author, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-primary));
 }
 
 .message-time {
@@ -971,8 +971,8 @@
 }
 
 .mention.everyone {
-    background: rgba(250, 180, 30, 0.3);
-    color: var(--color-warning);
+    background: var(--mode-mention-bg, rgba(250, 180, 30, 0.3));
+    color: var(--text-warning);
 }
 
 /* Message Images. `.message-image` is an inline <span> around the <img>, so
@@ -989,7 +989,7 @@
     margin-top: 6px;
     padding: 6px 10px;
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--mode-chip-bg, rgba(255, 255, 255, 0.06));
     color: #cfd5dd;
     font-size: 13px;
     text-decoration: none;
@@ -1005,7 +1005,7 @@ button.message-attachment {
     text-align: left;
 }
 a.message-attachment:hover,
-button.message-attachment:hover { background: rgba(255, 255, 255, 0.12); }
+button.message-attachment:hover { background: var(--mode-chip-bg, rgba(255, 255, 255, 0.12)); }
 button.message-attachment:disabled { opacity: 0.6; cursor: progress; }
 button.message-attachment.saved { color: #7fd18b; }
 button.message-attachment.error { color: #ffb4b4; }
@@ -1017,11 +1017,11 @@ button.message-attachment.error { color: #ffb4b4; }
    all but disappears, under every player and on its own. The light theme
    gets the same chip in dark ink. */
 [data-theme="light"] .message-attachment {
-    background: rgba(0, 0, 0, 0.06);
+    background: var(--mode-chip-bg, rgba(0, 0, 0, 0.06));
     color: var(--text-normal);
 }
 [data-theme="light"] a.message-attachment:hover,
-[data-theme="light"] button.message-attachment:hover { background: rgba(0, 0, 0, 0.1); }
+[data-theme="light"] button.message-attachment:hover { background: var(--mode-chip-bg, rgba(0, 0, 0, 0.1)); }
 [data-theme="light"] button.message-attachment.saved { color: #1e7a34; }
 [data-theme="light"] button.message-attachment.error,
 [data-theme="light"] .message-attachment.failed { color: #b42318; }
@@ -1342,7 +1342,7 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* Message Links */
 .message-link {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
     text-decoration: none;
 }
 
@@ -1716,12 +1716,12 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .task-checkbox:hover {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
     transform: scale(1.1);
 }
 
 .task-checkbox.completed {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
 }
 
 /* Caller lacks COMPLETE_TASKS/MANAGE_TASKS on the channel: still readable,
@@ -2071,7 +2071,7 @@ button.message-attachment.error { color: #ffb4b4; }
     gap: 6px;
     padding: 4px 8px;
     margin-bottom: 4px;
-    background: rgba(137, 180, 250, 0.1);
+    background: var(--mode-reply-bg, rgba(137, 180, 250, 0.1));
     border-left: 2px solid var(--brand-primary);
     border-radius: 0 4px 4px 0;
     font-size: 0.8rem;
@@ -2081,16 +2081,16 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .message-reply-ref:hover {
-    background: rgba(137, 180, 250, 0.2);
+    background: var(--mode-reply-hover-bg, rgba(137, 180, 250, 0.2));
 }
 
 .message-reply-ref .reply-icon {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
     font-size: 0.9rem;
 }
 
 .message-reply-ref .reply-author {
-    color: var(--brand-primary);
+    color: var(--mode-brand-text, var(--brand-primary));
     font-weight: 500;
 }
 
@@ -2863,7 +2863,7 @@ body.voice-drag-active {
    5.34:1, passes WCAG AA for normal text. A security affordance nobody can
    read is not an affordance. */
 [data-theme="light"] .not-encrypted-tag {
-    color: #8a5a00;
+    color: var(--mode-warning-text, #8a5a00);
 }
 /* Plaintext that arrived after the conversation was sealed: this is the
    server's doing, not a legacy row, and it reads as danger, not caution. */
@@ -2871,7 +2871,7 @@ body.voice-drag-active {
     color: var(--text-danger, #f23f43);
 }
 [data-theme="light"] .not-encrypted-tag.unexpected {
-    color: #a11a1a;
+    color: var(--mode-danger-text, #a11a1a);
 }
 
 /* "Older messages are locked on this device" — above a DM conversation

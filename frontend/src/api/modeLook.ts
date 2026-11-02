@@ -66,9 +66,10 @@ export function readPictureTheme(): PictureTheme | null {
         const colour = readThemeColor(token);
         if (colour) tokens[token] = colour;
     }
-    // A name with no role colour is written in the brand colour, which may be the mode's accent.
+    // Text in the brand colour (a name with no role colour, a link, who a reply answers), which
+    // may be the mode's accent: one dark enough to carry a white label was 1.28:1 over a picture.
     const brand = readThemeColor('--brand-primary');
-    if (brand) tokens['--mode-author'] = brand;
+    if (brand) tokens['--mode-brand-text'] = brand;
     const limit = pictureLimit(surface);
     // Everything translucent over a picture leans away from the text, so that it can only
     // add contrast. Measured: amoled's own selection grey over a moon leaves 3.64:1, and the
@@ -139,6 +140,13 @@ export function pictureStyle(url: string, theme: PictureTheme): Record<string, s
         '--mode-composer-bg': theme.composer,
         '--mode-mention-bg': theme.mention,
         '--mode-mention-hover-bg': theme.mentionHover,
+        '--mode-reply-bg': theme.hover,
+        '--mode-reply-hover-bg': theme.active,
+        // A file's chip has fixed colours for saved and failed: on a surface of its own they hold.
+        '--mode-chip-bg': 'var(--bg-secondary)',
+        // Light's darkened amber and red are written into the rule, and hold only on Light's surface.
+        '--mode-warning-text': theme.text['--text-warning'],
+        '--mode-danger-text': theme.text['--text-danger'],
         ...theme.text,
     };
 }

@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pictureStyle, type PictureTheme } from '../api/modeLook';
 import {
     ACCENT_MIN_LABEL_CONTRAST,
     ACCENT_MIN_SURFACE_CONTRAST,
@@ -679,5 +680,25 @@ describe('reading colours', () => {
         expect(parseCssColor('red')).toBeNull();
         expect(parseCssColor('#12')).toBeNull();
         expect(parseCssColor('')).toBeNull();
+    });
+});
+
+describe('what a picture sets on the chat', () => {
+    const theme: PictureTheme = {
+        limit: { kind: 'ceiling', luminance: 0.125 },
+        text: { '--text-normal': 'rgb(1, 1, 1)', '--text-warning': 'rgb(2, 2, 2)', '--text-danger': 'rgb(3, 3, 3)', '--mode-brand-text': 'rgb(4, 4, 4)' },
+        composer: 'composer', hover: 'hover', active: 'active', mention: 'mention', mentionHover: 'mention hover', halo: 'halo',
+    };
+
+    it('gives the rules in Chat.css what they ask for', () => {
+        const style = pictureStyle('data:image/jpeg;base64,AAAA', theme);
+        expect(style['--mode-brand-text']).toBe('rgb(4, 4, 4)');
+        expect(style['--mode-reply-bg']).toBe('hover');
+        expect(style['--mode-reply-hover-bg']).toBe('active');
+        expect(style['--mode-mention-bg']).toBe('mention');
+        expect(style['--mode-chip-bg']).toBe('var(--bg-secondary)');
+        expect(style['--mode-warning-text']).toBe('rgb(2, 2, 2)');
+        expect(style['--mode-danger-text']).toBe('rgb(3, 3, 3)');
+        expect(style.color).toBe('rgb(1, 1, 1)');
     });
 });

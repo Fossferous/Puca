@@ -291,8 +291,21 @@ async function measureLook(page) {
  * every pixel of its box, so the JPEG, the scaling and anything translucent on the way all
  * count. Text on a surface of its own (a button, a chip, the notice) is not on the picture.
  */
+/**
+ * Fades and colour transitions over: a colour on its way counts against the ink, and a fixed wait
+ * promises nothing on a busy machine (the Mode menu read 1.00:1, every item, at its first keyframe).
+ * What loops never finishes and is not waited for.
+ */
+const settled = (page) => page.evaluate(() => Promise.race([
+    Promise.all(document.getAnimations()
+        .filter(a => a.effect?.getComputedTiming().iterations !== Infinity)
+        .map(a => a.finished.catch(() => {}))),
+    new Promise(done => setTimeout(done, 5000)),
+]).then(() => {}));
+
 async function textOverPicture(page) {
     await page.mouse.move(1, 1);
+    await settled(page);
     const runs = await page.evaluate(() => {
         const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
         const root = document.querySelector('.chat-main');
@@ -330,11 +343,11 @@ async function textOverPicture(page) {
         return out;
     });
     const hide = await page.addStyleTag({ content: '.chat-main, .chat-main * { color: transparent !important; text-shadow: none !important; -webkit-text-fill-color: transparent !important; caret-color: transparent !important; } .chat-main *::placeholder { color: transparent !important; }' });
-    await sleep(120);
+    await settled(page);
     const png = await page.screenshot();
     await hide.evaluate(e => e.remove());
     // Colours with a transition are on their way back from transparent: the next reader waits.
-    await sleep(400);
+    await settled(page);
     return page.evaluate(async ({ b64, runs }) => {
         const img = new Image();
         img.src = `data:image/png;base64,${b64}`;
@@ -379,7 +392,7 @@ async function setTheme(page, theme, contrastOn) {
         document.documentElement.setAttribute('data-theme', theme);
         document.documentElement.setAttribute('data-contrast', contrastOn ? 'high' : 'normal');
     }, [theme, contrastOn]);
-    await sleep(350);
+    await settled(page);
 }
 
 /**
@@ -390,7 +403,7 @@ async function setTheme(page, theme, contrastOn) {
 async function menuLegible(page, label) {
     await page.locator('[data-testid="mode-selector"]').click();
     await page.locator('.context-menu').waitFor({ timeout: 5000 });
-    await sleep(200); // It fades in, and opacity counts against the ink.
+    await settled(page); // It fades in, and opacity counts against the ink.
     const menu = await illegibleText(page, '.context-menu');
     check(`${label}: the Mode menu is legible`, menu.measured >= 2 && menu.bad.length === 0, menu);
     await page.keyboard.press('Escape');
@@ -808,13 +821,11 @@ try {
     await sleep(800);
 
     // A real #mention of a channel the mode hides, through the real composer: what the
-    // docs mean by "a mention still opens it".
+    // docs mean by "a mention still opens it". On a row with its author's name: on a one-line
+    // row the phone's toolbar, shown by the tap, takes the click from the second mention.
     await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
     const say = A.locator('textarea[placeholder^="Message #"]');
     await say.waitFor({ timeout: 8000 });
-    await say.fill('the rules are at https://example.invalid/rules for anyone new');
-    await say.press('Enter');
-    await A.locator('.message-content a[href^="https://example.invalid"]').first().waitFor({ timeout: 8000 });
     await say.fill('see #game-chat and #room-a');
     await say.press('Enter');
     const mention = (name) => B.locator('.mention.channel', { hasText: name }).first();
@@ -1027,6 +1038,41 @@ try {
     check('the accent stays with its server: not behind Friends', !!await until(async () => await accentOf(A) === '', 4000), await accentOf(A));
     await A.locator(`.server-icon[title="${srvName}"]`).click();
     check('and comes back with it', !!await until(async () => await accentOf(A) !== '', 4000));
+    // What a message can hold, through the real composer: each has colours of its own, and the
+    // look holds for what is really on the screen. One at a time: a row's actions open once the
+    // server has given it its id.
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    await say.waitFor({ timeout: 8000 });
+    const posted = async (appears) => {
+        await A.locator(appears).last().waitFor({ timeout: 8000 });
+        await until(async () => (await A.locator('.msg-action-btn[title="Sending…"]').count()) === 0, 8000);
+    };
+    const post = async (text, appears) => {
+        await say.fill(text);
+        await say.press('Enter');
+        await posted(appears);
+    };
+    await post('the rules are at https://example.invalid/rules for anyone new', '.message-content a[href^="https://example.invalid"]');
+    await post('**bold** *lean* `code` and @everyone to read them', '.message-content .mention.everyone');
+    await post('> a quoted line', '.message-content .message-quote');
+    await post('```\nlet block = 1;\n```', '.message-content .code-block');
+    const linked = A.locator('.message', { hasText: 'the rules are at' }).first();
+    await linked.hover();
+    await linked.locator('.msg-action-btn[title="Reply"]').click();
+    await post('a reply to it', '.message-reply-ref .reply-author');
+    const notes = path.join(OUT, 'notes.txt');
+    fs.writeFileSync(notes, 'a file, shown as a chip\n');
+    await A.locator('.message-form input[type="file"]').setInputFiles(notes);
+    await A.locator('.composer-chip:not(.composer-chip-uploading)').first().waitFor({ timeout: 8000 });
+    await say.press('Enter');
+    await posted('.message-attachment');
+    const reacted = A.locator('.message', { hasText: 'a reply to it' }).first();
+    await reacted.hover();
+    await reacted.locator('.msg-action-btn[title="Add Reaction"]').click();
+    await A.locator('.toolbar-react-picker .emoji-btn').first().click();
+    await A.locator('.reaction-badge').first().waitFor({ timeout: 8000 });
+    await A.mouse.move(1, 1);
+    await shot(A, '07-what-a-message-holds');
     const pictures = { night, daylight: bright };
     for (const [label, file] of Object.entries(pictures)) {
         await A.locator('.server-settings-btn').first().click();
@@ -1041,6 +1087,8 @@ try {
             const m = await until(async () => { const v = await measureLook(A); return v.picture ? v : null; }, 6000);
             const onPicture = await textOverPicture(A);
             check(`${label} on ${theme}: every run of real text holds at 4.5:1 over every rendered pixel behind it`, !!m && onPicture.measured >= 8 && onPicture.bad.length === 0, onPicture);
+            const chip = await A.locator('.message-attachment').first().evaluate(e => getComputedStyle(e).backgroundColor);
+            check(`${label} on ${theme}: a file's chip, whose colours are fixed, is on a surface of its own`, !/rgba/.test(chip), chip);
             check(`${label} on ${theme}: accent ${m ? `rgb(${m.accent})` : ''} carries a white label (4.5:1) and shows on the surfaces (3:1)`, !!m && m.labelContrast >= 4.5 && m.surfaceContrast >= 3, m && { label: m.labelContrast.toFixed(2), surface: m.surfaceContrast.toFixed(2) });
             const legible = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}: the notice and the selector are legible`, legible.measured >= 3 && legible.bad.length === 0, legible);
