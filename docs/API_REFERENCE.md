@@ -74,6 +74,7 @@ none. A backend that predates modes omits it, and a client must then offer none.
 | GET | `/servers/:id/channels` | ✅ | List channels |
 | POST | `/servers/:id/channels` | ✅ | Create channel |
 | POST | `/servers/:id/channels/reorder` | ✅ | Reorder channels |
+| PATCH | `/channels/:id` | ✅ | Edit a channel (Manage Channels). A field left out is left alone. `parent_id`: a channel in the same server sets the parent (another server's is a 400), `null` takes it out of its collection. Every member is sent `ChannelUpdated`, which names only the server, and refetches the list. |
 | GET | `/servers/:id/voice-users` | ✅ | Who is in which voice channel of this server, limited to the channels the caller can VIEW. Rooms are matched by channel **id** only (`voice_<id>`); a channel's name is never read as a room id, so a channel called `voice_42` in a server you own no longer shows you the occupants of channel 42 somewhere else. |
 
 ---

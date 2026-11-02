@@ -188,6 +188,24 @@
     }
 }
 
+/* AFK, SFU and Checklist: a row with its box beside it. `.form-group label` would otherwise
+   make these a block of small capitals, and it is stronger than Login.css's .checkbox-label. */
+.edit-channel-modal .form-group label.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 0;
+    color: var(--text-normal);
+    font-size: 14px;
+    font-weight: 400;
+    text-transform: none;
+}
+
+.edit-channel-modal .form-group label.checkbox-label input[type="checkbox"] {
+    flex: none;
+    margin: 0;
+}
+
 /* ==========================================================================
    Mobile — the role list beside the grid leaves no room for labels at phone
    widths; the role list becomes a horizontally-scrolling strip above the
@@ -198,6 +216,10 @@
    selector, which is how the role strip sat at 40px.
    ========================================================================== */
 @media (pointer: coarse) and (max-width: 1024px) {
+    .edit-channel-modal .form-group label.checkbox-label {
+        min-height: 44px;
+    }
+
     .modal-content.edit-channel-modal {
         width: 92vw;
         max-height: 85dvh;

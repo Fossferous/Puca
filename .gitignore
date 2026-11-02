@@ -125,6 +125,7 @@ frontend/e2e/shots-user-context-menu/
 frontend/e2e/shots-member-popup/
 frontend/e2e/shots-message-overlap/
 frontend/e2e/shots-modes/
+frontend/e2e/shots-sidebar-toggles/
 frontend/e2e/shots-games/
 frontend/e2e/shots-games-live/
 # The Púca Notes Android shell's web bundle (NOTES_TARGET=native build; see

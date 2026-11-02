@@ -260,30 +260,71 @@
     display: none;
 }
 
-/* Toggle */
-.toggle-row {
+/* A switch: a label holding its text, a checkbox and the track.
+   `.form-group label`, which four stylesheets write at one class and one element, makes
+   a label a block of small capitals, and a block leaves the track an inline span with no
+   width: a bare knob. Two classes and an element beat it whichever stylesheet loads last.
+   The whole row is the target, 44 px on every pointer. */
+.toggle-row,
+.form-group label.toggle-row {
+    position: relative;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
+    min-height: 44px;
+    margin-bottom: 0;
     cursor: pointer;
-    font-size: 15px;
     color: var(--text-normal);
+    font-size: 15px;
+    font-weight: 400;
+    text-transform: none;
 }
 
+/* Hidden by eye only. display:none would take it out of the tab order, and the keyboard
+   could not reach the switch at all. Beside the track, so focus scrolls to the right place. */
 .toggle-row input[type="checkbox"] {
-    display: none;
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
 }
 
-.toggle-switch {
+/* 3:1 against the page and against the white knob, on and off, on every theme (e2e/
+   sidebar-toggles-walk.mjs measures it). The stock tokens miss in three places: Light's
+   green and grey are too pale on its pale pages, and High Contrast lifts --text-faint so
+   far on a dark theme that the white knob vanishes into it. */
+.toggle-row {
+    --switch-off: var(--text-faint);
+    --switch-on: var(--color-success);
+}
+
+[data-contrast="high"] .toggle-row {
+    --switch-off: #84878f;
+}
+
+[data-theme="light"] .toggle-row {
+    --switch-off: var(--text-muted);
+    --switch-on: #1a7f45;
+}
+
+.toggle-row .toggle-switch {
+    flex: none;
+    display: block;
     width: 44px;
     height: 24px;
-    background: var(--text-faint);
+    background: var(--switch-off);
     border-radius: 12px;
     position: relative;
     transition: background 0.2s;
 }
 
-.toggle-switch::after {
+.toggle-row .toggle-switch::after {
     content: '';
     position: absolute;
     width: 18px;
@@ -296,11 +337,22 @@
 }
 
 .toggle-row input:checked+.toggle-switch {
-    background: var(--color-success);
+    background: var(--switch-on);
 }
 
 .toggle-row input:checked+.toggle-switch::after {
     transform: translateX(20px);
+}
+
+.toggle-row input:focus-visible+.toggle-switch {
+    outline: 2px solid var(--text-normal);
+    outline-offset: 2px;
+}
+
+/* For someone who may look but not change it: the position still reads. */
+.toggle-row input:disabled+.toggle-switch {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 /* Buttons */

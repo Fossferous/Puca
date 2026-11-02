@@ -74,6 +74,11 @@ pub struct ChannelResponse {
 pub struct UpdateChannelRequest {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Three states, because null MEANS something here: left out leaves the parent
+    /// alone, null clears it, a value sets it. A plain `Option<i32>` reads null and
+    /// left-out as the same None, so "No parent (top level)" in Edit Channel saved
+    /// nothing: the editor's list moved the row, and the next refetch put it back.
+    ///
     /// i32, MATCHING CreateChannelRequest and the INT4 column — not i64.
     /// With i64 here, the reparent guard (which binds i32 to share the
     /// statement-cache width of "SELECT server_id FROM channels WHERE id =
@@ -82,7 +87,8 @@ pub struct UpdateChannelRequest {
     /// 500 for a request that used to 400 cleanly. Narrowing the field makes
     /// serde reject out-of-range JSON at the door, and the guard and the
     /// write can no longer disagree. (Review finding on the 0.8.110 diff.)
-    pub parent_id: Option<i32>, // Change parent collection
+    #[serde(default, deserialize_with = "present_or_null")]
+    pub parent_id: Option<Option<i32>>, // Change parent collection
     pub slowmode_seconds: Option<i32>,
     /// Toggle AFK on an existing voice channel.
     pub is_afk: Option<bool>,
@@ -91,6 +97,13 @@ pub struct UpdateChannelRequest {
     /// Toggle SFU mode on an existing voice channel. Read at join time; live
     /// calls keep the transport they started with.
     pub sfu_mode: Option<bool>,
+}
+
+/// `Some` for a key that is there, null included: serde calls this only for a present
+/// key, and the field's `default` is what a missing one gets. On `Option<Option<i32>>`
+/// serde's own handling folds null into the outer None.
+fn present_or_null<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Option<i32>>, D::Error> {
+    Option::<i32>::deserialize(de).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -512,7 +525,7 @@ pub async fn update_channel(
     // enforces existence, not same-server — without this a caller with
     // MANAGE_CHANNELS on their own server could graft their channel under another
     // server's collection channel and inject content into that server's feed.
-    if let Some(parent_id) = payload.parent_id {
+    if let Some(Some(parent_id)) = payload.parent_id {
         // Width matched to this text's siblings (channels.id is INT4; a
         // no-op cast at the create site, the fix at the update site — see
         // the 22P03 note in device_token.rs).
@@ -564,8 +577,8 @@ pub async fn update_channel(
     )
     .bind(&payload.name)
     .bind(&payload.description)
-    .bind(payload.parent_id.is_some()) // Flag: should we update parent_id?
-    .bind(payload.parent_id) // The actual new parent_id value (can be null to remove parent)
+    .bind(payload.parent_id.is_some()) // Flag: was parent_id in the request at all?
+    .bind(payload.parent_id.flatten()) // The new parent: null takes it out of its collection
     .bind(channel_id)
     .bind(payload.slowmode_seconds)
     .bind(payload.is_afk)
@@ -886,9 +899,10 @@ pub async fn get_channel_feed(
     }
 
     // 3. Find child channels (capped — the loop below runs one query per child,
-    // so an unbounded child count would be an N+1 round-trip amplifier).
+    // so an unbounded child count would be an N+1 round-trip amplifier). Text only:
+    // a feed is for reading, and a voice room under the collection has its own row.
     let children: Vec<(i32, String)> = sqlx::query_as(
-        "SELECT id, name FROM channels WHERE parent_id = $1 ORDER BY position ASC LIMIT $2",
+        "SELECT id, name FROM channels WHERE parent_id = $1 AND type = 0 ORDER BY position ASC LIMIT $2",
     )
     .bind(channel_id)
     .bind(MAX_FEED_CHILDREN as i64)
@@ -1216,6 +1230,18 @@ pub async fn delete_overwrite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_parent_is_not_a_left_out_one() {
+        let parse = |body: serde_json::Value| {
+            serde_json::from_value::<UpdateChannelRequest>(body).map(|r| r.parent_id).map_err(|_| ())
+        };
+        assert_eq!(parse(serde_json::json!({ "name": "renamed" })), Ok(None), "left out: leave it");
+        assert_eq!(parse(serde_json::json!({ "parent_id": null })), Ok(Some(None)), "null: clear it");
+        assert_eq!(parse(serde_json::json!({ "parent_id": 7 })), Ok(Some(Some(7))), "a value: set it");
+        assert_eq!(parse(serde_json::json!({ "parent_id": "7" })), Err(()), "not a channel id");
+        assert_eq!(parse(serde_json::json!({ "parent_id": 5_000_000_000_i64 })), Err(()), "wider than the column");
+    }
 
     #[test]
     fn only_a_real_voice_transport_flip_ends_the_call() {

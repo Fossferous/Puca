@@ -1191,6 +1191,93 @@ mod db {
         assert_eq!(on["unread_count"], 1);
     }
 
+    /// What a member's refetch of the channel list says the channel's parent is.
+    async fn parent_in_list(state: &Arc<AppState>, f: &Fx, by: i64, channel: i32) -> Value {
+        let resp = crate::channel_handlers::list_channels(State(Arc::clone(state)), Path(f.sid.clone()), Extension(claims(by)))
+            .await
+            .into_response();
+        let (status, body) = read(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = body.as_array().expect("a list").iter().find(|c| c["id"] == channel).expect("listed").clone();
+        row["parent_id"].clone()
+    }
+
+    /// Edit Channel's "No parent (top level)" sends null, and the server used to read
+    /// that as "nothing said", so the parent stayed. ChannelUpdated names only the server:
+    /// every member refetches the list, so the list is what has to say it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_null_parent_clears_a_left_out_one_leaves_it_and_a_value_sets_it() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let elsewhere = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        let room = subchannel(&pool, &f.sid, "room-a", 1, rooms).await;
+        let notes = subchannel(&pool, &f.sid, "notes", 0, rooms).await;
+        make(&state, &f, "Clocktower", &[rooms]).await;
+        let mut member = Sock::open(&state, f.plain);
+        let edit = |by: i64, channel: i32, body: Value| {
+            crate::channel_handlers::update_channel(
+                State(Arc::clone(&state)),
+                Path(channel as i64),
+                Extension(claims(by)),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+
+        let renamed = edit(f.owner, room, json!({ "name": "room-b" })).await.into_response().status();
+        let after_rename = parent_in_list(&state, &f, f.plain, room).await;
+        let refused = edit(f.plain, room, json!({ "parent_id": null })).await.into_response().status();
+        let after_refusal = parent_in_list(&state, &f, f.plain, room).await;
+        let hidden_under = channels_hidden_from(&pool, f.plain).await.unwrap();
+
+        member.drain();
+        let cleared_room = edit(f.owner, room, json!({ "parent_id": null })).await.into_response().status();
+        let told = member.drain();
+        let after_clear = parent_in_list(&state, &f, f.plain, room).await;
+        let hidden_clear = channels_hidden_from(&pool, f.plain).await.unwrap();
+        let cleared_notes = edit(f.manager, notes, json!({ "parent_id": null })).await.into_response().status();
+        let notes_after = parent_in_list(&state, &f, f.plain, notes).await;
+
+        let again = edit(f.owner, room, json!({ "parent_id": null })).await.into_response().status();
+        let after_again = parent_in_list(&state, &f, f.plain, room).await;
+        let set = edit(f.owner, room, json!({ "parent_id": shelf })).await.into_response().status();
+        let after_set = parent_in_list(&state, &f, f.plain, room).await;
+        let foreign = edit(f.owner, room, json!({ "parent_id": elsewhere.town })).await.into_response().status();
+        let after_foreign = parent_in_list(&state, &f, f.plain, room).await;
+        let stored: (Option<i32>,) =
+            sqlx::query_as("SELECT parent_id FROM channels WHERE id = $1").bind(notes).fetch_one(&pool).await.unwrap();
+        teardown(&pool, &f).await;
+        teardown(&pool, &elsewhere).await;
+
+        assert_eq!(renamed, StatusCode::OK);
+        assert_eq!(after_rename, json!(rooms), "control: an edit that leaves the field out leaves the parent");
+        assert_eq!(refused, StatusCode::FORBIDDEN);
+        assert_eq!(after_refusal, json!(rooms), "and clearing it still takes Manage Channels");
+        assert!(hidden_under.contains(&(room as i64)), "control: under a ticked collection, the mode that is off hides it");
+
+        assert_eq!(cleared_room, StatusCode::OK);
+        assert_eq!(after_clear, Value::Null, "null takes a voice room out of its collection");
+        assert!(
+            told.iter().any(|m| matches!(m, M::ChannelUpdated { server_id } if *server_id == f.sid)),
+            "and another member is told to refetch"
+        );
+        assert!(!hidden_clear.contains(&(room as i64)), "so the mode no longer takes it along");
+        assert!(hidden_clear.contains(&(rooms as i64)), "control: the collection is still in the mode");
+
+        assert_eq!(cleared_notes, StatusCode::OK);
+        assert_eq!(notes_after, Value::Null, "a text channel too");
+        assert_eq!(stored.0, None, "in the row itself");
+
+        assert_eq!(again, StatusCode::OK);
+        assert_eq!(after_again, Value::Null, "already at the top level: still fine");
+        assert_eq!(set, StatusCode::OK);
+        assert_eq!(after_set, json!(shelf), "a value still sets it");
+        assert_eq!(foreign, StatusCode::BAD_REQUEST);
+        assert_eq!(after_foreign, json!(shelf), "and another server's channel is still refused");
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
