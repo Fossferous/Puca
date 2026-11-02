@@ -222,10 +222,19 @@ and the table goes blank at once. It marks the edge `blocked`, counts it
 (`native.releases_owed`). `registerHold`'s `keepOnBlockedRelease` is what makes
 push-to-mute ignore that edge.
 
+A window whose integrity level cannot be read (a protected process, anti-cheat,
+another user) is treated the same way for this decision, because it may be above
+ours. The banner still says nothing about it, since nothing was read. If its keys
+are in fact visible, the hook still works there, so a press and release clears the
+hold, and so does leaving the window.
+
 Once a second the blocker thread looks at the owed keys, if the table can be read
-again. A key that reads up gets a plain release; a key that reads down, once the
-poll has supplied its press, has its release owed by the hook and the poll like any
-other. So someone who let go behind the window stays muted until they leave it, by
+again. A key whose DOWN bit is set has been pressed since: its release is owed by
+the hook and the poll like any other, and nothing is sent. The bit is read before
+the table, because a low-level hook runs before Windows updates the table, and a
+press landing on the look must not get a release. Otherwise a key that reads up gets
+a plain release, and one that reads down stays owed until the poll has supplied its
+press. So someone who let go behind the window stays muted until they leave it, by
 at most a second past that, and can do nothing about it from inside: no capture
 method can see the key. Someone still holding it never opens at all.
 
@@ -242,7 +251,7 @@ In `puca.log`:
 
 ```
 [hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=3, 2 more since the last line
-[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=4, 0 more since the last line (an elevated window or a secure screen is in front: every key reads up)
+[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=4, 0 more since the last line (an elevated or unreadable window, or a secure screen, is in front: every key may read up)
 [hotkeys] watch list changed with a key down: still watched vk=[86], released now vk=[77]
 [stream-diag] [hotkeys] voice.ptt released: its keybind changed while it was held
 [stream-diag] [hotkeys] released what was held: the native feed could not be re-registered
@@ -266,7 +275,7 @@ In the report, under `--- voice hotkeys ---`:
 | `call` | in voice, AFK channel, listen only, speak denied, clip buffer armed |
 | `feed` | live or not, the actions it covers, what it was last asked to watch |
 | `held now` | the hold actions the page believes are down |
-| `in front` | whether an elevated window is hiding keys now, and how many times one has come to the front since the app started: the first clears on a click in any ordinary window and at the end of the call. Not its name: the log has that, from when it happened |
+| `in front` | whether an elevated window was last in front and is still running, and how many times one has come to the front since the app started. The first is latched, so it stays while Púca itself is in front: `foreground_is_us` on the `native` line says who is in front now. It clears on a click in any ordinary window, when that process exits and at the end of the call. Not its name: the log has that, from when it happened |
 | `presses` | `feed.ownershipDeferrals` and `feed.nativeDispatches` |
 | `native` | a fixed list of `hotkey_diag` fields, numbers and yes/no only, so a field added there later reaches a report only if someone adds it to `NATIVE_FIELDS` in `hotkeyReport.ts` |
 | `feed log` | the last start and stop calls with their reasons, each with its local time (the clock `puca.log` uses) and how long before the report it was |
@@ -307,7 +316,7 @@ await __pucaHotkeysDebug.snapshot()
 | `native.foreground_blocker` non-empty | the app in front runs elevated; nothing here can see its keys |
 | `native.self_injected_bits` non-zero | those slots are held by our OWN remote-control injection; the poll is deliberately blind to them |
 | `native.poll_presses_suppressed` rising | presses the poll refused because the remote-control injector was holding a key. Expected during a device session, and zero otherwise |
-| `native.foreground_unreadable` true | the foreground process could not be inspected at all (protected, anti-cheat, another user). NOT a blocker: nothing is claimed about it |
+| `native.foreground_unreadable` true | the foreground process could not be inspected at all (protected, anti-cheat, another user). NOT a blocker for the banner: nothing is claimed about it. A held key's missed release is still treated as one that may be false, see *A key held when such a window comes to the front* |
 | `feed.ownershipDeferrals` climbing while `feed.nativeDispatches` does not | the in-app feed is standing down for a native feed that has gone quiet — the one failure mode the single-owner rule can have |
 | `feed.blocker` | the same, as the frontend last heard it (drives the banner) |
 | `native.rearms` | re-installs so far (60 s clock plus evidence) |
@@ -353,7 +362,7 @@ await __pucaHotkeysDebug.snapshot()
     The mic must stay shut. Come back still holding: still shut, until you let go.
     Do it again, letting go inside the game: the mic stays shut until you are
     back, then opens within a second. `poll_releases_blocked` rises, and the log
-    line ends `every key reads up)`.
+    line ends `every key may read up)`.
 12. If you use My Devices: let someone control this machine and have them
     type the letter your push-to-talk is bound to. Your mic must stay shut,
     and `native.self_injected_bits` must be non-zero while they hold it. Your

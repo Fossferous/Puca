@@ -205,12 +205,23 @@ describe('it does not become a keylogger', () => {
         expect(text).not.toContain('secret');
     });
 
-    it('says an elevated window is in front without naming it', () => {
+    it('says an elevated window was last in front without naming it', () => {
         expect(report()).toContain('in front    nothing known to hide keys');
         setCaptureBlockerForTest('secret-game.exe');
         const text = report();
-        expect(text).toContain('in front    an elevated window');
+        expect(text).toContain('in front    an elevated window was last in front and is still running');
         expect(text).not.toContain('secret-game');
+    });
+
+    // The name is latched while Púca is in front, which is where a report is made:
+    // the line must not read as "that window is in front now", and this says who is.
+    it('carries who is in front now, beside the latched line', () => {
+        setCaptureBlockerForTest('game.exe');
+        const text = report({ native: { hook_live: true, foreground_is_us: true } });
+        expect(text).toContain('foreground_is_us=true');
+        expect(text).not.toContain('in front    an elevated window:');
+        // CONTROL: the other answer is printed too, not only a true.
+        expect(report({ native: { hook_live: true, foreground_is_us: false } })).toContain('foreground_is_us=false');
     });
 
     it('the state it reads has no slot for a key press', () => {

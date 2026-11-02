@@ -71,7 +71,8 @@
 //!
 //! A BLANK TABLE IS NOT A RELEASE. With such a window in front, or a secure
 //! screen (a UAC prompt, the lock screen), every key reads up whatever the finger
-//! is doing, so the poll "supplies a release" for a key that may still be down.
+//! is doing, so the poll "supplies a release" for a key that may still be down. A
+//! window whose level cannot be read might be either, so it counts as one too.
 //! Push-to-talk wants that: closing a microphone costs nothing. Push-to-mute does
 //! not, because there the release OPENS it. So that release goes out marked
 //! `blocked`, for the page to judge per action, and the key stays owed: once the
@@ -813,7 +814,7 @@ mod imp {
     /// `vk` comes from the watch list and nowhere else, so it is a key the person
     /// bound: no other key has any way into this line.
     fn poll_release_line(vk: u32, total: u64, held_back: u64, blocked: bool) -> String {
-        let why = if blocked { " (an elevated window or a secure screen is in front: every key reads up)" } else { "" };
+        let why = if blocked { " (an elevated or unreadable window, or a secure screen, is in front: every key may read up)" } else { "" };
         format!("[hotkeys] the poll supplied a release the hook missed: vk={vk}, poll_releases={total}, {held_back} more since the last line{why}")
     }
 
@@ -861,11 +862,16 @@ mod imp {
     /// blocker thread, never touched on the hook thread, so a lock is fine here.
     static OWED_RELEASES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-    /// One look at the owed keys, for a table that can be read again. Up: send the
-    /// release. Down with its DOWN bit set: the poll has supplied the press, so the
-    /// hook and the poll owe the page its release from here on. Down with no bit
-    /// yet: ask again next time, because a release now would read as "up, and
-    /// already up" and reach nobody.
+    /// One look at the owed keys, for a table that can be read again. DOWN bit set:
+    /// the hook or the poll has seen it pressed, so they owe the page its release
+    /// from here on and nothing is sent. Otherwise up: send the release. Otherwise
+    /// down with no bit yet: ask again next time, because a release now would read
+    /// as "up, and already up" and reach nobody.
+    ///
+    /// THE BIT IS READ FIRST. A low-level hook runs before Windows updates the key
+    /// table, so a press landing on this look has set the bit while the table still
+    /// says up. Read the other way round, that press got a release, which for
+    /// push-to-mute opens the microphone with the finger going down.
     fn settle_owed(
         owed: &mut Vec<u32>,
         mut key_is_down: impl FnMut(u32) -> bool,
@@ -873,11 +879,14 @@ mod imp {
         mut send_release: impl FnMut(u32),
     ) {
         owed.retain(|&vk| {
-            if !key_is_down(vk) {
-                send_release(vk);
+            if down_bit_set(vk) {
                 return false;
             }
-            !down_bit_set(vk)
+            if key_is_down(vk) {
+                return true;
+            }
+            send_release(vk);
+            false
         });
     }
 
@@ -1140,24 +1149,56 @@ mod imp {
         Some(*GetSidSubAuthority(sid, (count - 1) as u32))
     }
 
-    /// The executable name of the foreground window's process, when that
-    /// process runs at a HIGHER integrity level than we do — the one case in
-    /// which Windows (UIPI) delivers none of its keystrokes to our hooks, to
-    /// GetAsyncKeyState, or to raw input, and no amount of re-arming helps.
-    /// A game launched "as administrator" is the everyday instance. None when
-    /// the foreground window is ours, absent, or at our level or below. The
-    /// pid rides along so the caller can tell later whether that process is
-    /// still running.
+    /// What one look at the foreground window found.
+    enum ForegroundLook {
+        /// No foreground window to ask about: a secure screen, or a window losing
+        /// activation for a moment.
+        NoWindow,
+        /// Ours, or at our integrity level or below. Its keys reach us.
+        NotAbove,
+        /// At a HIGHER integrity level than ours: the one case in which Windows
+        /// (UIPI) delivers none of its keystrokes to our hooks, to
+        /// GetAsyncKeyState, or to raw input, and no amount of re-arming helps.
+        /// A game launched "as administrator" is the everyday instance. The pid
+        /// rides along so the caller can tell later whether it is still running.
+        Above { name: String, pid: u32 },
+        /// Its level could not be read: a protected process, anti-cheat, another
+        /// user. It may be above us or not.
+        Unreadable,
+    }
+
+    impl ForegroundLook {
+        /// May the key-state table read up for every key right now?
+        ///
+        /// Unreadable counts as yes. If that window is in fact above us, believing
+        /// the table would open a held push-to-mute with the finger still down.
+        /// If it is not, the cost is small: the hook still sees its keys, so a
+        /// press and release there clears the hold, and so does leaving it.
+        fn hides_keys(&self) -> bool {
+            !matches!(self, Self::NotAbove)
+        }
+    }
+
+    /// The name and pid of a foreground process above our integrity level, for
+    /// the banner: `(None, 0)` for anything else, an unreadable process included,
+    /// because the banner claims only what was read.
     pub(super) fn foreground_capture_blocker() -> (Option<String>, u32) {
+        match look_at_foreground() {
+            ForegroundLook::Above { name, pid } => (Some(name), pid),
+            _ => (None, 0),
+        }
+    }
+
+    fn look_at_foreground() -> ForegroundLook {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd == HWND::default() {
-                return (None, 0);
+                return ForegroundLook::NoWindow;
             }
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid == 0 || pid == std::process::id() {
-                return (None, 0);
+                return ForegroundLook::NotAbove;
             }
             let ours = integrity_level_of(GetCurrentProcess()).unwrap_or(0x2000);
             let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
@@ -1166,7 +1207,7 @@ mod imp {
                 // as a process name (a banner reading "pid 4312 runs as
                 // administrator" is a guess wearing a fact's clothes).
                 FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
-                return (None, 0);
+                return ForegroundLook::Unreadable;
             };
             let theirs = integrity_level_of(process);
             let name = {
@@ -1185,23 +1226,25 @@ mod imp {
                 // The only case we claim: a level was READ and it is higher.
                 Some(level) if level > ours => {
                     FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
-                    (Some(name), pid)
+                    ForegroundLook::Above { name, pid }
                 }
                 Some(_) => {
                     FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
-                    (None, 0)
+                    ForegroundLook::NotAbove
                 }
                 None => {
                     FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
-                    (None, 0)
+                    ForegroundLook::Unreadable
                 }
             }
         }
     }
 
     /// The last probe could not read the foreground process's integrity
-    /// level. Not a blocker — an unknown. In `diag` so "hotkeys are dead and
-    /// nothing is reported" can be told apart from "nothing is wrong".
+    /// level. Not a blocker for the banner — an unknown. In `diag` so "hotkeys are
+    /// dead and nothing is reported" can be told apart from "nothing is wrong".
+    /// Sticky across a look at our own window, as a snapshot is read from there:
+    /// `ForegroundLook` is what to decide on.
     static FOREGROUND_UNREADABLE: AtomicBool = AtomicBool::new(false);
 
     /// Whether the foreground window belongs to THIS process — the truth the
@@ -1246,17 +1289,17 @@ mod imp {
         }
     }
 
-    /// Does the key-state table read up for every key right now? True with a
-    /// window above our integrity level in front, and with no foreground window to
-    /// ask about: a secure screen (a UAC prompt, the lock screen) takes the whole
-    /// desktop away, and GetAsyncKeyState documents zero for that too. A window
-    /// losing activation also reads as no window for a moment, which at worst
-    /// delays a push-to-mute release until the next look at the owed keys.
+    /// May the key-state table read up for every key right now? True with a window
+    /// above our integrity level in front, with one whose level cannot be read, and
+    /// with no foreground window to ask about: a secure screen (a UAC prompt, the
+    /// lock screen) takes the whole desktop away, and GetAsyncKeyState documents
+    /// zero for that too. A window losing activation also reads as no window for a
+    /// moment, which at worst delays a push-to-mute release until the next look at
+    /// the owed keys.
     ///
     /// Not for the hook thread (`BLOCKER_THREAD` says why).
     fn foreground_hides_keys() -> bool {
-        let no_window = unsafe { GetForegroundWindow() == HWND::default() };
-        no_window || foreground_capture_blocker().0.is_some()
+        look_at_foreground().hides_keys()
     }
 
     /// Answer what a blank table left owing, once the table can be read again.
@@ -2099,7 +2142,7 @@ mod imp {
     mod rewrite_tests {
         use super::{
             apply_watch_list, dedupe_slots, deliver_poll_release, poll_release_line, poll_tick, rewrite_log_line,
-            settle_owed, slot_of, take_edge, KeyEvent, NoteLimiter, PollAction, PollView, ReleaseNotes, WatchRewrite,
+            settle_owed, slot_of, take_edge, ForegroundLook, KeyEvent, NoteLimiter, PollAction, PollView, ReleaseNotes, WatchRewrite,
             POLL_CONFIRM, POLL_RELEASE_LOG_MIN_MS, WATCH_SLOTS,
         };
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -2458,6 +2501,53 @@ mod imp {
             assert_eq!(rig.owed, [] as [u32; 0]);
         }
 
+        /// A low-level hook runs before Windows updates the key table. So a press
+        /// landing on the look has set the DOWN bit while the table still reads
+        /// up: that is a press, and a release here opens a push-to-mute microphone
+        /// as the finger goes down. Fails with the table read first.
+        #[test]
+        fn a_press_the_table_has_not_caught_up_with_gets_no_release() {
+            let mut rig = held_when_the_table_went_blank();
+            rig.finger(V, false); // let go behind the window, which then goes
+            rig.blank_table = false;
+            rig.hook(V, true);
+            rig.finger(V, false); // the hook has run; the table has not been updated
+            let heard_before = rig.heard.len();
+            rig.settle();
+            assert!(rig.heard[heard_before..].is_empty(), "a false release: {:?}", rig.heard);
+            assert_eq!(rig.page, [V]);
+            assert_eq!(rig.owed, [] as [u32; 0], "the hook owes the release from here");
+            rig.hook(V, false);
+            assert_eq!(rig.page, [] as [u32; 0], "the real release still arrives");
+        }
+
+        /// What the emitter and the blocker thread decide on.
+        #[test]
+        fn a_window_we_cannot_read_counts_as_hiding_keys() {
+            assert!(ForegroundLook::Unreadable.hides_keys());
+            assert!(ForegroundLook::NoWindow.hides_keys());
+            assert!(ForegroundLook::Above { name: "game.exe".into(), pid: 1 }.hides_keys());
+            // Or a key let go in an ordinary window would never be released.
+            assert!(!ForegroundLook::NotAbove.hides_keys());
+        }
+
+        /// The price of counting an unreadable window: when its keys are in fact
+        /// visible, the poll's release was real and the hold is kept for nothing.
+        /// The hook still works there, so a press and release clears it, and the
+        /// look after the window goes finds nothing left to do.
+        #[test]
+        fn a_hold_kept_for_a_window_that_shows_its_keys_clears_on_a_re_press() {
+            let mut rig = held_when_the_table_went_blank();
+            rig.finger(V, false);
+            rig.blank_table = false;
+            rig.hook(V, true);
+            rig.hook(V, false);
+            assert_eq!(rig.page, [] as [u32; 0], "no longer muted");
+            rig.settle();
+            assert_eq!(rig.page, [] as [u32; 0]);
+            assert_eq!(rig.owed, [] as [u32; 0]);
+        }
+
         #[test]
         fn an_owed_key_that_left_the_list_is_still_answered() {
             let mut rig = held_when_the_table_went_blank();
@@ -2502,7 +2592,7 @@ mod imp {
         fn a_release_behind_a_hiding_window_is_marked_on_the_edge_and_in_the_line() {
             let steps = deliver(true, &mut ReleaseNotes::new(), 0);
             assert_eq!(steps[0], "edge blocked=true");
-            assert!(steps[1].ends_with("(an elevated window or a secure screen is in front: every key reads up)"), "{}", steps[1]);
+            assert!(steps[1].ends_with("(an elevated or unreadable window, or a secure screen, is in front: every key may read up)"), "{}", steps[1]);
         }
 
         #[test]
@@ -2572,7 +2662,7 @@ mod imp {
             );
             assert_eq!(
                 poll_release_line(V, 1, 0, true),
-                "[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=1, 0 more since the last line (an elevated window or a secure screen is in front: every key reads up)",
+                "[hotkeys] the poll supplied a release the hook missed: vk=86, poll_releases=1, 0 more since the last line (an elevated or unreadable window, or a secure screen, is in front: every key may read up)",
             );
             let rewrite = WatchRewrite { changed: true, kept: vec![V], released: vec![M] };
             assert_eq!(
