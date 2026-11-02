@@ -4,16 +4,28 @@
  * chosen picture to what every member, phones included, should have to download.
  * The arithmetic is api/serverModes.ts.
  */
-import { type Rgb, parseCssColor } from './serverModes';
+import {
+    PICTURE_TEXT_TOKENS,
+    type PictureLimit,
+    type Rgb,
+    type TonePlan,
+    parseCssColor,
+    pictureLimit,
+    pictureTextColours,
+    planTone,
+    toneMap,
+} from './serverModes';
 
-/** Longest edge of a stored background: a full-window picture, dimmed. */
+/** Longest edge of a stored background: a full-window picture. */
 export const BACKGROUND_MAX_EDGE = 1920;
 /** Mirrors the server's MAX_BACKGROUND_BYTES, to say so before uploading. */
 export const BACKGROUND_MAX_BYTES = 4 * 1024 * 1024;
 const BACKGROUND_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
-/** Worst case when a picture cannot be measured: pure black and pure white. */
-export const UNKNOWN_EXTREMES: readonly Rgb[] = [[0, 0, 0], [255, 255, 255]];
+/** Longest edge a picture is mapped at. It is a backdrop, and a phone has to do this too. */
+export const PICTURE_MAX_EDGE = 1600;
+const MAP_BAND_ROWS = 120;
+const PICTURE_QUALITY = 0.94;
 
 /**
  * A theme token's colour as the browser resolves it. Reading the custom property
@@ -31,36 +43,104 @@ export function readThemeColor(token: string): Rgb | null {
     return parseCssColor(value);
 }
 
-/**
- * The darkest and lightest parts of a picture, from a 32x32 reduction: fine
- * enough for a region a line of text could sit in, and a speck smaller than that
- * averages out rather than dimming the whole picture on its account.
- */
-export async function measureExtremes(url: string): Promise<readonly Rgb[]> {
-    const img = new Image();
-    img.decoding = 'async';
-    img.src = url;
-    try {
-        await img.decode();
-        const canvas = document.createElement('canvas');
-        canvas.width = 32;
-        canvas.height = 32;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return UNKNOWN_EXTREMES;
-        ctx.drawImage(img, 0, 0, 32, 32);
-        const { data } = ctx.getImageData(0, 0, 32, 32);
-        let dark: Rgb = [255, 255, 255];
-        let light: Rgb = [0, 0, 0];
-        const weight = ([r, g, b]: Rgb) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        for (let i = 0; i < data.length; i += 4) {
-            const pixel: Rgb = [data[i], data[i + 1], data[i + 2]];
-            if (weight(pixel) < weight(dark)) dark = pixel;
-            if (weight(pixel) > weight(light)) light = pixel;
-        }
-        return [dark, light];
-    } catch {
-        return UNKNOWN_EXTREMES;
+/** The theme as the reader has it right now, and what a picture has to do on it. */
+export interface PictureTheme {
+    limit: PictureLimit;
+    text: Record<string, string>;
+    /** The surfaces that lie over the picture, translucent. */
+    composer: string;
+    hover: string;
+    active: string;
+    mention: string;
+    mentionHover: string;
+    halo: string;
+}
+
+/** Null when the theme cannot be read: no picture then, since nothing could be held to it. */
+export function readPictureTheme(): PictureTheme | null {
+    const surface = readThemeColor('--bg-primary');
+    const below = readThemeColor('--bg-secondary');
+    if (!surface || !below) return null;
+    const tokens: Record<string, Rgb> = {};
+    for (const token of PICTURE_TEXT_TOKENS) {
+        const colour = readThemeColor(token);
+        if (colour) tokens[token] = colour;
     }
+    // A name with no role colour is written in the brand colour, which may be the mode's accent.
+    const brand = readThemeColor('--brand-primary');
+    if (brand) tokens['--mode-author'] = brand;
+    const limit = pictureLimit(surface);
+    // Everything translucent over a picture leans away from the text, so that it can only
+    // add contrast. Measured: amoled's own selection grey over a moon leaves 3.64:1, and the
+    // gold on a row that mentions you 4.05:1.
+    const dark = limit.kind === 'ceiling';
+    const lean = dark ? '0, 0, 0' : '255, 255, 255';
+    return {
+        limit,
+        text: pictureTextColours(tokens, limit),
+        composer: `rgba(${below[0]}, ${below[1]}, ${below[2]}, 0.55)`,
+        hover: `rgba(${lean}, ${dark ? 0.28 : 0.45})`,
+        active: `rgba(${lean}, ${dark ? 0.38 : 0.6})`,
+        mention: dark ? 'rgba(70, 45, 0, 0.45)' : 'rgba(255, 226, 150, 0.6)',
+        mentionHover: dark ? 'rgba(70, 45, 0, 0.6)' : 'rgba(255, 226, 150, 0.75)',
+        halo: dark ? '0 0 3px rgba(0, 0, 0, 0.75), 0 1px 2px rgba(0, 0, 0, 0.6)' : '0 0 3px rgba(255, 255, 255, 0.85), 0 1px 2px rgba(255, 255, 255, 0.6)',
+    };
+}
+
+/**
+ * The picture tone-mapped for this theme, as a `data:` URL and not a `blob:` one: it stays up
+ * for as long as the mode is on screen, and a long-lived Blob is what keeps decrypted
+ * attachments on disk (api/authedMedia.ts says how). So it has nothing to revoke either.
+ * Null for a picture that cannot be read: no picture then, rather than one nobody measured.
+ */
+export async function mapPicture(url: string, limit: PictureLimit): Promise<{ url: string; plan: TonePlan } | null> {
+    try {
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = url;
+        await img.decode();
+        const k = Math.min(1, PICTURE_MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * k));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * k));
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return null;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const plan = planTone(pixels.data, limit);
+        // In bands: a phone takes half a second over this, and the chat is running.
+        const band = 4 * canvas.width * MAP_BAND_ROWS;
+        for (let at = 0; at < pixels.data.length; at += band) {
+            toneMap(pixels.data.subarray(at, at + band), plan);
+            await new Promise(done => setTimeout(done));
+        }
+        ctx.putImageData(pixels, 0, 0);
+        const mapped = canvas.toDataURL('image/jpeg', PICTURE_QUALITY);
+        // Before the collector gets to it: iOS caps what all canvases may hold together.
+        canvas.width = 0;
+        return { url: mapped, plan };
+    } catch {
+        return null;
+    }
+}
+
+/** `.chat-main`'s style with a mapped picture behind it. Inherited by everything in the chat. */
+export function pictureStyle(url: string, theme: PictureTheme): Record<string, string> {
+    return {
+        // Text that names no colour inherits it from <body>, as a colour, not as the variable.
+        color: theme.text['--text-normal'],
+        backgroundImage: `url("${url}")`,
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+        textShadow: theme.halo,
+        '--bg-modifier-hover': theme.hover,
+        '--bg-modifier-active': theme.active,
+        '--bg-modifier-selected': theme.active,
+        '--mode-composer-bg': theme.composer,
+        '--mode-mention-bg': theme.mention,
+        '--mode-mention-hover-bg': theme.mentionHover,
+        ...theme.text,
+    };
 }
 
 /** Thrown with a message that can be shown as it is. */

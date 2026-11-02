@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { cachedFileUrl, fetchFileUrl } from '../../api/authedMedia';
-import { UNKNOWN_EXTREMES, measureExtremes, readThemeColor } from '../../api/modeLook';
-import { accentTokens, scrimAlpha, type Rgb, type ServerMode } from '../../api/serverModes';
+import { mapPicture, pictureStyle, readPictureTheme, readThemeColor } from '../../api/modeLook';
+import { accentTokens, type PictureLimit, type Rgb, type ServerMode } from '../../api/serverModes';
 
 const LOOK_ATTRIBUTES = ['data-theme', 'data-contrast', 'data-server-looks'];
 
@@ -29,6 +29,12 @@ export function serverLooksAllowed(): boolean {
 
 const BRAND_TOKENS = ['--brand-primary', '--brand-hover', '--brand-active'] as const;
 
+/** A picture on screen: `.chat-main`'s style, and the band its text has to stay out of. */
+export interface ModeLook {
+    style: CSSProperties;
+    limit: PictureLimit;
+}
+
 /**
  * A mode's look on this reader's screen: sets the accent on the document for as
  * long as `mode` is the one on screen (the menus and dialogs the app portals to
@@ -37,8 +43,9 @@ const BRAND_TOKENS = ['--brand-primary', '--brand-hover', '--brand-active'] as c
  * The picture is a background on `.chat-main` rather than a layer inside it,
  * because a positioned child would need `position: relative` on an element whose
  * containing-block chain the message toolbar and pickers depend on (Chat.css).
+ * It never touches the reader's theme: only Settings does (settingsStore applyTheme).
  */
-export function useModeLook(mode: ServerMode | null): CSSProperties | undefined {
+export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     const look = useSyncExternalStore(subscribeLook, lookSnapshot);
     const allowed = useMemo(() => {
         void look;
@@ -62,35 +69,23 @@ export function useModeLook(mode: ServerMode | null): CSSProperties | undefined 
     }, [accent, look]);
 
     const fileId = allowed ? mode?.background_file_id ?? null : null;
-    const [loaded, setLoaded] = useState<{ fileId: string; url: string; extremes: readonly Rgb[] } | null>(null);
+    // The theme decides the curve, so a theme change maps the picture again. Until that
+    // is done there is no picture: the old mapping is unreadable on the new theme. The
+    // accent is in the key for the names written in it.
+    const key = fileId ? `${fileId}|${look}|${accent ?? ''}` : null;
+    const [mapped, setMapped] = useState<{ key: string; look: ModeLook } | null>(null);
     useEffect(() => {
-        if (!fileId || loaded?.fileId === fileId) return;
+        if (!fileId || !key || mapped?.key === key) return;
         let stale = false;
         void (async () => {
-            const url = cachedFileUrl(fileId) ?? await fetchFileUrl(fileId);
-            if (!url || stale) return;
-            const extremes = await measureExtremes(url).catch(() => UNKNOWN_EXTREMES);
-            if (!stale) setLoaded({ fileId, url, extremes });
+            const source = cachedFileUrl(fileId) ?? await fetchFileUrl(fileId);
+            const theme = readPictureTheme();
+            if (!source || !theme || stale) return;
+            const picture = await mapPicture(source, theme.limit);
+            if (picture && !stale) setMapped({ key, look: { style: pictureStyle(picture.url, theme) as CSSProperties, limit: theme.limit } });
         })();
         return () => { stale = true; };
-    }, [fileId, loaded?.fileId]);
+    }, [fileId, key, mapped?.key]);
 
-    return useMemo(() => {
-        // The theme decides how far the picture has to be dimmed.
-        void look;
-        if (!fileId || loaded?.fileId !== fileId) return undefined;
-        const surface = readThemeColor('--bg-primary');
-        const texts = ['--text-normal', '--text-muted', '--text-link'].map(readThemeColor).filter((c): c is Rgb => c !== null);
-        if (!surface) return undefined;
-        const alpha = scrimAlpha(loaded.extremes, surface, texts);
-        const veil = `rgba(${surface[0]}, ${surface[1]}, ${surface[2]}, ${alpha})`;
-        return {
-            backgroundImage: `linear-gradient(${veil}, ${veil}), url("${loaded.url}")`,
-            backgroundSize: 'cover',
-            backgroundPosition: 'center',
-            // Timestamps. The veil holds --text-muted to AA and does not measure this
-            // one: holding it too would nearly hide any picture with a bright part.
-            '--text-faint': 'var(--text-muted)',
-        } as CSSProperties;
-    }, [fileId, loaded, look]);
+    return key && mapped?.key === key ? mapped.look : undefined;
 }

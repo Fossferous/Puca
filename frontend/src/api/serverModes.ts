@@ -260,8 +260,8 @@ export function applyActiveMode<T extends { id: string; active_mode_id?: number 
 //
 // A mode's look is chosen by one person and read by everyone, on eight themes.
 // So neither is taken on trust: an accent is moved in lightness until it works on
-// the reader's theme, and a background is dimmed exactly as far as its own
-// brightest and darkest parts need for the reader's text to stay readable.
+// the reader's theme, and a background is tone-mapped on the reader's device so the
+// reader's text stays readable over every part of it.
 
 export type Rgb = readonly [number, number, number];
 
@@ -369,46 +369,199 @@ export function accentTokens(hex: string, surfaces: readonly Rgb[]): AccentToken
     return null;
 }
 
-/** Below this the picture competes with the words, whatever the arithmetic says. */
-export const SCRIM_MIN = 0.6;
-export const SCRIM_MAX = 0.97;
 /** AA for text. */
 export const TEXT_MIN_CONTRAST = 4.5;
 
+// --- A picture behind the chat ---
+//
+// A flat veil holds text to AA by dimming the whole picture as far as its brightest part
+// needs, and greys it: a moon costs the whole sky. So the picture is not veiled. On the
+// reader's device it is exposed, keeping every pixel's hue and saturation, and only what
+// is still in the way of the text is compressed. A picture has to carry the weakest text
+// colour on the screen, so while one shows, the reader's text colours move out of the
+// band it needs: lighter on a dark theme, darker on a light one.
+
+/** The brightest a picture gets behind text on a dark theme, as WCAG luminance. */
+export const PICTURE_CEILING = 0.125;
+/** The darkest it gets on a light theme. */
+export const PICTURE_FLOOR = 0.3;
 /**
- * What a text colour has to keep over a picture: AA if it has AA on the theme's
- * own surface. A colour that is already below it (the light theme's links are
- * 2.6:1 on plain white) cannot be held to AA by a veil, nor to exactly what it has
- * by anything short of hiding the picture, so it may lose at most a tenth.
+ * What text is held to over the worst pixel the curve allows. Over AA, because the JPEG
+ * the mapped picture is stored as rings a little at hard edges, and scaling blends.
  */
-export function textFloor(text: Rgb, surface: Rgb): number {
-    const own = contrast(text, surface);
-    return own >= TEXT_MIN_CONTRAST ? TEXT_MIN_CONTRAST : own * 0.9;
+const PICTURE_TEXT_CONTRAST = 5.3;
+/** Message text and headings, a step clearer than what sits beside them. */
+const PICTURE_STRONG_CONTRAST = 6;
+/** How the two are told apart when the theme says what its colours are. */
+const STRONG_TEXT_TOKENS = ['--text-normal', '--header-primary'];
+/** Every text colour that can land directly on the picture. */
+export const PICTURE_TEXT_TOKENS = [
+    ...STRONG_TEXT_TOKENS,
+    '--text-muted',
+    '--text-faint',
+    '--text-link',
+    '--header-secondary',
+    '--text-positive',
+    '--text-warning',
+    '--text-danger',
+];
+
+export interface PictureLimit {
+    /** A dark theme's light text limits how bright a pixel gets, a light theme's how dark. */
+    kind: 'ceiling' | 'floor';
+    luminance: number;
 }
 
-/** `over` laid on `under` at `alpha`, in the space a browser composites in. */
-export function composite(over: Rgb, under: Rgb, alpha: number): Rgb {
-    return [
-        over[0] * alpha + under[0] * (1 - alpha),
-        over[1] * alpha + under[1] * (1 - alpha),
-        over[2] * alpha + under[2] * (1 - alpha),
-    ];
+/** The band a picture has to stay in behind this theme's text. */
+export function pictureLimit(surface: Rgb): PictureLimit {
+    return luminance(surface) < 0.18
+        ? { kind: 'ceiling', luminance: PICTURE_CEILING }
+        : { kind: 'floor', luminance: PICTURE_FLOOR };
 }
 
-/**
- * How opaque the theme-coloured layer over a picture has to be, so that `texts`
- * stay readable at the picture's lightest and darkest points (`extremes`): the
- * least that does it, so a dark picture on a dark theme shows far more than a
- * bright one does.
- */
-export function scrimAlpha(extremes: readonly Rgb[], surface: Rgb, texts: readonly Rgb[]): number {
-    const holds = (alpha: number) =>
-        extremes.every(pixel => {
-            const under = composite(surface, pixel, alpha);
-            return texts.every(text => contrast(text, under) >= textFloor(text, surface));
-        });
-    for (let a = SCRIM_MIN; a < SCRIM_MAX; a += 0.01) {
-        if (holds(a)) return Math.round(a * 100) / 100;
+/** The same hue and saturation at the nearest lightness that `ok` accepts, walking `step` at a time. */
+function atLightness(colour: Rgb, step: number, ok: (l: number) => boolean): Rgb {
+    if (ok(luminance(colour))) return colour;
+    const [h, s, l] = toHsl(colour);
+    for (let at = l; at >= 0 && at <= 1; at += step) {
+        const c = fromHsl(h, s, at);
+        if (ok(luminance(c))) return c;
     }
-    return SCRIM_MAX;
+    return step > 0 ? WHITE : [0, 0, 0];
+}
+
+/**
+ * A theme's text colours for reading over a picture: each keeps its hue and goes only as far
+ * as it must to hold over the worst pixel `limit` allows. A colour that already does stays.
+ */
+export function pictureTextColours(tokens: Readonly<Record<string, Rgb>>, limit: PictureLimit): Record<string, string> {
+    const edge = limit.luminance + 0.05;
+    const out: Record<string, string> = {};
+    for (const [token, colour] of Object.entries(tokens)) {
+        const want = STRONG_TEXT_TOKENS.includes(token) ? PICTURE_STRONG_CONTRAST : PICTURE_TEXT_CONTRAST;
+        out[token] = toHex(limit.kind === 'ceiling'
+            ? atLightness(colour, 0.005, l => l >= edge * want - 0.05)
+            : atLightness(colour, -0.005, l => l <= edge / want - 0.05));
+    }
+    return out;
+}
+
+const roleColours = new Map<string, string>();
+
+/**
+ * A role's colour for a name written on a picture, which is the one text colour that is not a
+ * theme's: the same treatment, remembered, since it is asked for every message on every render.
+ */
+export function pictureRoleColour(colour: string, limit: PictureLimit): string {
+    const key = `${limit.kind}|${colour}`;
+    const known = roleColours.get(key);
+    if (known) return known;
+    const rgb = parseCssColor(colour);
+    const out = rgb ? pictureTextColours({ colour: rgb }, limit).colour : colour;
+    roleColours.set(key, out);
+    return out;
+}
+
+/** What a tone curve does to one picture. */
+export interface TonePlan extends PictureLimit {
+    /** Exposure, in linear light, before the limit is applied. */
+    gain: number;
+}
+
+let toLinear: Float32Array | null = null;
+let toSrgb: Uint8Array | null = null;
+const SRGB_STEPS = 4095;
+
+/** sRGB to linear and back as tables: a picture is a million pixels. */
+function curves(): { toLinear: Float32Array; toSrgb: Uint8Array } {
+    if (!toLinear || !toSrgb) {
+        toLinear = new Float32Array(256);
+        for (let i = 0; i < 256; i++) toLinear[i] = linear(i);
+        toSrgb = new Uint8Array(SRGB_STEPS + 1);
+        for (let i = 0; i <= SRGB_STEPS; i++) {
+            const v = i / SRGB_STEPS;
+            toSrgb[i] = Math.round(255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055));
+        }
+    }
+    return { toLinear, toSrgb };
+}
+
+/** Where the picture's mid-to-bright tones are put on a dark theme, as a share of the ceiling. */
+const CEILING_EXPOSE_TO = 0.62;
+/** A share of a bright picture may go past that and be compressed: a moon must not dim the sky. */
+const BRIGHT_PERCENTILE = 0.75;
+const GAIN_DARK_THEME = { min: 0.05, max: 1.5 };
+/** Where they are put on a light theme. A dark picture is stretched to keep its shapes apart. */
+const FLOOR_EXPOSE_TO = 0.6;
+const GAIN_LIGHT_THEME = { min: 1, max: 16 };
+/** Where compressing starts, as a share of the ceiling, and as a multiple of the floor. */
+const CEILING_KNEE = 0.7;
+const FLOOR_KNEE = 1.7;
+
+/** Read off every sixteenth pixel or so: enough for a percentile, and a phone is waiting. */
+export function planTone(rgba: Uint8ClampedArray, limit: PictureLimit): TonePlan {
+    const { toLinear: lin, toSrgb: srgb } = curves();
+    const stride = 4 * 16;
+    const histogram = new Uint32Array(256);
+    let samples = 0;
+    for (let i = 0; i + 2 < rgba.length; i += stride) {
+        const y = 0.2126 * lin[rgba[i]] + 0.7152 * lin[rgba[i + 1]] + 0.0722 * lin[rgba[i + 2]];
+        histogram[srgb[Math.round(y * SRGB_STEPS)]]++;
+        samples++;
+    }
+    let seen = 0;
+    let bright = 255;
+    for (let v = 0; v < 256; v++) {
+        seen += histogram[v];
+        if (seen >= samples * BRIGHT_PERCENTILE) {
+            bright = v;
+            break;
+        }
+    }
+    const reference = Math.max(lin[bright], 1 / 255);
+    const [target, range] = limit.kind === 'ceiling'
+        ? [limit.luminance * CEILING_EXPOSE_TO, GAIN_DARK_THEME]
+        : [FLOOR_EXPOSE_TO, GAIN_LIGHT_THEME];
+    return { ...limit, gain: Math.min(range.max, Math.max(range.min, target / reference)) };
+}
+
+/**
+ * The curve, over RGBA in place. Brighter stays brighter. Under a ceiling a pixel is scaled in
+ * linear light, so it keeps its hue and saturation, and the exposed luminance rolls off towards
+ * the ceiling without reaching it. Over a floor a dark pixel has to gain light, which can only
+ * come from mixing towards white, so it keeps its hue, and loses only the saturation that takes.
+ */
+export function toneMap(rgba: Uint8ClampedArray, plan: TonePlan): void {
+    const { toLinear: lin, toSrgb: srgb } = curves();
+    const { gain, luminance: limit } = plan;
+    const encode = (v: number) => srgb[Math.round(v * SRGB_STEPS)];
+    if (plan.kind === 'ceiling') {
+        const knee = limit * CEILING_KNEE;
+        const span = limit - knee;
+        for (let i = 0; i + 2 < rgba.length; i += 4) {
+            const r = lin[rgba[i]];
+            const g = lin[rgba[i + 1]];
+            const b = lin[rgba[i + 2]];
+            const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            if (y === 0) continue;
+            const x = y * gain;
+            const scale = (x <= knee ? x : knee + span * (1 - Math.exp((knee - x) / span))) / y;
+            rgba[i] = encode(Math.min(1, r * scale));
+            rgba[i + 1] = encode(Math.min(1, g * scale));
+            rgba[i + 2] = encode(Math.min(1, b * scale));
+        }
+        return;
+    }
+    const knee = limit * FLOOR_KNEE;
+    const span = knee - limit;
+    for (let i = 0; i + 2 < rgba.length; i += 4) {
+        const r = Math.min(1, lin[rgba[i]] * gain);
+        const g = Math.min(1, lin[rgba[i + 1]] * gain);
+        const b = Math.min(1, lin[rgba[i + 2]] * gain);
+        const x = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const lift = x >= knee ? 0 : (limit + span * Math.exp((x - knee) / span) - x) / (1 - x);
+        rgba[i] = encode(r + lift * (1 - r));
+        rgba[i + 1] = encode(g + lift * (1 - g));
+        rgba[i + 2] = encode(b + lift * (1 - b));
+    }
 }

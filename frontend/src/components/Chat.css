@@ -935,7 +935,7 @@
 
 .message-author {
     font-weight: 600;
-    color: var(--brand-primary);
+    color: var(--mode-author, var(--brand-primary));
 }
 
 .message-time {
@@ -1652,7 +1652,7 @@ button.message-attachment.error { color: #ffb4b4; }
     display: flex;
     gap: 0.5rem;
     padding: 1rem 1.25rem;
-    background: var(--bg-secondary);
+    background: var(--mode-composer-bg, var(--bg-secondary));
 }
 
 .file-upload-btn {
@@ -3001,12 +3001,12 @@ body.voice-drag-active {
 
 /* ---- Message that @mentions you (highlighted, the familiar chat-app pattern) ---- */
 .message.mentioned {
-    background: rgba(250, 166, 26, 0.10);
+    background: var(--mode-mention-bg, rgba(250, 166, 26, 0.10));
     box-shadow: inset 2px 0 0 var(--color-warning, #faa61a);
     border-radius: 2px;
 }
 .message.mentioned:hover {
-    background: rgba(250, 166, 26, 0.15);
+    background: var(--mode-mention-hover-bg, rgba(250, 166, 26, 0.15));
 }
 
 /* Desktop-narrow breakpoints: let the chrome columns yield before the chat

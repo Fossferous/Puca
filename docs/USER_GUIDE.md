@@ -91,10 +91,13 @@ name and press **Add mode**. Then tick the channels it should show, and press
 
 - **Main voice channel**: where **Join** goes when the mode starts, and where **Call
   everyone back** brings people.
-- **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat on a
-  dimmed layer, dimmed as far as that picture needs for messages to stay readable on
-  each person's theme. It is stored unencrypted, like the server icon, so whoever
-  runs the server can see it. Animated pictures are not supported.
+- **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat in its own
+  colours. Each person's device darkens or lightens it only as far as messages need to
+  stay readable on their theme, so one bright moon does not dim the whole sky. While a
+  picture shows, smaller text in the chat is a little lighter (or, on the Light theme,
+  darker) than usual, for the same reason. The picture never changes anyone's theme. It
+  is stored unencrypted, like the server icon, so whoever runs the server can see it.
+  Animated pictures are not supported.
 - **Accent colour**: recolours buttons and highlights while the mode is on. It is
   lightened or darkened for each person's theme so button labels stay readable.
 - **Turn off when empty**: on by default. The mode turns itself off once its voice

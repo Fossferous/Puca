@@ -200,19 +200,63 @@ It is a CSS background on `.chat-main` rather than a layer inside it, because a
 positioned child would need `position: relative` on an element whose containing block
 the message toolbar and pickers depend on.
 
-**Readability is measured, not assumed.** A theme-coloured veil lies over the picture,
-and `scrimAlpha` makes it exactly as opaque as this picture needs on this theme:
-`measureExtremes` finds the picture's darkest and lightest points from a 32x32
-reduction, and the veil is the least (from 60%) that keeps `--text-normal`,
-`--text-muted` and `--text-link` at 4.5:1 against both. A colour already below that on
-its own theme (the light theme's links are 2.6:1 on plain white) may lose at most a
-tenth of what it has: no veil can lift it, and only hiding the picture would keep
-every last bit. So a dark picture shows far more on a dark theme than a bright one
-does. A picture that cannot be measured is treated as pure black and white.
+**The picture is tone-mapped on the reader's device, not veiled.** A flat veil holds
+text to AA by dimming the whole picture as far as its brightest part needs, and it
+greys everything: one bright moon took a night scene to an 88% veil. So `mapPicture`
+decodes the stored picture, works on at most 1600 px of it, and answers a new picture for
+this reader's theme (`planTone` and `toneMap` in `api/serverModes.ts`):
 
-Timestamps are `--text-faint`, deliberately not measured: holding that colour too would
-take a bright picture's veil from about 89% to 96%, nearly hiding it. They take
-`--text-muted` while a picture is showing instead, which the veil does hold.
+- **On a dark theme** nothing may be brighter than `PICTURE_CEILING`, a WCAG luminance
+  of 0.125. The picture is exposed so that its 75th percentile lands well under that,
+  and whatever is still too bright rolls off towards the ceiling without reaching it. Each
+  pixel is scaled in linear light, so it keeps its hue and saturation. A very dark picture
+  may be brightened by up to half. A moon is in the top quarter, so it costs only the moon.
+- **On a light theme** nothing may be darker than `PICTURE_FLOOR`, a luminance of 0.3. A
+  dark picture is stretched up (shapes in a night sky would otherwise merge), and what is
+  still too dark gains light by mixing towards white, which keeps its hue and gives up
+  only the saturation that takes.
+
+The bound holds every pixel by construction, so what is left to measure is what the
+browser does afterwards. The result is stored as a JPEG, which rings a little at hard edges
+and moves colour around, and it is scaled to the window. That costs up to about 0.03 of
+luminance at the sharpest edges.
+
+**A picture has to carry the weakest text on the screen, so the text moves too.** While a
+picture shows, `.chat-main` sets its own text colours (`pictureTextColours`): each keeps its
+hue and goes only as far as it must to hold 5.3:1 over the worst pixel the curve allows, 6:1
+for message text and headings. That 5.3 is what absorbs the JPEG. On a dark theme this makes
+secondary text nearly white and message text white, which is what readability forced: with the
+theme's own `--text-muted`, a picture could never be brighter than a luminance of about 0.03.
+Links keep their hue and get paler. The rest of the window keeps the theme's colours.
+
+Everything translucent over the picture leans away from the text, so that it can only add
+contrast: the composer (`--mode-composer-bg`, the theme's surface at 55%, so the picture runs
+behind it; the header was already clear), hover and selection (`--bg-modifier-*`), and a row
+that mentions you (`--mode-mention-bg`). Measured, amoled's own selection grey over a moon
+leaves 3.64:1, and the usual gold of a mention 4.05:1. A soft halo on the text (`text-shadow`)
+is extra margin and is not counted in any measurement. A name's role colour gets the same
+treatment as the theme's colours (`pictureRoleColour`), so it keeps its hue and moves only as
+far as it must.
+
+**Readability is measured on what is rendered.** `e2e/modes-look-real-browser.mjs` (a gate)
+reads a screenshot of each picture as CSS draws it and compares every text colour with every
+pixel: six pictures, eight themes, two sizes. Its tightest case is 4.71:1. A too-strong curve,
+the old veil at the most it could show, and the theme's own text colours are its negative
+controls, and each fails. `e2e/modes-walk.mjs` does the same for each run of real text in
+the real app, against only the pixels behind that text.
+
+**It is a `data:` URL, not an object URL**, because it stays up as long as the mode is on
+screen and a long-lived Blob is what keeps decrypted attachments on disk (`api/authedMedia.ts`).
+So there is nothing to revoke. Every shell's policy allows `img-src data:`, and the gate renders
+it under all five. It costs a decode, 5.5 MiB of pixels for a moment, and 750 KiB of text kept
+while it shows: 100 ms on a desktop and about 540 ms at a 6x CPU throttle, once per mode
+and theme, in bands so the page keeps breathing. Changing theme maps it again, and until that
+finishes there is no picture, since the old mapping is unreadable on the new theme. A
+picture that cannot be read gives no picture.
+
+A mode never changes anyone's theme. `settingsStore`'s `applyTheme` is the only writer of
+`data-theme`, and nothing in the app follows the time of day or the system's light or dark
+setting; a test holds that.
 
 ### Accent colour
 
@@ -272,3 +316,5 @@ Clients ship before the backend, so all four combinations have to make sense:
   and a session whose socket died; a channel shared with the next mode keeps the same
   session; Call everyone back moves them; the auto-off counts a person in a call and a
   session with no room entry, and not a stream-only account.
+- `frontend/e2e/modes-look-real-browser.mjs`: the tone curve in a real browser (see *The
+  look*), with no server, so it is one of the gates.

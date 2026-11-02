@@ -195,6 +195,7 @@ import { useModeLook } from './modes/useModeLook';
 import {
     adoptModeFrame, callEveryoneBack, channelInMode, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
     listedNow, notificationNav, setActiveMode, shownByMode, shownWithParent, usableHome, type ServerModes,
+    pictureRoleColour,
 } from '../api/serverModes';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
@@ -1327,7 +1328,10 @@ export function Chat({ onLogout }: ChatProps) {
     const notesOnScreen = notesInApp && showNotesView;
     // A mode's look belongs to its server's own screen. These paint over that slot with
     // currentServer still set, and the accent is on the document.
-    const modeLookStyle = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);
+    const modeLook = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);
+    /** A role's colour for a name in the chat: it may be written on a mode's picture. */
+    const nameColour = (colour: string | null | undefined) =>
+        (colour && modeLook && !currentDM ? pictureRoleColour(colour, modeLook.limit) : colour) || undefined;
     // The message list can be what the shared scroller holds and still not be
     // SEEN: Notes lies over the chat as a view of its own, without touching
     // the scroller, so showingMessageList — which the scroll state follows —
@@ -5826,7 +5830,7 @@ export function Chat({ onLogout }: ChatProps) {
             </aside>
 
             {/* Main Chat Area */}
-            <main className="chat-main" style={currentDM ? undefined : modeLookStyle}>
+            <main className="chat-main" style={currentDM ? undefined : modeLook?.style}>
                 <header className="chat-header">
                     {currentDM ? (
                         <>
@@ -6437,7 +6441,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                     <div className="message-header">
                                                         <span
                                                             className="message-author"
-                                                            style={{ color: allMembers.find(m => m.id === msg.sender.id)?.top_role_color || undefined }}
+                                                            style={{ color: nameColour(allMembers.find(m => m.id === msg.sender.id)?.top_role_color) }}
                                                         >
                                                             {msg.sender.display_name || msg.sender.username}
                                                         </span>

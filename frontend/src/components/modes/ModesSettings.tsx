@@ -246,7 +246,8 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
                     />
                 </div>
                 <span className="setting-help">
-                    Shown behind the chat on a dimmed layer, so messages stay readable on every theme. Stored
+                    Shown behind the chat in its own colours. Each person's device darkens or lightens it only as
+                    far as messages need to stay readable on their theme. Stored
                     unencrypted, like the server icon: whoever runs this server can see it. Anyone can turn
                     server backgrounds off in their own settings, and High Contrast hides them.
                 </span>

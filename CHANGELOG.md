@@ -9,7 +9,7 @@ one-line summary; this file is the full story. Versions follow
 ### Added
 
 - **Server modes: channels that only show when you need them.** A mode is a set of channels that are listed only while it is on, such as the town square and private rooms of a game of Blood on the Clocktower. Set one up under **Server Settings > Modes** (Manage Channels), then pick it from **Mode** under the server's name. A new **Switch Modes** permission decides who can do that, so someone can run a game without being able to delete channels. One mode is on at a time, and everyone online sees the change at once. **Turning a mode off disconnects everyone in its voice channels**, with a warning first; messages in its text channels are kept and come back with it. A mode can also have:
-    - a **background** behind the chat, dimmed as far as that picture needs for messages to stay readable on each person's theme. It is stored unencrypted, like the server icon;
+    - a **background** behind the chat, in its own colours. Each person's device darkens or lightens it only as far as messages need to stay readable on their theme. It is stored unencrypted, like the server icon;
     - an **accent colour**, adjusted for each person's theme so button labels stay readable;
     - a **main voice channel**, with a quiet notice and a **Join** button when the mode starts, and **Call everyone to** it, to pull people out of the private rooms;
     - **Turn off when empty**, after 30 minutes with nobody in its voice channels.
