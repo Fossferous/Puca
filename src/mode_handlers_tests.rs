@@ -1527,6 +1527,10 @@ mod db {
         let f = setup(&pool).await;
         let state = state_of(&pool);
         let mode = make(&state, &f, "Clocktower", &[f.town]).await;
+        // On and used, with the option off: ticking it is what writes the server's row.
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        note_voice_join(&state, f.town as i64).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": false })).await, StatusCode::OK);
         // Holding the server's row, as a delete does on its way to the mode's.
         let mut holder = pool.begin().await.unwrap();
         sqlx::query("SELECT 1 FROM servers WHERE id = $1 FOR UPDATE").bind(&f.sid).execute(&mut *holder).await.unwrap();
@@ -1573,7 +1577,7 @@ mod db {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        // The same file under another spelling is not a replacement.
+        // The same file under another spelling is not a replacement: the in-use check finds it.
         let again = profile(json!({ "avatar_file_id": avatar.to_uppercase(), "join_sound_file_id": sound.to_uppercase() })).await;
         let avatar_kept = file_exists(&pool, &avatar).await;
         let sound_kept = file_exists(&pool, &sound).await;

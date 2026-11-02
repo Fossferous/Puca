@@ -1526,7 +1526,7 @@ pub async fn update_profile(
         Ok(r) => {
             tracing::info!("update_profile: rows_affected={}", r.rows_affected());
             // Reclaim the replaced avatar blob if it actually changed.
-            if let (Some(old), Some(new)) = (&old_avatar, canonical_avatar.as_ref().or(payload.avatar_file_id.as_ref())) {
+            if let (Some(old), Some(new)) = (&old_avatar, &payload.avatar_file_id) {
                 if old != new {
                     crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                 }
@@ -1535,8 +1535,8 @@ pub async fn update_profile(
             // "clear it" value, so a clear reclaims too — `old != new` covers
             // both replace ("" != new id) and clear (old id != "").
             for (old, new) in [
-                (&old_join_sound, canonical_join.as_ref().or(payload.join_sound_file_id.as_ref())),
-                (&old_leave_sound, canonical_leave.as_ref().or(payload.leave_sound_file_id.as_ref())),
+                (&old_join_sound, &payload.join_sound_file_id),
+                (&old_leave_sound, &payload.leave_sound_file_id),
             ] {
                 if let (Some(old), Some(new)) = (old, new) {
                     if old != new && !old.is_empty() {
