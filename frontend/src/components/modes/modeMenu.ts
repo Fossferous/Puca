@@ -11,6 +11,12 @@ interface ModeMenuOptions {
     onManage: () => void;
 }
 
+/** Call everyone back is on offer: a mode is on, it has a main channel a person can go
+ *  to, and this reader holds Move Members. */
+export function offersCallBack(data: ServerModes, activeModeId: number | null, homeName: string | null): boolean {
+    return activeModeId !== null && data.can_call_back && homeName !== null;
+}
+
 /** What the selector's menu offers this reader. */
 export function modeMenuItems({ data, activeModeId, homeName, onSwitch, onCallBack, onManage }: ModeMenuOptions): ContextMenuItem[] {
     const items: ContextMenuItem[] = [];
@@ -30,7 +36,7 @@ export function modeMenuItems({ data, activeModeId, homeName, onSwitch, onCallBa
             });
         }
     }
-    const callBack = activeModeId !== null && data.can_call_back && homeName !== null;
+    const callBack = offersCallBack(data, activeModeId, homeName);
     if (callBack || data.can_edit) {
         if (items.length > 0) items.push({ id: 'mode-separator', label: '', separator: true });
     }
@@ -41,6 +47,11 @@ export function modeMenuItems({ data, activeModeId, homeName, onSwitch, onCallBa
         items.push({ id: 'mode-manage', label: 'Manage modes', icon: 'settings', onClick: onManage });
     }
     return items;
+}
+
+/** What the start notice's Join goes to: nothing for someone already there. */
+export function noticeJoinName(home: { id: number; name: string } | null | undefined, inCallId: number | null | undefined): string | null {
+    return home && home.id !== inCallId ? home.name : null;
 }
 
 /** The sentence a switch's warning says, or null when nobody would be cut off. */

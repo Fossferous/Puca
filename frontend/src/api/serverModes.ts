@@ -2,7 +2,7 @@
  * Server modes (docs/SERVER_MODES.md): a named set of channels listed only while
  * the mode is on, with an optional background picture and accent colour.
  *
- * Hiding is tidiness, not access. `shownByMode` decides what the channel LIST
+ * Hiding is tidiness, not access. `shownWithParent` decides what the channel LIST
  * shows; a hidden channel is still in the rows, still reachable from a #mention,
  * a notification or a link, and an older client lists it. Permissions stay the
  * one thing that keeps anybody out.
@@ -86,52 +86,72 @@ export function shownByMode(channel: { mode_ids?: number[] }, activeModeId: numb
     return activeModeId != null && ids.includes(activeModeId);
 }
 
+interface ModeRow {
+    id: number;
+    parent_id?: number | null;
+    mode_ids?: number[];
+    is_afk?: boolean;
+}
+
 /**
  * `shownByMode` for a channel among its siblings: a subchannel goes with its
- * collection, as the channel list renders it, so a list of places to go must agree.
+ * collection, whichever kind of channel it is. Every list that shows or names a
+ * channel goes through this. The AFK channel is exempt: an idle member is moved
+ * into it, so a mode cannot hide it, even through its collection.
  */
-export function shownWithParent<C extends { id: number; parent_id?: number | null; mode_ids?: number[] }>(
+export function shownWithParent<C extends ModeRow>(
     channel: C,
     channels: readonly C[],
     activeModeId: number | null | undefined,
 ): boolean {
+    if (channel.is_afk) return true;
     if (!shownByMode(channel, activeModeId)) return false;
     if (channel.parent_id == null) return true;
     const parent = channels.find(c => c.id === channel.parent_id);
     return !parent || shownByMode(parent, activeModeId);
 }
 
+/** Is the channel in this mode: ticked, or under a ticked collection? */
+export function channelInMode<C extends ModeRow>(channel: C, channels: readonly C[], modeId: number): boolean {
+    if (channel.is_afk) return false;
+    if (channel.mode_ids?.includes(modeId)) return true;
+    return channel.parent_id != null && !!channels.find(c => c.id === channel.parent_id)?.mode_ids?.includes(modeId);
+}
+
 /**
  * Whether the channel list shows a channel. A mode hides it, except that what is
- * open stays until you leave it (a list must not lose what you are reading), and
- * a voice channel with people in it is never hidden: a call nobody can see is not
- * tidy, it is a secret.
+ * open stays until you leave it (a list must not lose what you are reading: an open
+ * collection keeps its text subchannels), and a voice channel with people in it is
+ * never hidden: a call nobody can see is not tidy, it is a secret.
  */
-export function listedNow(
-    channel: { id: number; channel_type: number; mode_ids?: number[] },
+export function listedNow<C extends ModeRow & { channel_type: number }>(
+    channel: C,
+    channels: readonly C[],
     activeModeId: number | null | undefined,
     here: { openChannelId?: number | null; voiceChannelId?: number | null; occupants: (channelId: number) => number },
 ): boolean {
-    return shownByMode(channel, activeModeId)
+    return shownWithParent(channel, channels, activeModeId)
         || here.openChannelId === channel.id
+        || (channel.channel_type !== 1 && channel.parent_id != null && here.openChannelId === channel.parent_id
+            && shownByMode(channel, activeModeId))
         || here.voiceChannelId === channel.id
         || (channel.channel_type === 1 && here.occupants(channel.id) > 0);
 }
 
 /**
  * The voice channels a switch would end the calls in: in the mode that is on and
- * not in the one coming on. Mirrors the server's `channels_hidden_by`. This one
- * only words the warning; the server decides.
+ * not listed under the one coming on. Mirrors the server's `channels_hidden_by`.
+ * This one only words the warning; the server decides.
  */
-export function channelsEndedBySwitch(
-    modes: ServerMode[],
+export function channelsEndedBySwitch<C extends ModeRow & { channel_type: number }>(
+    channels: readonly C[],
     activeModeId: number | null | undefined,
     nextModeId: number | null,
 ): number[] {
-    const current = modes.find(m => m.id === activeModeId);
-    if (!current) return [];
-    const next = modes.find(m => m.id === nextModeId);
-    return current.channel_ids.filter(id => !next?.channel_ids.includes(id));
+    if (activeModeId == null) return [];
+    return channels
+        .filter(c => c.channel_type === 1 && channelInMode(c, channels, activeModeId) && !shownWithParent(c, channels, nextModeId))
+        .map(c => c.id);
 }
 
 /**
@@ -139,13 +159,32 @@ export function channelsEndedBySwitch(
  * for them and the mode that is on lists it. A main channel another mode has
  * since taken over is nowhere anyone could follow, and the server refuses it too.
  */
-export function usableHome<C extends { id: number; channel_type: number; mode_ids?: number[] }>(
+export function usableHome<C extends ModeRow & { channel_type: number }>(
     mode: ServerMode | null | undefined,
-    channels: C[],
+    channels: readonly C[],
 ): C | null {
     if (mode?.home_channel_id == null) return null;
     const home = channels.find(c => c.id === mode.home_channel_id);
-    return home && home.channel_type === 1 && shownByMode(home, mode.id) ? home : null;
+    return home && home.channel_type === 1 && shownWithParent(home, channels, mode.id) ? home : null;
+}
+
+/**
+ * Where an Android notification's tap lands. The server, as always, unless the list
+ * there would not show this channel: a mode hides it, so there would be no row to
+ * press. Rows the device does not hold yet read as listed. The `channel:` target is
+ * only ever posted by this web bundle, which is also what reads it, so an older APK
+ * passes it through untouched (`nav` is opaque in Java).
+ */
+export function notificationNav<C extends ModeRow>(
+    serverId: string,
+    channelId: number,
+    rows: readonly C[] | undefined,
+    activeModeId: number | null | undefined,
+): string {
+    const row = rows?.find(c => c.id === channelId);
+    return row && !shownWithParent(row, rows as readonly C[], activeModeId)
+        ? `channel:${serverId}:${channelId}`
+        : `server:${serverId}`;
 }
 
 // --- The frames ---
@@ -180,6 +219,24 @@ export function parseServerModesEdited(msg: { type: string; payload?: unknown })
     if (msg.type !== 'ServerModesEdited') return null;
     const id = (msg.payload as { server_id?: unknown } | null | undefined)?.server_id;
     return typeof id === 'string' && id !== '' ? id : null;
+}
+
+/**
+ * A frame says which mode is on as of now. A `GET /servers` already in flight may have
+ * read the row before that, and react-query would let its answer overwrite this one,
+ * with nothing to heal it (no interval, no focus refetch, five minutes of staleness).
+ * Invalidating cancels that fetch and starts one that reads after the frame.
+ */
+export function adoptModeFrame<T extends { id: string; active_mode_id?: number | null }>(
+    client: {
+        setQueryData: (key: readonly unknown[], update: (old: T[] | undefined) => T[] | undefined) => unknown;
+        invalidateQueries: (filters: { queryKey: readonly unknown[]; exact: boolean }) => Promise<unknown>;
+    },
+    serversKey: readonly unknown[],
+    f: Pick<ServerModeChangedFrame, 'server_id' | 'active_mode_id'>,
+): void {
+    client.setQueryData(serversKey, old => applyActiveMode(old, f));
+    void client.invalidateQueries({ queryKey: serversKey, exact: true });
 }
 
 /**

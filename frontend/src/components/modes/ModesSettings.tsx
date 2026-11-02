@@ -2,12 +2,12 @@ import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { keys, useChannels, useServerModes } from '../../hooks/queries';
 import { BackgroundRefused, prepareBackground } from '../../api/modeLook';
-import { accentTokens, createMode, deleteMode, shownByMode, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
+import { accentTokens, createMode, deleteMode, shownWithParent, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
 import type { Channel } from '../../api/servers';
 import { uploadFile } from '../../api/uploads';
 import { statusOf } from '../../api/client';
 import { AuthedImg } from '../AuthedImg';
-import { HashIcon, MoonIcon, SpeakerIcon, TrashIcon, UploadIcon } from '../Icons';
+import { FolderIcon, HashIcon, MoonIcon, SpeakerIcon, TrashIcon, UploadIcon } from '../Icons';
 import './ModesSettings.css';
 
 /** What the color input starts from when a mode has no accent yet. */
@@ -25,9 +25,11 @@ interface ModeCardProps {
     mode: ServerMode;
     channels: Channel[];
     isActive: boolean;
+    /** May this reader turn the mode off? Deleting the one that is on does. */
+    canSwitch: boolean;
 }
 
-function ModeCard({ serverId, mode, channels, isActive }: ModeCardProps) {
+function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardProps) {
     const queryClient = useQueryClient();
     const [saved, setSaved] = useState(false);
     // Each field is what was typed here, or undefined for "as stored". So another
@@ -69,7 +71,9 @@ function ModeCard({ serverId, mode, channels, isActive }: ModeCardProps) {
         // Only what changed, so this save cannot undo another manager's.
         const changes: ModeEdit = {};
         if (name.trim() !== mode.name) changes.name = name;
-        if (!sameChannels) changes.channel_ids = channelIds;
+        // Only ids still on the server: a channel deleted since the list was read has no
+        // row here to untick, and the server would refuse the whole save for it.
+        if (!sameChannels) changes.channel_ids = channelIds.filter(id => channels.some(c => c.id === id));
         if (homeId !== mode.home_channel_id) changes.home_channel_id = homeId ?? 0;
         if (accent !== mode.accent_color) changes.accent_color = accent ?? '';
         if (autoOff !== mode.auto_off) changes.auto_off = autoOff;
@@ -137,26 +141,44 @@ function ModeCard({ serverId, mode, channels, isActive }: ModeCardProps) {
     };
 
     const pickable = channels.filter(c => !c.is_afk);
-    const text = pickable.filter(c => c.channel_type !== 1);
-    const voice = pickable.filter(c => c.channel_type === 1);
-    // A main channel must be somewhere people can follow while this mode is on:
-    // one of its own, or one that is always listed.
-    const homeChoices = voice.filter(c => c.id === homeId || channelIds.includes(c.id) || shownByMode(c, mode.id));
+    const parentOf = (c: Channel) => (c.parent_id == null ? undefined : channels.find(p => p.id === c.parent_id));
+    // Each collection followed by what is under it, so a row reads as part of it.
+    const inTreeOrder = (rows: Channel[]) => rows.flatMap(c => {
+        if (c.parent_id != null && rows.some(p => p.id === c.parent_id)) return [];
+        return [c, ...rows.filter(sub => sub.parent_id === c.id)];
+    });
+    const text = inTreeOrder(pickable.filter(c => c.channel_type !== 1));
+    const voice = inTreeOrder(pickable.filter(c => c.channel_type === 1));
+    // A main channel must be somewhere people can follow while this mode is on: one of
+    // its own, ticked here or by its collection, or one that is always listed.
+    const homeChoices = voice.filter(c => {
+        const parent = parentOf(c);
+        return c.id === homeId || channelIds.includes(c.id) || (parent && channelIds.includes(parent.id))
+            || shownWithParent(c, channels, mode.id);
+    });
 
     const preview = accent ? accentTokens(accent, []) : null;
 
-    const row = (c: Channel) => (
-        <label key={c.id} className="mode-channel">
-            <input
-                type="checkbox"
-                checked={channelIds.includes(c.id)}
-                onChange={e => toggleChannel(c.id, e.target.checked)}
-                aria-label={`${c.name} belongs to ${mode.name}`}
-            />
-            <span className="mode-channel-icon" aria-hidden="true">{c.channel_type === 1 ? <SpeakerIcon /> : <HashIcon />}</span>
-            <span className="mode-channel-name">{c.name}</span>
-        </label>
-    );
+    const row = (c: Channel) => {
+        const parent = parentOf(c);
+        const withCollection = !!parent && channelIds.includes(parent.id);
+        return (
+            <label key={c.id} className={`mode-channel ${parent ? 'mode-channel-sub' : ''}`}>
+                <input
+                    type="checkbox"
+                    checked={channelIds.includes(c.id) || withCollection}
+                    disabled={withCollection}
+                    onChange={e => toggleChannel(c.id, e.target.checked)}
+                    aria-label={`${c.name} belongs to ${mode.name}`}
+                />
+                <span className="mode-channel-icon" aria-hidden="true">
+                    {c.channel_type === 1 ? <SpeakerIcon /> : c.channel_type === 2 ? <FolderIcon /> : <HashIcon />}
+                </span>
+                <span className="mode-channel-name">{c.name}</span>
+                {parent && <span className="mode-channel-parent">{withCollection ? `with ${parent.name}` : `in ${parent.name}`}</span>}
+            </label>
+        );
+    };
 
     return (
         <section className="mode-card" data-testid="mode-card" aria-label={mode.name}>
@@ -196,7 +218,7 @@ function ModeCard({ serverId, mode, channels, isActive }: ModeCardProps) {
                     {homeChoices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
                 <span className="setting-help">
-                    Where the Join button goes when this mode starts, and where Call everyone back brings people.
+                    Where the Join button goes when this mode starts, and where Call everyone to it brings people.
                 </span>
             </div>
 
@@ -277,10 +299,13 @@ function ModeCard({ serverId, mode, channels, isActive }: ModeCardProps) {
                 <button type="button" className="primary-btn" disabled={busy || !dirty || !name.trim()} onClick={() => void save()}>
                     Save
                 </button>
-                <button type="button" className="danger-btn" disabled={busy} onClick={() => void remove()}>
+                <button type="button" className="danger-btn" disabled={busy || (isActive && !canSwitch)} onClick={() => void remove()}>
                     <TrashIcon /> Delete mode
                 </button>
             </div>
+            {isActive && !canSwitch && (
+                <span className="setting-help">This mode is on. Deleting it would turn it off, which takes the Switch Modes permission.</span>
+            )}
         </section>
     );
 }
@@ -304,7 +329,8 @@ export function ModesSettings({ serverId }: ModesSettingsProps) {
 
     const add = async () => {
         const name = newName.trim();
-        if (!name) return;
+        // Enter repeats while it is held, and only the button is disabled.
+        if (!name || busy) return;
         setBusy(true);
         setError('');
         try {
@@ -364,6 +390,7 @@ export function ModesSettings({ serverId }: ModesSettingsProps) {
                             mode={mode}
                             channels={channels}
                             isActive={data.active_mode_id === mode.id}
+                            canSwitch={data.can_switch}
                         />
                     ))}
                 </>

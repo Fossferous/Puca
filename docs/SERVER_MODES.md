@@ -8,8 +8,11 @@ deleting and recreating them loses their permissions and history.
 
 - A channel in no mode is always listed.
 - A channel in a mode is listed while that mode is on. A channel can be in several.
-- A subchannel goes with its collection: tick the collection and all of it comes and
-  goes together.
+- A subchannel goes with its collection, voice or text: tick the collection and all
+  of it comes and goes together. A voice channel under a ticked collection is in the
+  mode everywhere: hidden with it, warned about, disconnected when it ends, counted by
+  Turn off when empty and reached by Call everyone back. This is the usual layout for
+  a game's private rooms.
 - **One mode is on at a time.** Picking a mode replaces the current one.
 
 The user-facing description is in [USER_GUIDE.md](USER_GUIDE.md#server-modes); the
@@ -44,7 +47,9 @@ The list keeps a hidden channel in two cases (`listedNow` in
 `frontend/src/api/serverModes.ts`):
 
 - **what you have open**, until you leave it: a list must not lose what you are
-  reading, the rule Hide Muted Channels already had;
+  reading, the rule Hide Muted Channels already had. A subchannel opened from a mention
+  brings back its collection's header and itself, not its siblings; an open collection
+  keeps its text subchannels;
 - **a voice channel with people in it**: a call nobody can see is not tidy, it is a
   secret. Everyone is disconnected when a mode ends (below), so this only shows for
   someone who rejoined from a link or an older client, and it shows honestly.
@@ -54,6 +59,20 @@ nothing in that server's list could clear them. Its own count comes back with th
 mode. (A message arriving live can show in the bubble until the next refresh, at most
 a minute later: only the server knows every server's modes.) Entering a server opens
 the first channel it lists, never a hidden one.
+
+Every other list of channels follows the same rule, so no two disagree: Move to on a
+member, the targets for forwarding and for Send to Púca, a collection's merged feed,
+All Checklists, the Tasks tab bar, the Púca Notes grid, and the voice channels an
+embedding host is given (`docs/EMBEDDING.md`). Two keep their whole view on purpose. A
+save of the Tasks tab order puts a hidden tab back in its slot, and Notes' prune still
+sees a hidden channel, so a mode switch never reads as the channel having been deleted.
+Searching Notes still finds its note, and its reminders still come due.
+
+**A notification still reaches a hidden channel**, on the server you are looking at or
+another one. On Android a notification the app posts itself opens the channel when the
+list there would have no row for it. One delivered by the native socket while the app
+is closed carries only the server (`PushFrames.java`), so it opens the server as it
+always has; changing that needs a new APK.
 
 ## Turning a mode off ends its calls
 
@@ -71,10 +90,23 @@ administrators read, has the whole count.
 
 Whoever presses the switch is warned how many people it will cut off first. The
 people cut off are told why ("Blood on the Clocktower ended, so this call ended"):
-the `ServerModeChanged` frame goes out before the disconnects for that reason, and
-because a client that hears `RoomLeft` first has nothing to say about it.
+their `RoomLeft` carries `reason: "mode_ended"`, to the connections that held the call
+and no others, so what they are told follows from what actually happened to them
+rather than from a guess at their channel's modes. `ServerModeChanged` goes out first,
+which is how the client knows what the mode was called.
 
-Deleting the mode that is on is turning it off. An edit never disconnects anyone.
+**Someone the room has lost track of goes too.** A LiveKit session whose socket is not
+in `voice_<id>` (it died, or the backend has just restarted) has no room entry to find,
+so it is cut at LiveKit directly and counted, as a transport change already did. A
+socket that sleeps through the switch would otherwise replay itself back into the ended
+call when it reconnects, so the sessions that held the call, and those whose socket had
+just died in it, are tombstoned for that room: the replay is refused with the same
+reason. A deliberate join clears it. What this cannot catch is a mesh call replayed
+after a backend restart, since the tombstones are in memory too; that person sits alone
+in a listed channel and can hang up.
+
+Deleting the mode that is on is turning it off, so it takes **Switch Modes** as well as
+Manage Channels. An edit never disconnects anyone.
 
 ## Who can do what
 
@@ -82,7 +114,8 @@ Deleting the mode that is on is turning it off. An edit never disconnects anyone
 |---|---|
 | Define, edit and delete modes | **Manage Channels**. Assigning a channel to a mode is managing channels |
 | Turn a mode on or off | **Switch Modes**, a new permission nobody has by default |
-| Call everyone back | **Move Members**, with a drag's own rules |
+| Delete the mode that is on | Both: it turns the mode off |
+| Call everyone back | **Move Members**, with a drag's own rules. Holding only this still gets the selector's menu, while there is someone to call back and somewhere to bring them |
 
 The owner and administrators can do all of it. Switch Modes is separate so that a
 Storyteller role can run a game without being able to delete channels.
@@ -96,7 +129,8 @@ needs a different plan on the client, such as BigInt.
 
 An editor who does not hold Switch Modes can neither grant nor remove it, the same
 carve-out as the restricting bits. Nobody holds it by default, so without that a
-manager recolouring a Storyteller role would take the role's one right away.
+manager recolouring a Storyteller role would take the role's one right away. The role
+editor shows the row disabled, with the reason, for such an editor.
 
 A manager sees and edits only the channels they can see. `channel_ids` replaces
 those, so a manager's save cannot quietly drop a channel hidden from them, and
@@ -105,7 +139,9 @@ those, so a manager's save cannot quietly drop a channel hidden from them, and
 ## The AFK channel
 
 An idle member is moved into the AFK channel, so it can't be hidden: the mode editor
-refuses it, and a channel made AFK leaves its modes.
+refuses it, a channel made AFK leaves its modes, and one under a ticked collection does
+not go with it. It can't be a main channel either, because a voice move refuses to take
+anyone back out of it: a channel made AFK stops being one.
 
 ## What the mode can carry
 
@@ -114,8 +150,9 @@ the mode's own channels or one that is always listed. If another mode later take
 over, nobody could follow, so the client offers no Join and the server refuses Call
 everyone back.
 
-**Call everyone back** pulls everyone in the mode's voice channels into the main
-one, for the moment a game's private rooms are done with. Each person goes through
+**Call everyone back** (in the menu as **Call everyone to** and the main channel's
+name) pulls everyone in the mode's voice channels into the main one, for the moment a
+game's private rooms are done with. Each person goes through
 `perform_voice_move`, the same checks as dragging them, so someone ranked at or above
 the caller stays and is counted (`skipped`). The caller's own client walks over.
 
@@ -127,10 +164,17 @@ yourself. If you are looking at another server it says which, and offers to open
 **Turn off when empty** (`auto_off`, on by default per mode) turns the mode off once
 its voice channels and its main channel, which may be an always-listed one, have been
 empty for 30 minutes. A once-a-minute tick in `main.rs` stamps
-`active_mode_occupied_at` while someone is there, and only a mode someone has been in
-can time out: turning one on is often the first thing that happens. Voice rooms live
-in memory, so a restart reads as everyone leaving; it starts the window again instead.
-It writes an audit row with no actor.
+`active_mode_occupied_at` while someone is there, and joining stamps it too, so a visit
+shorter than a tick counts. Only a mode someone has been in can time out: turning one
+on is often the first thing that happens. Voice rooms live in memory, so a restart
+reads as everyone leaving; it starts the window again instead. It writes an audit row
+with no actor.
+
+"Someone there" means a person. A LiveKit session with no room entry is somebody (the
+room only lost track of them). A stream-only account is not, because it can sit there
+unattended (`docs/STREAM_ONLY.md`), though a switch still disconnects it. The stamp
+keeps moving while the option is off, and ticking the option again starts a fresh 30
+minutes: the room may have emptied long ago.
 
 ## The look
 
@@ -166,14 +210,18 @@ tenth of what it has: no veil can lift it, and only hiding the picture would kee
 every last bit. So a dark picture shows far more on a dark theme than a bright one
 does. A picture that cannot be measured is treated as pure black and white.
 
+Timestamps are `--text-faint`, deliberately not measured: holding that colour too would
+take a bright picture's veil from about 89% to 96%, nearly hiding it. They take
+`--text-muted` while a picture is showing instead, which the veil does hold.
+
 ### Accent colour
 
 One `#rrggbb`, and `accentTokens` adapts it per reader: the chosen hue and saturation,
 at the nearest lightness where a white button label is at 4.5:1 and the colour is at
 3:1 on the theme's surfaces. It is set on the document while the mode's server is on
-screen, so menus and dialogs portaled to `<body>` take it too. Dark themes and light
-themes can leave it looking a little different, and that is what makes it readable on
-both.
+screen, not behind Friends, Devices or Notes, so menus and dialogs portaled to `<body>`
+take it too. Dark themes and light themes can leave it looking a little different, and
+that is what makes it readable on both.
 
 ### Declining it
 
@@ -189,7 +237,9 @@ Clients ship before the backend, so all four combinations have to make sense:
   frames reach it and it drops them, as it drops every frame type it does not know. It
   cannot define or switch modes. If someone in a hidden voice channel is on one, they
   are disconnected like anyone else, and can walk back in because their list shows the
-  channel.
+  channel. Its rail bubble does leave out a hidden channel's unread messages, though it
+  lists the channel: the server cannot tell which client asks. That lasts until it
+  updates, and the channel's own count still shows once the server is open.
 - **A new client on an old server** sees no `active_mode_id` on the server row (absent,
   not null), so it never asks for modes and shows no selector or tab.
 - **Rolling the server back**: the migration is additive, and an older binary ignores

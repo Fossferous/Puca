@@ -117,6 +117,9 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events, and when each
   of your devices last went quiet or came back (idle/away presence, below)
+- A server's modes (docs/SERVER_MODES.md): their names and which channels they
+  list, which one is on, when it switched, and when its voice channels last had
+  someone in them
 - For a personal note (Púca Notes, migration 065): whether it has text,
   pictures or a voice note and roughly how much (the sealed envelopes' sizes,
   which also hint at how many pictures), the encrypted uploads themselves as
@@ -1676,7 +1679,9 @@ whole room. A ping from a connection that is not in the room, or anything
 that is not a ping, keeps the full gate. Moving or disconnecting someone from
 voice requires the moderator to be able to VIEW the channel the target is in
 (`move_member_voice`), with the route's existing "not in a voice channel"
-answer otherwise; reporting a message requires being able to VIEW its channel
+answer otherwise; a server mode's switch is the exception, ending the calls in
+the channels it hides whether or not whoever presses it can see them, and
+counting for them only the ones they can (docs/SERVER_MODES.md); reporting a message requires being able to VIEW its channel
 (`create_report`, through `check_message_view`), with the same 400 as an
 unknown id. A server's pinned clips channel is reported as `null` to members
 who cannot VIEW it (`visible_clip_channel_id`,

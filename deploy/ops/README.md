@@ -462,10 +462,12 @@ DELETE FROM channel_keys WHERE recipient_id = :uid;
 UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = :uid;
 UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = :uid AND revoked_at IS NULL;
 -- UPLOAD_GRACE_STAMP_SQL, src/handlers.rs, with the grace set to zero. A server
--- icon or custom emoji the account uploaded belongs to the server and stays.
+-- icon, mode background or custom emoji the account uploaded belongs to the server
+-- and stays.
 UPDATE uploaded_files SET purge_after = NOW()
  WHERE uploader_id = :uid AND purge_after IS NULL
    AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL)
+   AND id::text NOT IN (SELECT background_file_id FROM server_modes WHERE background_file_id IS NOT NULL)
    AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL)
    AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL);
 COMMIT;

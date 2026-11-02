@@ -7,6 +7,7 @@
  * cannot leave them proving something about colours nobody uses.
  */
 import { describe, it, expect } from 'vitest';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -16,11 +17,14 @@ import {
     SCRIM_MIN,
     TEXT_MIN_CONTRAST,
     accentTokens,
+    adoptModeFrame,
     applyActiveMode,
+    channelInMode,
     channelsEndedBySwitch,
     composite,
     contrast,
     listedNow,
+    notificationNav,
     parseCssColor,
     parseServerModeChanged,
     parseServerModesEdited,
@@ -72,35 +76,156 @@ describe('what a mode hides', () => {
         expect(shownWithParent({ id: 5, parent_id: 3, mode_ids: [8] }, all, null), 'hidden itself').toBe(false);
     });
 
+    it('takes a VOICE subchannel with its collection too, and never the AFK channel', () => {
+        const collection = { id: 1, channel_type: 2, mode_ids: [7] };
+        const room = { id: 2, channel_type: 1, parent_id: 1, mode_ids: [] };
+        const afk = { id: 3, channel_type: 1, parent_id: 1, mode_ids: [], is_afk: true };
+        const all = [collection, room, afk];
+        expect(shownWithParent(room, all, null)).toBe(false);
+        expect(shownWithParent(room, all, 7)).toBe(true);
+        expect(shownWithParent(afk, all, null), 'idle members are moved into it').toBe(true);
+        expect(channelInMode(room, all, 7), 'its own row names no mode, and it is in this one').toBe(true);
+        expect(channelInMode(room, all, 8)).toBe(false);
+        expect(channelInMode(collection, all, 7)).toBe(true);
+        expect(channelInMode(afk, all, 7)).toBe(false);
+    });
+
     const hidden = { id: 5, channel_type: 1, mode_ids: [7] };
     const nowhere = { openChannelId: null, voiceChannelId: null, occupants: () => 0 };
 
     it('takes a hidden channel out of the list', () => {
-        expect(listedNow(hidden, null, nowhere)).toBe(false);
+        expect(listedNow(hidden, [hidden], null, nowhere)).toBe(false);
     });
 
     it('never takes away what is open, or the call you are in', () => {
-        expect(listedNow(hidden, null, { ...nowhere, openChannelId: 5 })).toBe(true);
-        expect(listedNow(hidden, null, { ...nowhere, voiceChannelId: 5 })).toBe(true);
+        expect(listedNow(hidden, [hidden], null, { ...nowhere, openChannelId: 5 })).toBe(true);
+        expect(listedNow(hidden, [hidden], null, { ...nowhere, voiceChannelId: 5 })).toBe(true);
     });
 
     it('never hides a voice channel with people in it, and says nothing of a text channel', () => {
-        expect(listedNow(hidden, null, { ...nowhere, occupants: () => 1 })).toBe(true);
-        expect(listedNow({ ...hidden, channel_type: 0 }, null, { ...nowhere, occupants: () => 1 })).toBe(false);
+        expect(listedNow(hidden, [hidden], null, { ...nowhere, occupants: () => 1 })).toBe(true);
+        expect(listedNow({ ...hidden, channel_type: 0 }, [hidden], null, { ...nowhere, occupants: () => 1 })).toBe(false);
+    });
+
+    describe('under a collection a mode hides', () => {
+        const collection = { id: 1, channel_type: 2, mode_ids: [7] };
+        const room = { id: 2, channel_type: 1, parent_id: 1, mode_ids: [] };
+        const s1 = { id: 3, channel_type: 0, parent_id: 1, mode_ids: [] };
+        const s2 = { id: 4, channel_type: 0, parent_id: 1, mode_ids: [] };
+        const ownMode = { id: 6, channel_type: 0, parent_id: 1, mode_ids: [8] };
+        const all = [collection, room, s1, s2, ownMode];
+        const listedOf = (here: { openChannelId?: number | null }) =>
+            all.filter(c => listedNow(c, all, null, { ...nowhere, ...here })).map(c => c.id);
+
+        it('a voice room is not listed, though its own row names no mode', () => {
+            expect(listedNow(room, all, null, nowhere)).toBe(false);
+            expect(listedNow(room, all, 7, nowhere), 'control: with the mode on').toBe(true);
+        });
+
+        it('...unless somebody is in it', () => {
+            expect(listedNow(room, all, null, { ...nowhere, occupants: () => 1 })).toBe(true);
+        });
+
+        it('one open subchannel does not bring its siblings back', () => {
+            expect(listedOf({ openChannelId: s1.id })).toEqual([s1.id]);
+        });
+
+        it('an open collection keeps its text subchannels, not its voice rooms or one another mode hides', () => {
+            expect(listedOf({ openChannelId: collection.id })).toEqual([collection.id, s1.id, s2.id]);
+        });
     });
 });
 
 describe('who a switch cuts off', () => {
-    const a = mode({ id: 1, channel_ids: [10, 11] });
-    const b = mode({ id: 2, channel_ids: [10, 12] });
+    const channels = [
+        { id: 10, channel_type: 1, mode_ids: [1, 2] },
+        { id: 11, channel_type: 1, mode_ids: [1] },
+        { id: 12, channel_type: 1, mode_ids: [2] },
+        { id: 13, channel_type: 0, mode_ids: [1] },
+        { id: 14, channel_type: 1, mode_ids: [] },
+    ];
 
-    it('is the channels of the mode that was on and not of the next one', () => {
-        expect(channelsEndedBySwitch([a, b], 1, null)).toEqual([10, 11]);
-        expect(channelsEndedBySwitch([a, b], 1, 2)).toEqual([11]);
+    it('is the voice channels of the mode that was on and not of the next one', () => {
+        expect(channelsEndedBySwitch(channels, 1, null)).toEqual([10, 11]);
+        expect(channelsEndedBySwitch(channels, 1, 2)).toEqual([11]);
     });
 
     it('is nobody when no mode was on', () => {
-        expect(channelsEndedBySwitch([a, b], null, 1)).toEqual([]);
+        expect(channelsEndedBySwitch(channels, null, 1)).toEqual([]);
+    });
+
+    it('takes in the voice rooms under a ticked collection, by the rule the server uses', () => {
+        const rows = [
+            { id: 1, channel_type: 2, mode_ids: [1, 2] },
+            { id: 2, channel_type: 1, parent_id: 1, mode_ids: [] },
+            { id: 3, channel_type: 1, parent_id: 1, mode_ids: [], is_afk: true },
+            { id: 4, channel_type: 2, mode_ids: [1] },
+            { id: 5, channel_type: 1, parent_id: 4, mode_ids: [2] },
+        ];
+        expect(channelsEndedBySwitch(rows, 1, null), 'not the AFK channel').toEqual([2, 5]);
+        expect(channelsEndedBySwitch(rows, 1, 2), 'ticked in the next mode, under a collection it does not tick').toEqual([5]);
+    });
+});
+
+describe('where a notification goes', () => {
+    const rows = [
+        { id: 1, mode_ids: [7] },
+        { id: 2, parent_id: 1, mode_ids: [] },
+        { id: 3, mode_ids: [] },
+    ];
+
+    it('is the server, unless the list there has no row to press', () => {
+        expect(notificationNav('s', 3, rows, null)).toBe('server:s');
+        expect(notificationNav('s', 1, rows, 7)).toBe('server:s');
+        expect(notificationNav('s', 1, rows, null)).toBe('channel:s:1');
+        expect(notificationNav('s', 2, rows, null)).toBe('channel:s:2');
+    });
+
+    it('is the server for a channel this device has no row for', () => {
+        expect(notificationNav('s', 9, rows, null)).toBe('server:s');
+        expect(notificationNav('s', 1, undefined, null)).toBe('server:s');
+    });
+});
+
+describe('a frame beats a fetch already in flight', () => {
+    type Row = { id: string; active_mode_id: number | null };
+    const KEY = ['servers'];
+    const deferred = () => {
+        let resolve!: (rows: Row[]) => void;
+        const promise = new Promise<Row[]>(r => { resolve = r; });
+        return { promise, resolve };
+    };
+
+    /** A fetch that read the row before the switch, answering after its frame. */
+    async function run(adopt: (client: QueryClient) => void) {
+        const client = new QueryClient();
+        const before = deferred();
+        const after = deferred();
+        const answers = [before, after];
+        const tick = () => new Promise(r => setTimeout(r, 0));
+        client.setQueryData<Row[]>(KEY, [{ id: 's', active_mode_id: null }]);
+        // Observed, as useServers is: the read starts on subscribing.
+        const observer = new QueryObserver<Row[]>(client, { queryKey: KEY, queryFn: () => answers.shift()!.promise, staleTime: 0 });
+        const stop = observer.subscribe(() => {});
+        await tick();
+        expect(answers, 'the read is in flight').toHaveLength(1);
+        adopt(client);
+        before.resolve([{ id: 's', active_mode_id: null }]);
+        await tick();
+        after.resolve([{ id: 's', active_mode_id: 3 }]);
+        await tick();
+        stop();
+        return client.getQueryData<Row[]>(KEY)?.[0].active_mode_id;
+    }
+
+    it('and the row says what the frame said', async () => {
+        const adopted = await run(client => adoptModeFrame<Row>(client, KEY, { server_id: 's', active_mode_id: 3 }));
+        expect(adopted).toBe(3);
+    });
+
+    it('CONTROL: only setting the row loses to the fetch', async () => {
+        const lost = await run(client => client.setQueryData<Row[]>(KEY, old => applyActiveMode(old, { server_id: 's', active_mode_id: 3 })));
+        expect(lost).toBeNull();
     });
 });
 
@@ -110,12 +235,21 @@ describe('the main voice channel', () => {
         { id: 2, channel_type: 1, mode_ids: [] },
         { id: 3, channel_type: 1, mode_ids: [8] },
         { id: 4, channel_type: 0, mode_ids: [7] },
+        { id: 5, channel_type: 2, mode_ids: [7] },
+        { id: 6, channel_type: 1, parent_id: 5, mode_ids: [] },
+        { id: 7, channel_type: 2, mode_ids: [8] },
+        { id: 8, channel_type: 1, parent_id: 7, mode_ids: [] },
     ];
     const home = (id: number | null) => usableHome(mode({ id: 7, home_channel_id: id }), channels)?.id ?? null;
 
     it('may be one of the mode, or always listed', () => {
         expect(home(1)).toBe(1);
         expect(home(2)).toBe(2);
+    });
+
+    it('may be under a collection of the mode, and not under one of another', () => {
+        expect(home(6)).toBe(6);
+        expect(home(8)).toBeNull();
     });
 
     it('is nowhere when another mode has taken it, it is gone, it is text, or none is set', () => {
@@ -167,10 +301,11 @@ describe('the frames', () => {
 /** Every theme's real colours, from the stylesheet the app ships. */
 function themes(): Record<string, { surfaces: Rgb[]; primary: Rgb; texts: Rgb[] }> {
     const css = readFileSync(resolve(__dirname, '../styles/theme.css'), 'utf8');
-    const block = (selector: string) => {
-        // The LAST one: the tinted themes also share a block whose selector list
-        // ends with `[data-theme="yellow"] {`, and it holds no hue of its own.
-        const start = css.lastIndexOf(`${selector} {`);
+    /** A selector's rule. `at` -1 is its last, 0 its first: the tinted themes share a
+     *  first block whose selector list ends with `[data-theme="yellow"] {`, holding
+     *  their ladder and no hue of its own. */
+    const block = (selector: string, at: -1 | 0 = -1) => {
+        const start = at === 0 ? css.indexOf(`${selector} {`) : css.lastIndexOf(`${selector} {`);
         expect(start, selector).toBeGreaterThanOrEqual(0);
         return css.slice(start, css.indexOf('}', start));
     };
@@ -195,14 +330,23 @@ function themes(): Record<string, { surfaces: Rgb[]; primary: Rgb; texts: Rgb[] 
             texts: [value(text, '--text-normal'), value(text, '--text-muted'), value(text, '--text-link')],
         };
     }
+    // The ladder the five tinted themes share, read like everything else here: a change
+    // to these lines must change what is measured, or fail for not being understood.
+    const tinted = block('[data-theme="yellow"]', 0);
+    const primaryLine = /--bg-primary:\s*hsl\(var\(--theme-hue\) var\(--theme-sat\) ([\d.]+)%\)/.exec(tinted);
+    const secondaryLine = /--bg-secondary:\s*hsl\(var\(--theme-hue\) calc\(var\(--theme-sat\) \* ([\d.]+)\) ([\d.]+)%\)/.exec(tinted);
+    expect(primaryLine, 'the tinted themes\' --bg-primary').not.toBeNull();
+    expect(secondaryLine, 'the tinted themes\' --bg-secondary').not.toBeNull();
+    const primaryL = parseFloat(primaryLine![1]);
+    const [secondaryS, secondaryL] = [parseFloat(secondaryLine![1]), parseFloat(secondaryLine![2])];
     for (const name of ['pink', 'purple', 'green', 'orange', 'yellow']) {
         const text = block(`[data-theme="${name}"]`);
         const hue = parseFloat(token(text, '--theme-hue')!);
         const sat = parseFloat(token(text, '--theme-sat')!);
-        const primary = hsl(hue, sat, 11);
+        const primary = hsl(hue, sat, primaryL);
         out[name] = {
             primary,
-            surfaces: [primary, hsl(hue, sat * 1.2, 7)],
+            surfaces: [primary, hsl(hue, sat * secondaryS, secondaryL)],
             texts: [value(root, '--text-normal'), value(root, '--text-muted'), value(root, '--text-link')],
         };
     }

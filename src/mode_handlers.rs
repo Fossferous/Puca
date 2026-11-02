@@ -91,8 +91,16 @@ pub struct ModeEdit {
 
 #[derive(Deserialize)]
 pub struct SetActiveRequest {
-    /// The mode to turn on, or null to turn the current one off.
+    /// The mode to turn on, or an explicit null to turn the current one off. A
+    /// `deserialize_with` makes the key required (serde would otherwise read a
+    /// missing Option as None): `{}` or a misspelt key ending every call in a mode
+    /// must be a 422, not a switch.
+    #[serde(deserialize_with = "present_or_null")]
     pub mode_id: Option<i32>,
+}
+
+fn present_or_null<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<i32>, D::Error> {
+    Option::<i32>::deserialize(de)
 }
 
 #[derive(Serialize)]
@@ -122,7 +130,17 @@ fn clean_name(raw: &str) -> Result<String, (StatusCode, &'static str)> {
     if name.len() > MAX_MODE_NAME_LEN {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "That name is too long"));
     }
+    // A NUL is what Postgres refuses (a 500 otherwise); newlines push a warning off
+    // its dialog; an override makes the name read backwards in the selector.
+    if name.chars().any(|c| c.is_control() || is_bidi_control(c)) {
+        return Err((StatusCode::BAD_REQUEST, "A mode's name can't contain control characters"));
+    }
     Ok(name.to_string())
+}
+
+/// Unicode's Bidi_Control characters.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// `#rrggbb` in lower case, for the column's CHECK and for one spelling on the
@@ -175,13 +193,15 @@ pub async fn channel_mode_ids(pool: &sqlx::PgPool, server_id: &str) -> Result<Ha
 }
 
 /// Every channel, on any of this member's servers, that the mode on there hides:
-/// in a mode that is off, or under a collection that is.
+/// in a mode that is off, or under a collection that is. Never the AFK channel: an
+/// idle member is moved into it, so a mode can't hide it even through its collection.
 pub async fn channels_hidden_from(pool: &sqlx::PgPool, user_id: i64) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
     let rows: Vec<(i64,)> = sqlx::query_as(
         "SELECT c.id::bigint FROM channels c \
          JOIN servers s ON s.id = c.server_id \
          JOIN server_members sm ON sm.server_id = s.id AND sm.user_id = $1 \
-         WHERE EXISTS (SELECT 1 FROM unnest(ARRAY[c.id, c.parent_id]) AS self_or_parent(id) \
+         WHERE NOT COALESCE(c.is_afk, false) \
+           AND EXISTS (SELECT 1 FROM unnest(ARRAY[c.id, c.parent_id]) AS self_or_parent(id) \
                         WHERE EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.channel_id = self_or_parent.id) \
                           AND NOT EXISTS (SELECT 1 FROM server_mode_channels listed \
                                            WHERE listed.channel_id = self_or_parent.id AND listed.mode_id = s.active_mode_id))",
@@ -192,11 +212,13 @@ pub async fn channels_hidden_from(pool: &sqlx::PgPool, user_id: i64) -> Result<s
     Ok(rows.into_iter().map(|(c,)| c).collect())
 }
 
-/// The voice channels of `mode_id`.
+/// The voice channels of `mode_id`: ticked, or under a ticked collection.
 async fn mode_voice_channels(pool: &sqlx::PgPool, mode_id: i32) -> Result<Vec<i32>, sqlx::Error> {
     let rows: Vec<(i32,)> = sqlx::query_as(
-        "SELECT mc.channel_id FROM server_mode_channels mc JOIN channels c ON c.id = mc.channel_id \
-         WHERE mc.mode_id = $1 AND c.type = 1",
+        "SELECT c.id FROM channels c \
+         WHERE c.server_id = (SELECT server_id FROM server_modes WHERE id = $1) \
+           AND c.type = 1 AND NOT COALESCE(c.is_afk, false) \
+           AND EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.mode_id = $1 AND mc.channel_id IN (c.id, c.parent_id))",
     )
     .bind(mode_id)
     .fetch_all(pool)
@@ -211,6 +233,40 @@ fn occupants(state: &AppState, channel_id: i32) -> Vec<UserId> {
         .get(&format!("voice_{channel_id}"))
         .map(|room| room.members.clone())
         .unwrap_or_default()
+}
+
+/// Is a person in the voice channel, as far as the auto-off is concerned? A stream-only
+/// account (docs/STREAM_ONLY.md) can sit in a room unattended, so it is nobody being
+/// there. A LiveKit session with no room entry (its socket died, or the backend just
+/// restarted) is somebody: the room only says it is empty because it lost track of them.
+async fn someone_there(state: &AppState, channel_id: i32) -> bool {
+    let in_room = occupants(state, channel_id);
+    if let Some(room) = state.rooms.get(&format!("voice_{channel_id}")) {
+        if room.members.iter().any(|&member| room.reads_text(member)) {
+            return true;
+        }
+    }
+    // Collected first: no map guard may live across the awaits.
+    let sessions: Vec<i64> = state
+        .sfu_rooms
+        .get(&crate::sfu::room_name_for_channel(channel_id as i64))
+        .map(|usage| {
+            usage
+                .participants
+                .keys()
+                .filter_map(|identity| crate::sfu::user_id_from_identity(identity))
+                .filter(|user| !in_room.contains(user))
+                .collect()
+        })
+        .unwrap_or_default();
+    for user in sessions {
+        // A failed read counts them: a mode left on is harmless.
+        match get_user_channel_permissions(&state.pool, channel_id as i64, user).await {
+            ChannelPermAccess::Allowed { perms, .. } if perms.is_stream_only() => {}
+            _ => return true,
+        }
+    }
+    false
 }
 
 async fn is_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<bool, sqlx::Error> {
@@ -369,8 +425,10 @@ async fn check_edit(state: &AppState, server_id: &str, caller: i64, edit: ModeEd
         None => None,
         Some("") => Some(None),
         Some(id) => {
-            let file: Option<(String, i64)> = sqlx::query_as(
-                "SELECT mime_type, size_bytes FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+            // id::text is what gets stored: the cast accepts upper case, braces and
+            // missing hyphens, and every guard on the column compares text.
+            let file: Option<(String, String, i64)> = sqlx::query_as(
+                "SELECT id::text, mime_type, size_bytes FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
             )
             .bind(id)
             .bind(caller as i32)
@@ -379,13 +437,13 @@ async fn check_edit(state: &AppState, server_id: &str, caller: i64, edit: ModeEd
             .unwrap_or(None);
             match file {
                 None => return Err(refuse(StatusCode::FORBIDDEN, "A background must be a file you uploaded")),
-                Some((mime, _)) if !BACKGROUND_TYPES.contains(&mime.as_str()) => {
+                Some((_, mime, _)) if !BACKGROUND_TYPES.contains(&mime.as_str()) => {
                     return Err(refuse(StatusCode::BAD_REQUEST, "A background must be a JPEG, PNG or WebP picture"))
                 }
-                Some((_, size)) if size > MAX_BACKGROUND_BYTES => {
+                Some((_, _, size)) if size > MAX_BACKGROUND_BYTES => {
                     return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE, "That picture is too large for a background"))
                 }
-                Some(_) => Some(Some(id.to_string())),
+                Some((canonical, _, _)) => Some(Some(canonical)),
             }
         }
     };
@@ -520,23 +578,12 @@ async fn commit_edit(
     let work = commit_then(tx, async move {
         push_to_members(&state, &server_id, ServerMessage::ServerModesEdited { server_id: server_id.clone() }).await;
         if let Some((file, caller)) = reclaim {
-            reclaim_background(&state.pool, &file, caller).await;
+            crate::upload_handlers::reclaim_file(&state.pool, &file, caller).await;
         }
     })
     .await?;
     let _ = work.await;
     Ok(())
-}
-
-/// Delete a replaced background's file, CALLER-scoped like the server icon's
-/// reclaim (so an edit can only ever delete the caller's own upload), and only
-/// when nothing else points at it: a file can back two modes, or a mode and an
-/// icon. A failed check keeps the file: an orphan is harmless, a broken picture
-/// is not.
-async fn reclaim_background(pool: &sqlx::PgPool, file_id: &str, caller: i64) {
-    if matches!(crate::upload_handlers::file_is_referenced(pool, file_id).await, Ok(false)) {
-        crate::upload_handlers::remove_file(pool, file_id, caller).await;
-    }
 }
 
 /// Create a mode.
@@ -648,6 +695,22 @@ pub async fn update_mode(
         return (StatusCode::NOT_FOUND, "No such mode").into_response();
     };
     let background = checked.background.clone().unwrap_or_else(|| old_background.clone());
+    // Turn off when empty ticked again: the room may have emptied while it was off,
+    // so it starts a fresh window rather than turning off on the next tick. A mode
+    // nobody has joined stays unjoined.
+    if !auto_off && checked.auto_off == Some(true) {
+        if let Err(e) = sqlx::query(
+            "UPDATE servers SET active_mode_occupied_at = NOW() \
+             WHERE id = $1 AND active_mode_id = $2 AND active_mode_occupied_at IS NOT NULL",
+        )
+        .bind(&server_id)
+        .bind(mode_id)
+        .execute(&mut *tx)
+        .await
+        {
+            return failed(e);
+        }
+    }
     if let Err(e) = sqlx::query(
         "UPDATE server_modes SET name = $1, background_file_id = $2, accent_color = $3, \
          home_channel_id = $4, auto_off = $5 WHERE id = $6",
@@ -676,7 +739,7 @@ pub async fn update_mode(
 }
 
 /// Delete a mode. Deleting the mode that is on turns it off first, with
-/// everything turning it off means.
+/// everything turning it off means, so that also takes Switch Modes.
 pub async fn delete_mode(
     State(state): State<Arc<AppState>>,
     Path((server_id, mode_id)): Path<(String, i32)>,
@@ -685,6 +748,8 @@ pub async fn delete_mode(
     if let Some(refused) = require_manage_channels(&state, &server_id, claims.sub).await {
         return refused;
     }
+    // Before the transaction: the resolver takes the pool (see check_edit).
+    let may_switch = user_has_permission(&state.pool, &server_id, claims.sub, Permissions::SWITCH_MODES).await;
     let failed = |e: sqlx::Error| {
         tracing::error!("delete_mode: {:?}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete the mode").into_response()
@@ -716,6 +781,9 @@ pub async fn delete_mode(
         return (StatusCode::NOT_FOUND, "No such mode").into_response();
     };
     let was_on = active == Some(mode_id);
+    if was_on && !may_switch {
+        return (StatusCode::FORBIDDEN, "This mode is on: deleting it would turn it off, which takes the Switch Modes permission").into_response();
+    }
     let hidden = if was_on {
         match channels_hidden_by(&mut tx, mode_id, None).await {
             Ok(h) => h,
@@ -744,7 +812,7 @@ pub async fn delete_mode(
             push_to_members(&state, &server_id, ServerMessage::ServerModesEdited { server_id: server_id.clone() }).await;
             log_audit_action(&state.pool, &server_id, "mode_delete", caller, None, Some("mode"), Some(&name)).await;
             if let Some(old) = background {
-                reclaim_background(&state.pool, &old, caller).await;
+                crate::upload_handlers::reclaim_file(&state.pool, &old, caller).await;
             }
         }
     };
@@ -757,16 +825,22 @@ pub async fn delete_mode(
 }
 
 /// The voice channels a switch from `previous` to `next` hides: in the mode that
-/// was on and not in the one coming on. A channel both share keeps its call.
+/// was on (ticked, or under a ticked collection) and not listed under the one coming
+/// on, by the same rule the channel list uses. A channel both share keeps its call.
 async fn channels_hidden_by(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     previous: i32,
     next: Option<i32>,
 ) -> Result<Vec<i32>, sqlx::Error> {
     let rows: Vec<(i32,)> = sqlx::query_as(
-        "SELECT mc.channel_id FROM server_mode_channels mc JOIN channels c ON c.id = mc.channel_id \
-         WHERE mc.mode_id = $1 AND c.type = 1 \
-           AND mc.channel_id NOT IN (SELECT channel_id FROM server_mode_channels WHERE mode_id = $2)",
+        "SELECT c.id FROM channels c \
+         WHERE c.server_id = (SELECT server_id FROM server_modes WHERE id = $1) \
+           AND c.type = 1 AND NOT COALESCE(c.is_afk, false) \
+           AND EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.mode_id = $1 AND mc.channel_id IN (c.id, c.parent_id)) \
+           AND EXISTS (SELECT 1 FROM unnest(ARRAY[c.id, c.parent_id]) AS self_or_parent(id) \
+                        WHERE EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.channel_id = self_or_parent.id) \
+                          AND NOT EXISTS (SELECT 1 FROM server_mode_channels listed \
+                                           WHERE listed.channel_id = self_or_parent.id AND listed.mode_id = $2))",
     )
     .bind(previous)
     .bind(next)
@@ -791,13 +865,27 @@ struct Switch {
 /// the switch hid, write the audit row. Answers how many people were taken out of
 /// each channel.
 async fn settle(state: &Arc<AppState>, switch: Switch) -> HashMap<i32, usize> {
+    // The STORED value, as games::settle_switch: two switches settle in tasks nothing
+    // orders, and a client keeps whichever frame it got last, so both must say what
+    // is in the row. `previous_mode_id` stays this switch's own: it names what ended.
+    let stored = match sqlx::query_scalar::<_, Option<i32>>("SELECT active_mode_id FROM servers WHERE id = $1")
+        .bind(&switch.server_id)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::error!("modes: re-reading the mode of server {} failed: {:?}", switch.server_id, e);
+            switch.next
+        }
+    };
     // First, so a client knows why the RoomLeft that follows arrived.
     push_to_members(
         state,
         &switch.server_id,
         ServerMessage::ServerModeChanged {
             server_id: switch.server_id.clone(),
-            active_mode_id: switch.next.map(|m| m as i64),
+            active_mode_id: stored.map(|m| m as i64),
             previous_mode_id: switch.previous.map(|m| m as i64),
             by: switch.by,
         },
@@ -812,14 +900,43 @@ async fn settle(state: &Arc<AppState>, switch: Switch) -> HashMap<i32, usize> {
         .flat_map(|&channel| occupants(state, channel).into_iter().map(move |user| (channel, user)))
         .map(|(channel, user)| async move {
             let room = format!("voice_{channel}");
-            let out = crate::ws::evict_user_from_voice_room(state, &room, user, true, crate::ws::SelfNotice::Gone).await;
-            (channel, out)
+            let out = crate::ws::evict_user_from_voice_room(state, &room, user, true, crate::ws::SelfNotice::ModeEnded).await;
+            (channel, user, out)
         });
     let mut gone: HashMap<i32, usize> = HashMap::new();
-    for (channel, out) in futures::future::join_all(evictions).await {
+    let mut cut: HashMap<i32, std::collections::BTreeSet<i64>> = HashMap::new();
+    for (channel, user, out) in futures::future::join_all(evictions).await {
         if out {
             *gone.entry(channel).or_default() += 1;
+            cut.entry(channel).or_default().insert(user);
         }
+    }
+    // A LiveKit session whose socket is not in voice_<id> (it died, or the backend just
+    // restarted) has no room entry for the eviction above to find: update_channel's
+    // transport flip has the same case. Collected first: no map guard across the awaits.
+    let sfu_only: Vec<(i32, i64)> = switch
+        .hidden
+        .iter()
+        .flat_map(|&channel| {
+            let done = cut.remove(&channel).unwrap_or_default();
+            crate::sfu::sfu_only_to_cut(true, &done, state.sfu_rooms.get(&crate::sfu::room_name_for_channel(channel as i64)).as_deref())
+                .into_iter()
+                .map(move |user| (channel, user))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let cuts = sfu_only.into_iter().map(|(channel, user)| async move {
+        (channel, crate::sfu::evict_user_from_channel(state, channel as i64, user).await)
+    });
+    for (channel, out) in futures::future::join_all(cuts).await {
+        if out.tried > 0 {
+            *gone.entry(channel).or_default() += 1;
+        }
+    }
+    // A socket that died in one of these rooms is out of it already, so nothing above
+    // found it, and its replay on reconnecting would put it back in the ended call.
+    for &channel in &switch.hidden {
+        crate::ws::tombstone_dropped_from(state, &format!("voice_{channel}"), crate::ws::MODE_ENDED);
     }
     let total: usize = gone.values().sum();
     let details = if total > 0 { format!("{}, {} disconnected", switch.details, total) } else { switch.details };
@@ -988,8 +1105,11 @@ pub async fn call_everyone_back(
     // Listed right now: in this mode, or in none. A main channel hidden since
     // (another mode took it over) is nowhere anyone could follow.
     let elsewhere: bool = match sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM server_mode_channels WHERE channel_id = $1) \
-            AND NOT EXISTS (SELECT 1 FROM server_mode_channels WHERE channel_id = $1 AND mode_id = $2)",
+        "SELECT EXISTS (SELECT 1 FROM channels c, unnest(ARRAY[c.id, c.parent_id]) AS self_or_parent(id) \
+                         WHERE c.id = $1 \
+                           AND EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.channel_id = self_or_parent.id) \
+                           AND NOT EXISTS (SELECT 1 FROM server_mode_channels listed \
+                                            WHERE listed.channel_id = self_or_parent.id AND listed.mode_id = $2))",
     )
     .bind(home)
     .bind(mode_id)
@@ -1054,14 +1174,72 @@ pub async fn auto_off_after_restart(state: &AppState) {
     }
 }
 
+/// Someone joined the voice room of `channel_id`: if it belongs to the mode on there,
+/// the mode has been used, however short the visit. The tick alone would miss one that
+/// falls between two of its passes, and that mode would then never turn itself off.
+pub async fn note_voice_join(state: &AppState, channel_id: i64) {
+    if let Err(e) = sqlx::query(
+        "UPDATE servers s SET active_mode_occupied_at = NOW() \
+         FROM channels c JOIN server_modes m ON m.server_id = c.server_id \
+         WHERE c.id = $1 AND s.id = c.server_id AND m.id = s.active_mode_id \
+           AND (m.home_channel_id = c.id \
+                OR EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.mode_id = m.id AND mc.channel_id IN (c.id, c.parent_id)))",
+    )
+    .bind(channel_id as i32)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::error!("modes: stamping a join of channel {} failed: {:?}", channel_id, e);
+    }
+}
+
+/// A channel made AFK: it leaves its modes, and stops being any mode's main channel.
+/// An idle member is moved into it, so it can't be hidden, and a voice move refuses to
+/// take anyone out of it, so it is nowhere to call people back to.
+pub async fn release_afk_channel(state: &AppState, server_id: &str, channel_id: i32) {
+    let changed: Result<(i64, i64), sqlx::Error> = sqlx::query_as(
+        "WITH listed AS (DELETE FROM server_mode_channels WHERE channel_id = $1 RETURNING 1), \
+              main AS (UPDATE server_modes SET home_channel_id = NULL WHERE home_channel_id = $1 RETURNING 1) \
+         SELECT (SELECT COUNT(*) FROM listed), (SELECT COUNT(*) FROM main)",
+    )
+    .bind(channel_id)
+    .fetch_one(&state.pool)
+    .await;
+    match changed {
+        Ok((0, 0)) => {}
+        Ok(_) => announce_edit(state, server_id).await,
+        Err(e) => tracing::error!("modes: taking AFK channel {} out of its modes failed: {:?}", channel_id, e),
+    }
+}
+
+/// Does a mode name this channel (or, for a collection, a subchannel the delete takes
+/// with it)? Read before a delete, whose foreign keys then clean up without a word:
+/// a mode editor still holding the id would have every save refused.
+pub async fn channel_is_named_by_a_mode(pool: &sqlx::PgPool, channel_id: i32) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM server_mode_channels mc \
+                         WHERE mc.channel_id IN (SELECT id FROM channels WHERE id = $1 OR parent_id = $1)) \
+             OR EXISTS (SELECT 1 FROM server_modes m \
+                         WHERE m.home_channel_id IN (SELECT id FROM channels WHERE id = $1 OR parent_id = $1))",
+    )
+    .bind(channel_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("modes: reading whether a mode names channel {} failed: {:?}", channel_id, e);
+        false
+    })
+}
+
 /// One pass of the auto-off (a once-a-minute task in main.rs). A failed read
 /// waits for the next tick: nothing here is urgent, and a mode left on is
-/// harmless.
+/// harmless. Stamps every active mode, opted in or not, so a mode opted back in
+/// knows whether anyone ever came.
 pub async fn auto_off_tick(state: &Arc<AppState>) {
     let rows: Vec<(String, i32, Option<i32>, String, bool, bool)> = match sqlx::query_as(
         "SELECT s.id, m.id, m.home_channel_id, m.name, s.active_mode_occupied_at IS NOT NULL, \
-                COALESCE(s.active_mode_occupied_at < NOW() - make_interval(mins => $1), false) \
-         FROM servers s JOIN server_modes m ON m.id = s.active_mode_id WHERE m.auto_off",
+                m.auto_off AND COALESCE(s.active_mode_occupied_at < NOW() - make_interval(mins => $1), false) \
+         FROM servers s JOIN server_modes m ON m.id = s.active_mode_id",
     )
     .bind(AUTO_OFF_EMPTY_MINUTES)
     .fetch_all(&state.pool)
@@ -1084,7 +1262,13 @@ pub async fn auto_off_tick(state: &Arc<AppState>) {
         // The main channel may be an always-listed one, in no mode. People gathered
         // there are still playing.
         voice.extend(home);
-        let occupied = voice.iter().any(|&channel| !occupants(state, channel).is_empty());
+        let mut occupied = false;
+        for &channel in &voice {
+            if someone_there(state, channel).await {
+                occupied = true;
+                break;
+            }
+        }
         match auto_off_verdict(occupied, seen, stale) {
             AutoOff::Keep => {}
             AutoOff::Touch => {
@@ -1115,7 +1299,8 @@ async fn turn_off_empty(state: &Arc<AppState>, server_id: &str, mode_id: i32, na
     };
     let done = sqlx::query(
         "UPDATE servers SET active_mode_id = NULL, active_mode_occupied_at = NULL \
-         WHERE id = $1 AND active_mode_id = $2 AND active_mode_occupied_at < NOW() - make_interval(mins => $3)",
+         WHERE id = $1 AND active_mode_id = $2 AND active_mode_occupied_at < NOW() - make_interval(mins => $3) \
+           AND EXISTS (SELECT 1 FROM server_modes WHERE id = $2 AND auto_off)",
     )
     .bind(server_id)
     .bind(mode_id)

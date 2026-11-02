@@ -823,17 +823,21 @@ pub async fn update_server_settings(
     // remove it on their behalf). An empty string clears the icon and is
     // allowed; any non-empty id must resolve to an upload owned by claims.sub.
     // An invalid-uuid string fails the ::uuid cast → None → refused.
+    //
+    // id::text is what gets stored: the cast accepts other spellings of a uuid, and
+    // every guard on the column compares text.
+    let mut canonical_icon: Option<String> = None;
     if let Some(ref icon_id) = payload.icon_file_id {
         if !icon_id.is_empty() {
-            let owns: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+            let owns: Option<(String,)> = sqlx::query_as(
+                "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
             )
             .bind(icon_id)
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
             .unwrap_or(None);
-            if owns.is_none() {
+            let Some((canonical,)) = owns else {
                 tracing::warn!(
                     "update_server_settings: user {} tried to set server {} icon to file {} they do not own",
                     claims.sub, server_id, icon_id
@@ -843,7 +847,8 @@ pub async fn update_server_settings(
                     "Server icon must be a file you uploaded",
                 )
                     .into_response();
-            }
+            };
+            canonical_icon = Some(canonical);
         }
     }
 
@@ -1005,16 +1010,16 @@ pub async fn update_server_settings(
         if any {
             qb.push(", ");
         }
-        qb.push("icon_file_id = ").push_bind(icon_id);
+        qb.push("icon_file_id = ").push_bind(canonical_icon.as_ref().unwrap_or(icon_id));
         any = true;
     }
 
     // M15 deletion hook, mirroring the avatar one: remember the icon we are
     // about to replace so its blob can be reclaimed after a successful update.
-    // A server icon has exactly one referent, so unlike a message attachment
-    // (which forwarding can duplicate) removing it is unambiguous. Reclaim is
-    // CALLER-scoped (see the remove_file call below) — never the old blob's
-    // uploader — so replacing an icon can only ever delete the caller's own file.
+    // The reclaim keeps a file that also backs something else, like a mode's
+    // background. It is CALLER-scoped (see the reclaim_file call below) — never the
+    // old blob's uploader — so replacing an icon can only ever delete the caller's
+    // own file.
     let old_icon: Option<(Option<String>,)> = if payload.icon_file_id.is_some() {
         sqlx::query_as("SELECT icon_file_id FROM servers WHERE id = $1")
             .bind(&server_id)
@@ -1086,7 +1091,7 @@ pub async fn update_server_settings(
                     // icon was always uploaded by the caller, so caller-scoped
                     // reclaim still frees it; an icon uploaded by someone else is
                     // left as a (GC-able) orphan rather than deleted.
-                    crate::upload_handlers::remove_file(&state.pool, old, claims.sub).await;
+                    crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                 }
             }
             StatusCode::OK.into_response()

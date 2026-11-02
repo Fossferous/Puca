@@ -190,11 +190,11 @@ import { GAME_NAMES } from '../api/games/gameWords';
 import { ActivityPicker } from './games/ActivityPicker';
 import { ActivityNotice } from './games/ActivityNotice';
 import { ModeNotice, ModeSelector } from './modes/ModeSelector';
-import { endedCallsWarning, modeMenuItems } from './modes/modeMenu';
+import { endedCallsWarning, modeMenuItems, noticeJoinName } from './modes/modeMenu';
 import { useModeLook } from './modes/useModeLook';
 import {
-    applyActiveMode, callEveryoneBack, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
-    listedNow, setActiveMode, shownByMode, shownWithParent, usableHome, type ServerModes,
+    adoptModeFrame, callEveryoneBack, channelInMode, channelsEndedBySwitch, parseServerModeChanged, parseServerModesEdited,
+    listedNow, notificationNav, setActiveMode, shownByMode, shownWithParent, usableHome, type ServerModes,
 } from '../api/serverModes';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
@@ -652,7 +652,6 @@ export function Chat({ onLogout }: ChatProps) {
     const activeModeId = currentServer?.active_mode_id ?? null;
     const { data: modesData } = useServerModes(currentServer?.id || '', modesSupported);
     const activeMode = modesData?.modes.find(m => m.id === activeModeId) ?? null;
-    const modeLookStyle = useModeLook(activeMode);
     // What the mode that is on lists. Only for lists of places to go: `channels`
     // stays whole, so a #mention or a notification can still open a hidden one.
     const modeShownChannels = useMemo(
@@ -874,6 +873,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
     const currentVoiceChannelRef = useRef<Channel | null>(null);
+    // The mode a ServerModeChanged just ended, for the RoomLeft that follows it.
+    const endedModeNameRef = useRef<string | null>(null);
     useEffect(() => { currentVoiceChannelRef.current = currentVoiceChannel; }, [currentVoiceChannel]);
 
     // Members of the server the VOICE CHANNEL belongs to — which is not always
@@ -1322,6 +1323,9 @@ export function Chat({ onLogout }: ChatProps) {
     // Tasks view is built for.
     const notesInApp = isTauri() && !isMobile;
     const notesOnScreen = notesInApp && showNotesView;
+    // A mode's look belongs to its server's own screen. These paint over that slot with
+    // currentServer still set, and the accent is on the document.
+    const modeLookStyle = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);
     // The message list can be what the shared scroller holds and still not be
     // SEEN: Notes lies over the chat as a view of its own, without touching
     // the scroller, so showingMessageList — which the scroll state follows —
@@ -1607,11 +1611,31 @@ export function Chat({ onLogout }: ChatProps) {
     // `handleChannelClick` directly would capture whichever versions existed
     // when the handler was registered, and a click could then jump to a channel
     // list from minutes ago.
-    const openChannelRef = useRef<(channelId: number) => void>(() => { });
+    const openChannelRef = useRef<(channelId: number, serverId?: string) => void>(() => { });
     useEffect(() => {
-        openChannelRef.current = (channelId: number) => {
+        openChannelRef.current = (channelId: number, serverId?: string) => {
             const ch = channels.find(c => c.id === channelId);
-            if (ch) handleChannelClick(ch);
+            if (ch) {
+                handleChannelClick(ch);
+                return;
+            }
+            // Another server's channel. Fetched rather than left to that server's list:
+            // a channel a mode hides has no row there to press.
+            const server = serverId ? servers.find(s => s.id === serverId) : undefined;
+            if (!server) return;
+            void queryClient.fetchQuery({
+                queryKey: keys.channels(server.id),
+                queryFn: () => listChannels(server.id),
+                staleTime: 30_000,
+            }).then((list: Channel[]) => {
+                const target = list.find(c => c.id === channelId);
+                if (!target) return;
+                setShowFriendsPanel(false);
+                setShowDevicesView(false);
+                setShowNotesView(false);
+                switchServer(server);
+                handleChannelClick(target);
+            }).catch(() => { /* stays where it is, like a click on a channel that is gone */ });
         };
     });
 
@@ -2497,7 +2521,9 @@ export function Chat({ onLogout }: ChatProps) {
         async function loadCollectionMessages() {
             try {
                 // Get all subchannels of this collection
-                const subchannels = channels.filter(c => c.parent_id === currentCollection!.id && c.channel_type === 0);
+                // Not one a mode hides: the list does not show it, so neither does its feed.
+                const subchannels = channels.filter(c => c.parent_id === currentCollection!.id && c.channel_type === 0
+                    && shownByMode(c, activeModeId));
                 console.debug('[Chat] Loading collection messages for', subchannels.length, 'subchannels');
 
                 if (subchannels.length === 0) {
@@ -2545,7 +2571,7 @@ export function Chat({ onLogout }: ChatProps) {
         loadCollectionMessages();
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
-    }, [currentCollection?.id, channels]);
+    }, [currentCollection?.id, channels, activeModeId]);
 
     // Presence (UserOnline / UserOffline / UserStatus) is no longer patched
     // into the members query here: the presence store hears every frame
@@ -2775,7 +2801,7 @@ export function Chat({ onLogout }: ChatProps) {
             // this device was in that call: say why it ended rather than
             // dropping silently. VoicePanel's own RoomLeft handler does the
             // teardown, exactly as for any eviction.
-            const notice = roomLeftNotice(msg.payload);
+            const notice = roomLeftNotice(msg.payload, endedModeNameRef.current);
             if (notice) showToast(notice);
         };
 
@@ -2960,7 +2986,10 @@ export function Chat({ onLogout }: ChatProps) {
                 fetchVoiceUsers(serverId).catch(() => ({ voice_users: [] })),
             ]);
             const active = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === serverId)?.active_mode_id;
-            return list.filter(c => c.channel_type === 1 && shownByMode(c, active)).map(c => ({
+            // What the channel list shows: docs/EMBEDDING.md.
+            const occupants = (id: number) => voice.voice_users.filter(v => v.room_id === `voice_${id}`).length;
+            const here = { voiceChannelId: currentVoiceChannelRef.current?.id, occupants };
+            return list.filter(c => c.channel_type === 1 && listedNow(c, list, active, here)).map(c => ({
                 id: c.id,
                 name: c.name,
                 canConnect: hasPerm(c.my_permissions, PERM.CONNECT),
@@ -3050,10 +3079,16 @@ export function Chat({ onLogout }: ChatProps) {
                 title: `${p.author.username} sent a message`,
                 isOwn: false,           // already returned above if it were ours
                 isMuted: muted,
-                // Android: collapse per server, tap lands on that server.
+                // Android: collapse per server, tap lands on that server (or on the
+                // channel, when a mode leaves no row for it there).
                 notifyKey: `chan:${p.server_id}`,
-                nav: `server:${p.server_id}`,
-                onActivate: () => openChannelRef.current(p.channel_id),
+                nav: notificationNav(
+                    p.server_id,
+                    p.channel_id,
+                    queryClient.getQueryData<Channel[]>(keys.channels(p.server_id)),
+                    queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === p.server_id)?.active_mode_id,
+                ),
+                onActivate: () => openChannelRef.current(p.channel_id, p.server_id),
             });
             if (chatOnScreen && currentChannel?.id === p.channel_id) return;
             // Rail bubble: live nudge for anything not on screen. Deliberately
@@ -3068,13 +3103,13 @@ export function Chat({ onLogout }: ChatProps) {
             if (appIsForeground() && loadSettings().messageToasts) {
                 pushMessageToast({
                     title: `${p.author.username} sent a message`,
-                    onClick: () => openChannelRef.current(p.channel_id),
+                    onClick: () => openChannelRef.current(p.channel_id, p.server_id),
                 });
             }
         };
         wsClient.on('MessageNotification', handleMessageNotification);
         return () => wsClient.off('MessageNotification', handleMessageNotification);
-    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen]);
+    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen, queryClient]);
 
     // Somebody joined a server you are in.
     //
@@ -4106,25 +4141,17 @@ export function Chat({ onLogout }: ChatProps) {
     }, [queryClient]);
     // A server's mode was switched: its channels and its look change at once, for
     // everyone online, with no reload. Someone in a voice channel the switch hid
-    // is disconnected by the server right after this frame, so this is where they
-    // get told why. Their voice panel just sees a RoomLeft.
+    // gets a RoomLeft right after this frame, whose reason says why; this remembers
+    // what to call the mode that ended.
     const [modeNotice, setModeNotice] = useState<{ serverId: string; modeId: number } | null>(null);
     useEffect(() => {
         const onSwitched = (msg: ServerMessage) => {
             const f = parseServerModeChanged(msg as { type: string; payload?: unknown });
             if (!f) return;
             const known = queryClient.getQueryData<ServerModes>(keys.modes(f.server_id))?.modes;
-            queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => applyActiveMode(old, f));
+            endedModeNameRef.current = known?.find(m => m.id === f.previous_mode_id)?.name ?? null;
+            adoptModeFrame<Server>(queryClient, keys.servers, f);
             void queryClient.invalidateQueries({ queryKey: keys.modes(f.server_id) });
-            // From the call's own channel row, which this device always has: the modes
-            // of a server it is only calling on may long have left the cache.
-            const inCall = currentVoiceChannelRef.current;
-            const callModes = inCall?.server_id === f.server_id ? inCall.mode_ids : undefined;
-            if (f.previous_mode_id !== null && callModes?.includes(f.previous_mode_id)
-                && !(f.active_mode_id !== null && callModes.includes(f.active_mode_id))) {
-                const name = known?.find(m => m.id === f.previous_mode_id)?.name ?? 'The mode';
-                showToast(`${name} ended, so this call ended.`);
-            }
             setModeNotice(prev => {
                 const quiet = f.active_mode_id === null || f.by === currentUserId || isServerMuted(f.server_id);
                 if (quiet) return prev?.serverId === f.server_id ? null : prev;
@@ -4144,7 +4171,10 @@ export function Chat({ onLogout }: ChatProps) {
         };
         // A switch while this device had no socket: the server rows say what is on
         // now (keys.servers is the prefix of each server's modes and channels too).
-        const onConnected = () => { void queryClient.invalidateQueries({ queryKey: keys.servers }); };
+        const onConnected = () => {
+            endedModeNameRef.current = null;
+            void queryClient.invalidateQueries({ queryKey: keys.servers });
+        };
         wsClient.on('ServerModeChanged', onSwitched);
         wsClient.on('ServerModesEdited', onEdited);
         wsClient.on('ChannelPermsChanged', onPermsChanged);
@@ -4165,7 +4195,7 @@ export function Chat({ onLogout }: ChatProps) {
 
     const switchMode = async (modeId: number | null) => {
         if (!currentServer || !modesData || modeId === activeModeId) return;
-        const people = channelsEndedBySwitch(modesData.modes, activeModeId, modeId)
+        const people = channelsEndedBySwitch(channels, activeModeId, modeId)
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
         if (warning && !confirm(warning)) return;
@@ -4181,7 +4211,8 @@ export function Chat({ onLogout }: ChatProps) {
             const { moved, skipped } = await callEveryoneBack(currentServer.id);
             // The server moves everyone but the person asking: walk over like them.
             const inCall = currentVoiceChannelRef.current;
-            if (inCall && inCall.id !== activeHome.id && activeMode?.channel_ids.includes(inCall.id)) {
+            const row = inCall && (channels.find(c => c.id === inCall.id) ?? inCall);
+            if (row && activeMode && row.id !== activeHome.id && channelInMode(row, channels, activeMode.id)) {
                 handleChannelClick(activeHome);
             }
             const held = skipped > 0 ? ` ${skipped} could not be moved: ranked at or above you, or not allowed in.` : '';
@@ -4190,7 +4221,7 @@ export function Chat({ onLogout }: ChatProps) {
             showToast("Couldn't call everyone back. Try again in a moment.");
         }
     };
-    const listed = (c: Channel): boolean => listedNow(c, activeModeId, {
+    const listed = (c: Channel): boolean => listedNow(c, channels, activeModeId, {
         openChannelId: currentChannel?.id ?? currentCollection?.id,
         voiceChannelId: currentVoiceChannel?.id,
         occupants: (id) => getVoiceUsersInRoom(`voice_${id}`).length,
@@ -4312,6 +4343,7 @@ export function Chat({ onLogout }: ChatProps) {
             channels,
             rosterOf: (channelId) => getVoiceUsersInRoom(`voice_${channelId}`),
             canMoveVoiceMembers,
+            isListed: listed,
         })
         : null;
     const userContextMenuVoiceChannel = userContextMenuVoice?.voiceChannel ?? null;
@@ -4430,6 +4462,16 @@ export function Chat({ onLogout }: ChatProps) {
                         .catch(() => { /* the deferred target waits for the next attempt */ });
                 }
                 // else: refetched and still absent — genuinely gone; stay put.
+            } else if (target.startsWith('channel:')) {
+                // A channel the server's list would not show (api/serverModes.ts
+                // notificationNav). 'channel:<server id>:<channel id>'.
+                const [, serverId, channelId] = target.split(':');
+                if (servers.some(sv => sv.id === serverId)) {
+                    openChannelRef.current(Number(channelId), serverId);
+                    if (isMobile) setMobilePanel('chat');
+                } else if (isServersLoading || servers.length === 0) {
+                    deferNav(target);
+                }
             } else if (target.startsWith('server:')) {
                 const server = servers.find(sv => sv.id === target.slice(7));
                 if (server) {
@@ -5258,6 +5300,7 @@ export function Chat({ onLogout }: ChatProps) {
                     <ModeSelector
                         data={modesData}
                         activeModeId={activeModeId}
+                        homeName={activeHome?.name ?? null}
                         onOpen={(at) => modesData && showContextMenuAt(at, modeMenuItems({
                             data: modesData,
                             activeModeId,
@@ -5926,11 +5969,11 @@ export function Chat({ onLogout }: ChatProps) {
 
                 {/* "<mode> is on - Join <channel>" (docs/SERVER_MODES.md): the
                     activity notice's shape. No focus taken, no sound. */}
-                {modeNotice && noticeMode && (
+                {modeNotice && noticeMode && noticeServer?.active_mode_id === modeNotice.modeId && (
                     <ModeNotice
                         modeName={noticeMode.name}
-                        otherServerName={modeNotice.serverId !== currentServer?.id ? noticeServer?.name ?? 'another server' : null}
-                        joinName={noticeHome?.name ?? null}
+                        otherServerName={modeNotice.serverId !== currentServer?.id ? noticeServer.name : null}
+                        joinName={noticeJoinName(noticeHome, currentVoiceChannel?.id)}
                         onJoin={() => {
                             setModeNotice(null);
                             if (noticeHome) handleChannelClick(noticeHome);

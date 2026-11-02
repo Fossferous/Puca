@@ -225,6 +225,8 @@ describe('what each device says', () => {
         expect(roomLeftNotice({ room_id: 'voice_42', reason: 'moved' })).toBe('You moved the call to another device');
         // An ordinary RoomLeft (own hang-up, exclusivity, a kick) says nothing new.
         expect(roomLeftNotice(ROOM_LEFT_PLAIN.payload)).toBeNull();
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'mode_ended' }, 'Clocktower')).toBe('Clocktower ended, so this call ended.');
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'mode_ended' }), 'a device that missed the frame').toBe('The mode ended, so this call ended.');
         expect(roomLeftNotice({ room_id: 'voice_42', reason: 'something-else' })).toBeNull();
     });
 

@@ -192,7 +192,7 @@ Every command goes through the same code as the app's own controls:
 |---|---|---|
 | `apiVersion` | `1` | |
 | `getState()` | `EmbedState` | The snapshot below, now. |
-| `listVoiceChannels(serverId)` | `Promise<{ id, name, canConnect, members: { id, username }[] }[]>` | The server's voice channels and who is in each. Empty when signed out. |
+| `listVoiceChannels(serverId)` | `Promise<{ id, name, canConnect, members: { id, username }[] }[]>` | The voice channels the app's own list shows right now, and who is in each: a server mode hides some (docs/SERVER_MODES.md), but never one with people in it or the call this device is in. Empty when signed out. |
 | `joinVoice(serverId, channelId)` | `Promise<{ ok: true } \| { ok: false, error }>` | Joins that channel's call, or moves this device's call there (mute and deafen come along, as with a click). `ok` means the call is starting; `state.call.connected` says when it has. A warning the app shows before some joins can hold it back until the person opens the app. |
 | `leaveVoice()` | `boolean` | Leaves the call, as **Disconnect**. |
 | `setMuted(muted)` | `boolean` (got there) | Presses **Mute** if needed. Refused while deafened, in an AFK channel, or without SPEAK, as the button is. |

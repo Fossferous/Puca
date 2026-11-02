@@ -169,14 +169,17 @@ export function ownVoiceBannerText(s: OwnVoiceState): string {
 
 /**
  * What the DISPLACED device says when its call was ended from another device
- * of the account (a RoomLeft carrying `reason`). Null for every other RoomLeft
- * — a hang-up, voice exclusivity, a kick — which keep their old behaviour.
+ * of the account, or by the server mode it belonged to (a RoomLeft carrying
+ * `reason`). Null for every other RoomLeft — a hang-up, voice exclusivity, a
+ * kick — which keep their old behaviour. `modeName`: the mode that just ended,
+ * when this device saw it end; a device whose socket was down did not.
  */
-export function roomLeftNotice(payload: unknown): string | null {
+export function roomLeftNotice(payload: unknown, modeName?: string | null): string | null {
     if (!payload || typeof payload !== 'object') return null;
     const p = payload as { reason?: unknown; by?: unknown };
     if (p.reason === 'moved') return `You moved the call to ${nameDevice(p.by)}`;
     if (p.reason === 'left_elsewhere') return `You left voice from ${nameDevice(p.by)}`;
+    if (p.reason === 'mode_ended') return `${modeName ?? 'The mode'} ended, so this call ended.`;
     return null;
 }
 

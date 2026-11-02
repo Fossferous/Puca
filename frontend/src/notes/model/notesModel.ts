@@ -95,6 +95,9 @@ export interface NoteSource {
     serverId?: string;
     serverName?: string;
     myPerms?: number;
+    /** A server mode hides this channel right now. Display only: a prune must keep
+     *  seeing it, or a mode switch would read as the channel having been deleted. */
+    hiddenByMode?: boolean;
     resolveUserName?: (id: number) => string | undefined;
     /** The list row's own counts — shown until the tasks themselves load. */
     totalTasks?: number;
@@ -167,6 +170,7 @@ export function buildNoteCards(
             serverId: s.serverId,
             serverName: s.serverName,
             myPerms: s.myPerms,
+            hiddenByMode: s.hiddenByMode,
             resolveUserName: s.resolveUserName,
             totalTasks: s.totalTasks,
             completedTasks: s.completedTasks,
@@ -238,7 +242,11 @@ export type NoteFilter =
  * `archive` shows only them; `search` looks everywhere — an archived hit is
  * still a hit, and the card says it is archived.
  */
-export function filterNotes(cards: NoteCard[], filter: NoteFilter): NoteCard[] {
+export function filterNotes(all: NoteCard[], filter: NoteFilter): NoteCard[] {
+    // A checklist channel a mode hides leaves the grid and stays a card: search and
+    // reminders still reach it, as a #mention reaches the channel, and the prune still
+    // knows it exists.
+    const cards = filter.kind === 'search' ? all : all.filter(c => !c.hiddenByMode);
     switch (filter.kind) {
         case 'all':
             return cards.filter(c => !c.archived);

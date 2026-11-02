@@ -8,14 +8,16 @@
 //      name, ticked channels, a main voice channel, a real picture through the real
 //      upload path, an accent colour; a phone's controls are 44 px, its inputs 16 px;
 //   2. hiding is tidiness: with the mode off the phone does not list the mode's
-//      channels, while the API still returns them with mode_ids and a #mention still
-//      opens one (control: an unmoded channel is listed throughout);
+//      channels (a voice room under a ticked collection among them), while the API still
+//      returns them with mode_ids and a real #mention opens one (control: an unmoded
+//      channel is listed throughout, and keeps its call);
 //   3. switching: the owner's real selector; the phone's channels, label, notice,
 //      background and accent all arrive with no reload; a member without the right
 //      gets a label, not a button; the notice's Join joins the main channel;
-//   4. Call everyone back moves the phone out of a private room into the main channel;
+//   4. Call everyone back moves the phone out of a private room into the main channel,
+//      and a role holding only Move Members can press it;
 //   5. turning off: the warning names the people, the phone's real call ends with the
-//      toast saying why, the channels and the look go;
+//      toast saying why, in a room under a ticked collection, the channels and the look go;
 //   6. Switch Modes (bit 31): a role holding it switches, and it stays a positive
 //      number in the database's answer after an edit that sends the whole mask;
 //   7. the look on all eight themes, with and without high contrast, on a bright
@@ -29,13 +31,17 @@
 //   8. the phone: nothing overflows 390 px (a 460 px element injected must be caught),
 //      the selector and the notice's buttons are 44 px and hit at their centres, the
 //      menu is inside the window.
+//   9. a message toast about a hidden channel on another server opens it; a picture over
+//      the limit arrives as a JPEG of at most 1920 px, a GIF is refused, a picture nobody
+//      can read is treated as black and white; the real personal-switch checkbox.
 // Each check prints PASS/FAIL; the exit code is the number of failures. Screenshots
 // go to OUT (SHOT <file>): look at them.
 //
 // Prereqs: a THROWAWAY backend (APP_ENV=development, raised AUTH_RATE_LIMIT_PER_SECOND
 // / _BURST, its own fresh database, never a real one) at API, and vite of THIS tree at
 // APP started with VITE_API_URL=API (the walk imports /src/api/* modules through vite
-// to set the fixture up). Silent: --mute-audio and fake media devices.
+// to set the fixture up). It refuses to start unless both are loopback and the page
+// really talks to API: it creates accounts. Silent: --mute-audio and fake media devices.
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5421 API=http://127.0.0.1:5321 OUT=<dir> node e2e/modes-walk.mjs
@@ -44,7 +50,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const APP = process.env.APP || 'http://127.0.0.1:5421';
+const API = process.env.API;
 const OUT = process.env.OUT || 'e2e/shots-modes';
+const isLoopback = (url) => { try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(url).hostname); } catch { return false; } };
+if (!isLoopback(APP) || !isLoopback(API)) {
+    console.error(`modes-walk creates accounts: APP and API must both be loopback (APP=${APP} API=${API})`);
+    process.exit(2);
+}
 const PASS = 'Password123!pw';
 const stamp = Date.now().toString(36);
 fs.mkdirSync(OUT, { recursive: true });
@@ -311,16 +323,44 @@ async function setTheme(page, theme, contrastOn) {
     await sleep(350);
 }
 
+/**
+ * Open the menu people switch from and read it, and on Light the server icon's own menu
+ * too. Both sit on a fixed dark background, and on the Light theme their text was once
+ * dark as well, at 1.5:1, which every other check passed.
+ */
+async function menuLegible(page, label) {
+    await page.locator('[data-testid="mode-selector"]').click();
+    await page.locator('.context-menu').waitFor({ timeout: 5000 });
+    await sleep(200); // It fades in, and opacity counts against the ink.
+    const menu = await illegibleText(page, '.context-menu');
+    check(`${label}: the Mode menu is legible`, menu.measured >= 2 && menu.bad.length === 0, menu);
+    await page.keyboard.press('Escape');
+    await page.locator('.context-menu').waitFor({ state: 'detached', timeout: 5000 });
+}
+
 const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
 const MODE = 'Blood on the Clocktower';
 
 try {
+    const probe = await browser.newContext();
+    const probePage = await probe.newPage();
+    await probePage.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 120000 });
+    const pageApi = await probePage.evaluate(async () => (await import('/src/api/config.ts')).API_BASE_URL);
+    await probe.close();
+    if (new URL(pageApi).origin !== new URL(API).origin) {
+        throw new Error(`the page talks to ${pageApi}, not to API=${API}: start vite with VITE_API_URL=API`);
+    }
+
     const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const phoneCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
     const storyCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const A = await signIn(desktop, 'mda_' + stamp, 'owner');
     const B = await signIn(phoneCtx, 'mdb_' + stamp, 'phone');
     const C = await signIn(storyCtx, 'mdc_' + stamp, 'storyteller');
+    const moverCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    // This one is also an embedding host (docs/EMBEDDING.md), for what the host is listed.
+    await moverCtx.addInitScript(() => { window.__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'modes walk' }; });
+    const D = await signIn(moverCtx, 'mdd_' + stamp, 'mover');
 
     // ── Fixture: a server with the channels of a game, and two ordinary ones.
     const srvName = 'modes_' + stamp;
@@ -332,16 +372,21 @@ try {
     await servers(A, 'createChannel', [srv.id, 'lounge', 0]);
     const rooms = await servers(A, 'createChannel', [srv.id, 'Rooms', 2]);
     await servers(A, 'createChannel', [srv.id, 'room-a', 0, rooms.id]);
+    await servers(A, 'createChannel', [srv.id, 'room-b', 0, rooms.id]);
+    // A voice room under the collection, ticked by nothing of its own: the usual layout.
+    await servers(A, 'createChannel', [srv.id, 'Attic', 1, rooms.id]);
     const inv = await servers(A, 'createInvite', [srv.id, {}]);
     await servers(B, 'joinViaInvite', [inv.code]);
     await servers(C, 'joinViaInvite', [inv.code]);
-    for (const page of [A, B, C]) {
+    await servers(D, 'joinViaInvite', [inv.code]);
+    for (const page of [A, B, C, D]) {
         await page.reload({ waitUntil: 'domcontentloaded' });
         await sleep(2500);
         await dismiss(page);
     }
     await A.locator(`.server-icon[title="${srvName}"]`).click();
     await C.locator(`.server-icon[title="${srvName}"]`).click();
+    await D.locator(`.server-icon[title="${srvName}"]`).click();
     await B.locator('.mobile-nav-btn').first().tap();
     await sleep(400);
     await B.locator(`.server-icon[title="${srvName}"]`).tap();
@@ -406,7 +451,7 @@ try {
     // ── 2. Hiding is tidiness.
     const hiddenOnPhone = await until(async () => {
         const n = await listed(B);
-        return !lists(n, 'Town Square') && !lists(n, 'Cottage') && !lists(n, 'game-chat') && !lists(n, 'Rooms') && !lists(n, 'room-a') && lists(n, 'Lobby');
+        return !lists(n, 'Town Square') && !lists(n, 'Cottage') && !lists(n, 'game-chat') && !lists(n, 'Rooms') && !lists(n, 'room-a') && !lists(n, 'Attic') && lists(n, 'Lobby');
     }, 10000);
     check('the phone stops listing the mode\'s channels the moment they join it, with no reload; Lobby stays', !!hiddenOnPhone, await listed(B));
     check('a member without the right sees no selector while nothing is on', await B.locator('[data-testid="mode-selector"], [data-testid="mode-label"]').count() === 0);
@@ -429,10 +474,41 @@ try {
     await sleep(400);
     await B.locator('.sidebar .channel', { hasText: 'lounge' }).first().tap();
     await sleep(800);
+
+    // A real #mention of a channel the mode hides, through the real composer: what the
+    // docs mean by "a mention still opens it".
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    const say = A.locator('textarea[placeholder^="Message #"]');
+    await say.waitFor({ timeout: 8000 });
+    await say.fill('see #game-chat and #room-a');
+    await say.press('Enter');
+    const mention = (name) => B.locator('.mention.channel', { hasText: name }).first();
+    check('the phone gets the message with the hidden channels as mentions, not as plain text', !!await until(async () =>
+        (await mention('game-chat').count()) > 0 && (await mention('room-a').count()) > 0, 10000));
+    const header = (page) => page.locator('.chat-header h2').first().innerText().then(t => t.trim());
+    await mention('game-chat').tap();
+    check('tapping it opens the channel the mode hides', !!await until(async () => (await header(B)).includes('game-chat'), 8000), await header(B).catch(String));
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(400);
+    let open = await listed(B);
+    check('it stays listed while it is open, and nothing else of the mode comes back with it',
+        lists(open, 'game-chat') && !lists(open, 'Cottage') && !lists(open, 'Rooms') && !lists(open, 'room-a'), open);
+    await B.locator('.sidebar .channel', { hasText: 'lounge' }).first().tap();
+    await sleep(600);
+    await mention('room-a').tap();
+    check('a mention of a subchannel opens it too', !!await until(async () => (await header(B)).includes('room-a'), 8000), await header(B).catch(String));
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(400);
+    open = await listed(B);
+    check('its collection returns as its header, and its sibling stays hidden', lists(open, 'Rooms') && lists(open, 'room-a') && !lists(open, 'room-b'), open);
+    await B.locator('.sidebar .channel', { hasText: 'lounge' }).first().tap();
+    await sleep(600);
+    await shot(B, '02-phone-back-in-lounge');
+
     await pick(A, false, MODE);
     const shown = await until(async () => {
         const n = await listed(B);
-        return lists(n, 'Town Square') && lists(n, 'Cottage') && lists(n, 'game-chat') && lists(n, 'Rooms') && lists(n, 'room-a');
+        return lists(n, 'Town Square') && lists(n, 'Cottage') && lists(n, 'game-chat') && lists(n, 'Rooms') && lists(n, 'room-a') && lists(n, 'Attic');
     }, 8000);
     check('the phone lists the mode\'s channels at once, with no reload', !!shown, await listed(B));
     check('the phone gets a label, not a button', await until(async () =>
@@ -444,7 +520,8 @@ try {
     check('the notice is a polite status line', await B.locator('[data-testid="mode-notice"]').getAttribute('role') === 'status');
     check('the look arrives: the phone has the picture and the accent', !!await until(async () => {
         const m = await measureLook(B);
-        return m.picture && m.alpha !== null;
+        const accent = await B.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary'));
+        return m.picture && m.alpha !== null && accent !== '';
     }, 8000));
 
     // ── 8. The phone, with the notice up.
@@ -489,10 +566,49 @@ try {
     await sleep(1500);
     check('the phone is still in a call after the move', await B.locator('.voice-panel-compact .voice-connected-label').count() > 0);
 
-    // ── 5. Turning off: warned, the call ends, told why, everything goes.
+    // A role holding only Move Members: the selector is a button for it now, with the one
+    // thing it may do, and it works on a room under a ticked collection.
+    check('control: without any of the three rights, a label', !!await until(async () =>
+        (await D.locator('[data-testid="mode-label"]').count()) > 0 && (await D.locator('[data-testid="mode-selector"]').count()) === 0, 5000));
+    const moverRole = await servers(A, 'createRole', [srv.id, { name: 'Usher', permissions: 1 << 14 }]);
+    const memberId = async (prefix) => {
+        const m = (await servers(A, 'listMembersWithRoles', [srv.id])).find(x => x.username.startsWith(prefix));
+        return m.id ?? m.user_id;
+    };
+    await servers(A, 'assignRole', [srv.id, await memberId('mdd_'), moverRole.id]);
+    check('a role holding only Move Members gets the button, live', !!await until(async () =>
+        (await D.locator('[data-testid="mode-selector"]').count()) > 0, 8000));
+    await D.locator('[data-testid="mode-selector"]').click();
+    await D.locator('.context-menu').waitFor({ timeout: 5000 });
+    const usherItems = await D.locator('.context-menu .context-menu-item').allInnerTexts();
+    check('and its menu offers that and nothing else', usherItems.length === 1 && /Call everyone to Town Square/.test(usherItems[0]), usherItems);
+    await D.keyboard.press('Escape');
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(500);
+    await B.locator('.voice-channel-list .voice-channel', { hasText: 'Attic' }).first().tap();
+    check('the phone walked into the room under the collection', !!await until(async () =>
+        (await A.locator('.voice-channel-container', { hasText: 'Attic' }).first().innerText()).includes('mdb_'), 15000));
+    await sleep(800);
+    await pick(D, false, 'Call everyone to Town Square');
+    check('Call everyone back reaches a voice room under a ticked collection', !!await until(async () =>
+        (await A.locator('.voice-channel-container', { hasText: 'Town Square' }).first().innerText()).includes('mdb_'), 15000));
+    await sleep(1500);
+
+    // ── 5. Turning off: warned, the call ends, told why, everything goes. The phone is in
+    //    a voice room under the ticked collection, whose row names no mode; someone else
+    //    is in a channel no mode names, and stays.
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(500);
+    await B.locator('.voice-channel-list .voice-channel', { hasText: 'Attic' }).first().tap();
+    check('the phone is in the room under the collection', !!await until(async () =>
+        (await A.locator('.voice-channel-container', { hasText: 'Attic' }).first().innerText()).includes('mdb_'), 15000));
+    await C.locator('.voice-channel-list .voice-channel', { hasText: 'Lobby' }).first().click();
+    check('someone else is in a channel no mode names', !!await until(async () =>
+        (await A.locator('.voice-channel-container', { hasText: 'Lobby' }).first().innerText()).includes('mdc_'), 15000));
+    await sleep(800);
     const before = dialogs.length;
     await pick(A, false, 'Off');
-    check('turning off warns with how many people', await until(() => dialogs.length > before, 4000) && /1 person is in .*disconnected/.test(dialogs[dialogs.length - 1]), dialogs.slice(before));
+    check('turning off warns with how many people, the room under the collection counted and the other call not', await until(() => dialogs.length > before, 4000) && /^owner: 1 person is in .*disconnected/.test(dialogs[dialogs.length - 1]), dialogs.slice(before));
     check('the phone\'s call ended', !!await until(async () => (await B.locator('.voice-panel-compact .voice-connected-label').count()) === 0, 15000));
     check('the phone is told why', !!await until(async () => /Blood on the Clocktower ended, so this call ended/.test(await B.evaluate(() => document.body.innerText)), 5000));
     check('the channels go from the phone\'s list', !!await until(async () => {
@@ -501,7 +617,31 @@ try {
     }, 8000), await listed(B));
     check('the look goes: no picture, and the theme\'s own brand', !!await until(async () => !(await measureLook(B)).picture, 5000));
     check('the document carries no accent any more', await B.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary') === ''));
+    check('the room under the collection goes too', !lists(await listed(B), 'Attic'), await listed(B));
+    await sleep(1000);
+    check('a call in a channel no mode names carried on', (await A.locator('.voice-channel-container', { hasText: 'Lobby' }).first().innerText()).includes('mdc_'));
     await shot(B, '06-phone-after-mode-off');
+
+    // Move to offers what the list shows: the owner right-clicks the person still in Lobby.
+    await A.locator('.voice-channel-container', { hasText: 'Lobby' }).first().getByText(/^mdc_/).first().click({ button: 'right' });
+    await A.locator('.user-context-menu .ucm-toggle', { hasText: 'Move to' }).click();
+    const moveTargets = await A.locator('.user-context-menu .ucm-submenu').innerText();
+    check('Move to offers no voice channel the mode hides', !/Town Square|Cottage|Attic/.test(moveTargets), moveTargets);
+    await A.keyboard.press('Escape');
+    await A.mouse.click(640, 400);
+    await sleep(300);
+
+    // An embedding host is listed what the channel list shows.
+    const hostList = async () => (await D.evaluate((s) => window.pucaEmbed.listVoiceChannels(s), srv.id)).map(c => c.name);
+    const hosted = await hostList();
+    check('a host is not listed the voice channels a mode hides, under a collection or not', hosted.includes('Lobby') && !hosted.includes('Town Square') && !hosted.includes('Attic'), hosted);
+    const hostJoin = await D.evaluate(([s, c]) => window.pucaEmbed.joinVoice(s, c), [srv.id, cottage.id]);
+    check('a host can still join one: hiding is not access', hostJoin.ok === true, hostJoin);
+    const withCall = await until(async () => { const l = await hostList(); return l.includes('Cottage') ? l : null; }, 15000);
+    check('and it lists the call it is in', !!withCall, withCall);
+    check('and everyone\'s list shows a call nobody could otherwise see', !!await until(async () => lists(await listed(B), 'Cottage'), 10000), await listed(B));
+    await D.evaluate(() => window.pucaEmbed.leaveVoice());
+    await until(async () => !lists(await listed(B), 'Cottage'), 10000);
     const audit = await servers(A, 'listAuditLog', [srv.id]);
     const auditRow = audit.find(r => r.action_type === 'mode_switch' && /off/.test(r.details ?? ''));
     check('the audit log says who and how many', auditRow?.details === `${MODE} off, 1 disconnected` && !!auditRow.actor_username, auditRow);
@@ -521,13 +661,34 @@ try {
     check('an edit that sends it NEGATIVE (what older clients do) is stored positive, bit kept', await roleBits() === SWITCH + (1 << 9), await roleBits());
     check('the storyteller gets the selector, live, from the role change alone', !!await until(async () =>
         (await C.locator('[data-testid="mode-selector"]').count()) > 0, 8000));
+    // The main channel for a moment is Lobby, always listed, with the owner in it: a
+    // Join button for the channel someone is already in would only open their voice view.
+    await modesApi(A, 'updateMode', [srv.id, mode.id, { home_channel_id: lobby.id }]);
+    await A.locator('.voice-channel-list .voice-channel', { hasText: 'Lobby' }).first().click();
+    check('the owner joined the main channel', !!await until(async () => (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0, 25000));
+    await sleep(1000);
     await pick(C, false, MODE);
     check('the storyteller turned it on', !!await until(async () => (await servers(A, 'listServers')).find(s => s.id === srv.id).active_mode_id === mode.id, 5000));
+    check('control: someone elsewhere is offered Join for it', !!await until(async () =>
+        /Join Lobby/.test(await B.locator('[data-testid="mode-notice"]').innerText()), 8000));
+    check('someone already in the main channel gets the notice with no Join', !!await until(async () => {
+        const t = await A.locator('[data-testid="mode-notice"]').innerText();
+        return /is on/.test(t) && !/Join/.test(t);
+    }, 8000));
+    await A.locator('[title="Disconnect"]').first().click();
+    await until(async () => (await A.locator('.voice-panel-compact .voice-connected-label').count()) === 0, 8000);
+    await modesApi(A, 'updateMode', [srv.id, mode.id, { home_channel_id: town.id }]);
     const editorRefused = await attempt(C, 'updateMode', [srv.id, mode.id, { name: 'x' }]);
     check('Switch Modes alone does not edit a mode', editorRefused === 403, editorRefused);
 
     // ── 7. The look, on eight themes.
     check('the owner sees the look', !!await until(async () => (await measureLook(A)).picture, 8000));
+    const accentOf = (page) => page.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary'));
+    check('control: the accent is on the document', await accentOf(A) !== '', await accentOf(A));
+    await A.locator('.server-icon.home-button').click();
+    check('the accent stays with its server: not behind Friends', !!await until(async () => await accentOf(A) === '', 4000), await accentOf(A));
+    await A.locator(`.server-icon[title="${srvName}"]`).click();
+    check('and comes back with it', !!await until(async () => await accentOf(A) !== '', 4000));
     const pictures = { night, bright };
     for (const [label, file] of Object.entries(pictures)) {
         await A.locator('.server-settings-btn').first().click();
@@ -544,11 +705,13 @@ try {
             check(`${label} on ${theme}: accent ${m ? `rgb(${m.accent})` : ''} carries a white label (4.5:1) and shows on the surfaces (3:1)`, !!m && m.labelContrast >= 4.5 && m.surfaceContrast >= 3, m && { label: m.labelContrast.toFixed(2), surface: m.surfaceContrast.toFixed(2) });
             const legible = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}: the notice and the selector are legible`, legible.measured >= 3 && legible.bad.length === 0, legible);
+            await menuLegible(A, `${label} on ${theme}`);
             await shot(A, `07-${label}-${theme}`);
 
             await setTheme(A, theme, true);
             const legibleHigh = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}, high contrast: the notice and the selector are legible`, legibleHigh.measured >= 3 && legibleHigh.bad.length === 0, legibleHigh);
+            await menuLegible(A, `${label} on ${theme}, high contrast`);
             const hc = await measureLook(A);
             const themeBrand = await A.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary'));
             check(`${label} on ${theme}: high contrast takes the picture and the accent away`, !hc.picture && themeBrand === '', { picture: hc.picture, themeBrand });
@@ -584,10 +747,81 @@ try {
     }
     await setTheme(A, 'dark', false);
 
+    // Timestamps: --text-faint is not measured (it would nearly hide the picture), so over
+    // a picture it takes --text-muted, which is. Control: outside .chat-main it does not.
+    const faint = await A.evaluate(() => {
+        const color = (parent, token) => {
+            const p = document.createElement('span');
+            p.style.color = `var(${token})`;
+            parent.appendChild(p);
+            const c = getComputedStyle(p).color;
+            p.remove();
+            return c;
+        };
+        const main = document.querySelector('.chat-main');
+        return { inFaint: color(main, '--text-faint'), inMuted: color(main, '--text-muted'), outFaint: color(document.body, '--text-faint') };
+    });
+    check('over a picture, timestamps take the colour the veil holds', faint.inFaint === faint.inMuted && faint.outFaint !== faint.inMuted, faint);
+
+    // A picture nobody can read is treated as black and white, the worst case.
+    const unreadable = await A.evaluate(async () => (await import('/src/api/modeLook.ts')).measureExtremes('data:image/png;base64,AAAA'));
+    check('a picture that cannot be read is measured as black and white', JSON.stringify(unreadable) === JSON.stringify([[0, 0, 0], [255, 255, 255]]), unreadable);
+
+    // The server icon's own menu: the same fixed dark surface and the same old mistake.
+    for (const high of [false, true]) {
+        await setTheme(A, 'light', high);
+        await A.locator(`.server-icon[title="${srvName}"]`).click({ button: 'right' });
+        await A.locator('.server-context-menu').waitFor({ timeout: 5000 });
+        await sleep(200);
+        const iconMenu = await illegibleText(A, '.server-context-menu');
+        check(`the server icon's menu on light${high ? ', high contrast' : ''} is legible`, iconMenu.measured >= 3 && iconMenu.bad.length === 0, iconMenu);
+        if (!high) {
+            await A.evaluate(() => { document.querySelector('.server-context-menu .context-menu-item').style.color = '#313338'; });
+            const dimmed = await illegibleText(A, '.server-context-menu');
+            check('NEGATIVE CONTROL: the old dark ink on that menu is caught', dimmed.bad.length > 0, dimmed);
+        }
+        await A.keyboard.press('Escape');
+        await A.mouse.click(640, 400);
+        await sleep(200);
+    }
+    await setTheme(A, 'dark', false);
+
     // The settings tab on every theme.
     await A.locator('.server-settings-btn').first().click();
     await A.locator('.server-settings-nav .nav-item', { hasText: 'Modes' }).click();
     await A.locator('[data-testid="mode-card"]').first().waitFor({ timeout: 8000 });
+
+    // What actually gets uploaded: a picture over the limit, and a GIF, through the real input.
+    const huge = path.join(OUT, 'huge.png');
+    const hugeB64 = await A.evaluate(() => {
+        const c = document.createElement('canvas');
+        c.width = 3000; c.height = 1500;
+        const g = c.getContext('2d');
+        g.fillStyle = '#123456'; g.fillRect(0, 0, 3000, 1500);
+        return c.toDataURL('image/png').split(',')[1];
+    });
+    fs.writeFileSync(huge, Buffer.from(hugeB64, 'base64'));
+    const firstInput = A.locator('[data-testid="mode-card"] input[type="file"]').first();
+    const pictureBefore = (await modesApi(A, 'listModes', [srv.id])).modes[0].background_file_id;
+    await firstInput.setInputFiles(huge);
+    const hugeId = await until(async () => {
+        const id = (await modesApi(A, 'listModes', [srv.id])).modes[0].background_file_id;
+        return id !== pictureBefore ? id : null;
+    }, 15000);
+    const uploaded = await A.evaluate(async (id) => {
+        const url = await (await import('/src/api/authedMedia.ts')).fetchFileUrl(id);
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        return { type: url.slice(0, url.indexOf(';')), edge: Math.max(img.naturalWidth, img.naturalHeight) };
+    }, hugeId);
+    check('a 3000 px PNG arrives as a JPEG of at most 1920 px', uploaded.type === 'data:image/jpeg' && uploaded.edge === 1920, uploaded);
+    const gif = path.join(OUT, 'animated.gif');
+    fs.writeFileSync(gif, Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+    await firstInput.setInputFiles(gif);
+    check('a GIF is refused, saying why', !!await until(async () => /Animated pictures are not supported/.test(await A.locator('[data-testid="mode-card"]').first().innerText()), 6000));
+    check('and the picture stays as it was', (await modesApi(A, 'listModes', [srv.id])).modes[0].background_file_id === hugeId);
+
     for (const theme of THEMES) {
         for (const high of [false, true]) {
             await setTheme(A, theme, high);
@@ -601,15 +835,29 @@ try {
     await A.locator('.server-settings-content .close-btn').click();
     await A.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 });
 
-    // The personal switch, in the real settings.
+    // The personal switch, the real checkbox in the real settings.
     await setTheme(A, 'dark', false);
     check('control: the look is on', (await measureLook(A)).picture);
-    await A.evaluate(() => document.documentElement.setAttribute('data-server-looks', 'off'));
+    const looksBox = async () => {
+        await A.locator('.user-actions .user-action-btn[title="Settings"]').first().click();
+        await A.locator('.settings-nav-item', { hasText: 'Accessibility' }).click();
+        const box = A.locator('input[aria-label="Show server backgrounds and colours"]');
+        await box.waitFor({ state: 'attached', timeout: 8000 });
+        return box;
+    };
+    const closeSettings = async () => {
+        await A.keyboard.press('Escape');
+        await A.locator('.settings-nav').waitFor({ state: 'detached', timeout: 5000 });
+    };
+    await (await looksBox()).evaluate(el => el.click());
+    await closeSettings();
     check('the personal switch takes the picture away', !!await until(async () => !(await measureLook(A)).picture, 4000));
     check('and the accent', await A.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary') === ''));
     const listedStill = await listed(A);
     check('and leaves the channels listed: it is about looks, not the mode', lists(listedStill, 'Town Square'), listedStill);
-    await A.evaluate(() => document.documentElement.setAttribute('data-server-looks', 'on'));
+    await (await looksBox()).evaluate(el => el.click());
+    await closeSettings();
+    check('turning it back on brings the look back', !!await until(async () => (await measureLook(A)).picture, 6000));
 
     // The phone's selector and tab, as someone who may use them.
     await servers(A, 'assignRole', [srv.id, (await servers(A, 'listMembersWithRoles', [srv.id])).find(m => m.username.startsWith('mdb_')).id ?? (await servers(A, 'listMembersWithRoles', [srv.id])).find(m => m.username.startsWith('mdb_')).user_id, role.id]);
@@ -664,9 +912,36 @@ try {
     await shot(B, '11-phone-modes-tab-bottom');
     await B.locator('.server-settings-content .close-btn').tap();
 
-    // A mode nobody can reach no longer offers anything; off leaves no notice behind.
-    await modesApi(A, 'setActiveMode', [srv.id, null]);
-    check('no notice is left behind when the mode ends', !!await until(async () => (await C.locator('[data-testid="mode-notice"]').count()) === 0, 5000));
+    // Two devices with no socket when the mode ends: the phone in a call, the other showing
+    // the start notice. Neither gets a frame. The phone's replay must not put it back in the
+    // ended call, and the other's notice must not go on saying the mode is on.
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(500);
+    await B.locator('.voice-channel-list .voice-channel', { hasText: 'Town Square' }).first().tap();
+    check('the phone is in a call', !!await until(async () =>
+        (await A.locator('.voice-channel-container', { hasText: 'Town Square' }).first().innerText()).includes('mdb_'), 25000));
+    check('control: the other device still shows the notice', await D.locator('[data-testid="mode-notice"]').count() === 1);
+    const dropSocket = async (ctx, page) => {
+        await ctx.setOffline(true);
+        await page.evaluate(async () => { (await import('/src/api/websocket.ts')).wsClient.ws?.close(); });
+    };
+    await dropSocket(phoneCtx, B);
+    await dropSocket(moverCtx, D);
+    check('the phone\'s socket is really gone: it left the room', !!await until(async () =>
+        !(await A.locator('.voice-channel-container', { hasText: 'Town Square' }).first().innerText()).includes('mdb_'), 25000));
+    // Off leaves no notice behind. The owner still has the one the storyteller's switch
+    // gave it: the storyteller pressed, so it never had one to lose.
+    check('control: the owner still has the notice', await A.locator('[data-testid="mode-notice"]').count() === 1);
+    await modesApi(C, 'setActiveMode', [srv.id, null]);
+    check('no notice is left behind when the mode ends', !!await until(async () => (await A.locator('[data-testid="mode-notice"]').count()) === 0, 5000));
+    await phoneCtx.setOffline(false);
+    await moverCtx.setOffline(false);
+    check('a device that missed the frame drops the notice once it reconnects', !!await until(async () => (await D.locator('[data-testid="mode-notice"]').count()) === 0, 45000));
+    check('the phone reconnected and is out of the ended call, not back in it', !!await until(async () =>
+        (await B.locator('.voice-panel-compact .voice-connected-label').count()) === 0, 45000));
+    check('and it is told why', !!await until(async () => /ended, so this call ended/.test(await B.evaluate(() => document.body.innerText)), 8000));
+    await sleep(2000);
+    check('it stayed out: nobody is back in the hidden channel', !lists(await listed(A), 'Town Square'), await listed(A));
 
     // Entering a server does not open a channel a mode hides. Its first text channel
     // is put in a mode, the mode is off, and the owner walks out and back.
@@ -689,11 +964,62 @@ try {
     const textRows = await A.evaluate(() => [...document.querySelectorAll('.sidebar .channel-name')].map(e => e.textContent.trim()));
     check('and the hidden first channel stays out of the list', textRows.includes('lounge') && !textRows.includes(firstText.name), textRows);
 
-    // A long list of modes scrolls rather than pushing Off above the window.
-    for (let i = 0; i < 24; i++) await modesApi(A, 'createMode', [srv.id, { name: `Spare ${i}` }]);
-    await sleep(1200);
+    // A message in a hidden channel while the owner looks at another server: the toast
+    // opens it, though that server's list has no row for it.
+    await A.locator(`.server-icon[title="elsewhere_${stamp}"]`).click();
+    await sleep(800);
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(500);
+    await B.locator('.sidebar .channel', { hasText: 'lounge' }).first().tap();
+    await sleep(600);
+    await mention('game-chat').tap();
+    await until(async () => (await header(B)).includes('game-chat'), 8000);
+    const phoneSay = B.locator('textarea[placeholder^="Message #"]');
+    await phoneSay.waitFor({ timeout: 8000 });
+    await phoneSay.fill('in a hidden channel');
+    await phoneSay.press('Enter');
+    const toast = A.locator('.message-toast').first();
+    await toast.waitFor({ timeout: 10000 });
+    await toast.click();
+    check('a toast about a hidden channel on another server opens it', !!await until(async () =>
+        (await A.locator('.server-name').first().innerText()) === srvName && (await header(A)).includes('game-chat'), 8000),
+        { server: await A.locator('.server-name').first().innerText().catch(String), header: await header(A).catch(String) });
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    await sleep(600);
     await B.locator('.mobile-nav-btn').nth(1).tap();
     await sleep(400);
+
+    // A collection's merged feed leaves out a subchannel a mode hides, as the list does.
+    const hall = await servers(A, 'createChannel', [srv.id, 'Hall', 2]);
+    const openSub = await servers(A, 'createChannel', [srv.id, 'open-sub', 0, hall.id]);
+    const spoilers = await servers(A, 'createChannel', [srv.id, 'spoilers', 0, hall.id]);
+    // Channels made through the API reach the owner's list with the next edit's frame.
+    const spoiled = await modesApi(A, 'createMode', [srv.id, { name: 'Spoiled' }]);
+    await until(async () => lists(await listed(A), 'spoilers'), 8000);
+    for (const name of ['open-sub', 'spoilers']) {
+        await A.locator('.sidebar .channel', { hasText: name }).first().click();
+        const box = A.locator('textarea[placeholder^="Message #"]');
+        await box.waitFor({ timeout: 8000 });
+        await box.fill(`in ${name}`);
+        await box.press('Enter');
+        await sleep(600);
+    }
+    const feedHeaders = async () => A.locator('.collection-channel-header .channel-name').allInnerTexts();
+    await A.locator('.sidebar .channel', { hasText: 'Hall' }).first().click();
+    const both = await until(async () => { const h = await feedHeaders(); return h.includes('open-sub') && h.includes('spoilers') ? h : null; }, 10000);
+    check('control: a collection\'s feed merges its subchannels', !!both, await feedHeaders());
+    await modesApi(A, 'updateMode', [srv.id, spoiled.id, { channel_ids: [spoilers.id] }]);
+    const without = await until(async () => { const h = await feedHeaders(); return h.includes('open-sub') && !h.includes('spoilers') ? h : null; }, 10000);
+    check('a subchannel a mode hides leaves the feed', !!without, await feedHeaders());
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    await sleep(400);
+    void openSub;
+
+    // A long list of modes scrolls rather than pushing Off above the window.
+    for (let i = 0; i < 23; i++) await modesApi(A, 'createMode', [srv.id, { name: `Spare ${i}` }]);
+    await sleep(1200);
+    // The owner's messages above raise toasts on the phone, on top of everything for a moment.
+    await until(async () => (await B.locator('.message-toast').count()) === 0, 20000);
     await B.locator('[data-testid="mode-selector"]').tap();
     await B.locator('.context-menu').waitFor({ timeout: 5000 });
     await sleep(400);
@@ -710,8 +1036,7 @@ try {
     check('phone: 25 modes scroll inside the window, with Off at the top and reachable', longMenu.inside && longMenu.offReachable && longMenu.scrolls, longMenu);
     await shot(B, '12-phone-many-modes');
 
-    // Nobody was dragged out of a channel in no mode by any of this.
-    check('a channel in no mode stayed listed throughout', lists(await listed(B), 'Lobby'), lobby.id);
+    check('a channel in no mode stayed listed to the end', lists(await listed(B), 'Lobby'), lobby.id);
 } catch (e) {
     check('the walk ran to the end', false, String(e?.stack || e).slice(0, 800));
 } finally {

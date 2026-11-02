@@ -61,6 +61,7 @@ import {
     taskTabKey,
 } from '../api/tasks';
 import { useServers, keys, fetchMembersWithPresence } from '../hooks/queries';
+import { shownWithParent } from '../api/serverModes';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { invalidateTaskScope, taskScopesKey } from './taskSources';
 import { consumeTasksTab, peekTasksIds, peekTasksTab, soleDueId } from '../api/tasksViewIntent';
@@ -347,8 +348,17 @@ export function TasksView() {
     // newly joined servers) in natural order. Cheap enough to run per render.
     const allTabs = orderTaskTabs([...listTabs, ...channelTabs], prefs);
 
+    // A checklist channel a mode hides leaves the bar like any other tab the filter leaves
+    // out: `hiddenKeys` below keeps its slot, so a mode switch costs nobody their order.
+    const modeHiddenKeys = new Set(servers.flatMap((server: Server, i: number) => {
+        const rows = (channelQueries[i]?.data as Channel[] | undefined) ?? [];
+        return rows
+            .filter(c => c.has_checklist && !shownWithParent(c, rows, server.active_mode_id))
+            .map(c => taskTabKey({ kind: 'channel', id: c.id }));
+    }));
     const isArchived = (key: string) => notePrefs.archived[key] === true;
     const matchesFilter = (key: string) => {
+        if (modeHiddenKeys.has(key)) return false;
         if (noteFilter.kind === 'archive') return isArchived(key);
         if (isArchived(key)) return false;
         if (noteFilter.kind === 'label') {

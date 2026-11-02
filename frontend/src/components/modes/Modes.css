@@ -25,6 +25,11 @@ button.mode-selector:hover {
     background: var(--bg-modifier-active);
 }
 
+/* The hover background is lighter than what --text-muted is made for, on the tinted themes. */
+button.mode-selector:hover .mode-selector-kicker {
+    color: var(--text-normal);
+}
+
 button.mode-selector:focus-visible {
     outline: 2px solid var(--brand-primary);
     outline-offset: 1px;

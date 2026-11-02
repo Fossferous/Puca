@@ -227,7 +227,10 @@
     border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.context-menu-item {
+/* Scoped to this menu: unscoped, these reached every ContextMenu (they load after
+   ContextMenu.css at the same specificity) and put --text-normal, dark on the light
+   theme, on that menu's fixed dark background. */
+.server-context-menu .context-menu-item {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -235,24 +238,25 @@
     border-radius: 4px;
     cursor: pointer;
     transition: background 0.1s ease;
-    color: var(--text-normal, #dcddde);
+    /* A colour, not a theme token: this menu's background (above) is dark on every theme. */
+    color: #dcddde;
     font-size: 14px;
     position: relative;
 }
 
-.context-menu-item:hover {
+.server-context-menu .context-menu-item:hover {
     background: rgba(88, 101, 242, 0.3);
 }
 
-.context-menu-item.danger {
+.server-context-menu .context-menu-item.danger {
     color: #ed4245;
 }
 
-.context-menu-item.danger:hover {
+.server-context-menu .context-menu-item.danger:hover {
     background: rgba(237, 66, 69, 0.2);
 }
 
-.context-menu-separator {
+.server-context-menu .context-menu-separator {
     height: 1px;
     background: rgba(255, 255, 255, 0.08);
     margin: 4px 0;
@@ -274,19 +278,19 @@
 
 .menu-subtitle {
     font-size: 11px;
-    color: var(--text-muted, #72767d);
+    color: #b5bac1;
 }
 
 .submenu-arrow {
     margin-left: auto;
-    color: var(--text-muted, #72767d);
+    color: #b5bac1;
     font-size: 16px;
 }
 
 .menu-badge {
     margin-left: auto;
-    background: var(--bg-tertiary, #2b2d31);
-    color: var(--text-muted, #72767d);
+    background: rgba(255, 255, 255, 0.1);
+    color: #b5bac1;
     font-size: 10px;
     font-weight: 600;
     padding: 2px 4px;

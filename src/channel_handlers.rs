@@ -576,18 +576,9 @@ pub async fn update_channel(
 
     match result {
         Ok(_) => {
-            // An idle member is moved into the AFK channel, so it can't be hidden:
-            // a channel made AFK leaves its modes (docs/SERVER_MODES.md).
+            // A channel made AFK leaves its modes (docs/SERVER_MODES.md).
             if payload.is_afk == Some(true) {
-                let left_a_mode = sqlx::query("DELETE FROM server_mode_channels WHERE channel_id = $1")
-                    .bind(channel_id as i32)
-                    .execute(&state.pool)
-                    .await
-                    .map(|r| r.rows_affected() > 0)
-                    .unwrap_or(false);
-                if left_a_mode {
-                    crate::mode_handlers::announce_edit(&state, &server_id).await;
-                }
+                crate::mode_handlers::release_afk_channel(&state, &server_id, channel_id as i32).await;
             }
 
             // TELL EVERYONE, not just the editor. Every member refetches the
@@ -755,11 +746,17 @@ pub async fn delete_channel(
     .execute(&state.pool)
     .await;
 
+    let named_by_a_mode = crate::mode_handlers::channel_is_named_by_a_mode(&state.pool, channel_id as i32).await;
+
     // INT4 as well: every other user of this text binds the column's width.
     let _ = sqlx::query("DELETE FROM channels WHERE id = $1")
         .bind(channel_id as i32)
         .execute(&state.pool)
         .await;
+
+    if named_by_a_mode {
+        crate::mode_handlers::announce_edit(&state, &server_id).await;
+    }
 
     // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
     state.games.close_room(

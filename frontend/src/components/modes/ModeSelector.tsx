@@ -1,24 +1,27 @@
 import { CloseIcon, SlidersIcon } from '../Icons';
 import type { ServerModes } from '../../api/serverModes';
+import { offersCallBack } from './modeMenu';
 import './Modes.css';
 
 interface ModeSelectorProps {
     data: ServerModes | undefined;
     /** The server row's value: pushed live, so it beats a fetch in flight. */
     activeModeId: number | null;
+    /** The active mode's main voice channel when Call everyone back can reach it. */
+    homeName: string | null;
     /** Open the menu at this place, just under the selector. */
     onOpen: (at: { x: number; y: number }) => void;
 }
 
 /**
- * The line under the server's name that says which mode is on. For someone who
- * may switch it is a button that opens the menu; for everyone else it is a plain
- * label while a mode is on, and nothing when none is.
+ * The line under the server's name that says which mode is on. For someone the
+ * menu has anything for it is a button that opens it; for everyone else it is a
+ * plain label while a mode is on, and nothing when none is.
  */
-export function ModeSelector({ data, activeModeId, onOpen }: ModeSelectorProps) {
+export function ModeSelector({ data, activeModeId, homeName, onOpen }: ModeSelectorProps) {
     if (!data || data.modes.length === 0) return null;
     const active = data.modes.find(m => m.id === activeModeId) ?? null;
-    const canUseMenu = data.can_switch || data.can_edit;
+    const canUseMenu = data.can_switch || data.can_edit || offersCallBack(data, activeModeId, homeName);
     if (!active && !canUseMenu) return null;
     const label = (
         <>

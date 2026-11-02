@@ -108,13 +108,14 @@ change at once, and gets a quiet notice with a **Join** button. It makes no soun
 sends no phone notification, and you won't see it for a server you have muted.
 
 **Turning a mode off disconnects everyone in its voice channels**, and you are warned
-first if anyone is in them. Switching straight to another mode does the same, except in
-channels both modes share. Messages in its text channels are kept and come back with
-the mode.
+first if anyone is in them. Voice channels under a collection you ticked count as the
+mode's. Switching straight to another mode does the same, except in channels both modes
+share. Messages in its text channels are kept and come back with the mode. Deleting a
+mode that is on turns it off, so that takes **Switch Modes** as well.
 
-**Call everyone back** (Move Members) is in the same menu while a mode is on: it pulls
-everyone in the mode's voice channels into its main voice channel. It can't move anyone
-ranked at or above you, and tells you how many it left.
+**Call everyone to** (Move Members) is in the same menu while a mode is on, followed by
+the name of its main voice channel: it pulls everyone in the mode's voice channels into
+that channel. It can't move anyone ranked at or above you, and tells you how many it left.
 
 **A mode tidies the list. It does not keep anyone out.** Anyone allowed to see a channel
 can still open it from a mention, a notification or a link, and people on an older

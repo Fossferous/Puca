@@ -111,6 +111,27 @@ describe('buildNoteCards', () => {
     });
 });
 
+describe('a checklist channel a server mode hides', () => {
+    const all = cards(
+        [source('list', 1, 'Mine'), { ...source('channel', 2, 'Game notes'), hiddenByMode: true }, source('channel', 3, 'Shared')],
+        {}, [], { colors: {}, labels: {}, archived: {} },
+    );
+    const titles = (c: NoteCard[]) => c.map(n => n.title).sort();
+
+    it('is still a card, so a prune does not read a switch as the channel being deleted', () => {
+        expect(all.map(c => c.title)).toContain('Game notes');
+        expect(all.find(c => c.title === 'Game notes')?.hiddenByMode).toBe(true);
+    });
+
+    it('leaves the grid', () => {
+        expect(titles(filterNotes(all, { kind: 'all' }))).toEqual(['Mine', 'Shared']);
+    });
+
+    it('and search still finds it, as a #mention still opens the channel', () => {
+        expect(titles(filterNotes(all, { kind: 'search', query: 'game' }))).toEqual(['Game notes']);
+    });
+});
+
 describe('filterNotes / splitPinned', () => {
     const local: NotesNoteState = {
         colors: {},

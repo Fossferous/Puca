@@ -145,6 +145,16 @@ pub(crate) async fn file_is_referenced(pool: &sqlx::PgPool, file_id: &str) -> Re
     Ok(referenced.is_some())
 }
 
+/// [`remove_file`] for a reclaim hook, called once the hook has cleared its own
+/// reference: only when nothing else still points at the file, since one upload can be
+/// an icon, a mode's background and an avatar at once. Scoped like `remove_file`. A
+/// failed check keeps the file: an orphan is harmless, a broken picture is not.
+pub async fn reclaim_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) {
+    if matches!(file_is_referenced(pool, file_id).await, Ok(false)) {
+        remove_file(pool, file_id, owner_id).await;
+    }
+}
+
 /// Delete an uploaded file (DB row + on-disk blob), scoped to its uploader so a
 /// caller can only remove files they own. Best-effort: it logs but never fails
 /// the caller if the on-disk unlink races. Used by deletion hooks (e.g. avatar
@@ -243,17 +253,19 @@ pub async fn delete_file(
     // (409) rather than unknown (404). A file the caller does not own must be
     // indistinguishable from one that does not exist. An invalid uuid string
     // errors on the cast -> treated as no row -> 404.
-    let mine: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+    // id::text: the cast accepts other spellings of a uuid, and the in-use check below
+    // compares text, so DELETE /files/<upper case> must not read as unreferenced.
+    let mine: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
     )
     .bind(&file_id)
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
-    if mine.is_none() {
+    let Some((file_id,)) = mine else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
 
     // Refuse while something still points at it. `users.avatar_file_id` and
     // `servers.icon_file_id` are plain TEXT with NO foreign key (001_init.sql,
@@ -694,8 +706,8 @@ async fn cap_era_start(pool: &sqlx::PgPool) -> Result<Option<DateTime<Utc>>, sql
 ///   an avatar or join/leave sound of an account in the caller's identity
 ///   context (friends, a shared server, or a conversation that account
 ///   started — the same rule that lets the caller see that account at all),
-///   an icon or emoji of a server the caller belongs to (or a public one,
-///   which `/discover` already shows everyone), or a part of a clip posted
+///   an icon, mode background or emoji of a server the caller belongs to (or a
+///   public one, which `/discover` already shows everyone), or a part of a clip posted
 ///   in a channel the caller can VIEW, or
 /// - it predates capabilities (see `cap_era_start`), or
 /// - the operator turned enforcement off (`FILES_ENFORCE_CAP=0`), the same

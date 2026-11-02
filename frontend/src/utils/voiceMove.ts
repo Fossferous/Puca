@@ -100,6 +100,9 @@ export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
     rosterOf: (channelId: number) => ReadonlyArray<{ id: number }>;
     /** The viewer holds MOVE_MEMBERS (or owns the server). */
     canMoveVoiceMembers: boolean;
+    /** Does the channel list show this channel? A menu offers what a drag could reach,
+     *  and a drag reaches only rendered rows. Who is where is still searched in all. */
+    isListed?: (channel: C) => boolean;
 }): { voiceChannel: C | null; canMoveMembers: boolean; targets: C[] } {
     const voiceChannel = opts.channels.find(c =>
         c.channel_type === 1 && opts.rosterOf(c.id).some(u => u.id === opts.userId)) ?? null;
@@ -108,7 +111,7 @@ export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
         voiceChannel,
         canMoveMembers: opts.canMoveVoiceMembers,
         targets: opts.canMoveVoiceMembers
-            ? voiceMoveTargets(opts.channels.filter(c => c.channel_type === 1), voiceChannel)
+            ? voiceMoveTargets(opts.channels.filter(c => c.channel_type === 1 && (opts.isListed?.(c) ?? true)), voiceChannel)
             : [],
     };
 }

@@ -135,6 +135,10 @@ export function RoleSettingsModal({
     // The owner or an administrator: the only editors the server lets set or
     // clear the restricting bits (Stream only, No receive).
     const [canRestrict, setCanRestrict] = useState(isOwner);
+    // The owner, an administrator or a holder of Switch Modes: the server keeps the bit
+    // as it was for anyone else's edit (role_handlers::edited_permissions), so a box they
+    // could tick would read as granted when it had not been.
+    const [canGrantSwitchModes, setCanGrantSwitchModes] = useState(isOwner);
 
     // Editable fields for selected role
     const [editName, setEditName] = useState('');
@@ -198,6 +202,9 @@ export function RoleSettingsModal({
                 }
                 if (!cancelled && (bits & PERMISSIONS.ADMINISTRATOR) !== 0) {
                     setCanRestrict(true);
+                }
+                if (!cancelled && (bits & (PERMISSIONS.SWITCH_MODES | PERMISSIONS.ADMINISTRATOR)) !== 0) {
+                    setCanGrantSwitchModes(true);
                 }
             } catch (err) {
                 console.error('[RoleSettingsModal] MANAGE_ROLES lookup failed:', err);
@@ -405,20 +412,25 @@ export function RoleSettingsModal({
                                         <div key={category.name} className="permission-category">
                                             <h4>{category.name}</h4>
                                             <div className="permission-list">
-                                                {category.permissions.map(perm => (
-                                                    <label key={perm.key} className="permission-item">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={hasPermission(perm.key)}
-                                                            onChange={() => togglePermission(perm.key)}
-                                                            disabled={!canManage}
-                                                        />
-                                                        <div className="permission-info">
-                                                            <span className="permission-label">{perm.label}</span>
-                                                            <span className="permission-desc">{perm.desc}</span>
-                                                        </div>
-                                                    </label>
-                                                ))}
+                                                {category.permissions.map(perm => {
+                                                    const notYours = perm.key === 'SWITCH_MODES' && !canGrantSwitchModes;
+                                                    return (
+                                                        <label key={perm.key} className="permission-item">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={hasPermission(perm.key)}
+                                                                onChange={() => togglePermission(perm.key)}
+                                                                disabled={!canManage || notYours}
+                                                            />
+                                                            <div className="permission-info">
+                                                                <span className="permission-label">{perm.label}</span>
+                                                                <span className="permission-desc">
+                                                                    {notYours ? 'Only someone who holds this permission can give it or take it away' : perm.desc}
+                                                                </span>
+                                                            </div>
+                                                        </label>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     ))}

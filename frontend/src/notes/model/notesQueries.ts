@@ -192,7 +192,8 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean;
                 ((memberData[i] as MemberWithRoles[] | undefined) ?? [])
                     .map(m => [m.id, m.display_name || m.server_nickname || m.username]),
             );
-            return ((channelData[i] as Channel[] | undefined) ?? [])
+            const rows = (channelData[i] as Channel[] | undefined) ?? [];
+            return rows
                 .filter(c => c.has_checklist)
                 .map(c => ({
                     ref: { kind: 'channel' as const, id: c.id },
@@ -200,6 +201,7 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean;
                     serverId: server.id,
                     serverName: server.name,
                     myPerms: c.my_permissions,
+                    hiddenByMode: !shownWithParent(c, rows, server.active_mode_id),
                     resolveUserName: (id: number) => names.get(id),
                 }));
         });

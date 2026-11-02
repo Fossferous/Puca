@@ -45,6 +45,9 @@ vi.mock('../api/servers', async (importOriginal) => ({
         { id: 3, name: 'General voice', channel_type: 1, server_id: SERVER, mode_ids: [] },
         { id: 4, name: 'game-chat', channel_type: 0, server_id: SERVER, mode_ids: [3] },
         { id: 5, name: 'Sleeping', channel_type: 1, server_id: SERVER, is_afk: true, mode_ids: [] },
+        { id: 6, name: 'Rooms', channel_type: 2, server_id: SERVER, mode_ids: [99] },
+        { id: 7, name: 'Room A', channel_type: 0, server_id: SERVER, parent_id: 6, mode_ids: [] },
+        { id: 8, name: 'Voice Under', channel_type: 1, server_id: SERVER, parent_id: 6, mode_ids: [] },
     ],
     listRoles: async () => [{ ...MEMBER, permissions: roleBits }],
     listMembersWithRoles: async () => [],
@@ -52,7 +55,7 @@ vi.mock('../api/servers', async (importOriginal) => ({
 }));
 
 const { ModeNotice, ModeSelector } = await import('../components/modes/ModeSelector');
-const { endedCallsWarning, modeMenuItems } = await import('../components/modes/modeMenu');
+const { endedCallsWarning, modeMenuItems, noticeJoinName } = await import('../components/modes/modeMenu');
 const { ModesSettings } = await import('../components/modes/ModesSettings');
 const { RoleSettingsModal } = await import('../components/RoleSettingsModal');
 const { PERMISSIONS, unsignedMask } = await import('../api/permissionBits');
@@ -118,16 +121,16 @@ describe('the selector', () => {
     const onOpen = vi.fn();
 
     it('is a button saying what is on, for someone who may switch, even with nothing on', async () => {
-        await render(<ModeSelector data={modes()} activeModeId={null} onOpen={onOpen} />);
+        await render(<ModeSelector data={modes()} activeModeId={null} homeName={null} onOpen={onOpen} />);
         const b = container.querySelector('[data-testid="mode-selector"]')!;
         expect(b.tagName).toBe('BUTTON');
         expect(b.textContent).toContain('Off');
-        await render(<ModeSelector data={modes()} activeModeId={3} onOpen={onOpen} />);
+        await render(<ModeSelector data={modes()} activeModeId={3} homeName={null} onOpen={onOpen} />);
         expect(container.querySelector('[data-testid="mode-selector"]')!.textContent).toContain('Blood on the Clocktower');
     });
 
     it('opens the menu under itself', async () => {
-        await render(<ModeSelector data={modes()} activeModeId={null} onOpen={onOpen} />);
+        await render(<ModeSelector data={modes()} activeModeId={null} homeName={null} onOpen={onOpen} />);
         await press(container.querySelector('[data-testid="mode-selector"]')!);
         expect(onOpen).toHaveBeenCalledTimes(1);
         expect(onOpen.mock.calls[0][0]).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
@@ -135,17 +138,31 @@ describe('the selector', () => {
 
     it('is a plain label for everyone else while a mode is on, and nothing when none is', async () => {
         const member = modes({ can_switch: false, can_edit: false, can_call_back: false });
-        await render(<ModeSelector data={member} activeModeId={3} onOpen={onOpen} />);
+        await render(<ModeSelector data={member} activeModeId={3} homeName={null} onOpen={onOpen} />);
         expect(container.querySelector('button')).toBeNull();
         expect(container.querySelector('[data-testid="mode-label"]')!.textContent).toContain('Blood on the Clocktower');
-        await render(<ModeSelector data={member} activeModeId={null} onOpen={onOpen} />);
+        await render(<ModeSelector data={member} activeModeId={null} homeName={null} onOpen={onOpen} />);
         expect(container.textContent).toBe('');
     });
 
-    it('is nothing on a server with no modes, or before the answer lands', async () => {
-        await render(<ModeSelector data={modes({ modes: [] })} activeModeId={null} onOpen={onOpen} />);
+    it('is a button for someone who holds only Move Members, once there is someone to call back', async () => {
+        const mover = modes({ can_switch: false, can_edit: false, can_call_back: true });
+        await render(<ModeSelector data={mover} activeModeId={3} homeName="Town Square" onOpen={onOpen} />);
+        await press(container.querySelector('[data-testid="mode-selector"]')!);
+        expect(onOpen).toHaveBeenCalledTimes(1);
+        // Without a mode on or a main channel the menu would be empty: still a label.
+        await render(<ModeSelector data={mover} activeModeId={3} homeName={null} onOpen={onOpen} />);
+        expect(container.querySelector('button')).toBeNull();
+        await render(<ModeSelector data={mover} activeModeId={null} homeName="Town Square" onOpen={onOpen} />);
         expect(container.textContent).toBe('');
-        await render(<ModeSelector data={undefined} activeModeId={null} onOpen={onOpen} />);
+        expect(modeMenuItems({ data: mover, activeModeId: 3, homeName: 'Town Square', onSwitch: vi.fn(), onCallBack: vi.fn(), onManage: vi.fn() }).map(i => i.id))
+            .toEqual(['mode-call-back']);
+    });
+
+    it('is nothing on a server with no modes, or before the answer lands', async () => {
+        await render(<ModeSelector data={modes({ modes: [] })} activeModeId={null} homeName={null} onOpen={onOpen} />);
+        expect(container.textContent).toBe('');
+        await render(<ModeSelector data={undefined} activeModeId={null} homeName={null} onOpen={onOpen} />);
         expect(container.textContent).toBe('');
     });
 });
@@ -214,6 +231,16 @@ describe('the start notice', () => {
     it('offers no Join when the mode has no main channel', async () => {
         await render(<ModeNotice modeName="Clocktower" otherServerName={null} joinName={null} {...on} />);
         expect(button(/^Join/)).toBeUndefined();
+    });
+});
+
+describe('the Join a start notice offers', () => {
+    const home = { id: 1, name: 'Town Square' };
+    it('goes to the main channel, and is not offered to someone already there', () => {
+        expect(noticeJoinName(home, null)).toBe('Town Square');
+        expect(noticeJoinName(home, 9)).toBe('Town Square');
+        expect(noticeJoinName(home, 1)).toBeNull();
+        expect(noticeJoinName(null, null)).toBeNull();
     });
 });
 
@@ -292,6 +319,70 @@ describe('Server Settings, Modes', () => {
         confirm.mockRestore();
     });
 
+    it('holding Enter creates one mode', async () => {
+        await render(<ModesSettings serverId={SERVER} />);
+        const name = container.querySelector<HTMLInputElement>('input[aria-label="New mode name"]')!;
+        await type(name, 'Twice');
+        createMode.mockImplementationOnce(() => new Promise(() => {}));
+        const enter = () => name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await act(async () => { enter(); });
+        await act(async () => { enter(); });
+        await act(async () => { enter(); });
+        expect(createMode).toHaveBeenCalledTimes(1);
+    });
+
+    it('will not delete the mode that is on without Switch Modes, and says why', async () => {
+        stored = modes({ active_mode_id: 3, can_switch: false });
+        await render(<ModesSettings serverId={SERVER} />);
+        expect(button(/Delete mode/)?.disabled).toBe(true);
+        expect(container.textContent).toContain('takes the Switch Modes permission');
+    });
+
+    it('CONTROL: with Switch Modes, or with the mode off, it will', async () => {
+        stored = modes({ active_mode_id: 3 });
+        await render(<ModesSettings serverId={SERVER} />);
+        expect(button(/Delete mode/)?.disabled).toBe(false);
+        stored = modes({ active_mode_id: null, can_switch: false });
+        await render(<ModesSettings serverId={SERVER} />);
+        expect(button(/Delete mode/)?.disabled).toBe(false);
+    });
+
+    it('never sends a channel that is gone, which the server would refuse the whole save for', async () => {
+        stored = modes({ modes: [{ ...clocktower, channel_ids: [1, 2, 4, 777] }] });
+        await render(<ModesSettings serverId={SERVER} />);
+        await act(async () => { container.querySelector<HTMLInputElement>('input[aria-label="Cottage belongs to Blood on the Clocktower"]')!.click(); });
+        await press(button('Save'));
+        const sent = (updateMode.mock.calls[0] as unknown as [string, number, { channel_ids: number[] }])[2].channel_ids;
+        expect(sent).not.toContain(777);
+        expect(sent.length).toBeGreaterThan(0);
+    });
+
+    it('shows which row is a collection and which are under it', async () => {
+        await render(<ModesSettings serverId={SERVER} />);
+        const rowOf = (name: string) => [...container.querySelectorAll('label.mode-channel')]
+            .find(l => l.querySelector('.mode-channel-name')?.textContent === name)!;
+        expect(rowOf('Rooms').querySelector('svg[data-icon="FolderIcon"], .mode-channel-icon svg')).toBeTruthy();
+        const under = rowOf('Room A');
+        expect(under.classList.contains('mode-channel-sub')).toBe(true);
+        expect(under.querySelector('.mode-channel-parent')?.textContent).toBe('in Rooms');
+        expect(rowOf('Rooms').classList.contains('mode-channel-sub')).toBe(false);
+        // Ticking the collection takes the row with it, and the row says so.
+        await act(async () => { rowOf('Rooms').querySelector('input')!.click(); });
+        expect(rowOf('Room A').querySelector('input')!.checked).toBe(true);
+        expect(rowOf('Room A').querySelector('input')!.disabled).toBe(true);
+        expect(rowOf('Room A').querySelector('.mode-channel-parent')?.textContent).toBe('with Rooms');
+    });
+
+    it('offers a voice room under a ticked collection as the main channel', async () => {
+        await render(<ModesSettings serverId={SERVER} />);
+        const options = () => [...container.querySelectorAll('select option')].map(o => o.textContent);
+        expect(options()).not.toContain('Voice Under');
+        const collection = [...container.querySelectorAll('label.mode-channel')]
+            .find(l => l.querySelector('.mode-channel-name')?.textContent === 'Rooms')!.querySelector('input')!;
+        await act(async () => { collection.click(); });
+        expect(options()).toContain('Voice Under');
+    });
+
     it('is read-only without Manage Channels', async () => {
         stored = modes({ can_edit: false });
         await render(<ModesSettings serverId={SERVER} />);
@@ -315,6 +406,16 @@ describe('the role editor', () => {
             root.render(<RoleSettingsModal isOpen onClose={() => {}} serverId={SERVER} serverName="S" isOwner embedded />);
         });
     };
+
+    it('someone who does not hold Switch Modes cannot tick it, because the server would ignore it', async () => {
+        await act(async () => {
+            root.render(<RoleSettingsModal isOpen onClose={() => {}} serverId={SERVER} serverName="S" isOwner={false} embedded />);
+        });
+        await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        const box = row('Switch Modes')!.querySelector('input')!;
+        expect(box.disabled).toBe(true);
+        expect(row('Switch Modes')!.textContent).toContain('Only someone who holds this permission');
+    });
 
     it('has a Switch Modes row that saves bit 31 as a POSITIVE number', async () => {
         await open();

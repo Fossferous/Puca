@@ -95,6 +95,29 @@
     color: var(--text-muted);
 }
 
+.modes-settings .mode-channel-sub {
+    padding-left: 28px;
+}
+
+.mode-channel-parent {
+    /* The name is what the row is for: this one gives way. */
+    flex: 1 1 0;
+    min-width: 0;
+    padding-left: 8px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* Red and green text miss AA on half the themes. The tint says which it is. */
+.modes-settings .notice.error,
+.modes-settings .notice.success {
+    color: var(--text-normal);
+}
+
 .mode-channel-name {
     min-width: 0;
     overflow: hidden;

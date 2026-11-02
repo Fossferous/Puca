@@ -1523,7 +1523,7 @@ pub async fn update_profile(
             // Reclaim the replaced avatar blob if it actually changed.
             if let (Some(old), Some(new)) = (&old_avatar, &payload.avatar_file_id) {
                 if old != new {
-                    crate::upload_handlers::remove_file(&state.pool, old, claims.sub).await;
+                    crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                 }
             }
             // Same for the join/leave clips. An empty string is the documented
@@ -1535,7 +1535,7 @@ pub async fn update_profile(
             ] {
                 if let (Some(old), Some(new)) = (old, new) {
                     if old != new && !old.is_empty() {
-                        crate::upload_handlers::remove_file(&state.pool, old, claims.sub).await;
+                        crate::upload_handlers::reclaim_file(&state.pool, old, claims.sub).await;
                     }
                 }
             }

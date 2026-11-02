@@ -15,6 +15,37 @@ fn a_mode_name_is_trimmed_and_bounded() {
 }
 
 #[test]
+fn a_mode_name_holds_no_control_or_bidi_characters() {
+    for bad in ["a\0b", "a\nb", "a\u{7f}b", "a\u{85}b", "a\u{202E}b", "a\u{2066}b", "a\u{200F}b", "a\u{061C}b"] {
+        assert_eq!(clean_name(bad).unwrap_err().0, StatusCode::BAD_REQUEST, "{bad:?}");
+    }
+    assert_eq!(clean_name("Čeština 血 🎲").unwrap(), "Čeština 血 🎲", "control: names in any script");
+}
+
+#[test]
+fn only_an_explicit_null_turns_a_mode_off() {
+    let parse = |body: Value| serde_json::from_value::<SetActiveRequest>(body).map(|r| r.mode_id).map_err(|_| ());
+    assert_eq!(parse(json!({ "mode_id": null })), Ok(None));
+    assert_eq!(parse(json!({ "mode_id": 7 })), Ok(Some(7)));
+    assert_eq!(parse(json!({})), Err(()), "no mode_id at all");
+    assert_eq!(parse(json!({ "modeId": 7 })), Err(()), "misspelt");
+}
+
+/// Reclaim hooks all go through upload_handlers::reclaim_file: one upload can back a mode
+/// and an icon, an avatar or an emoji, and remove_file checks nothing.
+#[test]
+fn no_reclaim_hook_calls_remove_file_directly() {
+    for (name, source) in [
+        ("server_handlers.rs", include_str!("server_handlers.rs")),
+        ("handlers.rs", include_str!("handlers.rs")),
+        ("reaction_handlers.rs", include_str!("reaction_handlers.rs")),
+        ("mode_handlers.rs", include_str!("mode_handlers.rs")),
+    ] {
+        assert!(!source.contains("upload_handlers::remove_file("), "{name} calls remove_file directly");
+    }
+}
+
+#[test]
 fn an_accent_is_one_spelling_of_six_hex_digits() {
     assert_eq!(clean_accent("#7A1F3D").as_deref(), Some("#7a1f3d"));
     for bad in ["7a1f3d", "#7a1f3", "#7a1f3dd", "#7a1f3g", "red", "#", "#7a1f3\u{e9}", "url(x)"] {
@@ -43,6 +74,11 @@ fn the_switch_is_a_server_right_nobody_gets_by_default() {
 mod db {
     use super::*;
     use crate::protocol::ServerMessage as M;
+
+    /// The tick reads every server in the database and judges each by ITS OWN state's
+    /// rooms, so one test's tick would turn off another test's aged mode. Every test
+    /// that ticks or ages a stamp holds this.
+    static AUTO_OFF_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct Fx {
         sid: String,
@@ -96,6 +132,47 @@ mod db {
             .fetch_one(pool)
             .await
             .expect("channel");
+        id
+    }
+
+    /// Make `user` a stream-only account, in the voice channel a role overwrite opens for
+    /// it: anywhere else its permissions resolve to nothing at all (docs/STREAM_ONLY.md).
+    async fn stream_only_in(pool: &sqlx::PgPool, sid: &str, user: i32, channel: i32) {
+        let (rid,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, 'stream only', '#99AAB5', $2, 4, false) RETURNING id",
+        )
+        .bind(sid)
+        .bind(P::STREAM_ONLY.bits() as i64)
+        .fetch_one(pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(sid)
+            .bind(user)
+            .bind(rid)
+            .execute(pool)
+            .await
+            .expect("member role");
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+            .bind(channel as i64)
+            .bind(rid)
+            .bind((P::VIEW_CHANNEL | P::CONNECT).bits() as i64)
+            .execute(pool)
+            .await
+            .expect("overwrite");
+    }
+
+    async fn subchannel(pool: &sqlx::PgPool, sid: &str, name: &str, kind: i32, parent: i32) -> i32 {
+        let (id,): (i32,) =
+            sqlx::query_as("INSERT INTO channels (server_id, name, type, parent_id) VALUES ($1, $2, $3, $4) RETURNING id")
+                .bind(sid)
+                .bind(name)
+                .bind(kind)
+                .bind(parent)
+                .fetch_one(pool)
+                .await
+                .expect("subchannel");
         id
     }
 
@@ -693,16 +770,16 @@ mod db {
         in_town.drain();
         in_cottage.drain();
 
-        let delete = |id: i32| {
-            delete_mode(State(Arc::clone(&state)), Path((f.sid.clone(), id)), Extension(claims(f.manager)))
+        let delete = |id: i32, by: i64| {
+            delete_mode(State(Arc::clone(&state)), Path((f.sid.clone(), id)), Extension(claims(by)))
         };
-        let deleted_off = delete(off).await.status();
+        let deleted_off = delete(off, f.manager).await.status();
         let cottage_after = occupants(&state, f.cottage);
         let cottage_frames = in_cottage.drain();
-        let deleted_on = delete(on).await.status();
+        let deleted_on = delete(on, f.owner).await.status();
         let town_after = occupants(&state, f.town);
         let town_story = story(&in_town.drain());
-        let gone_again = delete(on).await.status();
+        let gone_again = delete(on, f.owner).await.status();
         let (stored,): (Option<i32>,) =
             sqlx::query_as("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
         let channel_kept = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM channels WHERE id = $1)")
@@ -712,7 +789,7 @@ mod db {
             .unwrap();
         teardown(&pool, &f).await;
 
-        assert_eq!(deleted_off, StatusCode::OK);
+        assert_eq!(deleted_off, StatusCode::OK, "Manage Channels is enough for a mode that is off");
         assert_eq!(cottage_after, vec![f.mover], "deleting a mode that is off ends nothing");
         assert!(story(&cottage_frames).is_empty(), "{cottage_frames:?}");
         assert!(cottage_frames.iter().any(|m| matches!(m, M::ServerModesEdited { .. })), "everyone refetches");
@@ -859,6 +936,7 @@ mod db {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_empty_mode_turns_itself_off() {
         let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let _only_tick = AUTO_OFF_TESTS.lock().await;
         let f = setup(&pool).await;
         let state = state_of(&pool);
         let mode = make(&state, &f, "Clocktower", &[f.town]).await;
@@ -893,11 +971,22 @@ mod db {
         let untouched_seen = seen(pool.clone(), f.sid.clone()).await;
         let stays_unjoined = active(pool.clone(), f.sid.clone()).await;
 
-        // Someone joins: the clock starts, and a stale stamp is refreshed.
+        // Someone joins (the tick sees them): the clock starts from nothing...
+        let stamp_age = |pool: sqlx::PgPool, sid: String| async move {
+            sqlx::query_scalar::<_, Option<f64>>("SELECT EXTRACT(EPOCH FROM NOW() - active_mode_occupied_at)::float8 FROM servers WHERE id = $1")
+                .bind(sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
         let call = Sock::in_room(&state, f.plain, f.town);
+        auto_off_tick(&state).await;
+        let started = stamp_age(pool.clone(), f.sid.clone()).await;
+        // ...and a stale stamp is refreshed.
         age(pool.clone(), f.sid.clone(), 45).await;
         auto_off_tick(&state).await;
         let occupied_stays = active(pool.clone(), f.sid.clone()).await;
+        let refreshed = stamp_age(pool.clone(), f.sid.clone()).await;
         state.leave_room(&format!("voice_{}", f.town), call.user, call.conn);
 
         // Empty, within the window.
@@ -927,8 +1016,9 @@ mod db {
         auto_off_tick(&state).await;
         let opted_out_stays = active(pool.clone(), f.sid.clone()).await;
 
-        // Opted back in: off, and everyone is told nobody did it.
+        // Opted back in, and the window then runs out: off, and everyone is told nobody did it.
         assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": true })).await, StatusCode::OK);
+        age(pool.clone(), f.sid.clone(), AUTO_OFF_EMPTY_MINUTES + 2).await;
         let mut watcher = Sock::open(&state, f.switcher);
         auto_off_tick(&state).await;
         let after = active(pool.clone(), f.sid.clone()).await;
@@ -948,7 +1038,9 @@ mod db {
 
         assert!(!untouched_seen);
         assert_eq!(stays_unjoined, Some(mode));
+        assert!(started.is_some_and(|a| a < 30.0), "the first person starts the clock: {started:?}");
         assert_eq!(occupied_stays, Some(mode));
+        assert!(refreshed.is_some_and(|a| a < 30.0), "someone there moves a stale stamp: {refreshed:?}");
         assert_eq!(fresh_stays, Some(mode));
         assert_eq!(gathered_stays, Some(mode), "people in the main channel count");
         assert_eq!(restart_stays, Some(mode), "a restart is not everyone leaving");
@@ -1141,6 +1233,10 @@ mod db {
         let f = setup(&pool).await;
         let state = state_of(&pool);
         let mode = make(&state, &f, "Clocktower", &[f.town, f.cottage]).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": f.town })).await, StatusCode::OK);
+        // A main channel in no mode: nothing leaves a mode's list, and it still goes.
+        let other = make(&state, &f, "Other", &[]).await;
+        assert_eq!(patch(&state, &f, f.owner, other, json!({ "home_channel_id": f.lobby })).await, StatusCode::OK);
         let mut watcher = Sock::open(&state, f.plain);
         let edit = |channel: i32, body: Value| {
             crate::channel_handlers::update_channel(
@@ -1156,16 +1252,699 @@ mod db {
         let made_afk = edit(f.town, json!({ "is_afk": true })).await.into_response().status();
         let frames = watcher.drain();
         let (_, left) = modes(&state, &f, f.owner).await;
+        let lobby_afk = edit(f.lobby, json!({ "is_afk": true })).await.into_response().status();
+        let lobby_frames = watcher.drain();
+        let (_, lobby_left) = modes(&state, &f, f.owner).await;
         teardown(&pool, &f).await;
         assert_eq!(renamed, StatusCode::OK);
         assert_eq!(kept["modes"][0]["channel_ids"], json!([f.town, f.cottage]), "control: another edit leaves it");
+        assert_eq!(kept["modes"][0]["home_channel_id"], f.town, "control");
         assert_eq!(made_afk, StatusCode::OK);
         assert_eq!(left["modes"][0]["channel_ids"], json!([f.cottage]));
+        assert_eq!(left["modes"][0]["home_channel_id"], Value::Null, "and stops being the main channel");
         assert!(frames.iter().any(|m| matches!(m, M::ServerModesEdited { .. })), "and everyone hears");
+        assert_eq!(lobby_afk, StatusCode::OK);
+        assert_eq!(lobby_left["modes"][1]["home_channel_id"], Value::Null, "a main channel in no mode goes too");
+        assert!(lobby_frames.iter().any(|m| matches!(m, M::ServerModesEdited { .. })), "and that is announced as well");
+    }
+
+    /// A voice channel under a ticked collection IS in the mode, everywhere: this is how
+    /// a game's private rooms are usually laid out. The channel's own row names no mode,
+    /// so each of these used to miss it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_voice_channel_under_a_ticked_collection_is_in_the_mode() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let _only_tick = AUTO_OFF_TESTS.lock().await;
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let room_a = subchannel(&pool, &f.sid, "room-a", 1, rooms).await;
+        let room_b = subchannel(&pool, &f.sid, "room-b", 1, rooms).await;
+        let mode = make(&state, &f, "Clocktower", &[rooms, f.town]).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": f.town })).await, StatusCode::OK);
+        let also = make(&state, &f, "Shares the collection", &[rooms]).await;
+        let without = make(&state, &f, "Without it", &[f.lobby]).await;
+
+        // Auto-off: the stamp moves for people in a room under the collection.
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let in_room_a = Sock::in_room(&state, f.plain, room_a);
+        sqlx::query("UPDATE servers SET active_mode_occupied_at = NOW() - make_interval(mins => $1) WHERE id = $2")
+            .bind(AUTO_OFF_EMPTY_MINUTES + 5)
+            .bind(&f.sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        auto_off_tick(&state).await;
+        let (stays_on,): (Option<i32>,) =
+            sqlx::query_as("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+
+        // Call everyone back reaches them.
+        let (_, back) = read(
+            call_everyone_back(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.owner))).await,
+        )
+        .await;
+        drop(in_room_a);
+
+        // A main channel under the collection is somewhere people can follow...
+        let (under, under_in_b) = (subchannel(&pool, &f.sid, "under", 1, rooms).await, Sock::in_room(&state, f.plain, room_b));
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": under })).await, StatusCode::OK);
+        let (_, back_to_sub) = read(
+            call_everyone_back(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.owner))).await,
+        )
+        .await;
+        drop(under_in_b);
+
+        // ...and one under a collection this mode does not list is not.
+        let elsewhere = channel(&pool, &f.sid, "elsewhere", 2).await;
+        let beyond = subchannel(&pool, &f.sid, "beyond", 1, elsewhere).await;
+        make(&state, &f, "Beyond", &[elsewhere]).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": beyond })).await, StatusCode::OK);
+        let hidden_home = call_everyone_back(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.owner))).await.status();
+
+        // The next mode shares the collection: the call carries on.
+        let mut sharing = Sock::in_room(&state, f.mover, room_a);
+        let (_, kept) = switch(&state, &f, f.owner, Some(also)).await;
+        let room_a_kept = occupants(&state, room_a);
+        let sharing_story = story(&sharing.drain());
+
+        // It does not: the call ends, with the reason first.
+        let (_, ended) = switch(&state, &f, f.owner, Some(without)).await;
+        let room_a_ended = occupants(&state, room_a);
+        let ended_story = story(&sharing.drain());
+        teardown(&pool, &f).await;
+
+        assert_eq!(stays_on, Some(mode), "someone in a room under the collection keeps the mode on");
+        assert_eq!(back["moved"], 1, "Call everyone back pulled them out of it");
+        assert_eq!(back_to_sub["moved"], 1, "a main channel under the collection works");
+        assert_eq!(hidden_home, StatusCode::CONFLICT, "one under a collection this mode does not list does not");
+        assert_eq!(kept["disconnected"], 0);
+        assert_eq!(room_a_kept, vec![f.mover], "a collection both modes tick keeps its calls");
+        assert_eq!(sharing_story, vec![format!("mode:Some({also})")]);
+        assert_eq!(ended["disconnected"], 1, "counted in the answer");
+        assert!(room_a_ended.is_empty(), "turning it off ends the calls under the collection");
+        assert_eq!(ended_story, vec![format!("mode:Some({without})"), format!("left:voice_{room_a}")]);
+    }
+
+    /// "Listed under the next mode" is the channel list's own rule, not "ticked or under
+    /// a ticked collection": ticked in the next mode under a collection it does not tick
+    /// is not listed, and neither is a channel in another mode under a collection it does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_switch_hides_what_the_list_would_hide() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let ticked_alone = subchannel(&pool, &f.sid, "ticked-alone", 1, rooms).await;
+        let on_a = make(&state, &f, "Collection on", &[rooms]).await;
+        let on_b = make(&state, &f, "Its room alone", &[ticked_alone]).await;
+        // The AFK channel can't be hidden, even by its collection.
+        let afk = subchannel(&pool, &f.sid, "afk", 1, rooms).await;
+        sqlx::query("UPDATE channels SET is_afk = true WHERE id = $1").bind(afk).execute(&pool).await.unwrap();
+
+        assert_eq!(switch(&state, &f, f.owner, Some(on_a)).await.0, StatusCode::OK);
+        let mut in_room = Sock::in_room(&state, f.plain, ticked_alone);
+        let parked = Sock::in_room(&state, f.manager, afk);
+        in_room.drain();
+        let (_, first) = switch(&state, &f, f.owner, Some(on_b)).await;
+        let after_first = occupants(&state, ticked_alone);
+        let hidden_from = channels_hidden_from(&pool, f.plain).await.unwrap();
+        let (_, off) = switch(&state, &f, f.owner, None).await;
+        let afk_after = occupants(&state, afk);
+        let hidden_off = channels_hidden_from(&pool, f.plain).await.unwrap();
+        drop(parked);
+        teardown(&pool, &f).await;
+
+        assert_eq!(first["disconnected"], 1, "its collection is not listed under the next mode, so it is not either");
+        assert!(after_first.is_empty());
+        assert!(hidden_from.contains(&(ticked_alone as i64)), "and the rail agrees");
+        assert_eq!(off["disconnected"], 0);
+        assert_eq!(afk_after, vec![f.manager], "nobody is put out of the AFK channel by a mode");
+        assert!(!hidden_off.contains(&(afk as i64)), "and it never leaves the rail");
+        assert!(hidden_off.contains(&(rooms as i64)), "control: its collection does");
+    }
+
+    /// Turning a mode off cuts a LiveKit session whose socket is not in voice_<id> (it
+    /// died, or the backend just restarted): the room has no entry for it. It counts, in
+    /// the answer and the audit. And a session in the room is cut exactly as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn turning_off_cuts_a_livekit_session_with_no_room_entry() {
+        use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy};
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        no_env_proxy();
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town, f.lobby]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let room = crate::sfu::room_name_for_channel(f.town as i64);
+        let (socketless, in_room) = (format!("u{}#gone", f.mover), format!("u{}#here", f.plain));
+        {
+            let mut usage = state.sfu_rooms.entry(room.clone()).or_default();
+            usage.participants.insert(socketless.clone(), std::time::Instant::now());
+            usage.participants.insert(in_room.clone(), std::time::Instant::now());
+        }
+        let mut sock = Sock::in_room(&state, f.plain, f.town);
+        sock.drain();
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let (status, body) = crate::sfu::TEST_LIVEKIT.scope(base, switch(&state, &f, f.owner, None)).await;
+        let seen = asked(srv).await;
+        let (audit,): (String,) = sqlx::query_as(
+            "SELECT details FROM audit_log WHERE server_id = $1 AND action_type = 'mode_switch' ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&f.sid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        teardown(&pool, &f).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let removed: Vec<String> = seen.iter().map(|s| s.body.clone()).collect();
+        assert!(removed.iter().any(|b| b.contains(&socketless)), "the session with no room entry: {removed:?}");
+        assert!(removed.iter().any(|b| b.contains(&in_room)), "control: the one in the room: {removed:?}");
+        assert_eq!(body["disconnected"], 2, "both counted");
+        assert_eq!(audit, "Clocktower off, 2 disconnected");
+    }
+
+    /// Someone being there, for the auto-off: a person in the room or a LiveKit session
+    /// with no room entry is; a stream-only account (it can sit there unattended) is not,
+    /// though the disconnect still reaches it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_auto_off_counts_people_not_stream_only_accounts() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        stream_only_in(&pool, &f.sid, f.manager as i32, f.town).await;
+
+        let nobody = someone_there(&state, f.town).await;
+        // A stream-only account in the room.
+        let mut bot = Sock::in_room(&state, f.manager, f.town);
+        let room_name = format!("voice_{}", f.town);
+        state.rooms.get_mut(&room_name).unwrap().set_voice_rights(
+            f.manager,
+            crate::state::VoiceRights { can_speak: false, receives: false, reads_text: false },
+        );
+        let bot_alone = someone_there(&state, f.town).await;
+        // The same account's LiveKit session must not count just because its socket is the
+        // one the room knows: in the room, it has been judged already.
+        let sfu = crate::sfu::room_name_for_channel(f.town as i64);
+        state.sfu_rooms.entry(sfu.clone()).or_default().participants.insert(format!("u{}#bot", f.manager), std::time::Instant::now());
+        let bot_with_session = someone_there(&state, f.town).await;
+        // A person's LiveKit session with no room entry.
+        state.sfu_rooms.entry(sfu.clone()).or_default().participants.insert(format!("u{}#gone", f.plain), std::time::Instant::now());
+        let person_session = someone_there(&state, f.town).await;
+        state.sfu_rooms.remove(&sfu);
+        // A stream-only account's LiveKit session with no room entry.
+        state.leave_room(&room_name, bot.user, bot.conn);
+        state.sfu_rooms.entry(sfu.clone()).or_default().participants.insert(format!("u{}#bot", f.manager), std::time::Instant::now());
+        let bot_session_only = someone_there(&state, f.town).await;
+        state.sfu_rooms.remove(&sfu);
+        // A person in the room.
+        let _person = Sock::in_room(&state, f.plain, f.town);
+        let person = someone_there(&state, f.town).await;
+        // ...and the disconnect still takes the stream-only account.
+        state.join_room(&room_name, bot.user, bot.conn);
+        state.rooms.get_mut(&room_name).unwrap().set_voice_rights(
+            f.manager,
+            crate::state::VoiceRights { can_speak: false, receives: false, reads_text: false },
+        );
+        bot.drain();
+        let (_, off) = switch(&state, &f, f.owner, None).await;
+        let bot_told = story(&bot.drain());
+        teardown(&pool, &f).await;
+
+        assert!(!nobody, "control: an empty room");
+        assert!(!bot_alone, "a stream-only account in the room is nobody being there");
+        assert!(!bot_with_session, "nor is its LiveKit session");
+        assert!(person_session, "a person's LiveKit session with no room entry is");
+        assert!(!bot_session_only, "a stream-only account's session with no room entry is not");
+        assert!(person, "control: a person in the room");
+        assert_eq!(off["disconnected"], 2);
+        assert_eq!(bot_told, vec!["mode:None".to_string(), format!("left:voice_{}", f.town)]);
+    }
+
+    /// A socket that slept through the switch must not replay itself back into the ended
+    /// call: the session that held the call is tombstoned with the reason, and one whose
+    /// socket had just died (out of the room already) is too. A deliberate join is not
+    /// refused: a mode tidies the list, it does not lock anything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replay_of_a_call_a_mode_ended_is_refused_with_the_reason() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let room = format!("voice_{}", f.town);
+        let send = |state: Arc<AppState>, user: i64, conn: u64, frame: Value| async move {
+            crate::ws::handle_message(&state, user, conn, "t", &frame.to_string(), &mut std::collections::HashSet::new(), "").await
+        };
+        let replay = |room: String| json!({ "type": "JoinRoom", "payload": { "room_id": room, "replay": true } });
+        let join = |room: String| json!({ "type": "JoinRoom", "payload": { "room_id": room } });
+
+        // In the room, and a second device of the same account not in the call.
+        let mut held = Sock::open(&state, f.plain);
+        send(Arc::clone(&state), f.plain, held.conn, join(room.clone())).await.expect("join");
+        let mut other_device = Sock::open(&state, f.plain);
+        // A socket that died in the room: its sid is what its replay comes back under.
+        let dropped = Sock::open(&state, f.mover);
+        send(Arc::clone(&state), f.mover, dropped.conn, join(room.clone())).await.expect("join");
+        state.unregister_session(f.mover, dropped.conn);
+        let dropped_again = Sock::open(&state, f.mover);
+        // Control: a call in a channel no mode names.
+        let control = Sock::open(&state, f.switcher);
+        let lobby = format!("voice_{}", f.lobby);
+        send(Arc::clone(&state), f.switcher, control.conn, join(lobby.clone())).await.expect("join");
+        held.drain();
+        other_device.drain();
+
+        assert_eq!(switch(&state, &f, f.owner, None).await.0, StatusCode::OK);
+        let reason_of = |frames: Vec<ServerMessage>, room: &str| {
+            frames.into_iter().find_map(|m| match m {
+                M::RoomLeft { room_id, reason, .. } if room_id == room => Some(reason),
+                _ => None,
+            })
+        };
+        let held_reason = reason_of(held.drain(), &room);
+        let other_reason = reason_of(other_device.drain(), &room);
+
+        // The replays.
+        send(Arc::clone(&state), f.plain, held.conn, replay(room.clone())).await.expect("replay");
+        let held_after = occupants(&state, f.town);
+        let held_replay = reason_of(held.drain(), &room);
+        let mut again = dropped_again;
+        send(Arc::clone(&state), f.mover, again.conn, replay(room.clone())).await.expect("replay");
+        let dropped_after = occupants(&state, f.town);
+        let dropped_replay = reason_of(again.drain(), &room);
+        // A replay in a channel no mode ended goes through.
+        state.leave_room(&lobby, f.switcher, control.conn);
+        send(Arc::clone(&state), f.switcher, control.conn, replay(lobby.clone())).await.expect("replay");
+        let control_after = occupants(&state, f.lobby);
+        // Choosing to join is not refused.
+        send(Arc::clone(&state), f.plain, held.conn, join(room.clone())).await.expect("a deliberate join");
+        let deliberate = occupants(&state, f.town);
+        teardown(&pool, &f).await;
+
+        assert_eq!(held_reason, Some(Some(crate::ws::MODE_ENDED.to_string())), "the device in the call is told why");
+        assert_eq!(other_reason, Some(None), "another device of the account is told plainly: it says nothing");
+        assert!(held_after.is_empty(), "{held_after:?}");
+        assert_eq!(held_replay, Some(Some(crate::ws::MODE_ENDED.to_string())), "and its replay is refused with the reason");
+        assert!(dropped_after.is_empty(), "a socket that died in the room stays out too: {dropped_after:?}");
+        assert_eq!(dropped_replay, Some(Some(crate::ws::MODE_ENDED.to_string())));
+        assert_eq!(control_after, vec![f.switcher], "control");
+        assert_eq!(deliberate, vec![f.plain], "nothing refuses a later join");
+    }
+
+    /// Two switches settle in tasks nothing orders and a client keeps the last frame it
+    /// got, so every frame says what is in the row, not what its own switch asked for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_frame_announces_the_stored_mode() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let (a, b) = (make(&state, &f, "A", &[]).await, make(&state, &f, "B", &[]).await);
+        // The row has moved on to B by the time the first switch settles.
+        sqlx::query("UPDATE servers SET active_mode_id = $1 WHERE id = $2").bind(b).bind(&f.sid).execute(&pool).await.unwrap();
+        let mut watcher = Sock::open(&state, f.plain);
+        settle(
+            &state,
+            Switch { server_id: f.sid.clone(), previous: None, next: Some(a), by: Some(f.owner), hidden: Vec::new(), details: String::new() },
+        )
+        .await;
+        let frame = watcher.drain().into_iter().find_map(|m| match m {
+            M::ServerModeChanged { active_mode_id, previous_mode_id, .. } => Some((active_mode_id, previous_mode_id)),
+            _ => None,
+        });
+        teardown(&pool, &f).await;
+        assert_eq!(frame, Some((Some(b as i64), None)));
+    }
+
+    /// Two switches at once: the row lock makes each read the other's result as its
+    /// `previous`, so neither one's hidden channels are missed. Several rounds: without
+    /// the lock this is a race that either read can win.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_switches_at_once_miss_nothing() {
+        let Some(pool) = crate::migrator::test_pool(12).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let (ra, rb, rc) = (
+            channel(&pool, &f.sid, "room-a", 1).await,
+            channel(&pool, &f.sid, "room-b", 1).await,
+            channel(&pool, &f.sid, "room-c", 1).await,
+        );
+        let (a, b, c) = (
+            make(&state, &f, "A", &[ra]).await,
+            make(&state, &f, "B", &[rb]).await,
+            make(&state, &f, "C", &[rc]).await,
+        );
+        let mut wrong = Vec::new();
+        for round in 0..6 {
+            assert_eq!(switch(&state, &f, f.owner, Some(a)).await.0, StatusCode::OK);
+            let _in_a = Sock::in_room(&state, f.plain, ra);
+            let _in_b = Sock::in_room(&state, f.mover, rb);
+            let _in_c = Sock::in_room(&state, f.manager, rc);
+            let (first, second) = tokio::join!(switch(&state, &f, f.owner, Some(b)), switch(&state, &f, f.switcher, Some(c)));
+            assert_eq!((first.0, second.0), (StatusCode::OK, StatusCode::OK));
+            let (stored,): (Option<i32>,) =
+                sqlx::query_as("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+            let (kept, lost) = if stored == Some(b) { (rb, rc) } else { (rc, rb) };
+            if !occupants(&state, ra).is_empty() || occupants(&state, kept).len() != 1 || !occupants(&state, lost).is_empty() {
+                wrong.push(round);
+            }
+            for room in [ra, rb, rc] {
+                for member in occupants(&state, room) {
+                    let conns: Vec<u64> = state.rooms.get(&format!("voice_{room}")).and_then(|r| r.conns_of(member).cloned()).map(|c| c.into_iter().collect()).unwrap_or_default();
+                    for conn in conns {
+                        state.leave_room(&format!("voice_{room}"), member, conn);
+                    }
+                }
+            }
+        }
+        teardown(&pool, &f).await;
+        assert!(wrong.is_empty(), "rounds that missed a hidden channel: {wrong:?}");
+    }
+
+    /// A selector, not a catalogue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_server_holds_at_most_32_modes() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        for i in 0..MAX_MODES_PER_SERVER {
+            make(&state, &f, &format!("M{i}"), &[]).await;
+        }
+        let (status, _) = create(&state, &f, f.owner, json!({ "name": "One too many" })).await;
+        teardown(&pool, &f).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// Deleting a mode reclaims its picture, unless another mode still shows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_a_mode_reclaims_its_picture() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let (one, two) = (make(&state, &f, "One", &[]).await, make(&state, &f, "Two", &[]).await);
+        let shared = upload(&pool, f.owner, "image/jpeg", 1000).await;
+        for m in [one, two] {
+            assert_eq!(patch(&state, &f, f.owner, m, json!({ "background_file_id": shared.clone() })).await, StatusCode::OK);
+        }
+        let delete = |mode: i32| delete_mode(State(Arc::clone(&state)), Path((f.sid.clone(), mode)), Extension(claims(f.owner)));
+        assert_eq!(delete(one).await.status(), StatusCode::OK);
+        let kept_while_shared = file_exists(&pool, &shared).await;
+        assert_eq!(delete(two).await.status(), StatusCode::OK);
+        let reclaimed = !file_exists(&pool, &shared).await;
+        let _ = sqlx::query("DELETE FROM uploaded_files WHERE uploader_id = ANY($1)").bind(f.users.clone()).execute(&pool).await;
+        teardown(&pool, &f).await;
+        assert!(kept_while_shared, "another mode still shows it");
+        assert!(reclaimed, "the last one went");
+    }
+
+    /// Every spelling of a uuid the cast accepts is stored as the one the guards compare:
+    /// a mode's background and a server icon both, and DELETE /files reads through it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_file_is_stored_under_its_one_spelling() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[]).await;
+        let file = upload(&pool, f.owner, "image/jpeg", 1000).await;
+        let shouted = file.to_uppercase();
+
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "background_file_id": shouted.clone() })).await, StatusCode::OK);
+        let (_, read_back) = modes(&state, &f, f.owner).await;
+        let guarded = crate::upload_handlers::file_is_referenced(&pool, &file).await.unwrap();
+        // Saving the canonical spelling is not a replacement: the picture stays.
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "background_file_id": file.clone() })).await, StatusCode::OK);
+        let still_there = file_exists(&pool, &file).await;
+        let delete_shouted = crate::upload_handlers::delete_file(
+            State(Arc::clone(&state)),
+            Path(shouted.clone()),
+            Extension(claims(f.owner)),
+        )
+        .await
+        .into_response()
+        .status();
+
+        let icon = upload(&pool, f.owner, "image/png", 1000).await;
+        let set_icon = crate::server_handlers::update_server_settings(
+            State(Arc::clone(&state)),
+            Path(f.sid.clone()),
+            Extension(claims(f.owner)),
+            Json(serde_json::from_value(json!({ "icon_file_id": icon.to_uppercase() })).unwrap()),
+        )
+        .await
+        .into_response()
+        .status();
+        let stored_icon: Option<String> = sqlx::query_scalar("SELECT icon_file_id FROM servers WHERE id = $1")
+            .bind(&f.sid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let _ = sqlx::query("UPDATE servers SET icon_file_id = NULL WHERE id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM uploaded_files WHERE uploader_id = ANY($1)").bind(f.users.clone()).execute(&pool).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(read_back["modes"][0]["background_file_id"], json!(file));
+        assert!(guarded, "the in-use check finds it");
+        assert!(still_there, "a save of the same file under another spelling is not a replacement");
+        assert_eq!(delete_shouted, StatusCode::CONFLICT, "DELETE under another spelling is refused like the canonical one");
+        assert_eq!(set_icon, StatusCode::OK);
+        assert_eq!(stored_icon.as_deref(), Some(icon.as_str()));
+    }
+
+    /// One upload can back a mode and an icon: replacing the icon keeps the file. Reclaim
+    /// hooks go through reclaim_file, which is what the source pin below holds them to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replacing_an_icon_keeps_a_file_a_mode_still_shows() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[]).await;
+        let both = upload(&pool, f.owner, "image/jpeg", 1000).await;
+        let icon_only = upload(&pool, f.owner, "image/jpeg", 1000).await;
+        let next = upload(&pool, f.owner, "image/jpeg", 1000).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "background_file_id": both.clone() })).await, StatusCode::OK);
+        let set_icon = |id: String| {
+            crate::server_handlers::update_server_settings(
+                State(Arc::clone(&state)),
+                Path(f.sid.clone()),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(json!({ "icon_file_id": id })).unwrap()),
+            )
+        };
+        assert_eq!(set_icon(both.clone()).await.into_response().status(), StatusCode::OK);
+        assert_eq!(set_icon(icon_only.clone()).await.into_response().status(), StatusCode::OK);
+        let kept = file_exists(&pool, &both).await;
+        assert_eq!(set_icon(next.clone()).await.into_response().status(), StatusCode::OK);
+        let control = !file_exists(&pool, &icon_only).await;
+        let _ = sqlx::query("UPDATE servers SET icon_file_id = NULL WHERE id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM uploaded_files WHERE uploader_id = ANY($1)").bind(f.users.clone()).execute(&pool).await;
+        teardown(&pool, &f).await;
+        assert!(kept, "the mode still shows it");
+        assert!(control, "control: an icon nothing else uses is reclaimed");
+    }
+
+    /// Deleting a channel a mode names tells everyone, or a mode editor still holding its
+    /// id has every save refused with no row to untick. A channel no mode names says
+    /// nothing. Whoever is on the server refetches their channels through this frame too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_a_channel_a_mode_names_announces_it() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let under = subchannel(&pool, &f.sid, "under", 0, rooms).await;
+        let mode = make(&state, &f, "Clocktower", &[f.town, under]).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": f.cottage })).await, StatusCode::OK);
+        let mut watcher = Sock::open(&state, f.plain);
+        let delete = |id: i32| {
+            crate::channel_handlers::delete_channel(State(Arc::clone(&state)), Path(id as i64), Extension(claims(f.owner)))
+        };
+        let edited = |frames: Vec<ServerMessage>| frames.iter().any(|m| matches!(m, M::ServerModesEdited { .. }));
+
+        assert_eq!(delete(f.lobby).await.into_response().status(), StatusCode::NO_CONTENT);
+        let in_no_mode = edited(watcher.drain());
+        assert_eq!(delete(f.town).await.into_response().status(), StatusCode::NO_CONTENT);
+        let ticked = edited(watcher.drain());
+        assert_eq!(delete(f.cottage).await.into_response().status(), StatusCode::NO_CONTENT);
+        let main_channel = edited(watcher.drain());
+        assert_eq!(delete(rooms).await.into_response().status(), StatusCode::NO_CONTENT);
+        let collection_of_a_ticked_one = edited(watcher.drain());
+        teardown(&pool, &f).await;
+
+        assert!(!in_no_mode, "control: no mode names it");
+        assert!(ticked);
+        assert!(main_channel);
+        assert!(collection_of_a_ticked_one, "the delete takes the ticked subchannel with it");
+    }
+
+    /// The mode that is on takes Switch Modes to delete: it is turning it off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_the_mode_that_is_on_takes_switch_modes() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let on = make(&state, &f, "On", &[f.town]).await;
+        let _in_town = Sock::in_room(&state, f.plain, f.town);
+        assert_eq!(switch(&state, &f, f.owner, Some(on)).await.0, StatusCode::OK);
+        role(&pool, &f.sid, f.switcher as i32, "and channels", P::MANAGE_CHANNELS, 3).await;
+        let delete = |by: i64| delete_mode(State(Arc::clone(&state)), Path((f.sid.clone(), on)), Extension(claims(by)));
+
+        let manager_only = delete(f.manager).await.status();
+        let town_after_refusal = occupants(&state, f.town);
+        let (stored,): (Option<i32>,) =
+            sqlx::query_as("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let switcher_only = delete(f.mover).await.status();
+        let both = delete(f.switcher).await.status();
+        let town_after = occupants(&state, f.town);
+        teardown(&pool, &f).await;
+
+        assert_eq!(manager_only, StatusCode::FORBIDDEN);
+        assert_eq!(town_after_refusal, vec![f.plain], "nothing happened");
+        assert_eq!(stored, Some(on));
+        assert_eq!(switcher_only, StatusCode::FORBIDDEN, "a mover has neither");
+        assert_eq!(both, StatusCode::OK);
+        assert!(town_after.is_empty());
+    }
+
+    /// Re-enabling Turn off when empty starts a fresh window: the room may have emptied
+    /// while it was off. The stamp keeps moving while it is off, so a mode someone used
+    /// meanwhile is known to have been used, and one nobody joined stays unjoined.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn re_enabling_the_auto_off_starts_a_fresh_window() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let _only_tick = AUTO_OFF_TESTS.lock().await;
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let active = || async {
+            sqlx::query_scalar::<_, Option<i32>>("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap()
+        };
+        let age_of_stamp = || async {
+            sqlx::query_scalar::<_, Option<f64>>("SELECT EXTRACT(EPOCH FROM NOW() - active_mode_occupied_at)::float8 FROM servers WHERE id = $1")
+                .bind(&f.sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let (age_pool, age_sid) = (&pool, &f.sid);
+        let age = move |minutes: i32| async move {
+            sqlx::query("UPDATE servers SET active_mode_occupied_at = NOW() - make_interval(mins => $1) WHERE id = $2")
+                .bind(minutes)
+                .bind(age_sid)
+                .execute(age_pool)
+                .await
+                .unwrap();
+        };
+
+        // Opted out, unjoined: re-enabling does not make it look joined.
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": false })).await, StatusCode::OK);
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": true })).await, StatusCode::OK);
+        let still_unjoined = age_of_stamp().await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": false })).await, StatusCode::OK);
+
+        // Opted out, someone comes: the tick still stamps.
+        let visitor = Sock::in_room(&state, f.plain, f.town);
+        auto_off_tick(&state).await;
+        let stamped_while_out = age_of_stamp().await;
+        state.leave_room(&format!("voice_{}", f.town), visitor.user, visitor.conn);
+
+        // Three hours later, re-enabled: a fresh window, not an instant turn-off.
+        age(180).await;
+        auto_off_tick(&state).await;
+        let opted_out_stays = active().await;
+        // The turn-off itself re-checks, for an owner who unticked it after the read.
+        turn_off_empty(&state, &f.sid, mode, "Clocktower").await;
+        let unticked_since_the_read = active().await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": true })).await, StatusCode::OK);
+        let fresh = age_of_stamp().await;
+        auto_off_tick(&state).await;
+        let stays = active().await;
+
+        // A later edit of something else does not refresh it.
+        age(AUTO_OFF_EMPTY_MINUTES + 1).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "name": "Renamed" })).await, StatusCode::OK);
+        auto_off_tick(&state).await;
+        let control = active().await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(still_unjoined, None);
+        assert!(stamped_while_out.is_some_and(|a| a < 30.0), "{stamped_while_out:?}");
+        assert_eq!(opted_out_stays, Some(mode));
+        assert_eq!(unticked_since_the_read, Some(mode));
+        assert!(fresh.is_some_and(|a| a < 30.0), "{fresh:?}");
+        assert_eq!(stays, Some(mode));
+        assert_eq!(control, None, "control: an old stamp and no re-enable does turn it off");
+    }
+
+    /// A visit shorter than one tick counts: JoinRoom stamps. Only for a channel the mode
+    /// on there uses, and not for a stream-only account, which can sit there unattended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn joining_stamps_the_mode_however_short_the_visit() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let under = subchannel(&pool, &f.sid, "under", 1, rooms).await;
+        let mode = make(&state, &f, "Clocktower", &[f.town, rooms]).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "home_channel_id": f.lobby })).await, StatusCode::OK);
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let other = channel(&pool, &f.sid, "elsewhere", 1).await;
+        let seen = || async {
+            sqlx::query_scalar::<_, bool>("SELECT active_mode_occupied_at IS NOT NULL FROM servers WHERE id = $1")
+                .bind(&f.sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let clear = || async {
+            sqlx::query("UPDATE servers SET active_mode_occupied_at = NULL WHERE id = $1").bind(&f.sid).execute(&pool).await.unwrap();
+        };
+        let join = |user: i64, conn: u64, room: i32| {
+            let frame = json!({ "type": "JoinRoom", "payload": { "room_id": format!("voice_{room}") } }).to_string();
+            let state = Arc::clone(&state);
+            async move { crate::ws::handle_message(&state, user, conn, "t", &frame, &mut std::collections::HashSet::new(), "").await }
+        };
+        let person = Sock::open(&state, f.plain);
+
+        join(f.plain, person.conn, other).await.expect("join");
+        let not_the_mode = seen().await;
+        join(f.plain, person.conn, f.town).await.expect("join");
+        let ticked = seen().await;
+        clear().await;
+        join(f.plain, person.conn, under).await.expect("join");
+        let under_the_collection = seen().await;
+        clear().await;
+        join(f.plain, person.conn, f.lobby).await.expect("join");
+        let main_channel = seen().await;
+        clear().await;
+
+        stream_only_in(&pool, &f.sid, f.manager as i32, f.town).await;
+        let bot = Sock::open(&state, f.manager);
+        let bot_joined = join(f.manager, bot.conn, f.town).await;
+        let bot_stamped = seen().await;
+        let bot_in_room = occupants(&state, f.town).contains(&f.manager);
+        teardown(&pool, &f).await;
+
+        assert!(!not_the_mode, "a channel this mode has nothing to do with");
+        assert!(ticked);
+        assert!(under_the_collection);
+        assert!(main_channel);
+        assert!(bot_joined.is_ok() && bot_in_room, "the fixture's bot did join: {bot_joined:?}");
+        assert!(!bot_stamped, "a stream-only account is nobody being there");
     }
 
     /// The server rows carry the field: it is how a client knows this backend
-    /// has modes at all.
+    /// has modes at all, so absent and null are two different answers. Every road a
+    /// client gets a row by: the list, a server just made, a server just joined.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_server_row_says_which_mode_is_on() {
         let Some(pool) = crate::migrator::test_pool(8).await else { return };
@@ -1175,13 +1954,56 @@ mod db {
         let row = |state: Arc<AppState>, user: i64, sid: String| async move {
             let resp = crate::server_handlers::list_servers(State(state), Extension(claims(user))).await.into_response();
             let (_, rows) = read(resp).await;
-            rows.as_array().unwrap().iter().find(|s| s["id"] == sid.as_str()).unwrap()["active_mode_id"].clone()
+            rows.as_array().unwrap().iter().find(|s| s["id"] == sid.as_str()).unwrap().as_object().unwrap().get("active_mode_id").cloned()
         };
         let before = row(Arc::clone(&state), f.plain, f.sid.clone()).await;
         assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
         let after = row(Arc::clone(&state), f.plain, f.sid.clone()).await;
+
+        let (created_status, created) = read(
+            crate::server_handlers::create_server(
+                State(Arc::clone(&state)),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(json!({ "name": "made just now" })).unwrap()),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        let made = created["id"].as_str().map(str::to_string);
+
+        let code = format!("md{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+        sqlx::query("INSERT INTO server_invites (code, server_id, creator_id) VALUES ($1, $2, $3)")
+            .bind(&code)
+            .bind(&f.sid)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .expect("invite");
+        let (joiner,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(format!("md_join_{}", uuid::Uuid::new_v4().simple()))
+            .bind(b"s".as_ref())
+            .bind(b"v".as_ref())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (joined_status, joined) = read(
+            crate::invite_handlers::join_via_invite(State(Arc::clone(&state)), Path(code.clone()), Extension(claims(joiner as i64)))
+                .await
+                .into_response(),
+        )
+        .await;
+        if let Some(made) = &made {
+            let _ = sqlx::query("DELETE FROM channels WHERE server_id = $1").bind(made).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(made).execute(&pool).await;
+        }
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(joiner).execute(&pool).await;
         teardown(&pool, &f).await;
-        assert_eq!(before, Value::Null, "present and null, never absent: absent means an older backend");
-        assert_eq!(after, json!(mode));
+        assert_eq!(before, Some(Value::Null), "present and null, never absent: absent means an older backend");
+        assert_eq!(after, Some(json!(mode)));
+        assert!(created_status.is_success(), "{created}");
+        assert_eq!(created.as_object().unwrap().get("active_mode_id"), Some(&Value::Null), "a server just made");
+        assert!(joined_status.is_success(), "{joined}");
+        assert_eq!(joined.as_object().unwrap().get("active_mode_id"), Some(&json!(mode)), "a server just joined");
     }
 }

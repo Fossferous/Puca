@@ -529,9 +529,8 @@ pub async fn delete_emoji(
     }
 
     // Reclaim the blob too, or the uploader's quota keeps counting an emoji
-    // that no longer exists. RETURNING gives both halves atomically: the emoji
-    // row is the only referent of this file, so unlike a message attachment
-    // (which a forward can duplicate) removing it here is unambiguous.
+    // that no longer exists. RETURNING gives both halves atomically; the reclaim
+    // keeps a file that also backs something else, like a mode's background.
     let deleted: Option<(String, i32)> =
         sqlx::query_as("DELETE FROM server_emojis WHERE id = $1 RETURNING file_id, uploader_id")
             .bind(&emoji_id)
@@ -539,7 +538,7 @@ pub async fn delete_emoji(
             .await
             .unwrap_or(None);
     if let Some((ref file_id, uploader_id)) = deleted {
-        crate::upload_handlers::remove_file(&state.pool, file_id, uploader_id as i64).await;
+        crate::upload_handlers::reclaim_file(&state.pool, file_id, uploader_id as i64).await;
     }
     if deleted.is_none() {
         // The permission check above already proved the row existed and that

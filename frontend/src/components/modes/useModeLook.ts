@@ -20,7 +20,7 @@ function lookSnapshot(): string {
 /**
  * May this reader's window take a mode's look at all? High contrast is the reader
  * asking for the plainest possible surfaces, and the personal switch (Settings,
- * Appearance) is them declining it.
+ * Accessibility) is them declining it.
  */
 export function serverLooksAllowed(): boolean {
     const root = document.documentElement;
@@ -88,6 +88,9 @@ export function useModeLook(mode: ServerMode | null): CSSProperties | undefined 
             backgroundImage: `linear-gradient(${veil}, ${veil}), url("${loaded.url}")`,
             backgroundSize: 'cover',
             backgroundPosition: 'center',
-        } satisfies CSSProperties;
+            // Timestamps. The veil holds --text-muted to AA and does not measure this
+            // one: holding it too would nearly hide any picture with a bright part.
+            '--text-faint': 'var(--text-muted)',
+        } as CSSProperties;
     }, [fileId, loaded, look]);
 }
