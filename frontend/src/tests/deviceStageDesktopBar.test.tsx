@@ -76,6 +76,11 @@ vi.mock('../api/devices/session', () => ({
     noteFramePresented: () => { /* noop */ },
     subscribeLatency: () => () => { /* unsubscribe */ },
 }));
+const question = vi.hoisted(() => ({ open: false }));
+vi.mock('../api/appDialogs', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/appDialogs')>()),
+    appQuestionOpen: () => question.open,
+}));
 vi.mock('../api/devices/tunnel', () => ({
     tunnelStatus: async () => ({ listeners: [], inbound_streams: 0, outbound_streams: 0, forwards: [] }),
 }));
@@ -230,6 +235,29 @@ describe('keys on the desktop stage', () => {
         await key('keydown', 'End', { ctrlKey: true, altKey: true });
         expect(frames().filter(f => f.t === 'sas')).toHaveLength(1);
         expect(keyFrames(), 'End is not typed over there').toEqual([]);
+    });
+
+    // This listener hears a key before the question does (api/appDialogs.ts), and an
+    // Enter that answers Púca's own question is not for the machine over there.
+    it("while one of the app's own questions is open no key goes over", async () => {
+        await mount();
+        question.open = true;
+        await key('keydown', 'Enter');
+        await key('keydown', 'KeyA');
+        question.open = false;
+        expect(keyFrames(), 'the question has the keyboard').toEqual([]);
+        // POSITIVE CONTROL: answered, the same keys go over.
+        await key('keydown', 'KeyB');
+        expect(keyFrames()).toEqual(['KeyB↓']);
+    });
+
+    it('a key held when a question opens is still let go over there', async () => {
+        await mount();
+        await key('keydown', 'KeyA');
+        question.open = true;
+        await key('keyup', 'KeyA');
+        question.open = false;
+        expect(keyFrames(), 'or it stays held on the controlled machine').toEqual(['KeyA↓', 'KeyA↑']);
     });
 
     it('while a bar menu is open no key goes over, and Esc closes the menu', async () => {
