@@ -22,6 +22,7 @@ import {
     type WeekStart, addDaysToKey, gridOpenHour, localDayKey, minutesIntoDay, monthMatrix, parseWall, viewerZone, weekOf,
 } from '../../utils/calendarMath';
 import { isEditableTarget } from '../../api/hotkeys';
+import { appQuestionOpen } from '../../api/appDialogs';
 import { useDropOnTarget } from '../../hooks/useDropOnTarget';
 import {
     BellIcon, CalendarIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, EyeOffIcon, MapPinIcon, MoreVerticalIcon,
@@ -179,6 +180,9 @@ export function Calendar(props: CalendarProps) {
     const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
     useEffect(() => {
         keyRef.current = (e: KeyboardEvent) => {
+            // On the window, ahead of one of the app's own questions, which can stop only
+            // what comes after it: nothing typed at a question moves the calendar behind it.
+            if (appQuestionOpen()) return;
             if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target) || menuFor) return;
             if (!CAL_KEYS.has(e.key) || (acceptKey && !acceptKey(e))) return;
             const go = (v: CalView) => { e.preventDefault(); onNavigate(v, date); };

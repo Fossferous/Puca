@@ -96,7 +96,8 @@ export function registerAppDialogsHost(): () => void {
     };
 }
 
-/** Is a question on the screen? For what takes keys ahead of it (DeviceStage). */
+/** Is a question on the screen? For what hears keys ahead of it, on the window: the
+ *  remote-control stage, the picture viewer, the calendar. */
 export function appQuestionOpen(): boolean {
     return state.questions.length > 0;
 }

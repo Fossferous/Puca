@@ -53,6 +53,7 @@ import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
 import { AppDialogs } from './components/AppDialogs';
 import { NotesDialog } from './components/NotesDialog';
+import { ImageLightbox } from './components/ImageLightbox';
 import { askConfirm, askText, leaveNotice } from './api/appDialogs';
 import { handleNativeHotkeyPayload, registerHold, registerPress, setNativeFeedStateForTest } from './api/hotkeys';
 const log = window.__log = { answers: [], outside: 0, shortcut: 0, ticks: 0, destroyed: 0, plainClicked: 0, mic: false, muteToggles: 0 };
@@ -81,8 +82,13 @@ window.__unawaitedSite = () => { if (!askConfirm('Disband this server?')) return
 function App() {
     const [sheet, setSheet] = useState(false);
     window.__sheet = setSheet;
+    const [viewer, setViewer] = useState(false);
+    window.__viewer = setViewer;
+    const [, redraw] = useState(0);
+    window.__redraw = () => redraw(n => n + 1);
     return (
         <div id="composer" style={{ padding: 16, boxSizing: 'border-box', maxWidth: '100%' }}>
+            {viewer && <ImageLightbox url="data:image/gif;base64,R0lGODlhAQABAAAAACw=" name="p.gif" onClose={() => setViewer(false)} />}
             {sheet && (
                 <NotesDialog title="Import a calendar" onClose={() => setSheet(false)}>
                     <p>Some words of the sheet.</p>
@@ -292,6 +298,38 @@ async function holdsUntilAnswered(page, site) {
     await settle(page);
     check('and Cancel answers it, with the stage still fullscreen',
         JSON.stringify((await log(page)).answers) === '[false]' && await page.evaluate(() => document.fullscreenElement?.id === 'stage'));
+    await close();
+}
+
+{
+    console.log('a question over the picture viewer');
+    const { page, close } = await open();
+    const viewerOpen = () => page.locator('.image-lightbox').count().then(n => n > 0);
+    await page.evaluate(() => window.__viewer(true));
+    await page.waitForSelector('.image-lightbox');
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('CONTROL: Escape closes the viewer, with no question', !await viewerOpen());
+    await page.evaluate(() => window.__viewer(true));
+    await page.waitForSelector('.image-lightbox');
+    await page.evaluate(() => window.__ask('Update now?'));
+    await page.waitForSelector('dialog.app-question');
+    check('OK is on the screen and is what is hit, over the viewer', await hitsItself(page, '.app-question-ok'));
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('a real Escape answers the question', JSON.stringify((await log(page)).answers) === '[false]' && !await questionOpen(page));
+    check('and leaves the picture', await viewerOpen());
+    await page.evaluate(() => window.__ask('Update now?'));
+    await page.waitForSelector('dialog.app-question');
+    // Its onClose is new with each draw, so it now listens after the question does.
+    await page.evaluate(() => window.__redraw());
+    await settle(page);
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('and when the viewer has drawn again since', JSON.stringify((await log(page)).answers) === '[false,false]' && await viewerOpen());
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('the next Escape is the viewer\'s', !await viewerOpen());
     await close();
 }
 

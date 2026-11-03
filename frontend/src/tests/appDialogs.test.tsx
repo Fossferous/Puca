@@ -11,6 +11,8 @@ import { createRoot } from 'react-dom/client';
 import { mountAppDialogs } from './appDialogsHost';
 import { askConfirm, askText, closeAppDialogs, leaveNotice, tellUser, tellUserAndWait } from '../api/appDialogs';
 import { NotesDialog } from '../components/NotesDialog';
+import { ImageLightbox } from '../components/ImageLightbox';
+import { Calendar } from '../components/calendar/Calendar';
 
 let dialogs: ReturnType<typeof mountAppDialogs> | null;
 let confirmSpy: ReturnType<typeof vi.spyOn>;
@@ -349,6 +351,77 @@ describe('on the desktop a question is in the page', () => {
         expect(closed).toHaveBeenCalledTimes(1);
         act(() => { belowRoot.unmount(); });
         below.remove();
+    });
+
+    // A question listens on the window too, and stopping a key takes nothing from the
+    // listeners beside it there. These two listen there, and got in first.
+    describe('what also listens on the window', () => {
+        let below: HTMLDivElement;
+        let belowRoot: ReturnType<typeof createRoot>;
+        beforeEach(() => {
+            below = document.createElement('div');
+            document.body.appendChild(below);
+            belowRoot = createRoot(below);
+        });
+        afterEach(() => {
+            act(() => { belowRoot.unmount(); });
+            below.remove();
+        });
+
+        it('Escape over the picture viewer closes the question and leaves the picture', async () => {
+            const closed = vi.fn();
+            act(() => { belowRoot.render(<ImageLightbox url="blob:picture" name="p.png" onClose={closed} />); });
+            const { answer: pending } = await asked(() => askConfirm('Update now?'));
+            await press({ key: 'Escape' });
+            await expect(pending).resolves.toBe(false);
+            expect(closed).not.toHaveBeenCalled();
+            // CONTROL: with no question, that Escape is the viewer's.
+            await press({ key: 'Escape' });
+            expect(closed).toHaveBeenCalledTimes(1);
+        });
+
+        it('and when the viewer has bound again since, so it hears the key after the question', async () => {
+            const closed = vi.fn();
+            const viewer = () => <ImageLightbox url="blob:picture" name="p.png" onClose={() => closed()} />;
+            act(() => { belowRoot.render(viewer()); });
+            const { answer: pending } = await asked(() => askConfirm('Update now?'));
+            // The page goes on running: what holds the viewer drew again, with a new onClose.
+            act(() => { belowRoot.render(viewer()); });
+            await press({ key: 'Escape' });
+            await expect(pending).resolves.toBe(false);
+            expect(closed, 'the question was gone by the time it looked').not.toHaveBeenCalled();
+            await press({ key: 'Escape' });
+            expect(closed).toHaveBeenCalledTimes(1);
+        });
+
+        it('nothing typed at a question moves the calendar behind it', async () => {
+            const onNavigate = vi.fn();
+            const onAdd = vi.fn();
+            act(() => {
+                belowRoot.render(
+                    <Calendar
+                        sources={[]} view="month" date="2030-10-07" onNavigate={onNavigate} showCompleted={false} showPlain
+                        onToggleCompleted={() => {}} onTogglePlain={() => {}} weekStart={1} now={Date.parse('2030-10-01T12:00:00Z')} coarse={false}
+                        onOpen={() => {}} onMove={() => {}} onAdd={onAdd} onToggleDone={() => {}} shortcutsEnabled
+                    />,
+                );
+            });
+            const { answer: pending } = await asked(() => askConfirm('Delete it?'));
+            for (const key of ['j', 'k', 'n', 'p', 't', 'm', 'd', 'a', 'c']) {
+                const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+                await act(async () => { document.activeElement!.dispatchEvent(event); });
+                expect(event.defaultPrevented, `${key} took nothing`).toBe(false);
+            }
+            expect(onNavigate).not.toHaveBeenCalled();
+            expect(onAdd).not.toHaveBeenCalled();
+            await click(ok());
+            await pending;
+            // CONTROL: with no question, the same keys are the calendar's.
+            await press({ key: 'j' });
+            expect(onNavigate).toHaveBeenCalledTimes(1);
+            await press({ key: 'c' });
+            expect(onAdd).toHaveBeenCalledTimes(1);
+        });
     });
 
     it('sign-out answers what is open with a no', async () => {
