@@ -5485,7 +5485,9 @@ export function Chat({ onLogout }: ChatProps) {
                         // Remove from local list
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
-                        if (currentServer?.id === server.id) {
+                        // Asked of the ref: this press is a round trip old, and they may have gone
+                        // somewhere else meanwhile, where the box and the screen are that place's.
+                        if (embedCurrentServerRef.current?.id === server.id) {
                             composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {
@@ -5508,7 +5510,8 @@ export function Chat({ onLogout }: ChatProps) {
                         // Remove from local list
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
-                        if (currentServer?.id === server.id) {
+                        // Asked of the ref, as for a leave.
+                        if (embedCurrentServerRef.current?.id === server.id) {
                             composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {

@@ -27,6 +27,8 @@ const h = vi.hoisted(() => ({
     deleted: [] as string[],
     /** What the open channel's history holds. */
     rows: [] as Record<string, unknown>[],
+    /** A leave or a delete still on its way, until this settles. */
+    hold: null as null | Promise<void>,
     nav: null as string | null,
 }));
 
@@ -84,6 +86,7 @@ const reply = (status: number, body: unknown) => {
 vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     if (init?.method === 'DELETE' || (init?.method === 'POST' && /leave$/.test(u))) {
+        if (h.hold) await h.hold;
         h.deleted.push(u.slice(u.indexOf('/', 8)));
         const channel = /\/channels\/(\d+)$/.exec(u);
         if (channel) h.channels = h.channels.filter(c => c.id !== Number(channel[1]));
@@ -125,6 +128,7 @@ beforeEach(() => {
     h.discarded = [];
     h.deleted = [];
     h.rows = [];
+    h.hold = null;
     h.nav = null;
     feedLoads = 0;
     vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
@@ -601,6 +605,80 @@ describe('the server goes from under a collection\'s page', () => {
         await act(async () => { window.dispatchEvent(new CustomEvent('sovereign-navigate')); });
         await settled();
         expect(feedLoads).toBeLessThan(FEW);
+    });
+});
+
+describe('a leave or a disband still on its way while they go somewhere else', () => {
+    /** Press it, with the request held open; the returned function lets the answer come. */
+    const pressHeld = async (item: RegExp) => {
+        let answer!: () => void;
+        h.hold = new Promise<void>(r => { answer = r; });
+        await pressInServerMenu(item);
+        await settled(3);
+        expect(h.deleted, 'still on its way').toEqual([]);
+        return async () => {
+            h.hold = null;
+            await act(async () => { answer(); });
+            await settled();
+        };
+    };
+
+    it('leaving, and on to the server that stays: its box keeps the words, and it is not said to be gone', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await type('still writing');
+        const answered = await pressHeld(/^leave/i);
+        await clickServer('Far');
+        await landedOn('far-general');
+        expect(composer()!.value, 'their own click kept the words').toBe('still writing');
+        await answered();
+        expect(h.deleted.some(path => path.endsWith('/servers/s1/leave')), 'the leave went').toBe(true);
+        expect(headerText()).toContain('far-general');
+        expect(composer()!.value).toBe('still writing');
+        expect(dialogs.notices()).toEqual([]);
+    });
+
+    it('disbanding is the same', async () => {
+        h.servers = [{ ...SRV, owner_id: ME }, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await type('still writing');
+        const answered = await pressHeld(/disband/i);
+        await clickServer('Far');
+        await landedOn('far-general');
+        await answered();
+        expect(h.deleted.some(path => path.endsWith('/servers/s1')), 'the disband went').toBe(true);
+        expect(composer()!.value).toBe('still writing');
+        expect(dialogs.notices()).toEqual([]);
+    });
+
+    it('leaving, and on to home: no notice about "undefined", and home stays home', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await type('still writing');
+        const answered = await pressHeld(/^leave/i);
+        h.nav = 'dms';
+        await act(async () => { window.dispatchEvent(new CustomEvent('sovereign-navigate')); });
+        await settled(5);
+        await answered();
+        expect(composer()!.value).toBe('still writing');
+        expect(dialogs.notices()).toEqual([]);
+        expect(document.querySelector('.server-header'), 'not pulled back into a server').toBeNull();
+    });
+
+    it('CONTROL: still on that server when the answer comes: the words go in a notice naming it', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await type('still writing');
+        const answered = await pressHeld(/^leave/i);
+        await answered();
+        await landedOn('far-general');
+        expect(composer()!.value).toBe('');
+        expect(dialogs.notices()).toHaveLength(1);
+        expect(dialogs.notices()[0]).toContain('Srv is no longer available');
     });
 });
 
