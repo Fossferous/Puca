@@ -24,6 +24,8 @@ const h = vi.hoisted(() => ({
     discarded: [] as string[],
     /** Whose session is in storage now. */
     sessionOf: 1 as number | null,
+    /** Sealing a DM, when a test holds it. */
+    seal: null as null | (() => Promise<string>),
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
@@ -37,7 +39,7 @@ vi.mock('../api/servers', async importOriginal => ({
 }));
 vi.mock('../api/dms', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/dms')>()),
-    encryptDMContent: async () => 'sealed',
+    encryptDMContent: async () => (h.seal ? h.seal() : 'sealed'),
 }));
 vi.mock('../api/attachments', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/attachments')>()),
@@ -118,6 +120,7 @@ afterEach(() => {
     h.dms = [];
     h.discarded = [];
     h.sessionOf = ME;
+    h.seal = null;
     frameListeners = [];
     dmListeners = [];
     dialogs.unmount();
@@ -306,6 +309,70 @@ describe('the chat view, when nobody just pressed anything', () => {
             const [said] = dialogs.notices();
             expect(said).toContain('Message failed to send');
             expect(said).toContain('hello there');
+        });
+
+        // The same words by the two other ways out. A press's answer is an alert off the desktop.
+        describe('a channel send refused', () => {
+            async function refusedAfter(signedOut: boolean) {
+                let release: (reason: unknown) => void = () => {};
+                h.send = () => new Promise((_, reject) => { release = reject; });
+                await mountChat();
+                await pressSend('hello there');
+                await moveToRandom();
+                if (signedOut) h.sessionOf = null;
+                chatGoes();
+                await act(async () => { release(new Error('the server refused it')); });
+                await settle(50);
+            }
+
+            it('says nothing after a sign-out', async () => {
+                await refusedAfter(true);
+                expect(alertSpy).not.toHaveBeenCalled();
+                expect(dialogs.notices()).toEqual([]);
+            });
+
+            it('CONTROL: still signed in, it is said, with the words', async () => {
+                await refusedAfter(false);
+                expect(String(alertSpy.mock.calls[0]?.[0])).toContain('hello there');
+            });
+        });
+
+        describe('a DM that could not be sealed or sent', () => {
+            async function failedAfter(signedOut: boolean) {
+                h.dms = [
+                    { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+                    { id: 'd2', other_user_id: 3, other_username: 'carol', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+                ];
+                vi.spyOn(wsClient, 'isConnected', 'get').mockReturnValue(true);
+                vi.spyOn(wsClient, 'sendDirectMessage').mockImplementation(() => {});
+                let release: (reason: unknown) => void = () => {};
+                h.seal = () => new Promise((_, reject) => { release = reject; });
+                await mountChat();
+                await act(async () => { document.querySelector<HTMLElement>('.server-icon.home-button')!.click(); });
+                await settle();
+                await act(async () => { [...document.querySelectorAll<HTMLElement>('.dm-item')].find(el => el.textContent?.includes('bob'))!.click(); });
+                await settle(50);
+                await pressSend('hi bob');
+                await act(async () => { document.querySelector<HTMLElement>('.back-to-server-btn')!.click(); });
+                await settle();
+                await act(async () => { [...document.querySelectorAll<HTMLElement>('.dm-item')].find(el => el.textContent?.includes('carol'))!.click(); });
+                await settle(50);
+                if (signedOut) h.sessionOf = null;
+                chatGoes();
+                await act(async () => { release(new Error('no key for them')); });
+                await settle(50);
+            }
+
+            it('says nothing after a sign-out', async () => {
+                await failedAfter(true);
+                expect(alertSpy).not.toHaveBeenCalled();
+                expect(dialogs.notices()).toEqual([]);
+            });
+
+            it('CONTROL: still signed in, it is said, with the words', async () => {
+                await failedAfter(false);
+                expect(String(alertSpy.mock.calls[0]?.[0])).toContain('hi bob');
+            });
         });
     });
 

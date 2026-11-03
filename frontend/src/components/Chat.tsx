@@ -3608,6 +3608,12 @@ export function Chat({ onLogout }: ChatProps) {
         // The message took the ready uploads; failed chips stay for retry.
         takeSentAttachments();
 
+        // The answer to this send can outlive the session: a request or a ten second wait
+        // still running when they sign out. What is said then would stay on the screen
+        // for whoever signs in next, their words included. Asked of the token, not of
+        // Chat having gone: leaving it for an invite link is no reason to lose the words.
+        const stillSignedIn = () => currentUserIdFromToken() === currentUserId;
+
         // Handle DM messages
         if (currentDM) {
             const optimisticDMMessage = {
@@ -3649,6 +3655,7 @@ export function Chat({ onLogout }: ChatProps) {
                 console.error('Failed to send DM:', err);
                 setDmMessages(prev => prev.filter(m => m.id !== optimisticDMMessage.id));
                 unsentDmsRef.current.delete(optimisticDMMessage.id);
+                if (!stillSignedIn()) return;
                 tellUser(giveBackUnsent(
                     unsent,
                     err instanceof OfflineSendError
@@ -3726,10 +3733,7 @@ export function Chat({ onLogout }: ChatProps) {
                         return prev.filter(m => m.id !== optimisticMessage.id);
                     });
                     setTimeout(() => {
-                        // They may have signed out by now, and this would stay on the screen
-                        // for whoever signs in next. The timer is not cleared when Chat goes:
-                        // leaving it for an invite link is no reason to lose the words.
-                        if (stillUnconfirmed && currentUserIdFromToken() === currentUserId) {
+                        if (stillUnconfirmed && stillSignedIn()) {
                             // Ten seconds on, the person may be anywhere, and this is the
                             // only copy of what they wrote: the composer gets it back, and
                             // the notice waits for them. Nothing confirmed it landed, and
@@ -3745,6 +3749,7 @@ export function Chat({ onLogout }: ChatProps) {
             // actionable reason — show it verbatim.
             unconfirmedSendsRef.current.delete(optimisticMessage.id);
             setMessages(prev => prev.filter(m => m.id !== optimisticMessage.id));
+            if (!stillSignedIn()) return;
             tellUser(giveBackUnsent(unsent, error instanceof SecureSendError ? error.message : 'Message failed to send. Check your connection and try again.'));
         }
     };
