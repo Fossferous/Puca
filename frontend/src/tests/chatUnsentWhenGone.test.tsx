@@ -801,6 +801,66 @@ describe('Enter with no channel open, a new server\'s list still on its way', ()
         expect(composer()!.value).toBe('from general');
     });
 
+    /** A real paste on the box: returns whether it took the paste over. */
+    const paste = async (items: { kind: string; type: string; getAsFile: () => File | null }[]) => {
+        const event = new Event('paste', { bubbles: true, cancelable: true });
+        const files = items.map(i => i.getAsFile()).filter(f => f !== null);
+        Object.defineProperty(event, 'clipboardData', { value: { items, files } });
+        await act(async () => { composer()!.dispatchEvent(event); });
+        await settled(3);
+        return event.defaultPrevented;
+    };
+    const aFile = (name: string, type: string) => {
+        const file = new File(['hello'], name, { type });
+        return { kind: 'file', type, getAsFile: () => file };
+    };
+    const paperclip = () => document.querySelector<HTMLInputElement>('form.message-form input[type="file"]')!;
+    const toast = () => document.querySelector('.app-toast-text')?.textContent ?? '';
+
+    it('a file has nowhere to go either: the paperclip is off, and a paste says so and adds nothing', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        expect(paperclip().disabled, 'on, in a channel').toBe(false);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(false);
+        const listCame = await onToFar();
+        expect(paperclip().disabled).toBe(true);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(true);
+        expect(composer()!.disabled, 'the words can still be typed').toBe(false);
+        await type('here you go');
+
+        await paste([aFile('p.png', 'image/png')]);
+        expect(document.querySelector('[class*="composer-chip"]')).toBeNull();
+        expect(toast()).toContain('that file was not added');
+        await paste([aFile('n.txt', 'text/plain')]);
+        expect(document.querySelector('[class*="composer-chip"]')).toBeNull();
+        expect(composer()!.value).toBe('here you go');
+
+        await listCame();
+        expect(paperclip().disabled).toBe(false);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(false);
+        await pressEnter();
+        expect(h.sent[0]?.[1], 'nothing was promised that is not there').toBe('here you go');
+    });
+
+    it('CONTROL: words paste as usual, and say nothing', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        expect(await paste([{ kind: 'string', type: 'text/plain', getAsFile: () => null }])).toBe(false);
+        expect(toast()).toBe('');
+    });
+
+    it('CONTROL: in a channel a pasted file is a chip, and goes with the message', async () => {
+        await mountChat();
+        await paste([aFile('p.png', 'image/png')]);
+        await paste([aFile('n.txt', 'text/plain')]);
+        for (let i = 0; i < 40 && document.querySelectorAll('.composer-chip-ready').length < 2; i++) await settle();
+        expect(document.querySelectorAll('.composer-chip-ready')).toHaveLength(2);
+        expect(toast()).toBe('');
+    });
+
     it('CONTROL: a name for yourself on the server needs no channel, and clears the box as it did', async () => {
         h.servers = [SRV, FAR];
         h.channels = [GENERAL, FAR_GENERAL];

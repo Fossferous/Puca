@@ -6857,13 +6857,13 @@ export function Chat({ onLogout }: ChatProps) {
                         onToggleSpoiler={(id) => setPendingAttachments(prev => toggleChipSpoiler(prev, id))}
                         onRetry={retryUpload}
                     />
-                    <form className={`message-form ${canSendHere ? '' : 'composer-disabled'}`} onSubmit={handleSend}>
+                    <form className={`message-form ${acceptsFileDrop ? '' : 'composer-disabled'}`} onSubmit={handleSend}>
                         <label className="file-upload-btn" title="Attach file">
                             <PaperclipIcon />
                             <input
                                 type="file"
                                 style={{ display: 'none' }}
-                                disabled={!canSendHere}
+                                disabled={!acceptsFileDrop}
                                 onChange={async (e) => {
                                     const file = e.target.files?.[0];
                                     if (!file) return;
@@ -6955,6 +6955,12 @@ export function Chat({ onLogout }: ChatProps) {
                                 onPaste={(e) => {
                                     const items = e.clipboardData?.items;
                                     if (!items) return;
+                                    // A file goes up for the conversation it is added in, as a drop does
+                                    // (acceptsFileDrop), and here there is none. Any words paste as usual.
+                                    if (!acceptsFileDrop) {
+                                        if (Array.from(items).some(item => item.kind === 'file')) showToast('No channel is open yet, so that file was not added.');
+                                        return;
+                                    }
                                     // A pasted image becomes a chip directly —
                                     // its thumbnail IS the preview, and the
                                     // spoiler toggle lives on the chip. (This
