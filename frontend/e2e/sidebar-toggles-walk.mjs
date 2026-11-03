@@ -847,6 +847,7 @@ try {
     await api(A, 'DELETE', `/channels/${vanish.id}`);
     check('another member reading a channel in it is taken off it', !!await until(async () => (await header(C)) !== 'vanish-notes', 8000), await header(C));
     check('their call in a room of it ends', !!await until(async () => (await inCall(C)) === 0, 8000), await inCall(C));
+    check('and a toast says why, naming the room', (await C.locator('.app-toast-text').allInnerTexts()).some(t => t.includes('Vanish room is no longer available, so you left its call.')), await C.locator('.app-toast-text').allInnerTexts());
     check('what they were writing there is not in the next channel\'s box', (await composerOfC.inputValue()) === '', await composerOfC.inputValue());
     const noticeOfC = C.locator('.app-notice-text');
     check('a notice has it, and says where it was written', !!await until(async () => (await noticeOfC.allInnerTexts()).some(t => t.includes('#vanish-notes') && t.includes('written for vanish-notes')), 4000), await noticeOfC.allInnerTexts());
@@ -867,8 +868,10 @@ try {
     await api(A, 'DELETE', `/channels/${spare.id}`);
     await sleep(1500);
     check('control: and so does the delete of another channel over there', (await inCall(C)) > 0);
+    check('control: with nothing said of either', !(await C.locator('.app-toast-text').allInnerTexts()).some(t => t.includes('Far room') || t.includes('spare')), await C.locator('.app-toast-text').allInnerTexts());
     await api(A, 'DELETE', `/channels/${farAway.id}`);
     check('the delete of the room they are in ends the call, wherever they are looking', !!await until(async () => (await inCall(C)) === 0, 8000), await inCall(C));
+    check('and a toast says why there too', (await C.locator('.app-toast-text').allInnerTexts()).some(t => t.includes('Far room is no longer available, so you left its call.')), await C.locator('.app-toast-text').allInnerTexts());
 
     // A manager who cannot see all of a collection: the question can only name what they
     // can see, so the server refuses, and the person is told why and what to do.

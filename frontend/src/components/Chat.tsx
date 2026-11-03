@@ -8,7 +8,7 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, clearAllStreams, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
 import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
@@ -321,6 +321,9 @@ function unsentNotice(reason: string, text: string, hadChips: boolean, where: st
         ? `${reason}${attachments}\n\nWhat you wrote${where ? ` in ${where}` : ''}:\n${text}`
         : `${reason}${attachments}`;
 }
+
+/** What is said of a call whose channel left the list: deleted, or View taken away. */
+const callGoneToast = (channelName: string) => `${channelName} is no longer available, so you left its call.`;
 
 /** How long after a DM goes its refusal may still be on the way. */
 const DM_REFUSAL_WINDOW_MS = 10_000;
@@ -1531,6 +1534,18 @@ export function Chat({ onLogout }: ChatProps) {
         if ((viewMode === 'voice' || viewMode === 'table') && !currentVoiceChannel) setViewMode('chat');
     }, [viewMode, currentVoiceChannel]);
 
+    // What a call was watching goes with that call, however it ended. Only a hang-up runs
+    // VoicePanel's leaveVoice: a channel deleted, a kick or a move just unmounts the panel,
+    // which stops the media and left the stage on a dead picture, or on a header with no
+    // tiles in the next call. Keyed on the channel and not on the panel's own unmount: a
+    // touch screen crossing the phone layout's width moves the panel in or out of its portal
+    // below, a remount in the SAME call, which rejoins with what they watch still chosen.
+    const voiceChannelId = currentVoiceChannel?.id;
+    useEffect(() => {
+        if (voiceChannelId === undefined) return undefined;
+        return () => clearAllStreams();
+    }, [voiceChannelId]);
+
     // Games (docs/GAMES.md): the store hears the socket for the whole session
     // (a newcomer's GameTable arrives right after RoomJoined, before anyone
     // opens the view), and is told which call this client shows.
@@ -2468,6 +2483,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentVoiceChannel && currentVoiceChannel.server_id === currentServer.id &&
             !channels.some(c => c.id === currentVoiceChannel.id)) {
             setCurrentVoiceChannel(null);
+            showToast(callGoneToast(currentVoiceChannel.name));
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the refreshed channel list
     }, [channels, channelsFetched, currentServer?.id]);
@@ -4292,8 +4308,9 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         if (currentVoiceChannel && voiceServerChannels && !voiceServerChannels.some(c => c.id === currentVoiceChannel.id)) {
             setCurrentVoiceChannel(null);
+            showToast(callGoneToast(currentVoiceChannel.name));
         }
-    }, [currentVoiceChannel, voiceServerChannels]);
+    }, [currentVoiceChannel, voiceServerChannels, showToast]);
     const voiceGamesEnabled = currentVoiceChannel
         ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
         : undefined;

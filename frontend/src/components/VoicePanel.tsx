@@ -2727,7 +2727,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // captured here so the cleanup can drain its FINAL contents at unmount.
         const vadCleanups = voiceDetectorCleanups.current;
 
-        // Auto-leave when unmounted (user clicked disconnect or switched channels)
+        // Auto-leave when unmounted (user clicked disconnect or switched channels).
+        // What the call was watching is Chat's to drop, when the channel changes: this
+        // also runs for a layout change, which rejoins the same call.
         return () => {
             if (isInVoiceRef.current) {
                 // A channel switch (incl. VoiceMoved) remounts the panel without

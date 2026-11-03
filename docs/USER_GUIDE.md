@@ -302,6 +302,9 @@ Púca removes the hidden details a phone adds to a photo (where it was taken, th
 3. You are connected. Clicking the channel again opens the voice view; it never disconnects you
 4. If a warning appears instead, the app did not connect you — read it, then press **Join Voice** if you still want to join
 
+If the voice channel you are in is deleted, or you lose access to it, you leave its call, a message names the channel,
+and any share you were watching closes.
+
 A channel's **Speak** and **Connect** permissions (see
 [Channel permissions](#channel-permissions-manage-channels)) change what
 happens:
