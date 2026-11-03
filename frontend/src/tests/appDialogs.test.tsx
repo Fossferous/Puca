@@ -411,6 +411,44 @@ describe('on the desktop a notice stays until it is dismissed', () => {
         expect(dialogs!.notices()).toEqual(['Two']);
     });
 
+    describe('a press on it is no press on what they were doing', () => {
+        const press = (el: Element, type: string) => {
+            const event = new MouseEvent(type, { bubbles: true, cancelable: true });
+            act(() => { el.dispatchEvent(event); });
+            return event;
+        };
+        const PRESSES = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'contextmenu'];
+        let heard: string[];
+        const listen = (e: Event) => { heard.push(e.type); };
+        beforeEach(() => {
+            heard = [];
+            for (const type of PRESSES) document.addEventListener(type, listen);
+            act(() => leaveNotice('Message failed to send.'));
+        });
+        afterEach(() => { for (const type of PRESSES) document.removeEventListener(type, listen); });
+
+        // What QuickAdd's outside press listens on, and a menu's outside click.
+        it.each(['.app-notice-close', '.app-notice-text'])('%s: it goes no further than the notice', selector => {
+            const el = document.querySelector(selector)!;
+            for (const type of PRESSES.filter(t => t !== 'click')) press(el, type);
+            expect(heard).toEqual([]);
+            // CONTROL: what is not the notice is heard, each of them.
+            for (const type of PRESSES) press(document.body, type);
+            expect(heard).toEqual(PRESSES);
+        });
+
+        it('the X leaves the focus where it is, and the words do not', () => {
+            expect(press(document.querySelector('.app-notice-close')!, 'mousedown').defaultPrevented).toBe(true);
+            expect(press(document.querySelector('.app-notice-text')!, 'mousedown').defaultPrevented, 'selecting needs it').toBe(false);
+        });
+
+        it('and the X still dismisses it', () => {
+            act(() => { document.querySelector<HTMLButtonElement>('.app-notice-close')!.click(); });
+            expect(dialogs!.notices()).toEqual([]);
+            expect(heard, 'nor is that click heard').toEqual([]);
+        });
+    });
+
     it('the same words twice are one notice, and a burst keeps the newest', () => {
         act(() => { leaveNotice('Slow down'); leaveNotice('Slow down'); });
         expect(dialogs!.notices()).toEqual(['Slow down']);

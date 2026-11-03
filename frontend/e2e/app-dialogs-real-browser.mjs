@@ -466,6 +466,49 @@ async function holdsUntilAnswered(page, site) {
 }
 
 {
+    console.log('a press on a notice, over a half-written note');
+    const { page, close } = await open();
+    await page.evaluate(() => window.__notice('Message failed to send.\n\nWhat you wrote in #general:\nthe words of it'));
+    await page.waitForSelector('.app-notice');
+    await page.focus('#field');
+    const before = (await log(page)).outside;
+    const box = sel => page.locator(sel).boundingBox();
+
+    const words = await box('.app-notice-text');
+    await page.mouse.move(words.x + 2, words.y + 6);
+    await page.mouse.down();
+    await page.mouse.move(words.x + words.width - 2, words.y + words.height - 4, { steps: 4 });
+    await page.mouse.up();
+    check('its words can be selected with a drag', await page.evaluate(() => getSelection().toString().includes('Message failed')), JSON.stringify(await page.evaluate(() => getSelection().toString().slice(0, 40))));
+    check('and that is no press outside the composer', (await log(page)).outside === before, `${(await log(page)).outside - before} heard`);
+
+    await page.focus('#field');
+    await page.keyboard.type('half a no');
+    const dismiss = await box('.app-notice-close');
+    await page.mouse.move(dismiss.x + dismiss.width / 2, dismiss.y + dismiss.height / 2);
+    await page.mouse.down();
+    check('a press on its X leaves the focus in the field', await page.evaluate(() => document.activeElement?.id === 'field'), await page.evaluate(() => document.activeElement?.tagName));
+    await page.mouse.up();
+    await settle(page);
+    check('the X dismisses it', await page.locator('.app-notice').count() === 0);
+    check('and is no press outside the composer', (await log(page)).outside === before, `${(await log(page)).outside - before} heard`);
+    await page.keyboard.type('te');
+    check('and typing goes on where it was', await page.inputValue('#field') === 'half a note', await page.inputValue('#field'));
+
+    // Tab still reaches it: a mouse press is all that keeps the focus away.
+    await page.evaluate(() => window.__notice('Slow down.'));
+    await page.waitForSelector('.app-notice');
+    await page.evaluate(() => document.querySelector('.app-notice-close').focus());
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('Enter on a focused X dismisses it too', await page.locator('.app-notice').count() === 0);
+
+    await page.mouse.click(1200, 700);
+    check('CONTROL: a press off the notice and off the composer is one', (await log(page)).outside === before + 1, `${(await log(page)).outside - before} heard`);
+    await close();
+}
+
+{
     console.log('the mouse, inside a question');
     const { page, close } = await open();
     await page.evaluate(() => window.__ask('Discard this note?'));

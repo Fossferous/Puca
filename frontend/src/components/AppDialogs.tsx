@@ -26,7 +26,9 @@ import './AppDialogs.css';
  * A press in the question goes no further than the question. The page behind it is
  * inert to the person, not to its own listeners, and a press here is a press outside
  * everything: Cancel on "Discard this note?" would make the note's composer save and
- * close (QuickAdd's outside press), and close the menu or popup that asked.
+ * close (QuickAdd's outside press), and close the menu or popup that asked. A notice
+ * landing on a half-written note is the same: dismissing it, or selecting its words,
+ * is no reason to save and close the note.
  */
 const staysInTheQuestion = (e: SyntheticEvent) => e.stopPropagation();
 const PRESS_STAYS_IN = {
@@ -196,12 +198,16 @@ export function AppDialogs() {
             {notices.length > 0 && createPortal(
                 <div className="app-notices">
                     {notices.map(notice => (
-                        <div key={notice.id} className="app-notice" role="alert">
+                        <div key={notice.id} className="app-notice" role="alert" {...PRESS_STAYS_IN}>
                             <span className="app-notice-text">{notice.message}</span>
                             <button
                                 type="button"
                                 className="app-notice-close"
                                 aria-label="Dismiss"
+                                // The focus stays where they were typing. It would go with the
+                                // button, to nowhere. A press on the words does move it, or
+                                // they could not be selected.
+                                onMouseDown={e => e.preventDefault()}
                                 onClick={() => dismissAppNotice(notice.id)}
                             >
                                 <CloseIcon />
