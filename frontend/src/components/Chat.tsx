@@ -2420,10 +2420,16 @@ export function Chat({ onLogout }: ChatProps) {
                 setCurrentChannel(fresh);
             }
         }
-        if (currentCollection && !channels.some(c => c.id === currentCollection.id)) {
-            setCurrentCollection(null);
-            setMessages([]);
-            if (isMobile) setMobilePanel('channels');
+        if (currentCollection) {
+            const freshCollection = channels.find(c => c.id === currentCollection.id);
+            if (!freshCollection) {
+                setCurrentCollection(null);
+                setMessages([]);
+                if (isMobile) setMobilePanel('channels');
+            } else if (freshCollection !== currentCollection) {
+                // Same collection, refreshed row: the header and its page show its name and topic.
+                setCurrentCollection(freshCollection);
+            }
         }
         // A voice channel we can no longer see — but only if it belongs to THIS
         // server: voice persists while browsing other servers, and their
