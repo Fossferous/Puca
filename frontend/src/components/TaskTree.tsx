@@ -58,6 +58,7 @@ import {
 } from '../api/taskPlaces';
 import { currentPosition, mobileLocationAvailable } from '../api/mobileLocation';
 import { askConfirm, leaveNotice, tellUser } from '../api/appDialogs';
+import { currentUserIdFromToken } from '../api/auth';
 
 // Shared 30-second clock for overdue styling. The snapshot is quantized so it
 // is referentially stable between ticks (useSyncExternalStore re-renders only
@@ -508,6 +509,8 @@ export function TaskTree({
             return;
         }
 
+        // Whose upload this is: it runs on after a sign-out, when nothing is left to stop it.
+        const startedBy = currentUserIdFromToken();
         setUploadingIds(prev => new Set(prev).add(task.id));
         const added: TaskAttachmentRef[] = [];
         const failures: string[] = [];
@@ -544,8 +547,10 @@ export function TaskTree({
             onSetAttachments(task, Array.from(byHref.values()).slice(0, MAX_TASK_ATTACHMENTS));
         }
         // Notices that wait, here and for the lock above: this is the end of an upload
-        // that can take a while, and the person has often gone elsewhere by now.
-        if (failures.length > 0) {
+        // that can take a while, and the person has often gone elsewhere by now. But this one
+        // names their files, and once their session has ended (which fails the rest) it would
+        // stay on the screen for whoever signs in next: as in Chat's send, asked of the token.
+        if (failures.length > 0 && currentUserIdFromToken() === startedBy) {
             leaveNotice(`Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}`);
         }
     };
