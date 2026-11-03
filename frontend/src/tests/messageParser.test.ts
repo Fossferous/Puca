@@ -153,9 +153,6 @@ describe('a delimiter in the words before an address does not close inside it', 
         ['API_URL=', 'https://example.org/v1_beta'],
         ['my_repo: ', 'https://example.org/me/my_repo'],
         ['a__b at ', 'https://example.org/a__b'],
-        ['5*3 is at ', 'https://example.org/a*b'],
-        ['a**b is at ', 'https://example.org/a**b'],
-        ['old~~name: ', 'https://example.org/old~~name'],
     ])('%s%s', (words, href) => {
         expect(parseMessage(words + href)).toEqual([{ type: 'text', value: words }, { type: 'url', href }]);
     });
@@ -164,8 +161,8 @@ describe('a delimiter in the words before an address does not close inside it', 
         expect(parseMessage('_see https://example.org/a_b now_')).toEqual([
             { type: 'em', children: [{ type: 'text', value: 'see ' }, { type: 'url', href: 'https://example.org/a_b' }, { type: 'text', value: ' now' }] },
         ]);
-        expect(parseMessage('~~see https://example.org/a~~b~~ more')).toEqual([
-            { type: 'strike', children: [{ type: 'text', value: 'see ' }, { type: 'url', href: 'https://example.org/a~~b' }] },
+        expect(parseMessage('__see https://example.org/a__b__ more')).toEqual([
+            { type: 'underline', children: [{ type: 'text', value: 'see ' }, { type: 'url', href: 'https://example.org/a__b' }] },
             { type: 'text', value: ' more' },
         ]);
     });
@@ -194,11 +191,8 @@ describe('a delimiter in the words before an address does not close inside it', 
     });
 
     it('it closes at the end of an address that holds another of it', () => {
-        expect(hrefs('**https://example.org/a**b**')).toEqual(['https://example.org/a**b']);
         expect(hrefs('_https://example.org/a_b_')).toEqual(['https://example.org/a_b']);
-        expect(parseMessage('***https://example.org/a***')).toEqual([
-            { type: 'strong', children: [{ type: 'em', children: [{ type: 'url', href: 'https://example.org/a' }] }] },
-        ]);
+        expect(parseMessage('***https://example.org/a***')).toEqual(parsedAsItWas('***https://example.org/a***'));
     });
 
     it.each([
@@ -225,9 +219,43 @@ describe('a delimiter in the words before an address does not close inside it', 
         expect(hrefs('my_file https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc')).toEqual(['https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc']);
     });
 
-    it('CONTROL: with words between the opener and the address, one in the address stays the address\'s', () => {
-        expect(hrefs('**see https://example.org/a**b')).toEqual(['https://example.org/a**b']);
-        expect(hrefs('~~see https://example.org/a~~b')).toEqual(['https://example.org/a~~b']);
+    // `*` and `~` are next to never in a real address, and stepping over one cost what
+    // people do write: bold around an address or a link with something glued on after it.
+    it.each([
+        ['5*3 is at https://example.org/a*b'],
+        ['a**b is at https://example.org/a**b'],
+        ['old~~name: https://example.org/old~~name'],
+        ['**https://example.org/a**b**'],
+        ['~~see https://example.org/a~~b~~ more'],
+        ['*see https://example.org/a*@everyone'],
+    ])('every delimiter but `_` closes at the first one, as it always did: %s', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it.each([
+        ['**', 'strong'],
+        ['*', 'em'],
+        ['~~', 'strike'],
+    ])('words before the address, or a link, and something glued on after: %s', (d, type) => {
+        const href = 'https://example.org/a';
+        const link = { type: 'link', label: 'docs', href };
+        for (const after of ['\'s page', '-based', 's', '\u3092\u898b\u3066']) {
+            expect(parseMessage(`${d}see ${href}${d}${after}`)).toEqual([
+                { type, children: [{ type: 'text', value: 'see ' }, { type: 'url', href }] },
+                { type: 'text', value: after },
+            ]);
+            expect(parseMessage(`${d}[docs](${href})${d}${after}`)).toEqual([
+                { type, children: [link] },
+                { type: 'text', value: after },
+            ]);
+        }
+    });
+
+    it('two with a word between them are two', () => {
+        const a = 'https://example.org/a';
+        const b = 'https://example.org/b';
+        expect(hrefs(`**${a}**\u3068**${b}**`)).toEqual([a, b]);
+        expect(hrefs(`**${a}**and**${b}**`)).toEqual([a, b]);
     });
 
     it.each([
@@ -381,7 +409,7 @@ describe('a spoiler never stops being one', () => {
         const content = 'a*b Https://example.org/c_d https://example.org/e*f ||https://example.org/g_h|| and ||the butler did it||';
         expect(addresses(content)).toEqual({
             hidden: ['https://example.org/g_h'],
-            shown: ['Https://example.org/c_d', 'https://example.org/e*f'],
+            shown: ['Https://example.org/c_d', 'https://example.org/e'],
         });
         expect(parseMessage(content).filter(n => n.type === 'spoiler').map(n => text([n]))).toEqual(['https://example.org/g_h', 'the butler did it']);
     });
@@ -901,7 +929,7 @@ describe('what a message costs to read', () => {
         ['one `_`, and an address and a `||` over and over', `_${'http://a_b_c ||'.repeat(532)}* ||s||`],
         ['one word of addresses', `*${'http://a**b>#'.repeat(615)}_`],
         ['words of a shortcode with an address in them', `**${'~~)"~~@:Hbhttp://****b__H)('.repeat(295)}_ ||s||`],
-        ['a delimiter only the end of a link opens', `${'[x](http://a)**b '.repeat(470)}`],
+        ['a delimiter only the end of a link opens', `${'[x](http://a)_b '.repeat(490)}`],
         ['every delimiter, and an address that takes them in', `\`${'_***http://:**b~~~~____'.repeat(347)} ||s||`],
         ['a list of addresses with a spoiler', `my_list:\n${'https://example.org/some_long_path_name\n'.repeat(199)}||s|| *`],
     ])('%s', (_, content) => {
@@ -910,8 +938,14 @@ describe('what a message costs to read', () => {
         expect(fastest(content)).toBeLessThan(30);
     });
 
+    it('a walk that closes in an address pays for it: 3 ms, or 40 if only a walk that finds nothing does', () => {
+        const content = `||s|| ${'_http://_'.repeat(488)}${'('.repeat(1800)}${')'.repeat(1800)}`;
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content)).toBeLessThan(20);
+    });
+
     it('a run of one delimiter in an address: 1 ms, or 25 with no bound on what stands between a closer and an opener', () => {
-        const content = `*https://example.org/${'*'.repeat(7900)}a ||s||`;
+        const content = `_https://example.org/${'_'.repeat(7900)}a ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content)).toBeLessThan(10);
     });

@@ -34,12 +34,13 @@ const MAX_DEPTH = 12;
 
 /**
  * One reading of a message: `asItWas` (see `parseMessage`) or not, and how much it
- * may still spend on walks for a closer that find none. Such a walk can be repeated
- * from the next opener, since what it stepped over is not always what gets read:
- * `[x](https://a)**b`, over and over, has `**` that only the link's reading opens.
- * A real message spends a few lengths of itself. Past that a delimiter closes at the
- * first one, as it used to, which always moves on, so a message of 8000 cannot
- * cost more than this however it was made.
+ * may still spend on walks for a closer: the whole walk when it finds none, and every
+ * address it reads when it does. Such a walk can be repeated from the next opener,
+ * since what it stepped over is not always what gets read: `[x](https://a)_b`, over
+ * and over, has `_` that only the link's reading opens. A real message spends a few
+ * lengths of itself. Past that a delimiter closes at the first one, as it used to,
+ * which always moves on, so a message of 8000 cannot cost more than this however it
+ * was made.
  */
 interface Reading { asItWas: boolean; walkLeft: number }
 const WALK_PER_CHAR = 32;
@@ -474,30 +475,22 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
     return nodes;
 }
 
-/** For a delimiter, the closer of one address and the opener of the next, with
- *  no space between them: `**https://x/a**,**https://x/b**`. Bounded, so a run of
- *  them in one address costs no more than its length. */
-const NEXT_IN_A_LIST = new Map(INLINE_DELIMS.map(({ open }): [string, RegExp] => {
-    const d = open.replace(/[*|]/g, '\\$&');
-    return [open, new RegExp(`${d}[^\\p{L}\\p{N}]{0,3}?${d}https?://`, 'iu')];
-}));
+/** For `_` or `__`, the closer of one address and the opener of the next, with no
+ *  space between them: `_https://x/a_,_https://x/b_`. Bounded, so a run of them in
+ *  one address costs no more than its length. */
+const NEXT_IN_A_LIST = new Map(['_', '__'].map((d): [string, RegExp] => [d, new RegExp(`${d}[^\\p{L}\\p{N}]{0,3}?${d}https?://`, 'iu')]));
 
 /**
- * Where the delimiter `open` closes inside the address `href`, or -1 if every one
- * in there is the address's own. It closes before the next address of a list. It
- * closes at the last one if the address ends with it (`**https://x/a**`), give or
- * take what a sentence puts after it (`**https://x/a**!`, where URL_RE takes the
- * `!` in). And `against` says the opener is right up against the address, which
- * settles it for all but the `_` family: `*` and `~` are next to never in a real
- * address, and in `**https://x/a**'s page` or `**https://x/a**を見て` the rest is
- * words. `_` is in real addresses all the time, so `_https://x/a_b` stays one.
+ * Where `_` or `__` closes inside the address `href`, or -1 if every one in there is
+ * the address's own. It closes before the next address of a list. It closes at the
+ * last one if the address ends with it (`_https://x/a_`), give or take what a sentence
+ * puts after it (`_https://x/a_!`, where URL_RE takes the `!` in).
  */
-function closeInAddress(href: string, open: string, against: boolean): number {
+function closeInAddress(href: string, open: string): number {
     const listed = NEXT_IN_A_LIST.get(open)!.exec(href);
     if (listed) return listed.index;
     const last = href.lastIndexOf(open);
-    if (last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length))) return last;
-    return against && !open.includes('_') ? href.indexOf(open) : -1;
+    return last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length)) ? last : -1;
 }
 
 /** How long the @name, #name or :name: at `at` is, or 0. */
@@ -531,17 +524,18 @@ function closeInName(input: string, at: number, length: number, open: string): n
 }
 
 /**
- * Find the matching closing delimiter for `open` starting at `from`. A delimiter
+ * Find the matching closing delimiter for `open` starting at `from`. A `_` or `__`
  * in the words before an address does not close inside it, or `my_file is at
  * https://x/my_file.txt` is a link to https://x/my. Once past one it does not close
  * inside a name either, only after it: in `my_file at https://x/a_b cc @alice_c` that
  * is alice_c's mention, which it was before the address was stepped over, and with no
- * address in the text a name is what it always was. A spoiler closes at the first
- * `||`, always, in an address or not: URL_RE reads all of `https://x/a||!` as one
- * address, and it is still a spoiler.
+ * address in the text a name is what it always was. Every other delimiter closes at
+ * the first one, in an address or not: `*` and `~` are next to never in a real address,
+ * and `**https://x/a**'s page` is bold. A spoiler closes at the first `||` for a better
+ * reason: URL_RE reads all of `https://x/a||!` as one address, and it is still a spoiler.
  */
 function findClosing(input: string, from: number, open: string, reading: Reading): number {
-    const stepsOver = !reading.asItWas && open !== '||' && reading.walkLeft > 0;
+    const stepsOver = !reading.asItWas && open.includes('_') && reading.walkLeft > 0;
     let pastAddress = false;
     let i = from;
     while (i < input.length) {
@@ -556,7 +550,8 @@ function findClosing(input: string, from: number, open: string, reading: Reading
         if (stepsOver && (input[i] === 'h' || input[i] === 'H')) {
             const href = urlAt(input.slice(i));
             if (href) {
-                const inside = closeInAddress(href, open, i === from);
+                reading.walkLeft -= href.length;
+                const inside = closeInAddress(href, open);
                 if (inside !== -1) return i + inside;
                 i += href.length;
                 pastAddress = true;

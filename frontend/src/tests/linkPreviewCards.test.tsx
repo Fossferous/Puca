@@ -121,8 +121,7 @@ describe('the link and the card go to the whole address', () => {
         ['my_file is at ', 'https://example.org/my_file.txt'],
         ['API_URL=', 'https://example.org/v1_beta'],
         ['my_repo: ', 'https://example.org/me/my_repo'],
-        ['5*3 is at ', 'https://example.org/a*b'],
-        ['old~~name: ', 'https://example.org/old~~name'],
+        ['a__b at ', 'https://example.org/a__b'],
     ])('words with a delimiter before it: %s', async (words, href) => {
         await bothGoTo(words + href, href);
         expect(host!.textContent?.startsWith(words)).toBe(true);

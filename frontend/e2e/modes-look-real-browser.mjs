@@ -100,8 +100,8 @@ const LINKS = [
     ['my_file is at https://example.org/my_file.txt', 'https://example.org/my_file.txt'],
     ['API_URL=https://example.org/v1_beta', 'https://example.org/v1_beta'],
     ['my_repo: https://example.org/me/my_repo', 'https://example.org/me/my_repo'],
-    ['5*3 is at https://example.org/a*b', 'https://example.org/a*b'],
-    ['old~~name: https://example.org/old~~name', 'https://example.org/old~~name'],
+    ['a__b at https://example.org/a__b', 'https://example.org/a__b'],
+    ['**see https://example.org/a**\'s page', 'https://example.org/a', 'same'],
     ['my_file at Https://example.org/my_file', 'Https://example.org/my_file'],
     ['Link:https://example.org/page', 'https://example.org/page'],
     ['Download here:https://example.org/file', 'https://example.org/file'],
@@ -741,6 +741,9 @@ try {
         });
         check(`spoiler on ${theme}: revealed, it has the halo like the words around it`, revealed?.shadow === halo && !/, 0\)$/.test(revealed.colour), revealed);
         await chat.mouse.click(...await centreOf('.spoiler'));
+        // The colour's own transition ends a little inside `settled`, and on a busy machine a
+        // little after it: once the rest of the words were counted on their way out.
+        await settled();
         const again = await restAndHover();
         check(`spoiler on ${theme}: hidden again, nothing is painted`, again.rest === 0 && again.hovered === 0, again);
 
