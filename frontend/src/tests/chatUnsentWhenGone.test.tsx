@@ -33,6 +33,8 @@ const h = vi.hoisted(() => ({
     hold: null as null | Promise<void>,
     /** A server's list still on its way, until this settles. */
     holdList: null as null | { server: string; until: Promise<void> },
+    /** The server refuses to make a channel. */
+    createFails: false,
     nav: null as string | null,
 }));
 
@@ -90,6 +92,7 @@ const reply = (status: number, body: unknown) => {
 vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     if (init?.method === 'POST' && /\/servers\/[^/]+\/channels$/.test(u)) {
+        if (h.createFails) return reply(403, { error: 'no' });
         const asked = JSON.parse(String(init.body));
         const made = row(77, asked.name, { channel_type: asked.channel_type, parent_id: asked.parent_id ?? null });
         h.channels = [...h.channels, made];
@@ -142,6 +145,7 @@ beforeEach(() => {
     h.history = null;
     h.hold = null;
     h.holdList = null;
+    h.createFails = false;
     h.nav = null;
     feedLoads = 0;
     vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
@@ -946,6 +950,37 @@ describe('a text channel made with something else on screen', () => {
         await createInside('made-inside');
         expect(headerText()).toContain('made-inside');
         expect(onScreen()).not.toContain('what inside said');
+    });
+
+    it('CONTROL: one the server refuses opens nothing, and takes nothing off the screen', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        h.createFails = true;
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
+    });
+
+    it('CONTROL: a collection opens nothing, and takes nothing off the screen', async () => {
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await act(async () => { document.querySelector<HTMLElement>('.add-channel-btn')!.click(); });
+        await settled(3);
+        const collection = [...document.querySelectorAll<HTMLElement>('.type-btn')].find(b => /collection/i.test(b.textContent ?? ''));
+        expect(collection, 'the form offers one').toBeTruthy();
+        await act(async () => { collection!.click(); });
+        await submitCreateForm('a-collection');
+        expect(vi.mocked(fetch).mock.calls.some(([url, init]) => init?.method === 'POST' && /channels$/.test(String(url)) && JSON.parse(String(init?.body)).channel_type === 2), 'a collection went').toBe(true);
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
     });
 
     it('CONTROL: a voice channel opens nothing, and takes nothing off the screen', async () => {
