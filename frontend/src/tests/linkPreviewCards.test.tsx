@@ -88,6 +88,29 @@ describe('the card has the address the link has', () => {
     });
 });
 
+/** The addresses of the links in the message itself, as rendered. */
+const inTheMessage = () => [...host!.querySelectorAll<HTMLAnchorElement>('a.message-link')].map(a => a.getAttribute('href'));
+
+/** A message's link and its card are one address, and it is this one. */
+async function bothGoTo(content: string, href: string) {
+    const cards = await said(content);
+    expect(inTheMessage(), 'the link in the message').toEqual([href]);
+    expect(cards, 'the card under it').toEqual([href]);
+}
+
+describe('the link and the card go to the whole address', () => {
+    const RUST = 'https://example.org/wiki/Rust_(programming_language)';
+
+    it.each([
+        ['alone', RUST, RUST],
+        ['in a sentence', `read ${RUST} today`, RUST],
+        ['in brackets', `(see ${RUST})`, RUST],
+        ['ending in (v=vs.85)', 'https://example.org/library/ms123(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)'],
+    ])('a bracket it opened: %s', async (_, content, href) => {
+        await bothGoTo(content, href);
+    });
+});
+
 describe('what has no card', () => {
     it('a picture, which the message draws', async () => {
         expect(await said('https://example.invalid/pic.png')).toEqual([]);

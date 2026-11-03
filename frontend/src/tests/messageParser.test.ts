@@ -78,6 +78,58 @@ describe('markdown', () => {
     });
 });
 
+/** Every address in a message, as the message links it. */
+function hrefs(content: string): string[] {
+    const out: string[] = [];
+    const walk = (nodes: Node[]) => {
+        for (const n of nodes) {
+            if (n.type === 'url' || n.type === 'link' || n.type === 'image') out.push(n.href);
+            else if ('children' in n) walk(n.children);
+        }
+    };
+    walk(parseMessage(content));
+    return out;
+}
+
+describe('an address ending in a bracket it opened keeps it', () => {
+    const RUST = 'https://example.org/wiki/Rust_(programming_language)';
+
+    it.each([
+        ['alone', RUST, RUST],
+        ['in a sentence', `read ${RUST} today`, RUST],
+        ['at the end of a sentence', `read ${RUST}.`, RUST],
+        ['before a comma', `${RUST}, and more`, RUST],
+        ['in brackets', `(see ${RUST})`, RUST],
+        ['in brackets, and a full stop', `(see ${RUST}).`, RUST],
+        ['in bold', `**${RUST}**`, RUST],
+        ['(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)'],
+        ['one with a full stop in it', 'https://example.org/wiki/Speaker_(U.S.)', 'https://example.org/wiki/Speaker_(U.S.)'],
+        ['two in one address', 'https://example.org/a_(b)_(c)', 'https://example.org/a_(b)_(c)'],
+        ['one inside another', 'https://example.org/a_(b_(c))', 'https://example.org/a_(b_(c))'],
+        ['one after a stray one', 'https://example.org/a)(b)', 'https://example.org/a)(b)'],
+    ])('%s', (_, content, href) => {
+        expect(hrefs(content)).toEqual([href]);
+    });
+
+    it('the bracket after it is still words', () => {
+        expect(parseMessage(`(see ${RUST})`)).toEqual([
+            { type: 'text', value: '(see ' },
+            { type: 'url', href: RUST },
+            { type: 'text', value: ')' },
+        ]);
+    });
+
+    it.each([
+        ['closes a bracket before the address', '(https://example.org/a)', 'https://example.org/a'],
+        ['and a full stop', '(https://example.org/a).', 'https://example.org/a'],
+        ['with a full stop inside', '(https://example.org/a.)', 'https://example.org/a'],
+        ['an address with no bracket of its own', 'https://example.org/a)', 'https://example.org/a'],
+        ['one opened and never closed', 'https://example.org/a(b, and then c)', 'https://example.org/a(b'],
+    ])('CONTROL: a bracket that is not the address\'s: %s', (_, content, href) => {
+        expect(hrefs(content)).toEqual([href]);
+    });
+});
+
 describe('mentions & channels', () => {
     it('parses user, everyone, here mentions and channels', () => {
         const nodes = parseMessage('hey @alice and @everyone in #general');

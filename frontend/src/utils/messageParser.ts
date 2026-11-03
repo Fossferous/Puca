@@ -43,10 +43,37 @@ const INLINE_DELIMS: { open: string; type: 'strong' | 'em' | 'underline' | 'stri
 ];
 
 /** A bare URL at the START of the input: http(s) only, and the tail class
- *  keeps trailing punctuation out of the href. Exported so notes' own
- *  linkifier (utils/linkSegments.ts) uses THIS regex rather than a second
- *  copy that would drift away from it. */
-export const URL_RE = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
+ *  keeps trailing punctuation out of the href. */
+const URL_RE = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
+
+/** Wikipedia-shaped URLs end in `)`. URL_RE's tail class already dropped it,
+ *  so put it back only when the URL has an unmatched `(` that wants it, along
+ *  with what the class dropped before it: `Foo_(U.S.)`. `rest` is what follows
+ *  the URL. */
+function withBalancedTail(url: string, rest: string): string {
+    let unmatched = 0;
+    for (const ch of url) {
+        if (ch === '(') unmatched++;
+        else if (ch === ')' && unmatched > 0) unmatched--;
+    }
+    let taken = 0;
+    while (unmatched > 0) {
+        const tail = /^[.,:;'\]]*\)/.exec(rest.slice(taken));
+        if (!tail) break;
+        taken += tail[0].length;
+        unmatched--;
+    }
+    return url + rest.slice(0, taken);
+}
+
+/** The address at the START of `rest`, or null. Exported so notes' own
+ *  linkifier (utils/linkSegments.ts) reads an address THIS way rather than
+ *  with a second copy that would drift away from it. */
+export function urlAt(rest: string): string | null {
+    const m = URL_RE.exec(rest);
+    return m && withBalancedTail(m[0], rest.slice(m[0].length));
+}
+
 // Allow letters, numbers, underscore, dot, hyphen in mention/channel names.
 const NAME_RE = /^[a-z0-9_.-]+/i;
 
@@ -247,12 +274,14 @@ function parseInline(input: string, depth: number): Node[] {
         }
 
         // Bare URL.
-        if ((ch === 'h') && URL_RE.test(rest)) {
-            const m = URL_RE.exec(rest)!;
-            flush();
-            nodes.push({ type: 'url', href: m[0] });
-            i += m[0].length;
-            continue;
+        if (ch === 'h') {
+            const href = urlAt(rest);
+            if (href) {
+                flush();
+                nodes.push({ type: 'url', href });
+                i += href.length;
+                continue;
+            }
         }
 
         // Mentions and channels.
