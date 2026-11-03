@@ -4238,6 +4238,13 @@ export function Chat({ onLogout }: ChatProps) {
             ?? voiceServerChannels?.find(c => c.id === currentVoiceChannel.id)
             ?? currentVoiceChannel)
         : null;
+    // A call on another server whose channel was deleted: the deselect above only reads the
+    // viewed server's list, and this one is the list the delete's ChannelUpdated refetches.
+    useEffect(() => {
+        if (currentVoiceChannel && voiceServerChannels && !voiceServerChannels.some(c => c.id === currentVoiceChannel.id)) {
+            setCurrentVoiceChannel(null);
+        }
+    }, [currentVoiceChannel, voiceServerChannels]);
     const voiceGamesEnabled = currentVoiceChannel
         ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
         : undefined;

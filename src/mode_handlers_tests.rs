@@ -1449,6 +1449,62 @@ mod db {
         );
     }
 
+    /// Nobody but the deleter or the dragger used to learn: every other member's list kept a
+    /// deleted row until it was next refetched, and the old order. The frame names only the
+    /// server, so the list has to say it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_delete_and_a_reorder_reach_every_member() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let room = subchannel(&pool, &f.sid, "room", 1, rooms).await;
+        let mut member = Sock::open(&state, f.plain);
+        let listed = |by: i64| {
+            let state = Arc::clone(&state);
+            let sid = f.sid.clone();
+            async move {
+                let resp = crate::channel_handlers::list_channels(State(state), Path(sid), Extension(claims(by))).await.into_response();
+                let (_, rows) = read(resp).await;
+                rows.as_array().expect("a list").iter().map(|r| r["id"].as_i64().unwrap() as i32).collect::<Vec<i32>>()
+            }
+        };
+        let told_to_refetch = |frames: &[M]| frames.iter().any(|m| matches!(m, M::ChannelUpdated { server_id } if *server_id == f.sid));
+        let reorder = |by: i64, ids: Vec<i64>| {
+            crate::channel_handlers::reorder_channels(
+                State(Arc::clone(&state)),
+                Path(f.sid.clone()),
+                Extension(claims(by)),
+                Json(crate::channel_handlers::ReorderChannelsRequest { channel_ids: ids }),
+            )
+        };
+
+        let before = listed(f.plain).await;
+        member.drain();
+        let deleted = delete_channel_as(&state, f.owner, rooms).await;
+        let told_of_delete = member.drain();
+        let after = listed(f.plain).await;
+
+        let new_order = vec![f.text as i64, f.lobby as i64, f.town as i64, f.cottage as i64];
+        let refused = reorder(f.plain, new_order.clone()).await.into_response().status();
+        let told_of_refusal = member.drain();
+        let reordered = reorder(f.owner, new_order).await.into_response().status();
+        let told_of_reorder = member.drain();
+        let order = listed(f.plain).await;
+        teardown(&pool, &f).await;
+
+        assert!(before.contains(&rooms) && before.contains(&room), "control: the member had both rows");
+        assert_eq!(deleted.0, StatusCode::NO_CONTENT);
+        assert!(told_to_refetch(&told_of_delete), "a delete tells another member: {told_of_delete:?}");
+        assert!(!after.contains(&rooms) && !after.contains(&room), "and their refetch loses both rows");
+
+        assert_eq!(refused, StatusCode::FORBIDDEN);
+        assert!(!told_to_refetch(&told_of_refusal), "control: a refused reorder tells nobody");
+        assert_eq!(reordered, StatusCode::OK);
+        assert!(told_to_refetch(&told_of_reorder), "a reorder tells another member: {told_of_reorder:?}");
+        assert_eq!(&order[..4], &[f.text, f.lobby, f.town, f.cottage], "and their refetch is in the new order");
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

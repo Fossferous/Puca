@@ -280,7 +280,7 @@ async fn is_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result
 /// `MediaE2eeRequired` does: an older client and a delivery socket drop a frame
 /// they do not know. A failed read pushes nothing: members then see the change
 /// on their next fetch.
-async fn push_to_members(state: &AppState, server_id: &str, msg: ServerMessage) -> usize {
+pub(crate) async fn push_to_members(state: &AppState, server_id: &str, msg: ServerMessage) -> usize {
     let members = match sqlx::query_as::<_, (i32,)>("SELECT user_id FROM server_members WHERE server_id = $1")
         .bind(server_id)
         .fetch_all(&state.pool)

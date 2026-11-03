@@ -1695,7 +1695,8 @@ mod db {
         let reopened = state.games.peek(&room).is_some();
         let _ = crate::channel_handlers::delete_channel(State(Arc::clone(&state)), Path(f.cid), Extension(owner.clone())).await;
         a.drain();
-        let deleted = a.log.last().map(|f| f["payload"]["reason"].clone());
+        // Not the last frame: every member is then told to refetch the channel list.
+        let deleted = a.log.iter().rev().find(|f| f["type"] == "GameEnded").map(|f| f["payload"]["reason"].clone());
         let gone = state.games.peek(&room).is_none();
         drop_fixture(&pool, &f).await;
 

@@ -837,6 +837,16 @@ pub async fn delete_channel(
         );
     }
 
+    // TELL EVERYONE, as update_channel does: every member refetches the channel list, and
+    // the refetch is what takes the rows off theirs and closes whichever of them was open.
+    // Nothing else would until they left the server and came back.
+    crate::mode_handlers::push_to_members(
+        &state,
+        &server_id,
+        crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
+    )
+    .await;
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -913,6 +923,14 @@ pub async fn reorder_channels(
         )
             .into_response();
     }
+
+    // The list has one order, everyone's, not the dragger's own.
+    crate::mode_handlers::push_to_members(
+        &state,
+        &server_id,
+        crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
+    )
+    .await;
 
     StatusCode::OK.into_response()
 }
