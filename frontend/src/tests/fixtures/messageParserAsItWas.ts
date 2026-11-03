@@ -60,7 +60,7 @@ const SAFE_URL_SCHEMES = new Set(['http', 'https', 'mailto', 'sovereign-enc', 's
  * "\tjavascript:") are stripped before the scheme is read, so they can't smuggle
  * a dangerous scheme past the check.
  */
-function isSafeUrl(href: string): boolean {
+export function isSafeUrl(href: string): boolean {
     // Skip leading chars a browser ignores when resolving the scheme
     // (spaces, tabs, newlines and other C0 controls) with a charCode scan
     // rather than a control-char regex literal. Interior controls can't form

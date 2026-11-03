@@ -39,6 +39,12 @@
 //      finds every kind. Each is rendered as Chat renders a message, beside the REAL LinkPreview: no
 //      card under the message gives a spoilered link away, hidden or revealed, and a link outside a
 //      spoiler has its card, with the link's own address (the control).
+//   8. The address a link opens, on one theme: a message's real link beside its real card, for the
+//      addresses the parser used to get wrong (a bracket the address opened, a delimiter in the words
+//      before it, straight after a colon, in < > or quotes, a capital scheme, a bracket in a link's
+//      target). A real press on each opens a real tab, answered here, and each must land on the whole
+//      address. NEGATIVE CONTROL: the same presses through the parser as it was
+//      (src/tests/fixtures/messageParserAsItWas.ts) must not both land there.
 //
 // No server, no build, nothing leaves the machine (one page served on 127.0.0.1), silent.
 //
@@ -85,9 +91,36 @@ const bundle = (await build({
 })).outputFiles[0].text;
 const themeCss = fs.readFileSync(path.join(HERE, 'src', 'styles', 'theme.css'), 'utf8');
 
+// What 8 presses: [what was typed, the whole address]. `same` went to the right place before too.
+const LINKS = [
+    ['https://example.org/wiki/Rust_(programming_language)', 'https://example.org/wiki/Rust_(programming_language)'],
+    ['read https://example.org/wiki/Rust_(programming_language) today', 'https://example.org/wiki/Rust_(programming_language)'],
+    ['(see https://example.org/wiki/Rust_(programming_language))', 'https://example.org/wiki/Rust_(programming_language)'],
+    ['https://example.org/library/ms123(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)'],
+    ['my_file is at https://example.org/my_file.txt', 'https://example.org/my_file.txt'],
+    ['API_URL=https://example.org/v1_beta', 'https://example.org/v1_beta'],
+    ['my_repo: https://example.org/me/my_repo', 'https://example.org/me/my_repo'],
+    ['5*3 is at https://example.org/a*b', 'https://example.org/a*b'],
+    ['old~~name: https://example.org/old~~name', 'https://example.org/old~~name'],
+    ['Link:https://example.org/page', 'https://example.org/page'],
+    ['Download here:https://example.org/file', 'https://example.org/file'],
+    ['<https://example.org>', 'https://example.org'],
+    ['<https://example.org/page>', 'https://example.org/page'],
+    ['{"url":"https://example.org/x"}', 'https://example.org/x'],
+    ['<a href="https://example.org/x">link</a>', 'https://example.org/x'],
+    ['Https://example.org/wiki/Foo_Bar_Baz', 'Https://example.org/wiki/Foo_Bar_Baz'],
+    ['Https://example.org/page#top', 'Https://example.org/page#top'],
+    ['Https://example.org/@alice/123', 'Https://example.org/@alice/123'],
+    ['HTTP://example.org/a_b', 'HTTP://example.org/a_b'],
+    ['[w](https://example.org/wiki/Foo_(bar))', 'https://example.org/wiki/Foo_(bar)'],
+    ['https://example.org/plain', 'https://example.org/plain', 'same'],
+    ['**https://example.org/bold**', 'https://example.org/bold', 'same'],
+    ['see [the plot](https://example.org/plot).', 'https://example.org/plot', 'same'],
+];
+
 // The chat's stylesheet and the real message parser, for what the halo must stay off (6). The
 // composer's list is written out as Chat.tsx writes it: it is no component of its own.
-const chatBuild = await build({
+const chatOptions = {
     stdin: {
         contents: `
             import './index.css';
@@ -101,9 +134,10 @@ const chatBuild = await build({
             // What a press did, with nothing really opened.
             window.__pressed = [];
             window.open = (where) => { window.__pressed.push('opened ' + where); return null; };
+            const OPENS_FOR_REAL = location.pathname.startsWith('/links');
             document.addEventListener('click', (e) => {
                 const a = e.target.closest?.('a');
-                if (a) { e.preventDefault(); window.__pressed.push('opened ' + a.getAttribute('href')); }
+                if (a && !OPENS_FOR_REAL) { e.preventDefault(); window.__pressed.push('opened ' + a.getAttribute('href')); }
             }, true);
             const MEMBERS = [{ id: 2, username: 'alice' }];
             const CHANNELS = [{ id: 7, name: 'general' }];
@@ -130,7 +164,12 @@ const chatBuild = await build({
                     </div>
                 );
             }
-            createRoot(document.getElementById('root')).render(
+            const LINKS = ${JSON.stringify(LINKS.map(([typed]) => typed))};
+            createRoot(document.getElementById('root')).render(OPENS_FOR_REAL ? (
+                <main className="chat-main" style={{ height: '100%', display: 'block', overflow: 'auto' }}>
+                    {LINKS.map((content, n) => <div className="message-content" key={n} data-link={n}>{said(content)}<LinkPreview content={content} /></div>)}
+                </main>
+            ) : (
                 <main className="chat-main" id="main" style={{ height: '100%' }}>
                     <div className="message-content" id="said">
                         <MessageContent content="Plain words. ||the demon is **Alice**||" members={[]} />
@@ -156,8 +195,8 @@ const chatBuild = await build({
                         </div>
                         <button type="submit">Send</button>
                     </form>
-                </main>,
-            );
+                </main>
+            ));
         `,
         resolveDir: path.join(HERE, 'src'),
         loader: 'tsx',
@@ -186,13 +225,25 @@ const chatBuild = await build({
     }],
     logOverride: { 'empty-import-meta': 'silent' },
     logLevel: 'error',
-});
+};
+const chatBuild = await build(chatOptions);
 const chatJs = chatBuild.outputFiles.find((f) => f.path.endsWith('.js')).text;
 const chatCss = chatBuild.outputFiles.find((f) => f.path.endsWith('.css')).text;
 if (!chatCss.includes('.composer-autocomplete')) throw new Error('rig: Chat.css did not make it into the bundle');
-const CHAT_PAGE = `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><title>look in the chat</title>
+// The same chat through the parser as it was, for 8's control.
+const asItWasJs = (await build({
+    ...chatOptions,
+    plugins: [...chatOptions.plugins, {
+        name: 'parser-as-it-was',
+        setup(b) {
+            b.onResolve({ filter: /utils\/messageParser$/ }, () => ({ path: path.join(HERE, 'src', 'tests', 'fixtures', 'messageParserAsItWas.ts') }));
+        },
+    }],
+})).outputFiles.find((f) => f.path.endsWith('.js')).text;
+const chatPage = (script) => `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><title>look in the chat</title>
 <link rel="stylesheet" href="/chat.css"><style>html,body,#root{margin:0;height:100%}</style></head>
-<body><div id="root"></div><script src="/chat.js"></script></body></html>`;
+<body><div id="root"></div><script src="${script}"></script></body></html>`;
+const CHAT_PAGE = chatPage('/chat.js');
 const PAGE = `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><title>look</title>
 <link rel="stylesheet" href="/theme.css">
 <style>html,body{margin:0;height:100%;background:var(--bg-primary)}#box,#over{position:fixed;inset:0}</style></head>
@@ -207,6 +258,9 @@ function serve(csp) {
             else if (req.url === '/chat.js') res.writeHead(200, { ...headers, 'content-type': 'text/javascript' }).end(chatJs);
             else if (req.url === '/chat.css') res.writeHead(200, { ...headers, 'content-type': 'text/css' }).end(chatCss);
             else if (req.url === '/chat') res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(CHAT_PAGE);
+            else if (req.url === '/links') res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(CHAT_PAGE);
+            else if (req.url === '/links-as-it-was') res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(chatPage('/as-it-was.js'));
+            else if (req.url === '/as-it-was.js') res.writeHead(200, { ...headers, 'content-type': 'text/javascript' }).end(asItWasJs);
             else res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(PAGE);
         });
         server.listen(0, '127.0.0.1', () => resolve({ server, url: `http://127.0.0.1:${server.address().port}/` }));
@@ -824,6 +878,62 @@ try {
     await chat.close();
     await desktop.close();
     await phoneCtx.close();
+
+    // ── 8. The address a link opens. Every tab it opens is answered here: nothing goes out.
+    const opening = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const answered = [];
+    await opening.route('**/*', (route) => {
+        const asked = route.request().url();
+        if (asked.startsWith(url)) return route.continue();
+        answered.push(asked);
+        return route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>answered here</title>' });
+    });
+    /** Where a real press on it lands, as the tab it opened says. 'no such thing' and 'opened nothing' are answers too. */
+    const lands = async (on, selector, wait) => {
+        const target = on.locator(selector);
+        if (await target.count() === 0) return 'no such thing';
+        await target.first().scrollIntoViewIfNeeded();
+        const at = await target.first().evaluate((el) => {
+            const r = el.getClientRects()[0];
+            const x = r.left + r.width / 2;
+            const y = r.top + r.height / 2;
+            return { x, y, hit: el.contains(document.elementFromPoint(x, y)) };
+        });
+        if (!at.hit) return 'something is over it';
+        const tab = opening.waitForEvent('page', { timeout: wait }).catch(() => null);
+        await on.mouse.click(at.x, at.y);
+        const opened = await tab;
+        if (!opened) return 'opened nothing';
+        await opened.waitForLoadState('domcontentloaded');
+        const where = opened.url();
+        await opened.close();
+        return where;
+    };
+    const links = await opening.newPage();
+    links.on('pageerror', (e) => check('no uncaught page error among the links', false, e.message.slice(0, 300)));
+    await links.goto(`${url}links`);
+    await links.waitForSelector(`[data-link="${LINKS.length - 1}"] a.message-link`, { timeout: 15000 });
+    await links.waitForTimeout(200);
+    check('drawing a link and its card asks nothing of anywhere', answered.length === 0, answered);
+    for (const [n, [typed, address]] of LINKS.entries()) {
+        const whole = new URL(address).href;
+        const message = await lands(links, `[data-link="${n}"] a.message-link`, 5000);
+        const card = await lands(links, `[data-link="${n}"] a.link-preview-card`, 5000);
+        check(`a press on the link and on the card of ${typed}: both open the whole address`, message === whole && card === whole, message === whole && card === whole ? whole : { whole, message, card });
+    }
+    check('and asked nothing else of anywhere', answered.every((asked) => LINKS.some(([, address]) => new URL(address).href === asked)), answered);
+    const asItWas = await opening.newPage();
+    await asItWas.goto(`${url}links-as-it-was`);
+    await asItWas.waitForSelector(`[data-link="${LINKS.length - 1}"] a.message-link`, { timeout: 15000 });
+    await asItWas.waitForTimeout(200);
+    for (const [n, [typed, address, same]] of LINKS.entries()) {
+        const whole = new URL(address).href;
+        const message = await lands(asItWas, `[data-link="${n}"] a.message-link`, 1000);
+        const card = await lands(asItWas, `[data-link="${n}"] a.link-preview-card`, 1000);
+        if (same) check(`CONTROL: through the parser as it was, ${typed}: this one was right`, message === whole && card === whole, { message, card });
+        else check(`NEGATIVE CONTROL: through the parser as it was, ${typed}: not both open the whole address`, message !== whole || card !== whole, { message, card });
+    }
+    await opening.close();
 } catch (e) {
     check('the script ran to the end', false, String(e?.stack || e).slice(0, 800));
 } finally {
