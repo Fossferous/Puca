@@ -31,6 +31,8 @@ export type Node =
     | { type: 'emoji'; name: string };
 
 const MAX_DEPTH = 12;
+// A link's target, 2048 long at most, and the `)` after it.
+const LINK_TARGET_RE = /^\S{0,2049}/;
 
 // Inline delimiters, longest-first so `**` wins over `*` and `__` over `_`.
 const INLINE_DELIMS: { open: string; type: 'strong' | 'em' | 'underline' | 'strike' | 'spoiler' }[] = [
@@ -257,6 +259,35 @@ function findLineStart(s: string, prefix: string): number {
     return -1;
 }
 
+/**
+ * What a link or a picture holds, at `at` in `input`, with `head` matching up to
+ * the `(` of its target. The target takes in the brackets it opens, so
+ * `[w](https://x/Foo_(bar))` keeps its own, and it stops at the first `)` that
+ * closes none: `[a](b) (c)` does not take in `(c)`. With no such `)`, as in
+ * `[a](https://x/(b)`, it stops at the first `)` it passed. Bounded, like `head`.
+ */
+function matchLinkParts(head: RegExp, input: string, at: number): { label: string; href: string; length: number } | null {
+    const rest = input.slice(at);
+    const m = head.exec(rest);
+    if (!m) return null;
+    const target = LINK_TARGET_RE.exec(rest.slice(m[0].length))![0];
+    if (!target.includes(')')) return null;
+    let depth = 0;
+    let first = -1;
+    let end = -1;
+    for (let i = 0; i < target.length && end === -1; i++) {
+        if (target[i] === '(') depth++;
+        else if (target[i] === ')') {
+            if (depth === 0) end = i;
+            else if (first === -1) first = i;
+            depth--;
+        }
+    }
+    // With a spoiler ahead, what is after the first `)` stays what it was (see `spoilerAhead`).
+    if (first !== -1 && (end === -1 || (spoilerAhead(input, at) && /[*_~`[|:]/.test(target.slice(first, end))))) end = first;
+    return end > 0 ? { label: m[1], href: target.slice(0, end), length: m[0].length + end + 1 } : null;
+}
+
 /** Inline parser: emits text runs interleaved with markup nodes. */
 function parseInline(input: string, depth: number): Node[] {
     const nodes: Node[] = [];
@@ -290,28 +321,28 @@ function parseInline(input: string, depth: number): Node[] {
         // window instead of scanning to end-of-string — otherwise a message of
         // many '[' is O(n^2) and freezes the renderer (client-side DoS).
         if (ch === '!' && input[i + 1] === '[') {
-            const m = /^!\[([^\]\n]{0,512})\]\(([^)\s]{1,2048})\)/.exec(rest);
+            const m = matchLinkParts(/^!\[([^\]\n]{0,512})\]\(/, input, i);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme (javascript:, data:, …): keep the
                 // alt text, drop the href, so it never renders as an <img src>. (H7)
-                if (isSafeUrl(m[2])) nodes.push({ type: 'image', alt: m[1], href: m[2] });
-                else if (m[1]) nodes.push({ type: 'text', value: m[1] });
-                i += m[0].length;
+                if (isSafeUrl(m.href)) nodes.push({ type: 'image', alt: m.label, href: m.href });
+                else if (m.label) nodes.push({ type: 'text', value: m.label });
+                i += m.length;
                 continue;
             }
         }
 
         // Link: [label](url) — bounded (see image note above) to keep parsing linear.
         if (ch === '[') {
-            const m = /^\[([^\]\n]{1,512})\]\(([^)\s]{1,2048})\)/.exec(rest);
+            const m = matchLinkParts(/^\[([^\]\n]{1,512})\]\(/, input, i);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme: drop the href and keep the label
                 // as plain text so `[x](javascript:…)` is never a clickable link. (H7)
-                if (isSafeUrl(m[2])) nodes.push({ type: 'link', label: m[1], href: m[2] });
-                else nodes.push({ type: 'text', value: m[1] });
-                i += m[0].length;
+                if (isSafeUrl(m.href)) nodes.push({ type: 'link', label: m.label, href: m.href });
+                else nodes.push({ type: 'text', value: m.label });
+                i += m.length;
                 continue;
             }
         }

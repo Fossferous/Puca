@@ -448,6 +448,84 @@ describe('a capital scheme, which a phone keyboard makes', () => {
     });
 });
 
+describe('brackets in a link\'s target', () => {
+    const link = (label: string, href: string) => ({ type: 'link', label, href });
+
+    it('it keeps the ones it opens', () => {
+        expect(parseMessage('[w](https://example.org/wiki/Foo_(bar))')).toEqual([link('w', 'https://example.org/wiki/Foo_(bar)')]);
+        expect(parseMessage('[w](https://example.org/wiki/Foo_(bar)_baz) after')).toEqual([
+            link('w', 'https://example.org/wiki/Foo_(bar)_baz'),
+            { type: 'text', value: ' after' },
+        ]);
+        expect(parseMessage('[w](https://example.org/a_(b)_(c))')).toEqual([link('w', 'https://example.org/a_(b)_(c)')]);
+        expect(parseMessage('[w](https://example.org/a_(b_(c)))')).toEqual([link('w', 'https://example.org/a_(b_(c))')]);
+        expect(parseMessage('(see [w](https://example.org/Foo_(bar)))')).toEqual([
+            { type: 'text', value: '(see ' },
+            link('w', 'https://example.org/Foo_(bar)'),
+            { type: 'text', value: ')' },
+        ]);
+    });
+
+    it('a picture\'s too', () => {
+        expect(parseMessage('![p](https://example.org/a_(1).png)')).toEqual([{ type: 'image', alt: 'p', href: 'https://example.org/a_(1).png' }]);
+    });
+
+    it('CONTROL: a bracket it opens and never closes is as it was', () => {
+        expect(parseMessage('[a](https://x/(b)')).toEqual([link('a', 'https://x/(b')]);
+        expect(parseMessage('[a](x(y) z)')).toEqual([link('a', 'x(y'), { type: 'text', value: ' z)' }]);
+    });
+
+    it('CONTROL: it stops at the first ) that closes nothing', () => {
+        expect(parseMessage('[a](b) (c)')).toEqual([link('a', 'b'), { type: 'text', value: ' (c)' }]);
+        expect(parseMessage('[a](b))')).toEqual([link('a', 'b'), { type: 'text', value: ')' }]);
+        expect(parseMessage('[a](b)(c)')).toEqual([link('a', 'b'), { type: 'text', value: '(c)' }]);
+    });
+
+    it('CONTROL: no target and no closing are no link', () => {
+        expect(parseMessage('[a]()')).toEqual([{ type: 'text', value: '[a]()' }]);
+        expect(parseMessage('[a](b')).toEqual([{ type: 'text', value: '[a](b' }]);
+        expect(parseMessage('[a](b c)')).toEqual([{ type: 'text', value: '[a](b c)' }]);
+    });
+
+    it.each([
+        ['javascript:alert(1)'],
+        ['JavaScript:alert((1))'],
+        ['data:text/html,(a)'],
+        ['vbscript:msgbox(1)'],
+        ['//example.org/(a)'],
+    ])('a dangerous target stays neutralised, whole: %s', (target) => {
+        expect(parseMessage(`[x](${target})`)).toEqual([{ type: 'text', value: 'x' }]);
+        expect(parseMessage(`![x](${target})`)).toEqual([{ type: 'text', value: 'x' }]);
+    });
+
+    it('a spoiler after the first ) is still one', () => {
+        expect(parseMessage('[a](https://x/(b)||c||)')).toEqual([
+            link('a', 'https://x/(b'),
+            { type: 'spoiler', children: [{ type: 'text', value: 'c' }] },
+            { type: 'text', value: ')' },
+        ]);
+        expect(parseMessage('[w](https://example.org/Foo_(bar)) ||c||')).toEqual([
+            link('w', 'https://example.org/Foo_(bar)'),
+            { type: 'text', value: ' ' },
+            { type: 'spoiler', children: [{ type: 'text', value: 'c' }] },
+        ]);
+    });
+
+    it('it stays bounded: a target past the limit is no link, and a message of openers takes no time', () => {
+        const target = `https://example.org/${'a'.repeat(2028)}`;
+        expect(target).toHaveLength(2048);
+        expect(hrefs(`[a](${target})`)).toEqual([target]);
+        expect(parseMessage(`[a](${target}b)`).some(n => n.type === 'link')).toBe(false);
+        // Past the limit, a first `)` further back is what it stops at, as before it stopped there.
+        expect(hrefs(`[a](x(y)${'a'.repeat(3000)})`)).toEqual(['x(y']);
+        const started = performance.now();
+        parseMessage('[a]('.repeat(5000));
+        parseMessage('[a](('.repeat(4000));
+        parseMessage(`[a](${'('.repeat(20000)}`);
+        expect(performance.now() - started).toBeLessThan(5000);
+    });
+});
+
 describe('mentions & channels', () => {
     it('parses user, everyone, here mentions and channels', () => {
         const nodes = parseMessage('hey @alice and @everyone in #general');

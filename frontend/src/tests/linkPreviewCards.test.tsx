@@ -161,6 +161,12 @@ describe('the link and the card go to the whole address', () => {
         expect(isExternalHref(href)).toBe(true);
     });
 
+    it('with words of its own and a bracket in its target', async () => {
+        await bothGoTo('[w](https://example.org/wiki/Foo_(bar))', 'https://example.org/wiki/Foo_(bar)');
+        expect(host!.querySelector('a.message-link')!.textContent).toBe('w');
+        expect(host!.textContent, 'no stray bracket after it').not.toContain('w)');
+    });
+
     it('a picture with a capital scheme is drawn as one, with no card', async () => {
         expect(await said('Https://example.invalid/pic.png')).toEqual([]);
         expect(host!.querySelector('button.message-image-blocked')).not.toBeNull();
