@@ -64,6 +64,21 @@ describe('markdown', () => {
         expect(text(nodes)).toBe('quoted line');
     });
 
+    it('a quote takes every quoted line after it, and stops at the first that is not', () => {
+        expect(parseMessage('> a\n>\n> b\nc\n> d')).toEqual([
+            { type: 'blockquote', children: [{ type: 'text', value: 'a\n\nb' }] },
+            { type: 'text', value: 'c\n' },
+            { type: 'blockquote', children: [{ type: 'text', value: 'd' }] },
+        ]);
+    });
+
+    it.each(['>', '> ', '>\n', '> a\n', '> a\n> b', '> a\n>\n> b', '> a\n\n> b', '>\n>\n', '>\n\n>\n\n', '> a\n>b', '>a\n> b', 'a\n> b\nc', '> a\r\n> b', '> a\n> b\n\n'])(
+        'a quote ends where it always did: %j',
+        (content) => {
+            expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+        },
+    );
+
     it('parses links and bare URLs', () => {
         expect(parseMessage('[site](https://example.com)')[0]).toMatchObject({
             type: 'link', href: 'https://example.com', label: 'site',
@@ -844,6 +859,12 @@ describe('what a message costs to read', () => {
         const content = `*https://example.org/${'*'.repeat(7900)}a ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content)).toBeLessThan(10);
+    });
+
+    it('very short quotes and one small spoiler: 2 ms, or 116 if each quote reads all that is left of the text', () => {
+        const content = `${'>\n\n'.repeat(2665)}||s||`;
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content)).toBeLessThan(30);
     });
 
     it('CONTROL: what is cheap is still read in full: a list of addresses, all whole, and every name', () => {

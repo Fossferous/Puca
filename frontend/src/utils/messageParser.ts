@@ -264,16 +264,16 @@ function matchCodeBlock(s: string): { node: Node; length: number } | null {
 
 function matchBlockquote(s: string, reading: Reading): { node: Node; length: number } | null {
     if (!(s.startsWith('> ') || s.startsWith('>\n') || s === '>')) return null;
-    const lines = s.split('\n');
+    // Up to the first line that is not quoted, and no further: a text of very short
+    // quotes comes back here for each one, with nearly all of itself still to read.
     const quoted: string[] = [];
     let consumed = 0;
-    for (const line of lines) {
-        if (line === '>' || line.startsWith('> ')) {
-            quoted.push(line === '>' ? '' : line.slice(2));
-            consumed += line.length + 1; // + newline
-        } else {
-            break;
-        }
+    while (consumed < s.length) {
+        const nl = s.indexOf('\n', consumed);
+        const line = s.slice(consumed, nl === -1 ? s.length : nl);
+        if (line !== '>' && !line.startsWith('> ')) break;
+        quoted.push(line === '>' ? '' : line.slice(2));
+        consumed += line.length + 1; // + newline
     }
     if (quoted.length === 0) return null;
     const length = Math.min(consumed, s.length);
