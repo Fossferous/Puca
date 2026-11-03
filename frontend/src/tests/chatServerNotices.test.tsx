@@ -22,6 +22,8 @@ const h = vi.hoisted(() => ({
     pin: null as null | (() => Promise<unknown>),
     dms: [] as unknown[],
     discarded: [] as string[],
+    /** Whose session is in storage now. */
+    sessionOf: 1 as number | null,
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
@@ -48,6 +50,7 @@ vi.mock('../api/uploads', async importOriginal => ({
 vi.mock('../api/auth', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/auth')>()),
     getToken: () => `h.${btoa(JSON.stringify({ sub: ME, username: 'me' })).replace(/=+$/, '')}.s`,
+    currentUserIdFromToken: () => h.sessionOf,
 }));
 vi.mock('../utils/audioFeedback', async importOriginal => ({
     ...(await importOriginal<typeof import('../utils/audioFeedback')>()),
@@ -112,6 +115,7 @@ afterEach(() => {
     h.pin = null;
     h.dms = [];
     h.discarded = [];
+    h.sessionOf = ME;
     frameListeners = [];
     dialogs.unmount();
     vi.restoreAllMocks();
@@ -126,6 +130,21 @@ function shortenTheGrace() {
     const realTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: []) =>
         realTimeout(fn, ms === 10_000 || ms === 5_000 ? 0 : ms, ...rest)) as typeof setTimeout);
+}
+
+/** The grace held until `fire`: what has happened by the time it runs. */
+function holdTheGrace() {
+    const realTimeout = globalThis.setTimeout;
+    const held: (() => void)[] = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: []) => {
+        if (ms !== 10_000) return realTimeout(fn, ms, ...rest);
+        held.push(fn);
+        return 0;
+    }) as typeof setTimeout);
+    return async () => {
+        await act(async () => { for (const fn of held.splice(0)) fn(); });
+        await settle(50);
+    };
 }
 
 async function mountChat() {
@@ -246,6 +265,45 @@ describe('the chat view, when nobody just pressed anything', () => {
         expect(said).toContain('Message failed to send');
         expect(said).toContain('#general');
         expect(said).toContain('hello there');
+    });
+
+    describe('when Chat has gone by the time it gives up', () => {
+        async function leftWithASendUnconfirmed() {
+            const fire = holdTheGrace();
+            h.send = async () => { throw new TypeError('Failed to fetch'); };
+            await mountChat();
+            await pressSend('hello there');
+            await settle(50);
+            await moveToRandom();
+            return fire;
+        }
+        const chatGoes = () => { act(() => root?.unmount()); root = null; };
+
+        it('signed out, their words do not wait on the login screen for the next person', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            // logout(): the token goes, then the page does.
+            h.sessionOf = null;
+            chatGoes();
+            await fire();
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('nor do they reach another account that signed in meanwhile', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            h.sessionOf = ME + 1;
+            chatGoes();
+            await fire();
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('CONTROL: still signed in (an invite link replaced Chat), this is the only copy, and it is said', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            chatGoes();
+            await fire();
+            const [said] = dialogs.notices();
+            expect(said).toContain('Message failed to send');
+            expect(said).toContain('hello there');
+        });
     });
 
     it('POSITIVE CONTROL: a refusal the moment the person pressed Send stays what it was, a dialog they answer', async () => {

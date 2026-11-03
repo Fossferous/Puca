@@ -43,7 +43,7 @@ import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipPropos
 import { API_BASE_URL } from './api/config';
 import { ClipApprovalPrompt } from './components/ClipApprovalPrompt';
 import './App.css';
-import { askConfirm } from './api/appDialogs';
+import { askConfirm, closeAppDialogs } from './api/appDialogs';
 
 const MAX_AUTO_RETRIES = RETRY_DELAYS_MS.length;
 
@@ -135,6 +135,10 @@ function App() {
   // screen with an explanation instead of silently-empty screens. Remember-me
   // usually signs straight back in without any typing.
   const expireSession = useCallback(() => {
+    // logout()'s rule. <AppDialogs/> is outside this component and stays on the
+    // screen through a sign-in, which reloads nothing: a question would be answered
+    // in the next session, and a notice can hold someone's unsent words.
+    closeAppDialogs();
     softExpireSession();
     wsClient.disconnect();
     setLoggedIn(false);

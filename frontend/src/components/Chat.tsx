@@ -44,7 +44,7 @@ import { ForwardModal } from './ForwardModal';
 import { SupportReportModal } from './SupportReportModal';
 import { onPendingInviteAnnounced } from '../api/pendingInvite';
 import { SaveToNoteModal } from './SaveToNoteModal';
-import { getToken } from '../api/auth';
+import { currentUserIdFromToken, getToken } from '../api/auth';
 import { appIsForeground, isMobile as isNativeMobile, isTauri, RC_ENABLED } from '../api/platform';
 import {
     // getOrCreateDefaultServer removed - no auto-join default server
@@ -3701,7 +3701,10 @@ export function Chat({ onLogout }: ChatProps) {
                         return prev.filter(m => m.id !== optimisticMessage.id);
                     });
                     setTimeout(() => {
-                        if (stillUnconfirmed) {
+                        // They may have signed out by now, and this would stay on the screen
+                        // for whoever signs in next. The timer is not cleared when Chat goes:
+                        // leaving it for an invite link is no reason to lose the words.
+                        if (stillUnconfirmed && currentUserIdFromToken() === currentUserId) {
                             // Ten seconds on, the person may be anywhere, and this is the
                             // only copy of what they wrote: the composer gets it back, and
                             // the notice waits for them. Nothing confirmed it landed, and
