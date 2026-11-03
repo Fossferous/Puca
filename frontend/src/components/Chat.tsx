@@ -4123,6 +4123,15 @@ export function Chat({ onLogout }: ChatProps) {
     };
 
 
+    // Every way into the form starts clean: Cancel only hides it, and a parent left behind
+    // can be a collection on another server by now, which every create is then refused for.
+    const openCreateChannel = (type: 0 | 1, parent: number | null = null) => {
+        setNewChannelType(type);
+        setNewChannelHasChecklist(false);
+        setNewChannelParentId(parent);
+        setShowCreateModal(true);
+    };
+
     // --- Mouse-based Channel Drag and Drop (WebView2 compatible) ---
     // WebView2 doesn't fire dragover/drop events, so we use mouse events instead
 
@@ -5491,7 +5500,7 @@ export function Chat({ onLogout }: ChatProps) {
                         <h3>Text Channels</h3>
                         <button
                             className="add-channel-btn"
-                            onClick={() => { setNewChannelType(0); setShowCreateModal(true); }}
+                            onClick={() => openCreateChannel(0)}
                             title="Create Text Channel"
                         >
                             +
@@ -5551,11 +5560,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                     // does NOT inherit the array's ContextMenuItem context,
                                                     // so a bare 'plus' widens to string and fails IconName.
                                                     icon: 'plus' as const,
-                                                    onClick: () => {
-                                                        setNewChannelParentId(channel.id);
-                                                        setNewChannelType(0);
-                                                        setShowCreateModal(true);
-                                                    }
+                                                    onClick: () => openCreateChannel(0, channel.id),
                                                 }] : []),
                                                 {
                                                     id: 'mute-channel',
@@ -5625,7 +5630,7 @@ export function Chat({ onLogout }: ChatProps) {
                         <h3>Voice Channels</h3>
                         <button
                             className="add-channel-btn"
-                            onClick={() => { setNewChannelType(1); setShowCreateModal(true); }}
+                            onClick={() => openCreateChannel(1)}
                             title="Create Voice Channel"
                         >
                             +
