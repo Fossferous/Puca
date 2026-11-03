@@ -130,6 +130,14 @@ describe('the link and the card go to the whole address', () => {
     it('bold around an address that holds a `*`, and something after the bold', async () => {
         await bothGoTo('**https://example.org/a*b**!', 'https://example.org/a*b');
     });
+
+    it.each([
+        ['Link:', 'https://example.org/page'],
+        ['Download here:', 'https://example.org/file'],
+    ])('straight after a colon: %s', async (words, href) => {
+        await bothGoTo(words + href, href);
+        expect(host!.textContent?.startsWith(words)).toBe(true);
+    });
 });
 
 describe('what has no card', () => {

@@ -85,6 +85,10 @@ describe('what stays plain text', () => {
         });
     }
 
+    it('an address straight after a colon is plain here: that word is refused whole, as javascript:x is', () => {
+        expect(linkSegments('Link:https://a.example/x')).toEqual([{ kind: 'text', value: 'Link:https://a.example/x' }]);
+    });
+
     it('a string with no address is exactly one text segment (the cheap path)', () => {
         expect(linkSegments('Buy milk before Friday')).toEqual([{ kind: 'text', value: 'Buy milk before Friday' }]);
         expect(linkSegments('')).toEqual([{ kind: 'text', value: '' }]);

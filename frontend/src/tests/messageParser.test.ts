@@ -309,6 +309,62 @@ describe('a spoiler never stops being one', () => {
     });
 });
 
+describe('an address straight after a colon', () => {
+    it.each([
+        ['Link:', 'https://example.org/page'],
+        ['Download here:', 'https://example.org/file'],
+        ['Source:', 'http://example.org/a_b_c'],
+        ['(see:', 'https://example.org/page'],
+    ])('%s%s', (words, href) => {
+        expect(parseMessage(words + href)).toEqual([{ type: 'text', value: words }, { type: 'url', href }]);
+    });
+
+    it('in a sentence, in bold, and with a delimiter in it', () => {
+        expect(hrefs('the Link:https://example.org/page is here')).toEqual(['https://example.org/page']);
+        expect(hrefs('**Link:https://example.org/a_b**')).toEqual(['https://example.org/a_b']);
+        expect(hrefs('my_file Link:https://example.org/my_file')).toEqual(['https://example.org/my_file']);
+    });
+
+    it(':name: with // after it is not a shortcode, and stays as typed', () => {
+        expect(parseMessage(':smile://x')).toEqual([{ type: 'text', value: ':smile://x' }]);
+        expect(parseMessage('see :smile://x/y now')).toEqual([{ type: 'text', value: 'see :smile://x/y now' }]);
+        // Words, whole: its `_` opens nothing, as a shortcode's never did.
+        expect(parseMessage(':a_b://x _c_')).toEqual([
+            { type: 'text', value: ':a_b://x ' },
+            { type: 'em', children: [{ type: 'text', value: 'c' }] },
+        ]);
+    });
+
+    it('CONTROL: a shortcode is still one, right up against an address or with a slash after a space', () => {
+        expect(parseMessage(':smile:')).toEqual([{ type: 'emoji', name: 'smile' }]);
+        expect(parseMessage(':https:')).toEqual([{ type: 'emoji', name: 'https' }]);
+        expect(parseMessage(':smile: //x')).toEqual([{ type: 'emoji', name: 'smile' }, { type: 'text', value: ' //x' }]);
+        expect(parseMessage(':smile:https://example.org/a')).toEqual([
+            { type: 'emoji', name: 'smile' },
+            { type: 'url', href: 'https://example.org/a' },
+        ]);
+    });
+
+    it('@ in it is no mention, and one beside it still is', () => {
+        expect(extractMentions('Link:https://example.org/@alice/1')).toEqual({ users: [], everyone: false });
+        expect(extractMentions('@bob Link:https://example.org/@alice/1 @carol')).toEqual({ users: ['bob', 'carol'], everyone: false });
+    });
+
+    it('a spoiler stays one beside it, or in its word', () => {
+        const spoiler = (value: string) => ({ type: 'spoiler', children: [{ type: 'text', value }] });
+        expect(parseMessage('Link:https://example.org/a ||hidden||')).toEqual([
+            { type: 'text', value: 'Link:' },
+            { type: 'url', href: 'https://example.org/a' },
+            { type: 'text', value: ' ' },
+            spoiler('hidden'),
+        ]);
+        expect(parseMessage('Link:https://example.org/a||hidden||')).toEqual([
+            { type: 'text', value: 'Link:https://example.org/a' },
+            spoiler('hidden'),
+        ]);
+    });
+});
+
 describe('mentions & channels', () => {
     it('parses user, everyone, here mentions and channels', () => {
         const nodes = parseMessage('hey @alice and @everyone in #general');

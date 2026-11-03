@@ -94,6 +94,21 @@ function wordAt(input: string, at: number): string {
     return /^[^\s<]*/.exec(input.slice(at))![0];
 }
 
+/**
+ * The address at `at`, as the parser reads it, or null. `lately` says it was not
+ * read as one before, being straight after a colon: with a spoiler ahead it stays
+ * unread where a delimiter in its word could pair differently for it (see
+ * `spoilerAhead`), which it can only if there is another of it further on.
+ */
+function addressAt(input: string, at: number, lately: boolean): string | null {
+    const href = urlAt(input.slice(at));
+    if (!href || !lately || !spoilerAhead(input, at)) return href;
+    const word = wordAt(input, at);
+    const after = input.slice(at + word.length);
+    if (/[`[|]/.test(word) || ['*', '_', '~'].some((d) => word.includes(d) && after.includes(d))) return null;
+    return href;
+}
+
 /** How many `||` are in `text`. */
 function barsIn(text: string): number {
     return text.split('||').length - 1;
@@ -341,9 +356,23 @@ function parseInline(input: string, depth: number): Node[] {
             }
         }
 
-        // Shortcode emoji: :smile:
+        // Shortcode emoji: :smile: Not with // after it: `Link:https://…` is an
+        // address straight after a colon, and `:smile://x` is words.
         if (ch === ':') {
             const m = /^:([a-z0-9_+-]+):/i.exec(rest);
+            if (m && rest.startsWith('//', m[0].length)) {
+                const href = addressAt(input, i + 1, true);
+                if (href) {
+                    buf += ':';
+                    flush();
+                    nodes.push({ type: 'url', href });
+                    i += 1 + href.length;
+                } else {
+                    buf += m[0];
+                    i += m[0].length;
+                }
+                continue;
+            }
             if (m) {
                 flush();
                 nodes.push({ type: 'emoji', name: m[1] });
@@ -450,7 +479,7 @@ function findClosing(input: string, from: number, open: string): number {
             }
         }
         if (input[i] === 'h') {
-            const href = urlAt(input.slice(i));
+            const href = addressAt(input, i, input[i - 1] === ':');
             if (href) {
                 // An address takes in any `||` in its word, but for the one that
                 // closes a spoiler opened before it.
