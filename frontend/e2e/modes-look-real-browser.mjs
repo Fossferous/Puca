@@ -21,6 +21,12 @@
 //      URL, never a blob: (api/authedMedia.ts), and it renders under all five CSPs the app ships.
 //   5. What it costs on a phone: decoding and mapping the largest stored picture, with the CPU
 //      throttled 6x. Printed, and bounded.
+//   6. What the halo around the text has to stay off, under the REAL Chat.css on all eight themes.
+//      The REAL spoiler through the REAL message parser: nothing of its hidden words is painted,
+//      at rest or under the pointer, read back from the screen, and revealed it has the halo like
+//      any text. The composer's autocomplete list: no halo on a solid surface of its own, where on
+//      Light it fills the white label's letters. NEGATIVE CONTROLS: with the reset taken out, the
+//      same counts find the words, and find more white in the chosen row.
 //
 // No server, no build, nothing leaves the machine (one page served on 127.0.0.1), silent.
 //
@@ -66,6 +72,79 @@ const bundle = (await build({
     define: { __RC_ENABLED__: 'false', 'import.meta.env': '{}' },
 })).outputFiles[0].text;
 const themeCss = fs.readFileSync(path.join(HERE, 'src', 'styles', 'theme.css'), 'utf8');
+
+// The chat's stylesheet and the real message parser, for what the halo must stay off (6). The
+// composer's list is written out as Chat.tsx writes it: it is no component of its own.
+const chatBuild = await build({
+    stdin: {
+        contents: `
+            import './index.css';
+            import './components/Chat.css';
+            import { createRoot } from 'react-dom/client';
+            import { MessageContent } from './components/MessageContent';
+            import { mapPicture, pictureStyle, readPictureTheme } from './api/modeLook';
+            window.__chat = { mapPicture, pictureStyle, readPictureTheme };
+            createRoot(document.getElementById('root')).render(
+                <main className="chat-main" id="main" style={{ height: '100%' }}>
+                    <div className="message-content" id="said">
+                        <MessageContent content="Plain words. ||the demon is **Alice**||" members={[]} />
+                    </div>
+                    <form className="message-form" style={{ marginTop: 'auto' }} onSubmit={(e) => e.preventDefault()}>
+                        <div className="input-wrapper">
+                            <div className="composer-autocomplete">
+                                <div className="autocomplete-header">MEMBERS</div>
+                                <div className="autocomplete-item active">
+                                    <span className="ac-avatar">A</span>
+                                    <span className="ac-name">Alice in the chosen row</span>
+                                    <span className="ac-sub">@alice</span>
+                                </div>
+                                <div className="autocomplete-item">
+                                    <span className="ac-avatar">B</span>
+                                    <span className="ac-name">Bob</span>
+                                    <span className="ac-sub">@bob</span>
+                                </div>
+                            </div>
+                            <textarea className="message-textarea" defaultValue="@" />
+                        </div>
+                        <button type="submit">Send</button>
+                    </form>
+                </main>,
+            );
+        `,
+        resolveDir: path.join(HERE, 'src'),
+        loader: 'tsx',
+        sourcefile: 'chat-entry.tsx',
+    },
+    bundle: true,
+    write: false,
+    outdir: path.join(HERE, '.rig-out'),
+    format: 'iife',
+    target: 'es2022',
+    platform: 'browser',
+    jsx: 'automatic',
+    loader: { '.woff2': 'empty', '.woff': 'empty', '.ttf': 'empty', '.svg': 'empty', '.png': 'empty', '.mp3': 'empty', '.ogg': 'empty', '.wasm': 'empty' },
+    define: {
+        'process.env.NODE_ENV': '"production"',
+        __RC_ENABLED__: 'false',
+        __APP_VERSION__: '"0.0.0-rig"',
+        'import.meta.env': JSON.stringify({ VITE_API_URL: 'http://127.0.0.1:1', DEV: false, PROD: true, MODE: 'production' }),
+    },
+    plugins: [{
+        name: 'url-stub',
+        setup(b) {
+            b.onResolve({ filter: /\?(url|worker)$/ }, (a) => ({ path: a.path, namespace: 'url-stub' }));
+            b.onLoad({ filter: /.*/, namespace: 'url-stub' }, (a) => ({ contents: a.path.endsWith('?worker') ? 'export default class W {}' : 'export default ""', loader: 'js' }));
+        },
+    }],
+    logOverride: { 'empty-import-meta': 'silent' },
+    logLevel: 'error',
+});
+const chatJs = chatBuild.outputFiles.find((f) => f.path.endsWith('.js')).text;
+const chatCss = chatBuild.outputFiles.find((f) => f.path.endsWith('.css')).text;
+if (!chatCss.includes('.composer-autocomplete')) throw new Error('rig: Chat.css did not make it into the bundle');
+const CHAT_PAGE = `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><title>look in the chat</title>
+<link rel="stylesheet" href="/chat.css"><style>html,body,#root{margin:0;height:100%}</style></head>
+<body><div id="root"></div><script src="/chat.js"></script></body></html>`;
 const PAGE = `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><title>look</title>
 <link rel="stylesheet" href="/theme.css">
 <style>html,body{margin:0;height:100%;background:var(--bg-primary)}#box,#over{position:fixed;inset:0}</style></head>
@@ -77,6 +156,9 @@ function serve(csp) {
             const headers = csp ? { 'content-security-policy': csp } : {};
             if (req.url === '/look.js') res.writeHead(200, { ...headers, 'content-type': 'text/javascript' }).end(bundle);
             else if (req.url === '/theme.css') res.writeHead(200, { ...headers, 'content-type': 'text/css' }).end(themeCss);
+            else if (req.url === '/chat.js') res.writeHead(200, { ...headers, 'content-type': 'text/javascript' }).end(chatJs);
+            else if (req.url === '/chat.css') res.writeHead(200, { ...headers, 'content-type': 'text/css' }).end(chatCss);
+            else if (req.url === '/chat') res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(CHAT_PAGE);
             else res.writeHead(200, { ...headers, 'content-type': 'text/html' }).end(PAGE);
         });
         server.listen(0, '127.0.0.1', () => resolve({ server, url: `http://127.0.0.1:${server.address().port}/` }));
@@ -421,6 +503,122 @@ try {
     console.log(`COST  decode + map + encode, 1600x900: ${free.ms} ms here, ${slow.ms} ms at 6x CPU throttle; data: URL ${Math.round(free.chars / 1024)} KiB; pixels in memory while mapping ${Math.round(1600 * 900 * 4 / 1048576 * 10) / 10} MiB`);
     check('on a phone\'s CPU it takes under 3 s, once per mode and theme', slow.ms < 3000, slow);
     check('and what stays in memory is a fraction of the raw pixels', free.chars < 1600 * 900 * 4 / 2, free);
+
+    // ── 6. What the halo has to stay off.
+    const chat = await desktop.newPage();
+    chat.on('pageerror', (e) => check('no uncaught page error in the chat', false, e.message.slice(0, 300)));
+    await chat.goto(`${url}chat`);
+    await chat.waitForFunction(() => !!window.__chat && !!document.querySelector('.spoiler'), null, { timeout: 15000 });
+    /** The transition on a spoiler is all 0.2 s, its halo and its bar included. */
+    const settled = () => chat.waitForTimeout(260);
+    const shadowOf = (selector) => chat.evaluate((s) => getComputedStyle(document.querySelector(s)).textShadow, selector);
+    /** Let the halo through what resets it, as nothing reset it before. */
+    const letThrough = (selector) => chat.evaluate((s) => {
+        const rule = document.createElement('style');
+        rule.id = 'let-through';
+        rule.textContent = `${s} { text-shadow: inherit !important; }`;
+        document.head.appendChild(rule);
+    }, selector);
+    const putBack = () => chat.evaluate(() => document.getElementById('let-through')?.remove());
+    /** Read the screen inside a box, its rounded ends left out. */
+    const shotOf = async (selector) => {
+        const box = await chat.evaluate((s) => {
+            const el = document.querySelector(s);
+            const r = el.getBoundingClientRect();
+            return { x: r.x + 4, y: r.y + 1, width: r.width - 8, height: r.height - 2, fill: getComputedStyle(el).backgroundColor };
+        }, selector);
+        const { fill, ...clip } = box;
+        await pixelsOf(chat, await chat.screenshot({ clip }));
+        return fill;
+    };
+    /** How many pixels inside a spoiler's bar are anything but the bar. */
+    const paintedOn = async (selector) => {
+        const fill = await shotOf(selector);
+        return chat.evaluate((fill) => {
+            const [r, g, b] = fill.match(/[\d.]+/g).map(Number);
+            const d = window.__shot;
+            let painted = 0;
+            for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - r) > 2 || Math.abs(d[i + 1] - g) > 2 || Math.abs(d[i + 2] - b) > 2) painted++;
+            return painted;
+        }, fill);
+    };
+    const whiteIn = async (selector) => {
+        await shotOf(selector);
+        return chat.evaluate(() => {
+            const d = window.__shot;
+            let white = 0;
+            for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235) white++;
+            return white;
+        });
+    };
+    const centreOf = (selector) => chat.evaluate((s) => {
+        const r = document.querySelector(s).getBoundingClientRect();
+        return [r.x + r.width / 2, r.y + r.height / 2];
+    }, selector);
+    const restAndHover = async () => {
+        await chat.mouse.move(2, 2);
+        await settled();
+        const rest = await paintedOn('.spoiler');
+        await chat.mouse.move(...await centreOf('.spoiler'));
+        await settled();
+        const hovered = await paintedOn('.spoiler');
+        await chat.mouse.move(2, 2);
+        await settled();
+        return { rest, hovered };
+    };
+    // Where the halo is the colour of the bar at rest, and only hovering shows it.
+    const SAME_AS_THE_BAR = new Set(['light', 'amoled']);
+    for (const theme of THEMES) {
+        await chat.evaluate(async ({ theme, source }) => {
+            document.documentElement.setAttribute('data-theme', theme);
+            const { mapPicture, pictureStyle, readPictureTheme } = window.__chat;
+            const look = readPictureTheme();
+            const picture = await mapPicture(`data:image/jpeg;base64,${source}`, look.limit);
+            const main = document.getElementById('main');
+            for (const [k, v] of Object.entries(pictureStyle(picture.url, look))) {
+                if (k.startsWith('--')) main.style.setProperty(k, v);
+                else main.style[k] = v;
+            }
+        }, { theme, source: sources.daylight });
+        const halo = await shadowOf('#said');
+        check(`halo on ${theme}: CONTROL: the words around the spoiler wear it`, halo !== 'none', halo);
+
+        const hidden = await restAndHover();
+        check(`spoiler on ${theme}: nothing of the hidden words is painted, at rest or under the pointer`, hidden.rest === 0 && hidden.hovered === 0, hidden);
+        await letThrough('.spoiler:not(.revealed)');
+        const through = await restAndHover();
+        await putBack();
+        check(`NEGATIVE CONTROL: spoiler on ${theme}: with the halo let through, the same count finds the words`, (SAME_AS_THE_BAR.has(theme) ? through.hovered : through.rest) > 0, through);
+
+        await chat.mouse.click(...await centreOf('.spoiler'));
+        await chat.mouse.move(2, 2);
+        await settled();
+        const revealed = await chat.evaluate(() => {
+            const el = document.querySelector('.spoiler.revealed');
+            return el && { shadow: getComputedStyle(el).textShadow, colour: getComputedStyle(el).color };
+        });
+        check(`spoiler on ${theme}: revealed, it has the halo like the words around it`, revealed?.shadow === halo && !/, 0\)$/.test(revealed.colour), revealed);
+        await chat.mouse.click(...await centreOf('.spoiler'));
+        const again = await restAndHover();
+        check(`spoiler on ${theme}: hidden again, nothing is painted`, again.rest === 0 && again.hovered === 0, again);
+
+        const list = await chat.evaluate(() => Object.fromEntries(['.composer-autocomplete', '.autocomplete-header', '.autocomplete-item.active', '.ac-avatar', '.ac-name', '.ac-sub']
+            .map((s) => [s, getComputedStyle(document.querySelector(s)).textShadow])));
+        check(`autocomplete on ${theme}: no halo anywhere in the list`, Object.values(list).every((v) => v === 'none'), list);
+        const white = await whiteIn('.autocomplete-item.active');
+        await letThrough('.composer-autocomplete');
+        const whiteThrough = await whiteIn('.autocomplete-item.active');
+        const listThrough = await shadowOf('.autocomplete-item.active');
+        await putBack();
+        check(`NEGATIVE CONTROL: autocomplete on ${theme}: with the halo let through, the chosen row has it`, listThrough === halo, listThrough);
+        if (theme === 'light') {
+            check('NEGATIVE CONTROL: autocomplete on light: and it paints white around the white label', whiteThrough > white * 1.2, { white, whiteThrough });
+        }
+    }
+    // Why the white labels on fills elsewhere in the chat (Send and the rest) need nothing: they are
+    // buttons, and a browser's own stylesheet gives a button no text-shadow.
+    check('a button in the chat takes no halo: the browser\'s own rule', (await shadowOf('.message-form button[type="submit"]')) === 'none');
+    await chat.close();
     await desktop.close();
     await phoneCtx.close();
 } catch (e) {

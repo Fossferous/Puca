@@ -225,7 +225,9 @@ a landscape is left as it is, down to the byte. A busy picture has its fine deta
 brought towards the mean around it until it reaches `DETAIL_TARGET`, keeping at least
 `DETAIL_KEEP_MIN` of it (`softenDetail`). Colour is not touched, and shapes larger than a word
 are not either. The text's shadow is a tight dark halo with a soft one around it (light on a
-light theme); the check above does not count it.
+light theme); the check above does not count it. A shadow has its own colour, so an unrevealed
+spoiler resets it (its letters are transparent and the halo would draw them), and so does the
+composer's autocomplete list, a solid surface of its own. A button takes none from the browser.
 
 The bound holds every pixel by construction, so what is left to measure is what the
 browser does afterwards. The result is stored as a JPEG, which rings a little at hard edges

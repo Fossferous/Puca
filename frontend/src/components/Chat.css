@@ -1361,6 +1361,12 @@ button.message-attachment.error { color: #ffb4b4; }
     user-select: none;
 }
 
+/* A shadow has a colour of its own, so a picture's halo (api/modeLook.ts) would draw the
+   hidden words around their transparent letters. */
+.spoiler:not(.revealed) {
+    text-shadow: none;
+}
+
 .spoiler:hover:not(.revealed) {
     background: var(--bg-tertiary);
 }
@@ -2937,6 +2943,9 @@ body.voice-drag-active {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     z-index: 300;
     padding: 6px;
+    /* A solid surface of its own: a picture's halo has nothing to do here, and on Light it
+       fills the letters of the white label on the chosen row. */
+    text-shadow: none;
 }
 .autocomplete-header {
     font-size: 0.62rem;
