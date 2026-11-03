@@ -919,6 +919,7 @@ const discardNative = nativeDialogs.length;
 ck('discard: nothing is discarded while it is open', await page.inputValue('.notes-quickadd-title') === 'Asked about');
 await page.locator('dialog.app-question .app-question-btn', { hasText: 'Cancel' }).click();
 await until(page, () => !document.querySelector('dialog.app-question'), null, 3000);
+await sleep(500); // the composer's own close is async: give it the time to happen
 ck('discard: Cancel keeps the composer, open, with its text, and saves nothing',
     await page.locator('.notes-quickadd-open').count() === 1 && await page.inputValue('.notes-quickadd-title') === 'Asked about');
 await page.click('button[aria-label="Discard note"]');
