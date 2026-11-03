@@ -5801,7 +5801,7 @@ export function Chat({ onLogout }: ChatProps) {
                             memberAvatars={new Map(allMembers.map(m => [m.id, m.avatar_file_id || null]))}
                             memberSounds={voiceMemberSounds}
                             onDisconnect={(cutByServer) => {
-                                if (cutByServer) sfuCutRef.current = { channelId: currentVoiceChannel.id, at: Date.now() };
+                                if (cutByServer) sfuCutRef.current = { channelId: currentVoiceChannel.id, at: Date.now(), leaveUnanswered: true };
                                 setCurrentVoiceChannel(null);
                             }}
                             // The voice channel may belong to a different server than the

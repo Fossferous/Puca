@@ -37,7 +37,8 @@
 //  10. with LK_API, on channels with sfu_mode on, by what LiveKit's ListParticipants says
 //      (rooms are sfu_<id>): turning off takes everyone out, a client that ignores being
 //      told and a session whose socket died among them; a channel shared with the next
-//      mode keeps the very same session; Call everyone back moves them; Turn off when
+//      mode keeps the very same session; Call everyone back moves them, LiveKit's removal
+//      first, and after a removal that was no move a directive moves nobody; Turn off when
 //      empty sees a person in an SFU call and a session with no room entry, and not a
 //      stream-only account. A call in a channel no mode names is the control throughout.
 // Each check prints PASS/FAIL; the exit code is the number of failures. Screenshots
@@ -259,6 +260,13 @@ async function pick(page, phone, label) {
     await (phone ? item.tap() : item.click());
 }
 
+/** Any change of look maps the picture again and none shows meanwhile, so gone has to last. */
+async function pictureStaysGone(page) {
+    if (!await until(async () => !(await measureLook(page)).picture, 4000)) return false;
+    await sleep(2500);
+    return !(await measureLook(page)).picture;
+}
+
 /** Is the picture up, and what does the accent do on this theme? */
 async function measureLook(page) {
     return page.evaluate(() => {
@@ -422,11 +430,12 @@ function keepSockets() {
 }
 
 /**
- * Every WebSocket the page opens, with three things a test can do to the app's alone: ignore
+ * Every WebSocket the page opens, with four things a test can do to the app's alone: ignore
  * frames matching `window.__ignoreFrames` (a client that does not act on what it is told),
  * hold back those matching `window.__lateFrames` for 800 ms (LiveKit's removal then always
- * gets there first), and refuse a new one while `window.__noAppSocket` holds (a page in a
- * LiveKit call whose socket to the app is gone). LiveKit's own socket is left alone.
+ * gets there first), hand it a frame with `window.__deliverFrame`, and refuse a new one while
+ * `window.__noAppSocket` holds (a page in a LiveKit call whose socket to the app is gone).
+ * LiveKit's own socket is left alone.
  */
 function appSockets(origin) {
     const Native = window.WebSocket;
@@ -439,6 +448,7 @@ function appSockets(origin) {
             if (app) window.__appSockets.push(this);
         }
         set onmessage(fn) {
+            if (fn && this.__app) window.__deliverFrame = (data) => fn(new MessageEvent('message', { data }));
             super.onmessage = !fn || !this.__app ? fn : (e) => {
                 if (window.__ignoreFrames?.test(String(e.data))) return;
                 if (window.__lateFrames?.test(String(e.data))) setTimeout(() => fn(e), 800);
@@ -609,6 +619,16 @@ async function sfuRun() {
     check('SFU: and each is told who moved them', (await Promise.all([P, Q].map(p => until(async () => (await p.evaluate(() => document.body.innerText)).includes('moved you to Town Square'), 8000)))).every(Boolean));
     check('SFU control: the caller\'s own call elsewhere did not move', await keptCall());
     await shot(O, 'sfu-01-called-back');
+    // A removal that was no move, with LiveKit's getting there first again. The eviction's RoomLeft
+    // comes on top of the answer to the client's own leave, so a directive after them moves nobody.
+    await Q.evaluate(() => { window.__lateFrames = /"type":"RoomLeft"/; });
+    await servers(O, 'moveMemberVoice', [srv.id, qId, null]);
+    check('SFU: a moderator\'s disconnect takes the session out of LiveKit', !!await gone(town, qId), await lkPeople(`sfu_${town.id}`));
+    const qOut = await until(async () => !(await inCall(Q)), 10000);
+    await sleep(1200);
+    await Q.evaluate(({ server, to, from }) => window.__deliverFrame(JSON.stringify({ type: 'VoiceMoved', payload: { server_id: server, channel_id: to, from_channel_id: from, moved_by: 'someone' } })), { server: srv.id, to: cottage.id, from: town.id });
+    await sleep(2500);
+    check('SFU: after a removal that was no move, a directive moves nobody', !!qOut && !await inCall(Q) && (await sessions(cottage, qId)).length === 0, await room(Q));
     await Q.evaluate(() => { window.__lateFrames = null; });
     await leave(Q);
 
@@ -1099,9 +1119,9 @@ try {
             const legibleHigh = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}, high contrast: the notice and the selector are legible`, legibleHigh.measured >= 3 && legibleHigh.bad.length === 0, legibleHigh);
             await menuLegible(A, `${label} on ${theme}, high contrast`);
-            const hc = await until(async () => { const v = await measureLook(A); return v.picture ? null : v; }, 4000);
+            const gone = await pictureStaysGone(A);
             const themeBrand = await A.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary'));
-            check(`${label} on ${theme}: high contrast takes the picture and the accent away`, !!hc && themeBrand === '', { picture: hc?.picture, themeBrand });
+            check(`${label} on ${theme}: high contrast takes the picture and the accent away`, gone && themeBrand === '', { gone, themeBrand });
             await shot(A, `07-${label}-${theme}-high-contrast`);
         }
         await setTheme(A, 'dark', false);
@@ -1242,7 +1262,7 @@ try {
     };
     await (await looksBox()).evaluate(el => el.click());
     await closeSettings();
-    check('the personal switch takes the picture away', !!await until(async () => !(await measureLook(A)).picture, 4000));
+    check('the personal switch takes the picture away', await pictureStaysGone(A));
     check('and the accent', await A.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary') === ''));
     const listedStill = await listed(A);
     check('and leaves the channels listed: it is about looks, not the mode', lists(listedStill, 'Town Square'), listedStill);

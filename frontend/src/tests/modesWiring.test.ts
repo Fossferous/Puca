@@ -74,6 +74,10 @@ describe('a navigation target opens and never joins', () => {
         expect(chat).toContain('sfuCutRef.current = cutAfterRoomLeft(sfuCutRef.current, payload.room_id)');
     });
 
+    it('and the note of a cut expects the answer to this device leaving', () => {
+        expect(chat).toContain('sfuCutRef.current = { channelId: currentVoiceChannel.id, at: Date.now(), leaveUnanswered: true }');
+    });
+
     it('tells Notes when a mode switches', () => {
         expect(chat).toContain('window.dispatchEvent(new CustomEvent(MODES_CHANGED_EVENT))');
     });

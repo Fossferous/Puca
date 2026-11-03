@@ -61,6 +61,7 @@ describe('canMoveVoiceMember', () => {
 
 describe('movedOutOfHere', () => {
     const NOW = 1_000_000;
+    const cutAt = (channelId: number, at: number) => ({ channelId, at, leaveUnanswered: false });
 
     it('is about this device when it is in the channel', () => {
         expect(movedOutOfHere(7, 7, null, NOW)).toBe(true);
@@ -73,40 +74,40 @@ describe('movedOutOfHere', () => {
     });
 
     it('still is when LiveKit\'s removal got here first', () => {
-        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - 200 }, NOW)).toBe(true);
+        expect(movedOutOfHere(7, null, cutAt(7, NOW - 200), NOW)).toBe(true);
     });
 
     it('not for a removal from another channel', () => {
-        expect(movedOutOfHere(7, null, { channelId: 8, at: NOW - 200 }, NOW)).toBe(false);
+        expect(movedOutOfHere(7, null, cutAt(8, NOW - 200), NOW)).toBe(false);
     });
 
     it('not once the removal is old: a device that left long ago is not this call', () => {
-        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - MOVE_AFTER_CUT_MS }, NOW)).toBe(false);
-        expect(movedOutOfHere(7, null, { channelId: 7, at: NOW - MOVE_AFTER_CUT_MS + 1 }, NOW)).toBe(true);
+        expect(movedOutOfHere(7, null, cutAt(7, NOW - MOVE_AFTER_CUT_MS), NOW)).toBe(false);
+        expect(movedOutOfHere(7, null, cutAt(7, NOW - MOVE_AFTER_CUT_MS + 1), NOW)).toBe(true);
     });
 
     it('not when the person has already gone somewhere else', () => {
-        expect(movedOutOfHere(7, 9, { channelId: 7, at: NOW - 200 }, NOW)).toBe(false);
+        expect(movedOutOfHere(7, 9, cutAt(7, NOW - 200), NOW)).toBe(false);
     });
 });
 
 describe('cutAfterRoomLeft', () => {
-    const cut = { channelId: 7, at: 1000 };
+    const cut = { channelId: 7, at: 1000, leaveUnanswered: true };
 
-    it('forgets a removal the server says was not a move', () => {
-        expect(cutAfterRoomLeft(cut, 'voice_7')).toBeNull();
+    it('a move brings one RoomLeft, the answer to this device leaving, and the move still counts', () => {
+        expect(movedOutOfHere(7, null, cutAfterRoomLeft(cut, 'voice_7'), 1200)).toBe(true);
+    });
+
+    it('any other removal brings a second, and only that one forgets it', () => {
+        const left = cutAfterRoomLeft(cutAfterRoomLeft(cut, 'voice_7'), 'voice_7');
+        expect(left).toBeNull();
+        expect(movedOutOfHere(7, null, left, 1200)).toBe(false);
     });
 
     it('keeps it for a RoomLeft about anywhere else, and has nothing to forget otherwise', () => {
         expect(cutAfterRoomLeft(cut, 'voice_8')).toBe(cut);
         expect(cutAfterRoomLeft(cut, 'channel_7')).toBe(cut);
         expect(cutAfterRoomLeft(null, 'voice_7')).toBeNull();
-    });
-
-    it('so a move after that removal is no longer about this device', () => {
-        const left = cutAfterRoomLeft(cut, 'voice_7');
-        expect(movedOutOfHere(7, null, cut, 1200), 'control: with the note it would be').toBe(true);
-        expect(movedOutOfHere(7, null, left, 1200)).toBe(false);
     });
 });
 

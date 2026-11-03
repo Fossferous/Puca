@@ -15,6 +15,8 @@ export const MOVE_AFTER_CUT_MS = 3000;
 export interface SfuCut {
     channelId: number;
     at: number;
+    /** This device left the room on being cut, and the server's answer has not come yet. */
+    leaveUnanswered: boolean;
 }
 
 /**
@@ -35,12 +37,16 @@ export function movedOutOfHere(
 }
 
 /**
- * What is left of the note once a RoomLeft for `roomId` has arrived. A move never sends one
- * (ws::SelfNotice), so that removal was not a move, and the note must not turn a later
- * VoiceMoved into pulling a device out of no call into the next one, unattended.
+ * What is left of the note once a RoomLeft for `roomId` has arrived. A move sends none of its
+ * own (ws::SelfNotice), so a removal that does was not a move, and the note must not turn a
+ * later VoiceMoved into pulling a device out of no call into the next one, unattended. But a
+ * cut device leaves the room, and the server answers every LeaveRoom with a RoomLeft no
+ * different from an eviction's. So a move brings one and any other removal two, and which of
+ * the two came first does not matter: only the second forgets the note.
  */
 export function cutAfterRoomLeft(cut: SfuCut | null, roomId: string): SfuCut | null {
-    return cut && roomId === `voice_${cut.channelId}` ? null : cut;
+    if (!cut || roomId !== `voice_${cut.channelId}`) return cut;
+    return cut.leaveUnanswered ? { ...cut, leaveUnanswered: false } : null;
 }
 
 /**
