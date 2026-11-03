@@ -118,6 +118,41 @@ describe('a mode\'s picture on a connection that drops', () => {
         expect(h.decodes, 'mapped once, by the attempt that is still current').toHaveLength(1);
     });
 
+    describe('a reconnect while the download hangs, which then falls over', () => {
+        /** The picture's GET stalled, and the socket's heartbeat noticing first. */
+        async function hangThenReconnect() {
+            let fail: (e: Error) => void = () => {};
+            fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((_, reject) => { fail = reject; }));
+            await mount();
+            await reconnect();
+            expect(fetchSpy, 'nothing second while it runs').toHaveBeenCalledTimes(1);
+            return async () => {
+                await act(async () => { fail(new TypeError('Failed to fetch')); });
+                await settle();
+            };
+        }
+
+        it('asks once more: the reconnect\'s one go went on that download, and nothing else would ask', async () => {
+            const fallsOver = await hangThenReconnect();
+            fetchSpy.mockImplementation(async () => served());
+            await fallsOver();
+            expect(fetchSpy).toHaveBeenCalledTimes(2);
+            expect(picture()).toBe('on');
+        });
+
+        it('only once, if the connection is no better, and the next reconnect has its own', async () => {
+            const fallsOver = await hangThenReconnect();
+            fetchSpy.mockRejectedValue(new TypeError('Failed to fetch'));
+            await fallsOver();
+            expect(fetchSpy).toHaveBeenCalledTimes(2);
+            await settle();
+            expect(fetchSpy, 'control: nothing polls for it meanwhile').toHaveBeenCalledTimes(2);
+            expect(picture()).toBe('off');
+            await reconnect();
+            expect(fetchSpy).toHaveBeenCalledTimes(3);
+        });
+    });
+
     it('a picture that is up is not fetched or mapped again', async () => {
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => served());
         await mount();

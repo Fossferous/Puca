@@ -132,6 +132,11 @@ export function fetchFileUrl(fileId: string): Promise<string | null> {
     return job;
 }
 
+/** Whether fetchFileUrl would join a fetch already running, rather than start one. */
+export function fileFetchRunning(fileId: string): boolean {
+    return inflight.has(fileId);
+}
+
 /**
  * A file for a one-off `<audio>` (a sound's preview): a blob: URL, because
  * `media-src` allows no `data:` on Android or the web. Not cached: call
