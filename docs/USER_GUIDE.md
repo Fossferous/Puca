@@ -140,6 +140,7 @@ For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 ### Send a Message
 - Type in the message box and press **Enter**
 - **Shift+Enter** inserts a new line
+- If the channel goes away while you are writing (it is deleted, you lose access to it, or you are no longer on the server), Púca moves you to another channel and empties the box, so nothing can go to the wrong people. A notice has your words until you dismiss it. Pressing another channel yourself keeps what you wrote in the box
 
 ### Format Text
 | Syntax | Result |

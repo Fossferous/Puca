@@ -314,6 +314,14 @@ interface UnsentMessage {
     wentAt?: number;
 }
 
+/** What the notice says of a message that cannot go back in the box it was written in. */
+function unsentNotice(reason: string, text: string, hadChips: boolean, where: string | null): string {
+    const attachments = hadChips ? ' Its attachments were not sent either.' : '';
+    return text.trim()
+        ? `${reason}${attachments}\n\nWhat you wrote${where ? ` in ${where}` : ''}:\n${text}`
+        : `${reason}${attachments}`;
+}
+
 /** How long after a DM goes its refusal may still be on the way. */
 const DM_REFUSAL_WINDOW_MS = 10_000;
 
@@ -1628,10 +1636,7 @@ export function Chat({ onLogout }: ChatProps) {
                     if (fileId) discardUpload(fileId);
                 }
             }
-            const attachments = unsent.chips.length > 0 ? ' Its attachments were not sent either.' : '';
-            return unsent.text.trim()
-                ? `${reason}${attachments}\n\nWhat you wrote in ${unsent.where}:\n${unsent.text}`
-                : `${reason}${attachments}`;
+            return unsentNotice(reason, unsent.text, unsent.chips.length > 0, unsent.where);
         }
         setInput(prev => (prev.trim() ? `${unsent.text}\n${prev}` : unsent.text));
         // takeSentAttachments revoked the previews; the uploads themselves stand.
@@ -1693,6 +1698,27 @@ export function Chat({ onLogout }: ChatProps) {
         setReplyingTo(null);
         clearComposerAttachments({ discardUploads: true });
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id, clearComposerAttachments]);
+
+    // The open conversation is going and they did not ask to go anywhere else: a channel
+    // deleted or its View taken away, a collection deleted, the server gone. The composer
+    // belongs to no conversation, so what it holds would be there in whichever one opens
+    // next, one Enter from being sealed for the wrong people. It goes in a notice instead,
+    // as a send that comes back too late does. Their own click on another channel keeps it.
+    // The effect above takes the reply and the chips, as the conversation's id changes.
+    // A ref refreshed every render: a frame's handler can be older than the words.
+    const composerGoesWithRef = useRef<(gone: 'channel' | 'collection' | 'server') => void>(() => { });
+    composerGoesWithRef.current = (gone) => {
+        const channelName = currentChannel ? `#${currentChannel.name}` : null;
+        const goneName = gone === 'server' ? currentServer?.name : gone === 'collection' ? currentCollection?.name : channelName;
+        if (input.trim() || pendingAttachments.length > 0) {
+            // A checklist channel has no box: what is in it was written somewhere earlier.
+            leaveNotice(unsentNotice(`${goneName} is no longer available, so your message was not sent.`, input, pendingAttachments.length > 0, composerShown ? channelName : null));
+        }
+        setInput('');
+        setAutocomplete(null);
+        // It grew with what was written; only a send puts it back.
+        if (inputRef.current) inputRef.current.style.height = 'auto';
+    };
 
     // Forward state — the decrypted content being forwarded (null = closed).
     // Content is all a forward needs: it's re-encrypted by the target's own
@@ -1925,8 +1951,10 @@ export function Chat({ onLogout }: ChatProps) {
                 return withoutDeletedChannel(old || [], channelId);
             });
 
-            // If we deleted the current channel, switch to another
-            if (currentChannel?.id === channelId) {
+            // If we deleted the current channel, switch to another. Asked of the ref: this
+            // press may be a while old, and they may have gone somewhere else meanwhile.
+            if (currentChannelIdRef.current === channelId) {
+                composerGoesWithRef.current('channel');
                 // accessing channels from cache would be ideal, but we can look at local state 'channels'
                 const remaining = modeShownChannels.filter(c => c.id !== channelId && c.channel_type === 0);
                 setCurrentChannel(remaining[0] || null);
@@ -2119,6 +2147,7 @@ export function Chat({ onLogout }: ChatProps) {
     // drop it — otherwise the auto-select below can resurrect a stale copy.
     useEffect(() => {
         if (currentServer && !isServersLoading && !servers.some(s => s.id === currentServer.id)) {
+            composerGoesWithRef.current('server');
             setCurrentServer(null);
             setCurrentChannel(null);
             setMessages([]);
@@ -2409,6 +2438,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentChannel) {
             const fresh = channels.find(c => c.id === currentChannel.id);
             if (!fresh) {
+                composerGoesWithRef.current('channel');
                 setCurrentChannel(null);
                 setMessages([]);
                 setShowChecklist(false);
@@ -2423,6 +2453,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentCollection) {
             const freshCollection = channels.find(c => c.id === currentCollection.id);
             if (!freshCollection) {
+                composerGoesWithRef.current('collection');
                 setCurrentCollection(null);
                 setMessages([]);
                 if (isMobile) setMobilePanel('channels');
@@ -2712,6 +2743,7 @@ export function Chat({ onLogout }: ChatProps) {
             const payload = msg.payload as { server_id: string };
             queryClient.invalidateQueries({ queryKey: keys.servers });
             if (currentServer?.id === payload.server_id) {
+                composerGoesWithRef.current('server');
                 setCurrentServer(null);
                 setCurrentChannel(null);
                 setCurrentVoiceChannel(null);
@@ -5427,6 +5459,7 @@ export function Chat({ onLogout }: ChatProps) {
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
                         if (currentServer?.id === server.id) {
+                            composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {
                                 switchServer(remaining[0]);
@@ -5448,6 +5481,7 @@ export function Chat({ onLogout }: ChatProps) {
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
                         if (currentServer?.id === server.id) {
+                            composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {
                                 switchServer(remaining[0]);

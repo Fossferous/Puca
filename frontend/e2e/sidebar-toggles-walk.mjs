@@ -17,7 +17,8 @@
 //      takes a text channel and a voice room out of their collection, for the phone too
 //      with no reload, and a voice room out of the mode with it. Another member's list hears
 //      of a delete and a reorder with no reload, and a delete closes what they had open of
-//      it: a channel, a collection, a call, on the server they are looking at or not. A
+//      it: a channel, a collection, a call, on the server they are looking at or not, and what
+//      they were writing there goes in a notice and not in the next channel's box. A
 //      manager who cannot see all of a collection is told why they cannot delete it. An open
 //      collection's header follows a rename, an emptied topic stays empty, a cancelled Create
 //      Subchannel leaves no parent behind, and a channel under a collection inside a
@@ -837,6 +838,8 @@ try {
     check('fixture: the third account is in the room', !!await until(async () => (await inCall(C)) > 0, 25000));
     await textRow(C, 'vanish-notes').click();
     check('fixture: and reading the channel', !!await until(async () => (await header(C)) === 'vanish-notes', 6000), await header(C));
+    const composerOfC = C.locator('textarea.message-textarea');
+    await composerOfC.fill('written for vanish-notes');
     await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
     await sleep(400);
     await textRow(B, 'Vanishing').tap();
@@ -844,6 +847,13 @@ try {
     await api(A, 'DELETE', `/channels/${vanish.id}`);
     check('another member reading a channel in it is taken off it', !!await until(async () => (await header(C)) !== 'vanish-notes', 8000), await header(C));
     check('their call in a room of it ends', !!await until(async () => (await inCall(C)) === 0, 8000), await inCall(C));
+    check('what they were writing there is not in the next channel\'s box', (await composerOfC.inputValue()) === '', await composerOfC.inputValue());
+    const noticeOfC = C.locator('.app-notice-text');
+    check('a notice has it, and says where it was written', !!await until(async () => (await noticeOfC.allInnerTexts()).some(t => t.includes('#vanish-notes') && t.includes('written for vanish-notes')), 4000), await noticeOfC.allInnerTexts());
+    await composerOfC.press('Enter');
+    await sleep(500);
+    check('and Enter posts nothing', !(await C.locator('.messages-container').innerText()).includes('written for vanish-notes'));
+    await C.locator('.app-notice-close').first().click({ timeout: 3000 }).catch(() => {});
     const thirdRows = await sidebarRows(C);
     check('and neither is listed', !hasRow(thirdRows, 'vanish-notes') && !hasRow(thirdRows, 'Vanish room'), thirdRows.map(r => r.name));
     check('another member with the collection open is taken off it', !!await until(async () => (await header(B).catch(() => '')) !== 'Vanishing', 8000), await header(B).catch(String));
