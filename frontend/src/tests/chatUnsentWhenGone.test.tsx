@@ -801,6 +801,24 @@ describe('Enter with no channel open, a new server\'s list still on its way', ()
         expect(composer()!.value).toBe('from general');
     });
 
+    it('the box stays the size of the words in it, and goes back once they are sent', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        const listCame = await onToFar();
+        await type('line one\nline two\nline three');
+        composer()!.style.height = '120px'; // it grew with what was written
+        await pressEnter();
+        await settled(3);
+        expect(composer()!.value).toContain('line three');
+        expect(composer()!.style.height).toBe('120px');
+        await listCame();
+        await pressEnter();
+        expect(h.sent[0]?.[0]).toBe(30);
+        await settled(3);
+        expect(composer()!.style.height).toBe('auto');
+    });
+
     /** A real paste on the box: returns whether it took the paste over. */
     const paste = async (items: { kind: string; type: string; getAsFile: () => File | null }[]) => {
         const event = new Event('paste', { bubbles: true, cancelable: true });

@@ -1714,6 +1714,12 @@ export function Chat({ onLogout }: ChatProps) {
         clearComposerAttachments({ discardUploads: true });
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id, clearComposerAttachments]);
 
+    // The box grew with what was written. Emptied, by whatever emptied it, it goes back;
+    // an Enter that sent nothing leaves it the size of the words still in it.
+    useEffect(() => {
+        if (!input && inputRef.current) inputRef.current.style.height = 'auto';
+    }, [input]);
+
     // The open conversation is going and they did not ask to go anywhere else: a channel
     // deleted or its View taken away, a collection deleted, the server gone. The composer
     // belongs to no conversation, so what it holds would be there in whichever one opens
@@ -1731,8 +1737,6 @@ export function Chat({ onLogout }: ChatProps) {
         }
         setInput('');
         setAutocomplete(null);
-        // It grew with what was written; only a send puts it back.
-        if (inputRef.current) inputRef.current.style.height = 'auto';
     };
 
     // Forward state — the decrypted content being forwarded (null = closed).
@@ -6938,9 +6942,6 @@ export function Chat({ onLogout }: ChatProps) {
                                     if (e.key === 'Enter' && !e.shiftKey) {
                                         e.preventDefault();
                                         handleSend(e as unknown as FormEvent);
-                                        // reset height after send
-                                        const el = e.currentTarget;
-                                        requestAnimationFrame(() => { el.style.height = 'auto'; });
                                     }
                                 }}
                                 placeholder={!canSendHere
