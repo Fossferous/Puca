@@ -164,7 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnUnderCollection, keptByHideMuted, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, keptByHideMuted, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -4949,8 +4949,7 @@ export function Chat({ onLogout }: ChatProps) {
                                         }}
                                     >
                                         <option value="">(No Parent - Top Level)</option>
-                                        {channels
-                                            .filter(c => c.channel_type === 2) // Only show collections
+                                        {parentChoices(channels)
                                             .map(c => (
                                                 <option key={c.id} value={c.id}>
                                                     {c.name}
@@ -5535,14 +5534,14 @@ export function Chat({ onLogout }: ChatProps) {
                             ones out — except the channel currently open, which must
                             never vanish from under the reader. */}
                         {channels
-                            .filter(c => (c.channel_type === 0 || c.channel_type === 2) && !c.parent_id)
+                            .filter(c => (c.channel_type === 0 || c.channel_type === 2) && drawnAtTop(c, channels))
                             // A hidden collection stays as the header of an open subchannel.
                             .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && openRowId === sub.id))
                             .filter(c => !hideMutedHere || keptByHideMuted(c, channels, isChannelMuted, openRowId))
                             .map(channel => {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
-                                const subchannels = channels.filter(sub => sub.parent_id === channel.id)
+                                const subchannels = channels.filter(sub => sub.parent_id === channel.id && !drawnAtTop(sub, channels))
                                     .filter(drawnUnderCollection)
                                     .filter(listed)
                                     .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || openRowId === sub.id);
@@ -7178,7 +7177,7 @@ export function Chat({ onLogout }: ChatProps) {
                     isOpen={!!editingChannel}
                     onClose={() => setEditingChannel(null)}
                     channel={editingChannel}
-                    collections={channels.filter(c => c.channel_type === 2)}
+                    collections={parentChoices(channels, editingChannel.parent_id)}
                     onChannelUpdated={(updated) => {
                         // Optimistic update
                         queryClient.setQueryData(keys.channels(currentServer?.id || ''), (old: Channel[] | undefined) => {

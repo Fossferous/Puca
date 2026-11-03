@@ -10,6 +10,7 @@ import { AuthedImg } from '../AuthedImg';
 import { FolderIcon, HashIcon, MoonIcon, SpeakerIcon, TrashIcon, UploadIcon } from '../Icons';
 import './ModesSettings.css';
 import { askConfirm } from '../../api/appDialogs';
+import { drawnAtTop } from '../sidebarChannels';
 
 /** What the color input starts from when a mode has no accent yet. */
 const DEFAULT_ACCENT = '#7a1f3d';
@@ -152,8 +153,8 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
     const parentOf = (c: Channel) => (c.parent_id == null ? undefined : channels.find(p => p.id === c.parent_id));
     // Each collection followed by what is under it, so a row reads as part of it.
     const inTreeOrder = (rows: Channel[]) => rows.flatMap(c => {
-        if (c.parent_id != null && rows.some(p => p.id === c.parent_id)) return [];
-        return [c, ...rows.filter(sub => sub.parent_id === c.id)];
+        if (!drawnAtTop(c, rows)) return [];
+        return [c, ...rows.filter(sub => sub.parent_id === c.id && !drawnAtTop(sub, rows))];
     });
     const text = inTreeOrder(pickable.filter(c => c.channel_type !== 1));
     const voice = inTreeOrder(pickable.filter(c => c.channel_type === 1));
