@@ -4171,6 +4171,7 @@ export function Chat({ onLogout }: ChatProps) {
             // Auto-select the new channel if it's a text channel
             if (newChannelType === 0) {
                 setCurrentChannel(newChannel);
+                setCurrentCollection(null); // Made from a collection's page: its page would stay on top
                 setShowFriendsPanel(false);
                 setShowDevicesView(false);
                 setShowNotesView(false);

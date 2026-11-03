@@ -85,6 +85,12 @@ const reply = (status: number, body: unknown) => {
 };
 vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
+    if (init?.method === 'POST' && /\/servers\/[^/]+\/channels$/.test(u)) {
+        const asked = JSON.parse(String(init.body));
+        const made = row(77, asked.name, { channel_type: asked.channel_type, parent_id: asked.parent_id ?? null });
+        h.channels = [...h.channels, made];
+        return reply(200, made);
+    }
     if (init?.method === 'DELETE' || (init?.method === 'POST' && /leave$/.test(u))) {
         if (h.hold) await h.hold;
         h.deleted.push(u.slice(u.indexOf('/', 8)));
@@ -679,6 +685,44 @@ describe('a leave or a disband still on its way while they go somewhere else', (
         expect(composer()!.value).toBe('');
         expect(dialogs.notices()).toHaveLength(1);
         expect(dialogs.notices()[0]).toContain('Srv is no longer available');
+    });
+});
+
+describe('a channel made from a collection\'s page', () => {
+    /** Create Subchannel on the open collection's row, through the real form. */
+    const createInside = async (name: string) => {
+        await act(async () => {
+            rowNamed('Private')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+        });
+        const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(el => /create subchannel/i.test(el.textContent ?? ''));
+        expect(item, 'the row\'s menu has Create Subchannel').toBeTruthy();
+        await act(async () => { item!.click(); });
+        await settled(3);
+        const field = [...document.querySelectorAll<HTMLInputElement>('input[type="text"]')].find(i => i.closest('.form-group')?.textContent?.includes('Channel Name'))!;
+        expect(field, 'the form is up').toBeTruthy();
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, name);
+        await act(async () => { field.dispatchEvent(new Event('input', { bubbles: true })); });
+        await settle();
+        await act(async () => { field.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settled();
+    };
+
+    it('opens that channel, and a delete of both says the words once', async () => {
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        await createInside('made-inside');
+        expect(headerText(), 'the new channel, not the collection\'s page').toContain('made-inside');
+        expect(composer()!.value, 'their own move keeps the words').toBe('from general');
+        expect(dialogs.notices()).toEqual([]);
+        await goneFromTheList([20, 77]);
+        expect(headerText()).toContain('general');
+        expect(composer()!.value).toBe('');
+        expect(dialogs.notices()).toHaveLength(1);
+        expect(dialogs.notices()[0]).toContain('#made-inside is no longer available');
+        expect(dialogs.notices()[0]).toContain('from general');
     });
 });
 
