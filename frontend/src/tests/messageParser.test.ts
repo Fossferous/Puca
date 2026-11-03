@@ -426,7 +426,8 @@ describe('a spoiler never stops being one', () => {
         'HTTP://x/W*W', 'https://x/W||W', 'Https://x/W||W', ':', '://', ':https:', '//', ':W_W:', '@W', '#W_W',
         '(', ')', '[W](', ']', '![W](', '!', '.', ',', '>', '"', '<', '\n', '> ', 'W_W', 'W*W', 'W~~W',
         'https://x/(W', 'https://x/W)', 'Link:https://x/W_W', 'Link:Https://x/W', '[W](https://x/(W)', '-', '?',
-        'https://*>', 'https://_>', 'https://[', 'https://`>', 'Https://x/[W', 'https://x/W**', 'https://x/W>_W', 'https://x/W"*W'];
+        'https://*>', 'https://_>', 'https://[', 'https://`>', 'Https://x/[W', 'https://x/W**', 'https://x/W>_W', 'https://x/W"*W',
+        '@W_', '@W_.', '#W_'];
 
     it.each<[number, number, string]>([
         [20261103, 10, ''],
@@ -780,6 +781,60 @@ describe('a delimiter past an address does not close inside a name', () => {
                 { type: 'text', value: ' now' },
             ],
         }]);
+    });
+
+    // A name takes in the `_` that closes, and the `.` after it, so an address earlier in the
+    // sentence used to change who it pinged: to `bob_`, or from everyone to nobody.
+    it('a `_` at the end of a name closes there, and the name is the one meant', () => {
+        const content = '_see https://example.org/a @bob_';
+        expect(parseMessage(content)).toEqual([{
+            type: 'em',
+            children: [
+                { type: 'text', value: 'see ' },
+                { type: 'url', href: 'https://example.org/a' },
+                { type: 'text', value: ' ' },
+                { type: 'mentionUser', name: 'bob' },
+            ],
+        }]);
+        expect(extractMentions(content).users).toEqual(['bob']);
+        expect(messageMentionsUser(content, { username: 'bob' })).toBe(true);
+        expect(messageMentionsUser(content, { username: 'bob_' })).toBe(false);
+    });
+
+    it.each(['_see https://example.org/a @everyone_', '_see https://example.org/a @here_', '_see https://example.org/a @everyone_.'])(
+        '%s pings everyone',
+        (content) => {
+            expect(extractMentions(content)).toEqual({ users: [], everyone: true });
+            expect(messageMentionsUser(content, { username: 'carol' })).toBe(true);
+        },
+    );
+
+    it.each([
+        '__see https://example.org/a @bob__',
+        '_see https://example.org/a @bob_.',
+        '_see https://example.org/a @bob_, thanks',
+        '_see https://example.org/a @bob__',
+        '__see https://example.org/a @bob___',
+        '__see https://example.org/a @bob_',
+        '_cc @alice https://example.org/a @bob_',
+        '_see https://example.org/a #general_',
+        '_see https://example.org/a #general_.',
+        '_see https://example.org/a @_',
+        '_see https://example.org/a @bob_ and @carol_',
+        'my_file at https://example.org/a cc @alice_',
+        '*see https://example.org/a @bob_*',
+        '**see https://example.org/a @bob_**',
+    ])('%s reads as it does with no address in it', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it.each<[string, string]>([
+        ['_see https://example.org/a @alice_c_', 'alice_c'],
+        ['_see https://example.org/a_b @alice_c_.', 'alice_c'],
+        ['__see https://example.org/a @alice__c__', 'alice__c'],
+        ['my_file at https://example.org/a_b cc @alice_c.', 'alice_c.'],
+    ])('CONTROL: a `_` with more of the name after it is the name\'s: %s', (content, name) => {
+        expect(extractMentions(content).users).toEqual([name]);
     });
 
     it('an address straight after a colon is still an address there, not a shortcode to step over', () => {

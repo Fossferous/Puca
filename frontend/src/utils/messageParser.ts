@@ -516,14 +516,29 @@ function nameLengthAt(input: string, at: number): number {
 }
 
 /**
+ * Where the delimiter `open` closes in the @name or #name `length` long at `at`, or
+ * -1. NAME_RE takes in the `_` that closes and the `.` that ends the sentence after
+ * it: `_see https://x/a @bob_.` is bob, in italics, as it is with no address in the
+ * text. So a delimiter closes in what follows the name's last letter or digit. A
+ * `:name:` has an end of its own.
+ */
+function closeInName(input: string, at: number, length: number, open: string): number {
+    if (input[at] === ':') return -1;
+    let tail = at + length;
+    while (tail > at + 1 && '_.-'.includes(input[tail - 1])) tail--;
+    const close = input.slice(tail, at + length).indexOf(open);
+    return close === -1 ? -1 : tail + close;
+}
+
+/**
  * Find the matching closing delimiter for `open` starting at `from`. A delimiter
  * in the words before an address does not close inside it, or `my_file is at
  * https://x/my_file.txt` is a link to https://x/my. Once past one it does not close
- * inside a name either: in `my_file at https://x/a_b cc @alice_c` that is alice_c's
- * mention, which it was before the address was stepped over, and with no address in
- * the text a name is what it always was. A spoiler closes at the first `||`, always,
- * in an address or not: URL_RE reads all of `https://x/a||!` as one address, and it
- * is still a spoiler.
+ * inside a name either, only after it: in `my_file at https://x/a_b cc @alice_c` that
+ * is alice_c's mention, which it was before the address was stepped over, and with no
+ * address in the text a name is what it always was. A spoiler closes at the first
+ * `||`, always, in an address or not: URL_RE reads all of `https://x/a||!` as one
+ * address, and it is still a spoiler.
  */
 function findClosing(input: string, from: number, open: string, reading: Reading): number {
     const stepsOver = !reading.asItWas && open !== '||' && reading.walkLeft > 0;
@@ -551,6 +566,8 @@ function findClosing(input: string, from: number, open: string, reading: Reading
         if (stepsOver && pastAddress) {
             const name = nameLengthAt(input, i);
             if (name) {
+                const close = closeInName(input, i, name, open);
+                if (close !== -1) return close;
                 i += name;
                 continue;
             }
