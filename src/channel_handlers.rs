@@ -712,6 +712,29 @@ pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Optio
     channel_type == VOICE && matches!(requested, Some(after) if after != before)
 }
 
+/// May a delete take these channels along? The foreign key cascades through everything
+/// under the channel it names, messages included, with no undo, and the question a client
+/// asks first can only name the rows its own list holds. So a channel hidden from the
+/// caller would go without their having been told, and they could not have told anyone.
+/// Fail closed: a resolver error refuses, and so does a channel it did not answer for. An
+/// empty list is a plain delete, of a channel with nothing under it.
+fn may_delete_along(
+    under: &[i64],
+    perms: Result<std::collections::HashMap<i64, Permissions>, sqlx::Error>,
+) -> Result<(), (StatusCode, &'static str)> {
+    let perms = perms.map_err(|e| {
+        tracing::error!("delete_channel: resolving what goes with it failed: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel")
+    })?;
+    if under.iter().all(|id| perms.get(id).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL))) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        "This collection also holds channels you cannot see, and they would be deleted with it, so nothing was deleted. Your channel list is incomplete: ask someone who can see every channel to delete it.",
+    ))
+}
+
 /// Delete a channel
 pub async fn delete_channel(
     State(state): State<Arc<AppState>>,
@@ -743,7 +766,36 @@ pub async fn delete_channel(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response();
     }
 
-    // Deleting the server's PINNED CLIPS CHANNEL turns clips off with it.
+    // What the foreign key's cascade is about to take: this channel and everything under
+    // it, at any depth (a collection can sit inside a collection). UNION, not UNION ALL, so
+    // a loop that raw API calls made ends the walk where it comes back round.
+    let doomed: Vec<i32> = match sqlx::query_scalar(
+        "WITH RECURSIVE doomed(id) AS ( \
+             SELECT id FROM channels WHERE id = $1 \
+             UNION \
+             SELECT c.id FROM channels c JOIN doomed d ON c.parent_id = d.id \
+         ) SELECT id FROM doomed",
+    )
+    .bind(channel_id as i32)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("delete_channel: reading what goes with {} failed: {:?}", channel_id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel").into_response();
+        }
+    };
+
+    // Only what goes ALONG is judged: deleting one channel by its id is as it always was.
+    let under: Vec<i64> = doomed.iter().map(|&id| id as i64).filter(|&id| id != channel_id).collect();
+    let perms = get_user_channels_permissions(&state.pool, &server_id, claims.sub, &under).await;
+    if let Err(refusal) = may_delete_along(&under, perms) {
+        return refusal.into_response();
+    }
+
+    // Deleting the server's PINNED CLIPS CHANNEL turns clips off with it, whether
+    // it is the channel named or one the cascade takes.
     // The FK is ON DELETE SET NULL (050_clips.sql), so without this a
     // moderator with MANAGE_CHANNELS — who cannot touch server settings —
     // would leave the server clips-enabled with no pin: the exact state
@@ -755,12 +807,12 @@ pub async fn delete_channel(
     // if only this UPDATE lands the pin moves nowhere; if only the DELETE
     // lands we are back to the FK gap, which the settings guard tolerates.
     let _ = sqlx::query(
-        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = $2",
+        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = ANY($2)",
     )
     .bind(&server_id)
     // i32, matching the INTEGER column — an i64 bind against INT4 is the
     // intermittent 22P03 the cold-boot fix documents (sqlx caches by SQL text).
-    .bind(channel_id as i32)
+    .bind(&doomed)
     .execute(&state.pool)
     .await;
 
@@ -777,11 +829,13 @@ pub async fn delete_channel(
     }
 
     // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
-    state.games.close_room(
-        &state,
-        &format!("voice_{channel_id}"),
-        crate::games_wire::GameEndReason::ChannelDeleted,
-    );
+    for id in &doomed {
+        state.games.close_room(
+            &state,
+            &format!("voice_{id}"),
+            crate::games_wire::GameEndReason::ChannelDeleted,
+        );
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1246,6 +1300,24 @@ mod tests {
         assert_eq!(parse(serde_json::json!({ "parent_id": 7 })), Ok(Some(Some(7))), "a value: set it");
         assert_eq!(parse(serde_json::json!({ "parent_id": "7" })), Err(()), "not a channel id");
         assert_eq!(parse(serde_json::json!({ "parent_id": 5_000_000_000_i64 })), Err(()), "wider than the column");
+    }
+
+    #[test]
+    fn a_delete_takes_along_only_what_the_caller_can_see() {
+        use std::collections::HashMap;
+        let answered = |rows: &[(i64, Permissions)]| Ok(rows.iter().copied().collect::<HashMap<_, _>>());
+        let status = |under: &[i64], perms| may_delete_along(under, perms).map_err(|(s, _)| s);
+
+        assert_eq!(status(&[], answered(&[])), Ok(()), "nothing under it: a plain delete");
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::VIEW_CHANNEL)])), Ok(()));
+        assert_eq!(status(&[1], answered(&[(1, Permissions::ADMINISTRATOR)])), Ok(()), "an admin sees everything");
+
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::empty())])), Err(StatusCode::CONFLICT));
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL)])), Err(StatusCode::CONFLICT), "no answer is no");
+        assert_eq!(status(&[1], Err(sqlx::Error::PoolTimedOut)), Err(StatusCode::INTERNAL_SERVER_ERROR), "a resolver error refuses");
+
+        let (_, sentence) = may_delete_along(&[1], answered(&[])).unwrap_err();
+        assert!(sentence.contains("nothing was deleted") && sentence.contains("ask someone who can see every channel"), "{sentence}");
     }
 
     #[test]

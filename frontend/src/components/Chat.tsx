@@ -1933,7 +1933,10 @@ export function Chat({ onLogout }: ChatProps) {
             }
         } catch (error) {
             console.error('Failed to delete channel:', error);
-            tellUser('Could not delete the channel. You may not have permission.');
+            // A 409: a collection holding a channel this person cannot see. The server says what to do.
+            tellUser(error instanceof ApiError && error.status === 409 && error.message
+                ? error.message
+                : 'Could not delete the channel. You may not have permission.');
         }
     };
 

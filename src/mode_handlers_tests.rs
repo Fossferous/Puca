@@ -1278,6 +1278,177 @@ mod db {
         assert_eq!(after_foreign, json!(shelf), "and another server's channel is still refused");
     }
 
+    async fn delete_channel_as(state: &Arc<AppState>, by: i64, channel: i32) -> (StatusCode, String) {
+        let resp = crate::channel_handlers::delete_channel(State(Arc::clone(state)), Path(channel as i64), Extension(claims(by)))
+            .await
+            .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Of these channels, the ones that exist, in id order.
+    async fn still_there(pool: &sqlx::PgPool, ids: &[i32]) -> Vec<i32> {
+        sqlx::query_scalar("SELECT id FROM channels WHERE id = ANY($1) ORDER BY id")
+            .bind(ids)
+            .fetch_all(pool)
+            .await
+            .expect("channels")
+    }
+
+    async fn deny_everyone_view(pool: &sqlx::PgPool, sid: &str, channel: i32) {
+        sqlx::query(
+            "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
+             SELECT $1, id, 0, $2 FROM server_roles WHERE server_id = $3 AND is_default",
+        )
+        .bind(channel as i64)
+        .bind(P::VIEW_CHANNEL.bits() as i64)
+        .bind(sid)
+        .execute(pool)
+        .await
+        .expect("deny");
+    }
+
+    /// A child of a collection the raw API left behind, and any move of one.
+    async fn move_under(pool: &sqlx::PgPool, channel: i32, parent: i32) {
+        sqlx::query("UPDATE channels SET parent_id = $1 WHERE id = $2").bind(parent).bind(channel).execute(pool).await.expect("move");
+    }
+
+    /// The cascade takes everything under a collection, and a question can name only what
+    /// the asker's list holds. So a manager who cannot see all of it is refused and told why,
+    /// at any depth, and nothing is touched. Those who see everything are unaffected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_holding_a_channel_the_caller_cannot_see_is_not_deleted() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        role(&pool, &f.sid, f.plain as i32, "admin", P::ADMINISTRATOR, 6).await;
+
+        // f.secret is denied to @everyone: the manager, who holds Manage Channels, has no row of it.
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let notes = subchannel(&pool, &f.sid, "notes", 0, rooms).await;
+        let deeper = subchannel(&pool, &f.sid, "deeper", 2, rooms).await;
+        move_under(&pool, f.secret, deeper).await;
+        sqlx::query("UPDATE servers SET clips_enabled = true, clip_channel_id = $1 WHERE id = $2")
+            .bind(notes)
+            .bind(&f.sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut member = Sock::open(&state, f.owner);
+        let whole = [rooms, notes, deeper, f.secret];
+
+        member.drain();
+        let two_down = delete_channel_as(&state, f.manager, rooms).await;
+        let told_of_a_refusal = member.drain();
+        let after_two_down = still_there(&pool, &whole).await;
+        let (clips_after_refusal,): (bool,) =
+            sqlx::query_as("SELECT clips_enabled FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+
+        move_under(&pool, f.secret, rooms).await;
+        let one_down = delete_channel_as(&state, f.manager, rooms).await;
+
+        // Directly by id, as it always was, and a collection with nothing hidden in it.
+        let lone = channel(&pool, &f.sid, "lone", 0).await;
+        deny_everyone_view(&pool, &f.sid, lone).await;
+        let hidden_by_id = delete_channel_as(&state, f.manager, lone).await;
+        let clean = channel(&pool, &f.sid, "clean", 2).await;
+        let clean_child = subchannel(&pool, &f.sid, "clean-child", 1, clean).await;
+        let visible = delete_channel_as(&state, f.manager, clean).await;
+        let after_visible = still_there(&pool, &[lone, clean, clean_child]).await;
+
+        // An administrator and the owner resolve to everything.
+        let admin = delete_channel_as(&state, f.plain, rooms).await;
+        let after_admin = still_there(&pool, &whole).await;
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        let hidden = subchannel(&pool, &f.sid, "hidden", 1, shelf).await;
+        deny_everyone_view(&pool, &f.sid, hidden).await;
+        let refused_again = delete_channel_as(&state, f.manager, shelf).await;
+        let owner = delete_channel_as(&state, f.owner, shelf).await;
+        let after_owner = still_there(&pool, &[shelf, hidden]).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(two_down.0, StatusCode::CONFLICT, "{two_down:?}");
+        assert!(two_down.1.contains("ask someone who can see every channel"), "and it says what to do: {}", two_down.1);
+        assert_eq!(after_two_down.len(), whole.len(), "and nothing went");
+        assert!(clips_after_refusal, "a refusal turns nothing off");
+        assert!(!told_of_a_refusal.iter().any(|m| matches!(m, M::ChannelUpdated { .. })), "nothing happened, so nobody is told");
+        assert_eq!(one_down.0, StatusCode::CONFLICT, "directly under it too: {one_down:?}");
+        assert_eq!(refused_again.0, StatusCode::CONFLICT, "a voice room counts as well");
+
+        assert_eq!(hidden_by_id.0, StatusCode::NO_CONTENT, "control: one channel by its id is as it was");
+        assert_eq!(visible.0, StatusCode::NO_CONTENT, "control: a collection they can see all of");
+        assert!(after_visible.is_empty(), "{after_visible:?}");
+        assert_eq!(admin.0, StatusCode::NO_CONTENT, "{admin:?}");
+        assert!(after_admin.is_empty(), "{after_admin:?}");
+        assert_eq!(owner.0, StatusCode::NO_CONTENT, "{owner:?}");
+        assert!(after_owner.is_empty(), "{after_owner:?}");
+    }
+
+    /// The pin and the card tables of everything the cascade takes, not just of the row named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collections_delete_ends_what_its_channels_carried() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let deeper = subchannel(&pool, &f.sid, "deeper", 2, rooms).await;
+        let pinned = subchannel(&pool, &f.sid, "pinned", 0, deeper).await;
+        let room = subchannel(&pool, &f.sid, "room", 1, deeper).await;
+        let other = channel(&pool, &f.sid, "other", 2).await;
+        subchannel(&pool, &f.sid, "other-room", 1, other).await;
+        sqlx::query("UPDATE servers SET clips_enabled = true, clip_channel_id = $1 WHERE id = $2")
+            .bind(pinned)
+            .bind(&f.sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let clips = || async {
+            sqlx::query_as::<_, (bool, Option<i32>)>("SELECT clips_enabled, clip_channel_id FROM servers WHERE id = $1")
+                .bind(&f.sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let room_id = format!("voice_{room}");
+        let mut player = Sock::in_room(&state, f.owner, room);
+        state.set_conn_games(f.owner, player.conn, true);
+        crate::games::handle_frame(
+            &state,
+            f.owner,
+            player.conn,
+            crate::protocol::ClientMessage::GameCreate {
+                room_id: room_id.clone(),
+                kind: crate::games_wire::GameKindWire::Holdem,
+                config: None,
+            },
+        )
+        .await;
+        let table_open = state.games.peek(&room_id).is_some();
+
+        let unrelated = delete_channel_as(&state, f.owner, other).await;
+        let clips_after_unrelated = clips().await;
+        let table_after_unrelated = state.games.peek(&room_id).is_some();
+        player.drain();
+        let gone = delete_channel_as(&state, f.owner, rooms).await;
+        let told = player.drain();
+        let clips_after = clips().await;
+        let table_after = state.games.peek(&room_id).is_some();
+        teardown(&pool, &f).await;
+
+        assert!(table_open, "control: the fixture has a table");
+        assert_eq!(unrelated.0, StatusCode::NO_CONTENT);
+        assert_eq!(clips_after_unrelated, (true, Some(pinned)), "control: another collection's delete leaves the pin");
+        assert!(table_after_unrelated, "and the table");
+        assert_eq!(gone.0, StatusCode::NO_CONTENT);
+        assert_eq!(clips_after, (false, None), "two levels down, the pin goes and clips go off with it");
+        assert!(!table_after, "and the table in the room two levels down ends");
+        assert!(
+            told.iter().any(|m| matches!(m, M::GameEnded { room_id: r, reason: crate::games_wire::GameEndReason::ChannelDeleted, .. } if *r == room_id)),
+            "and whoever sits at it is told why"
+        );
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
