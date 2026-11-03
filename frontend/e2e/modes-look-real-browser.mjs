@@ -27,6 +27,13 @@
 //      any text. The composer's autocomplete list: no halo on a solid surface of its own, where on
 //      Light it fills the white label's letters. NEGATIVE CONTROLS: with the reset taken out, the
 //      same counts find the words, and find more white in the chosen row.
+//   7. What has a colour or a chip of its own, in a spoiler: inline code, a link, a bare URL, a
+//      mention, @everyone, a channel, through the REAL parser on all eight themes. Nothing of them is
+//      painted, at rest or under the pointer, read back from the screen. A press on one only reveals,
+//      and a hidden link takes no focus. Revealed, each looks as it does outside a spoiler, and a
+//      press on a link or a channel is for that and leaves it revealed (a press on the words hides
+//      it again). NEGATIVE CONTROL: with the hiding rule taken out of the stylesheet, the same count
+//      finds every kind.
 //
 // No server, no build, nothing leaves the machine (one page served on 127.0.0.1), silent.
 //
@@ -80,15 +87,46 @@ const chatBuild = await build({
         contents: `
             import './index.css';
             import './components/Chat.css';
+            import { useState } from 'react';
             import { createRoot } from 'react-dom/client';
             import { MessageContent } from './components/MessageContent';
             import { mapPicture, pictureStyle, readPictureTheme } from './api/modeLook';
             window.__chat = { mapPicture, pictureStyle, readPictureTheme };
+            // What a press did, with nothing really opened.
+            window.__pressed = [];
+            document.addEventListener('click', (e) => {
+                const a = e.target.closest?.('a');
+                if (a) { e.preventDefault(); window.__pressed.push('opened ' + a.getAttribute('href')); }
+            }, true);
+            const MEMBERS = [{ id: 2, username: 'alice' }];
+            const CHANNELS = [{ id: 7, name: 'general' }];
+            const said = (content) => <MessageContent content={content} members={MEMBERS} channels={CHANNELS} onChannelClick={() => window.__pressed.push('channel')} />;
+            const KINDS = {
+                code: '||\`the code\`||',
+                link: '||[the link](https://example.invalid/hidden)||',
+                url: '||https://example.invalid/bare||',
+                mention: '||@alice||',
+                everyone: '||@everyone||',
+                channel: '||#general||',
+                mixed: '||words \`the code\` [the link](https://example.invalid/mixed) @alice||',
+                formats: '||**bold** *lean* __under__ ~~struck~~ :fire:||',
+            };
+            function Kinds() {
+                const [n, set] = useState(0);
+                window.__resetKinds = () => set((x) => x + 1);
+                return (
+                    <div className="message-content" id="kinds" key={n}>
+                        {Object.entries(KINDS).map(([kind, content]) => <div key={kind} data-kind={kind}>{said(content)}</div>)}
+                    </div>
+                );
+            }
             createRoot(document.getElementById('root')).render(
                 <main className="chat-main" id="main" style={{ height: '100%' }}>
                     <div className="message-content" id="said">
                         <MessageContent content="Plain words. ||the demon is **Alice**||" members={[]} />
                     </div>
+                    <Kinds />
+                    <div className="message-content" id="open">{said('\`the code\` [the link](https://example.invalid/open) @alice @everyone #general')}</div>
                     <form className="message-form" style={{ marginTop: 'auto' }} onSubmit={(e) => e.preventDefault()}>
                         <div className="input-wrapper">
                             <div className="composer-autocomplete">
@@ -568,6 +606,24 @@ try {
     };
     // Where the halo is the colour of the bar at rest, and only hovering shows it.
     const SAME_AS_THE_BAR = new Set(['light', 'amoled']);
+    // The spoilers of 7, by what each holds, and the ones with a look of their own.
+    const KINDS = ['code', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats'];
+    const OWN_LOOK = KINDS.filter((kind) => kind !== 'formats');
+    const inKind = (kind) => `[data-kind="${kind}"] .spoiler`;
+    /** Take the rule that hides them out of the REAL stylesheet, and put it back as it was. */
+    const takeOutHidingRule = () => chat.evaluate(() => {
+        window.__taken = [];
+        for (const sheet of document.styleSheets) {
+            [...sheet.cssRules].forEach((rule, i) => {
+                if (rule.selectorText?.includes('.spoiler:not(.revealed) .inline-code')) window.__taken.push([sheet, rule.cssText, i]);
+            });
+        }
+        for (const [sheet, , i] of window.__taken) sheet.deleteRule(i);
+        return window.__taken.length;
+    });
+    const putBackHidingRule = () => chat.evaluate(() => {
+        for (const [sheet, text, i] of window.__taken) sheet.insertRule(text, i);
+    });
     for (const theme of THEMES) {
         await chat.evaluate(async ({ theme, source }) => {
             document.documentElement.setAttribute('data-theme', theme);
@@ -601,6 +657,78 @@ try {
         await chat.mouse.click(...await centreOf('.spoiler'));
         const again = await restAndHover();
         check(`spoiler on ${theme}: hidden again, nothing is painted`, again.rest === 0 && again.hovered === 0, again);
+
+        // ── 7. What has a colour or a chip of its own.
+        await chat.evaluate(() => { window.__resetKinds(); window.__pressed.length = 0; });
+        await settled();
+        const counted = async () => {
+            const out = {};
+            for (const kind of KINDS) out[kind] = await paintedOn(inKind(kind));
+            return out;
+        };
+        const atRest = await counted();
+        check(`spoiler holding each kind on ${theme}: nothing is painted at rest, chips included`, Object.values(atRest).every((n) => n === 0), atRest);
+        const underPointer = {};
+        for (const kind of KINDS) {
+            await chat.mouse.move(...await centreOf(inKind(kind)));
+            await settled();
+            underPointer[kind] = await paintedOn(inKind(kind));
+        }
+        await chat.mouse.move(2, 2);
+        await settled();
+        check(`spoiler holding each kind on ${theme}: nor under the pointer`, Object.values(underPointer).every((n) => n === 0), underPointer);
+
+        const ruleOut = await takeOutHidingRule();
+        const shownThrough = await counted();
+        await putBackHidingRule();
+        check(`NEGATIVE CONTROL: spoiler holding each kind on ${theme}: with the hiding rule taken out, the same count finds each`,
+            ruleOut === 1 && OWN_LOOK.every((kind) => shownThrough[kind] > 0), { ruleOut, shownThrough });
+
+        const hiddenLink = await chat.evaluate(() => {
+            const a = document.querySelector('[data-kind="link"] a');
+            a.focus();
+            const r = a.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return { focused: document.activeElement === a, hitsTheSpoiler: !!hit?.matches('.spoiler'), width: r.width };
+        });
+        check(`hidden link on ${theme}: takes no focus, and a pointer on it lands on the spoiler`, !hiddenLink.focused && hiddenLink.hitsTheSpoiler && hiddenLink.width > 0, hiddenLink);
+        for (const kind of KINDS) await chat.mouse.click(...await centreOf(inKind(kind)));
+        await chat.mouse.move(2, 2);
+        await settled();
+        const afterPress = await chat.evaluate(() => ({ pressed: window.__pressed.slice(), revealed: document.querySelectorAll('#kinds .spoiler.revealed').length }));
+        check(`spoiler holding each kind on ${theme}: the first press only reveals: nothing opened, no channel entered`, afterPress.pressed.length === 0 && afterPress.revealed === KINDS.length, afterPress);
+
+        const looks = await chat.evaluate(() => {
+            const read = (el) => { const c = getComputedStyle(el); return { colour: c.color, background: c.backgroundColor, visibility: c.visibility }; };
+            return Object.fromEntries(['.inline-code', '.message-link', '.mention:not(.everyone):not(.channel)', '.mention.everyone', '.mention.channel'].map((s) => [s, {
+                revealed: read(document.querySelector(`#kinds ${s}`)),
+                outside: read(document.querySelector(`#open ${s}`)),
+            }]));
+        });
+        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !/, 0\)$/.test(l.revealed.colour)), looks);
+        const painted = {};
+        for (const kind of OWN_LOOK) {
+            const clip = await chat.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, inKind(kind));
+            const shown = await chat.screenshot({ clip });
+            await chat.addStyleTag({ content: '#kinds .spoiler * { visibility: hidden !important; }' }).then((h) => h.evaluate((el) => { el.id = 'bar-only'; }));
+            const bare = await chat.screenshot({ clip });
+            await chat.evaluate(() => document.getElementById('bar-only').remove());
+            painted[kind] = !shown.equals(bare);
+        }
+        check(`revealed on ${theme}: each is really on the screen`, Object.values(painted).every(Boolean), painted);
+
+        for (const kind of ['link', 'url', 'channel', 'code']) await chat.mouse.click(...await centreOf(inKind(kind)));
+        await chat.mouse.move(2, 2);
+        const stayed = await chat.evaluate(() => ({
+            pressed: window.__pressed.slice(),
+            link: !!document.querySelector('[data-kind="link"] .spoiler.revealed'),
+            url: !!document.querySelector('[data-kind="url"] .spoiler.revealed'),
+            channel: !!document.querySelector('[data-kind="channel"] .spoiler.revealed'),
+            code: !!document.querySelector('[data-kind="code"] .spoiler.revealed'),
+        }));
+        check(`revealed on ${theme}: a press on a link or a channel is for that, and leaves it revealed`,
+            JSON.stringify(stayed.pressed) === JSON.stringify(['opened https://example.invalid/hidden', 'opened https://example.invalid/bare', 'channel']) && stayed.link && stayed.url && stayed.channel, stayed);
+        check(`CONTROL: revealed on ${theme}: a press on anything else hides it again`, !stayed.code, stayed);
 
         const list = await chat.evaluate(() => Object.fromEntries(['.composer-autocomplete', '.autocomplete-header', '.autocomplete-item.active', '.ac-avatar', '.ac-name', '.ac-sub']
             .map((s) => [s, getComputedStyle(document.querySelector(s)).textShadow])));

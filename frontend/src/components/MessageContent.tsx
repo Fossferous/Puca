@@ -656,7 +656,13 @@ function Spoiler({ children }: { children: React.ReactNode }) {
     return (
         <span
             className={`spoiler ${revealed ? 'revealed' : ''}`}
-            onClick={() => setRevealed(!revealed)}
+            onClick={(e) => {
+                // Revealed, a press on a link, a channel or a Download is for that one, and would
+                // otherwise hide what it just pressed. Hidden, they take no press (Chat.css).
+                const control = (e.target as Element).closest('a, button, [role="button"]');
+                if (revealed && control && e.currentTarget.contains(control)) return;
+                setRevealed(!revealed);
+            }}
         >
             <SpoilerCover.Provider value={!revealed}>{children}</SpoilerCover.Provider>
         </span>
