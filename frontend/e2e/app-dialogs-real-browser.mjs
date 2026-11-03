@@ -23,6 +23,9 @@
 // which must fail the same check the real path passes: the old plugin's window.confirm,
 // run verbatim, and askConfirm with its await left off.
 //
+// It also measures NotesDialog, the small sheet of the .ics import and Notes, on every theme:
+// nothing else opens one on Light, where it was dark text on a near-black surface for months.
+//
 // SILENT and headless: no media at all. Nothing is ever fetched from outside.
 //
 //   cd frontend && node e2e/app-dialogs-real-browser.mjs [outdir]
@@ -43,8 +46,13 @@ const LINES = 'first line\nsecond line\n```\nfn main() {}\n```';
 
 const entry = `
 import './styles/theme.css';
+// Before every component's CSS, as Notes' own page and the desktop app load it.
+import './notes/notes.css';
+import './components/calendar/IcsImport.css';
 import { createRoot } from 'react-dom/client';
+import { useState } from 'react';
 import { AppDialogs } from './components/AppDialogs';
+import { NotesDialog } from './components/NotesDialog';
 import { askConfirm, askText, leaveNotice } from './api/appDialogs';
 import { handleNativeHotkeyPayload, registerHold, registerPress, setNativeFeedStateForTest } from './api/hotkeys';
 const log = window.__log = { answers: [], outside: 0, shortcut: 0, ticks: 0, destroyed: 0, plainClicked: 0, mic: false, muteToggles: 0 };
@@ -71,8 +79,20 @@ window.__site = async () => { if (!await askConfirm('Disband this server?')) ret
 window.__oldSite = () => { if (!window.confirm('Disband this server?')) return; log.destroyed++; };
 window.__unawaitedSite = () => { if (!askConfirm('Disband this server?')) return; log.destroyed++; };
 function App() {
+    const [sheet, setSheet] = useState(false);
+    window.__sheet = setSheet;
     return (
         <div id="composer" style={{ padding: 16, boxSizing: 'border-box', maxWidth: '100%' }}>
+            {sheet && (
+                <NotesDialog title="Import a calendar" onClose={() => setSheet(false)}>
+                    <p>Some words of the sheet.</p>
+                    <p className="notes-labels-hint">A hint under them.</p>
+                    <div className="ics-notes" role="note"><p>Not everything maps exactly:</p></div>
+                    <p className="notes-send-error">The message did not go.</p>
+                    <button type="button" className="notes-textbtn">Cancel</button>
+                    <button type="button" className="notes-textbtn primary">Import</button>
+                </NotesDialog>
+            )}
             <input id="field" onKeyDown={e => { if (e.key === 'Enter') window.__ask('Turn it into a heading?'); }} />
             <input id="edit-field" onKeyDown={e => { if (e.key === 'Enter') window.__askText('Edit message:', ${JSON.stringify(LINES)}); }} />
             <button id="edit" onClick={() => window.__askText('Edit message:', ${JSON.stringify(LINES)})}>Edit</button>
@@ -550,6 +570,57 @@ async function holdsUntilAnswered(page, site) {
     await page.evaluate(() => window.__notice('Message failed to send. Check your connection and try again.'));
     await page.evaluate(() => window.__askText('Edit message:', 'first'));
     await page.waitForSelector('dialog.app-question input');
+    // Behind the question, which takes nothing from its colours. Not itself one of these
+    // questions, but the same kind of surface (the .ics import, Notes' sheets), and nothing
+    // else measures it: the theme walks do not open it.
+    await page.evaluate(() => window.__sheet(true));
+    await page.waitForSelector('.notes-dialog');
+    const measureLooks = () => page.evaluate(() => {
+        const parts = c => c.match(/[\d.]+/g).map(Number);
+        // Translucent layers composited down to the first opaque one.
+        const paint = el => {
+            const layers = [];
+            for (let e = el; e; e = e.parentElement) {
+                const [r, g, b, a = 1] = parts(getComputedStyle(e).backgroundColor);
+                if (a === 0) continue;
+                layers.push([r, g, b, a]);
+                if (a >= 1) break;
+            }
+            let [r, g, b] = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop() : [255, 255, 255];
+            for (const [lr, lg, lb, la] of layers.reverse()) {
+                r = lr * la + r * (1 - la); g = lg * la + g * (1 - la); b = lb * la + b * (1 - la);
+            }
+            return [r, g, b];
+        };
+        const lum = rgb => {
+            const [r, g, b] = rgb.slice(0, 3).map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+        const q = s => document.querySelector(s);
+        const text = (name, el, need) => [name, ratio(parts(getComputedStyle(el).color), paint(el)), need];
+        return [
+            text('message', q('.app-question-message'), 4.5),
+            text('field', q('.app-question-input'), 4.5),
+            text('Cancel', q('.app-question-btn:not(.app-question-ok)'), 4.5),
+            text('OK', q('.app-question-ok'), 4.5),
+            ['OK\'s border', ratio(parts(getComputedStyle(q('.app-question-ok')).borderTopColor), paint(q('.app-question'))), 3],
+            text('notice', q('.app-notice-text'), 4.5),
+            text('notice\'s Dismiss', q('.app-notice-close'), 3),
+            text('sheet\'s title', q('.notes-dialog-head h3'), 4.5),
+            text('sheet\'s words', q('.notes-dialog-body p'), 4.5),
+            text('sheet\'s warning', q('.ics-notes p'), 4.5),
+            text('sheet\'s button', q('.notes-dialog-body .notes-textbtn:not(.primary)'), 4.5),
+            text('sheet\'s Close', q('.notes-dialog-head .notes-iconbtn'), 3),
+            // The app-wide tokens as text, on any surface of any theme: their own figures as
+            // a floor, none of which this surface can do anything about. --text-faint is
+            // 3.4 to 4:1, --brand-primary 4.15 to 4.3:1, and --color-danger over its own
+            // tint 4.45:1 on the yellow theme.
+            text('sheet\'s hint', q('.notes-dialog-body .notes-labels-hint'), 3),
+            text('sheet\'s main button', q('.notes-dialog-body .notes-textbtn.primary'), 4),
+            text('sheet\'s error', q('.notes-send-error'), 4.4),
+        ];
+    });
     for (const theme of themes) {
         for (const contrast of ['normal', 'high']) {
             await page.evaluate(([t, c]) => {
@@ -557,40 +628,7 @@ async function holdsUntilAnswered(page, site) {
                 document.documentElement.setAttribute('data-contrast', c);
             }, [theme, contrast]);
             await page.waitForTimeout(250); // past any colour transition
-            const pairs = await page.evaluate(() => {
-                const parts = c => c.match(/[\d.]+/g).map(Number);
-                // Translucent layers composited down to the first opaque one.
-                const paint = el => {
-                    const layers = [];
-                    for (let e = el; e; e = e.parentElement) {
-                        const [r, g, b, a = 1] = parts(getComputedStyle(e).backgroundColor);
-                        if (a === 0) continue;
-                        layers.push([r, g, b, a]);
-                        if (a >= 1) break;
-                    }
-                    let [r, g, b] = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop() : [255, 255, 255];
-                    for (const [lr, lg, lb, la] of layers.reverse()) {
-                        r = lr * la + r * (1 - la); g = lg * la + g * (1 - la); b = lb * la + b * (1 - la);
-                    }
-                    return [r, g, b];
-                };
-                const lum = rgb => {
-                    const [r, g, b] = rgb.slice(0, 3).map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
-                    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                };
-                const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
-                const q = s => document.querySelector(s);
-                const text = (name, el, need) => [name, ratio(parts(getComputedStyle(el).color), paint(el)), need];
-                return [
-                    text('message', q('.app-question-message'), 4.5),
-                    text('field', q('.app-question-input'), 4.5),
-                    text('Cancel', q('.app-question-btn:not(.app-question-ok)'), 4.5),
-                    text('OK', q('.app-question-ok'), 4.5),
-                    ['OK\'s border', ratio(parts(getComputedStyle(q('.app-question-ok')).borderTopColor), paint(q('.app-question'))), 3],
-                    text('notice', q('.app-notice-text'), 4.5),
-                    text('notice\'s Dismiss', q('.app-notice-close'), 3),
-                ];
-            });
+            const pairs = await measureLooks();
             for (const [name, value, need] of pairs) {
                 measured++;
                 if (value < need) poor.push(`${theme}/${contrast} ${name} ${value.toFixed(2)}:1`);
@@ -599,8 +637,18 @@ async function holdsUntilAnswered(page, site) {
             if (outDir) await page.screenshot({ path: join(outDir, `${theme}-${contrast}.png`) });
         }
     }
-    check('every text 4.5:1 and every mark 3:1, in each of 16 looks', poor.length === 0 && measured === 16 * 7, poor.join('; ') || `${measured} measured`);
+    check('every text 4.5:1 and every mark 3:1, the app-wide tokens at their own floors, in each of 16 looks', poor.length === 0 && measured === 16 * 15, poor.join('; ') || `${measured} measured`);
     check('and OK is what is hit in each', offScreen === 0, `${offScreen} missed`);
+    for (const contrast of ['normal', 'high']) {
+        await page.evaluate(c => {
+            document.documentElement.setAttribute('data-theme', 'light');
+            document.documentElement.setAttribute('data-contrast', c);
+            document.querySelector('.notes-dialog').style.background = 'var(--bg-floating)';
+        }, contrast);
+        await page.waitForTimeout(250);
+        const words = (await measureLooks()).find(([name]) => name === 'sheet\'s words')[1];
+        check(`CONTROL: the sheet's surface as it was, --bg-floating, fails this on Light (${contrast})`, words < 3, `${words.toFixed(2)}:1`);
+    }
     await close();
 }
 
