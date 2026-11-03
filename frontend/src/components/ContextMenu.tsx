@@ -44,11 +44,13 @@ interface ContextMenuProps {
  * keyboard has to carry on from somewhere. A pointer's leaves it on nothing, and the opener does not
  * keep it: from there a stray Space or Enter opens this again as a key's (ModeSelector: a click no
  * pointer counted), with the first item under the focus for the next stray one to press, and on
- * the mode selector that item is Off.
+ * the mode selector that item is Off. It does pass through the opener, which is where the browser
+ * starts a Tab from afterwards: this menu is last in the page, so a Tab from where it was would
+ * walk the whole page again. Not in Safari's engine, which starts one from the top either way.
  */
 const settleFocus = (opener: HTMLElement | undefined, fromKeyboard: boolean | undefined) => {
-    if (fromKeyboard) opener?.focus({ preventScroll: true });
-    else opener?.blur();
+    opener?.focus({ preventScroll: true });
+    if (!fromKeyboard) opener?.blur();
 };
 
 const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<HTMLButtonElement>('.context-menu-item:not(:disabled)') ?? [])];

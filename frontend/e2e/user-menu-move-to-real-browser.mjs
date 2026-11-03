@@ -31,8 +31,11 @@
 // elsewhere, the focus goes to nothing: back on the selector a stray Space or Enter opens the menu
 // again as a key's, with Off under the focus for the next one, and a third answers the question Off
 // asks. So every way out is followed by the stray keys, the real question's Cancel too (under a fake
-// desktop shell). The control is a key's menu, which does give the focus back. At 390x844: 44 px
-// rows, nothing clipped, inside the window, and a tap lands.
+// desktop shell). The control is a key's menu, which does give the focus back. With the focus on
+// nothing, Tab still goes on from the selector and Shift+Tab back from it, not from the end of the
+// page where the menu was, in Edge and Firefox (not Safari's engine, which starts a Tab from the top
+// of the page, nor through a question's Cancel, both printed). At 390x844: 44 px rows, nothing
+// clipped, inside the window, and a tap lands.
 //
 // And a hold on Space or Enter through the REAL hotkeys registry (api/hotkeys.ts), in Edge, Firefox
 // and WebKit, because each browser decides for itself what these keys press. A push-to-talk on Space
@@ -711,10 +714,23 @@ const ring = (page) => page.evaluate(() => {
     await key(page, 'Escape');
     ck(!await menuOpen(page) && await focusOn(page) === 'body', 'mouse: Escape leaves the focus on nothing, not on the selector', await focusOn(page));
     await strayKeys('Escape');
+    // On nothing, and Tab still goes on from the selector: not from the end of the page, where the
+    // menu was, which would send them round the server rail and the channel list again.
+    await clickSelector();
+    await key(page, 'Escape');
+    await key(page, 'Tab');
+    ck(await focusOn(page) === 'rig-after', 'mouse: after Escape, Tab goes on from the selector, not from where the menu was', await focusOn(page));
+    await clickSelector();
+    await key(page, 'Escape');
+    await key(page, 'Shift+Tab');
+    ck(await focusOn(page) === 'rig-before', 'mouse: and Shift+Tab goes back from it', await focusOn(page));
     await clickSelector();
     await key(page, 'ArrowUp');
     ck(await focusOn(page) === 'Manage modes', 'mouse: Up goes in at the last item', await focusOn(page));
     await key(page, 'Escape');
+    ck(await focusOn(page) === 'body', 'mouse: out from an item, the focus on nothing too', await focusOn(page));
+    await key(page, 'Tab');
+    ck(await focusOn(page) === 'rig-after', 'mouse: and Tab from there goes on from the selector', await focusOn(page));
     await clickSelector();
     await key(page, 'Tab');
     ck(!await menuOpen(page) && await focusOn(page) === 'rig-after', 'mouse: Tab closes it and goes on from the selector', await focusOn(page));
@@ -729,6 +745,19 @@ const ring = (page) => page.evaluate(() => {
     ck(await focusOn(page) === 'body', 'mouse: and the focus is on nothing, not on the selector', await focusOn(page));
     await page.evaluate(() => { window.__log.length = 0; });
     await strayKeys('a pick');
+    await clickSelector();
+    await press(page, await probe(page, MM, 'Movie Night'), false);
+    await key(page, 'Tab');
+    ck(await focusOn(page) === 'rig-after', 'mouse: after a pick, Tab goes on from the selector', await focusOn(page));
+
+    // CONTROL: a key's menu gives the focus back, so Tab has always gone on from there.
+    await fresh();
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await key(page, 'Enter');
+    await key(page, 'Escape');
+    await key(page, 'Tab');
+    ck(await focusOn(page) === 'rig-after', 'CONTROL: a key\'s menu, Escape, then Tab goes on from the selector', await focusOn(page));
+    await page.evaluate(() => { window.__log.length = 0; });
 
     // A press elsewhere. The press moves the focus by itself, unless what it lands on stops that
     // (a notice's close button does): the selector is still not left holding it, however it got it.
@@ -775,6 +804,9 @@ const ring = (page) => page.evaluate(() => {
     await press(page, await probe(page, MM, 'Movie Night'), false);
     await key(page, 'Escape');
     ck(!await questionOpen() && await focusOn(page) === 'body', 'question, mouse: Escape refuses, the focus on nothing', await focusOn(page));
+    // Left as it is: the question, not the menu, was the last thing to hold the focus.
+    await key(page, 'Tab');
+    console.log('INFO question, mouse: Tab after it lands on', await focusOn(page));
 
     await fresh();
     await page.locator('[data-testid="mode-selector"]').focus();
@@ -982,6 +1014,25 @@ async function holdKeys(engine, on) {
     await clickOn('#rig-row');
     await threeTaps();
     ck((await logged(page)).length === 0 && !await menuOpen(page), say('CONTROL: chain: a click elsewhere, then taps: nothing'), JSON.stringify(await logged(page)));
+
+    // Where Tab goes from nothing is each browser's own decision too.
+    await fresh();
+    await reset();
+    await clickOn(SEL);
+    await tap('Escape');
+    const focusAfterEscape = await focusOn(page);
+    await tap('Tab');
+    const tabFromNothing = await focusOn(page);
+    if (engine === 'webkit') console.log(`INFO ${say('Tab after a mouse\'s menu lands on')} ${tabFromNothing}`);
+    else ck(focusAfterEscape === 'body' && tabFromNothing === 'rig-after', say('a mouse\'s menu, Escape, the focus on nothing: Tab goes on from the selector'), tabFromNothing);
+    await fresh();
+    await reset();
+    await clickOn(SEL);
+    await clickOn('.context-menu-item', 'Movie Night');
+    await tap('Tab');
+    const tabAfterPick = await focusOn(page);
+    if (engine === 'webkit') console.log(`INFO ${say('Tab after a mouse\'s pick lands on')} ${tabAfterPick}`);
+    else ck(tabAfterPick === 'rig-after', say('a mouse\'s pick: Tab goes on from the selector'), tabAfterPick);
 
     // The focus on the selector, as a key's menu leaves it: the hold is all that stands in the way.
     await fresh();
