@@ -74,6 +74,14 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     // accent is in the key for the names written in it.
     const key = fileId ? `${fileId}|${look}|${accent ?? ''}` : null;
     const [mapped, setMapped] = useState<{ key: string; look: ModeLook } | null>(null);
+    // A fetch that fell over with the connection gets one more go each time the socket is back.
+    // Nothing else would ask: the refetch that follows answers the same file, accent and look.
+    const [attempt, setAttempt] = useState(0);
+    useEffect(() => {
+        const again = () => setAttempt(n => n + 1);
+        window.addEventListener('wsConnected', again);
+        return () => window.removeEventListener('wsConnected', again);
+    }, []);
     useEffect(() => {
         if (!fileId || !key || mapped?.key === key) return;
         let stale = false;
@@ -85,7 +93,7 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
             if (picture && !stale) setMapped({ key, look: { style: pictureStyle(picture.url, theme) as CSSProperties, limit: theme.limit } });
         })();
         return () => { stale = true; };
-    }, [fileId, key, mapped?.key]);
+    }, [fileId, key, mapped?.key, attempt]);
 
     return key && mapped?.key === key ? mapped.look : undefined;
 }
