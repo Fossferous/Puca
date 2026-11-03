@@ -230,6 +230,7 @@ const GATES = [
         ['e2e-notes-dialog-escape', 'notes-dialog-escape-real-browser.mjs'],
         // Screenshots go to the ignored e2e-artifacts, as the two below explain.
         ['e2e-app-dialogs', 'app-dialogs-real-browser.mjs e2e-artifacts/app-dialogs-shots'],
+        ['e2e-light-surfaces', 'light-surfaces-real-browser.mjs e2e-artifacts/light-surfaces-shots'],
         ['e2e-user-menu-move-to', 'user-menu-move-to-real-browser.mjs'],
         ['e2e-paste-html', 'paste-html-real-browser.mjs'],
         ['e2e-photo-metadata', 'photo-metadata-real-browser.mjs'],

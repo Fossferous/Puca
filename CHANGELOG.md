@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **The Light theme is readable where it was not.** Púca Notes' menus and bars, a calendar item's menu, snooze, the drawing window, dates and repeats, the nickname dialog, the card table's amount sheet and its notice, the encryption tooltip, the clip dialogs and the prompts for controlling a PC all put dark words on a near-black surface. Labels and what you type in the forms of **Server Settings**, **Edit Channel** and **Modes**, a link preview's words, and red, amber and green messages were pale on a pale surface. **Role Settings** and the safety number dialog stay dark, with their words readable. On the other themes a few small words and the main button in these places are a little clearer, because they were hard to read there too. The main button in Púca Notes' own page, as in **Trash**, no longer has a label the colour of its background.
+
 ## 0.9.855 — 2026-11-03
 
 Server modes, and the desktop app asks before destructive actions again

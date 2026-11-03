@@ -700,11 +700,12 @@ async function holdsUntilAnswered(page, site) {
         await page.evaluate(c => {
             document.documentElement.setAttribute('data-theme', 'light');
             document.documentElement.setAttribute('data-contrast', c);
-            document.querySelector('.notes-dialog').style.background = 'var(--bg-floating)';
+            // What --bg-floating was on Light then; it has its own answer since.
+            document.querySelector('.notes-dialog').style.background = '#0d0e10';
         }, contrast);
         await page.waitForTimeout(250);
         const words = (await measureLooks()).find(([name]) => name === 'sheet\'s words')[1];
-        check(`CONTROL: the sheet's surface as it was, --bg-floating, fails this on Light (${contrast})`, words < 3, `${words.toFixed(2)}:1`);
+        check(`CONTROL: the sheet's surface as it was, near black, fails this on Light (${contrast})`, words < 3, `${words.toFixed(2)}:1`);
     }
     await close();
 }
