@@ -2746,7 +2746,9 @@ export function Chat({ onLogout }: ChatProps) {
                 composerGoesWithRef.current('server');
                 setCurrentServer(null);
                 setCurrentChannel(null);
-                setCurrentVoiceChannel(null);
+                // Only a call on this server: voice persists while browsing other servers,
+                // and being removed from this one says nothing about those.
+                setCurrentVoiceChannel(prev => (prev?.server_id === payload.server_id ? null : prev));
                 setMessages([]);
                 setShowFriendsPanel(true);
                 setShowDevicesView(false);
