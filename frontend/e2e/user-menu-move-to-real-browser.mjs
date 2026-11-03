@@ -34,13 +34,24 @@
 // desktop shell). The control is a key's menu, which does give the focus back. At 390x844: 44 px
 // rows, nothing clipped, inside the window, and a tap lands.
 //
+// And a hold on Space or Enter through the REAL hotkeys registry (api/hotkeys.ts), in Edge, Firefox
+// and WebKit, because each browser decides for itself what these keys press. A push-to-talk on Space
+// clicked whatever had the focus on every press: taps and held keys (repeats) now press no button,
+// link, checkbox, radio, summary or button inside [data-owns-keys], and the hold's down and up still
+// arrive. The real chain with the hold bound: a mouse's pick, then taps; a key's menu closed, then
+// taps on the selector; a question, then taps on OK. CONTROLS: with no hold bound the same keys do
+// press those controls; in a field, a textarea and editable text a bound key still types and still
+// holds; a hold on Tab or Escape keeps its key's default; a hold bound to Ctrl+Space leaves a bare
+// Space alone; a click elsewhere then taps press nothing. A press action on Space held down no longer
+// presses the button on its repeats either.
+//
 // It bundles the REAL UserContextMenu, ServerList and AppDialogs plus the app's global CSS
 // (index.css, mobile.css) with esbuild. SILENT and headless: no media at all.
 //
 //   cd frontend && node e2e/user-menu-move-to-real-browser.mjs
 //
 // No server and no build needed. CHANNEL=msedge (default) or CHANNEL=bundled.
-import { chromium } from '@playwright/test';
+import { chromium, firefox, webkit } from '@playwright/test';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -62,6 +73,7 @@ import { ModeSelector } from './components/modes/ModeSelector';
 import { modeMenuItems } from './components/modes/modeMenu';
 import { AppDialogs } from './components/AppDialogs';
 import { askConfirm } from './api/appDialogs';
+import { registerHold, registerPress, unregisterHold, unregisterPress } from './api/hotkeys';
 
 const log = [];
 window.__log = log;
@@ -112,12 +124,35 @@ function ModeRig({ disabledFirst, people }) {
     );
 }
 
+/** The kinds of thing Space and Enter press, and the kinds they type into. */
+const pressed = (name) => () => log.push(name);
+function ControlsRig() {
+    return (
+        <div className="chat-container">
+            <div>
+                <button id="c-button" onClick={pressed('button')}>Mute</button>
+                <a id="c-link" href="#went" onClick={(e) => { e.preventDefault(); log.push('link'); }}>A link</a>
+                <input id="c-check" type="checkbox" onChange={pressed('check')} />
+                <input id="c-radio" type="radio" onChange={pressed('radio')} />
+                <input id="c-inbutton" type="button" value="An input button" onClick={pressed('inbutton')} />
+                <details><summary id="c-summary" onClick={pressed('summary')}>A summary</summary>Inside it</details>
+                <div data-owns-keys=""><button id="c-owned" onClick={pressed('owned')}>In a dialog that owns its keys</button></div>
+                <input id="c-text" type="text" />
+                <textarea id="c-area" />
+                <div id="c-edit" contentEditable suppressContentEditableWarning style={{ minHeight: 20 }} />
+            </div>
+        </div>
+    );
+}
+
 let setMount = () => {};
 function App() {
     const [mount, set] = useState(null);
     setMount = set;
+    window.__rigReady = true;
     if (!mount) return null;
     if (mount.kind === 'mode') return <ModeRig key={mount.n} disabledFirst={mount.disabledFirst} people={mount.people} />;
+    if (mount.kind === 'controls') return <ControlsRig key={mount.n} />;
     if (mount.kind === 'user') {
         return (
             <div className="chat-container">
@@ -171,6 +206,17 @@ window.__mountUser = (position, opts = {}) => setMount({
 });
 window.__mountServer = () => setMount({ kind: 'server', n: ++n });
 window.__mountMode = (opts = {}) => setMount({ kind: 'mode', n: ++n, disabledFirst: !!opts.disabledFirst, people: opts.people ?? 0 });
+window.__mountControls = () => setMount({ kind: 'controls', n: ++n });
+window.__hold = { down: 0, up: 0 };
+window.__bindHold = (keyCode, mods = {}) => registerHold('rig.hold', () => ({ keyCode, ctrl: !!mods.ctrl, alt: false, shift: false }), {
+    onDown: () => { window.__hold.down++; },
+    onUp: () => { window.__hold.up++; },
+});
+window.__unbindHold = () => unregisterHold('rig.hold');
+window.__bindPress = (keyCode) => registerPress('rig.press', () => ({ keyCode, ctrl: false, alt: false, shift: false }), () => log.push('press-action'));
+window.__unbindPress = () => unregisterPress('rig.press');
+// What a key's default was left as, once everything has heard it.
+window.addEventListener('keydown', (e) => { window.__lastKey = { key: e.key, prevented: e.defaultPrevented }; });
 createRoot(document.getElementById('root')).render(
     <QueryClientProvider client={qc}><App /><AppDialogs /></QueryClientProvider>
 );
@@ -225,8 +271,8 @@ const browser = await chromium.launch({
 });
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 30)))));
 
-async function open(ctxOpts, { desktopShell = false } = {}) {
-    const ctx = await browser.newContext(ctxOpts);
+async function open(ctxOpts, { desktopShell = false, on = browser } = {}) {
+    const ctx = await on.newContext(ctxOpts);
     const page = await ctx.newPage();
     // api/appDialogs.ts asks in the page only in the desktop shell: all it asks is that this exists.
     if (desktopShell) await page.addInitScript(() => { window.__TAURI_INTERNALS__ = {}; });
@@ -252,6 +298,7 @@ async function open(ctxOpts, { desktopShell = false } = {}) {
         };
     });
     await page.goto(RIG + '/', { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__rigReady);
     return { ctx, page };
 }
 
@@ -793,6 +840,197 @@ const ring = (page) => page.evaluate(() => {
     ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), 'phone: a tap on an item presses it, and closes the menu', JSON.stringify(await logged(page)));
     ck(await focusOn(page) === 'body', 'phone: and the focus is on nothing, not on the selector', await focusOn(page));
     await ctx.close();
+}
+
+// ======================= a hold on Space or Enter ===========================
+const SPACE = 32, ENTER = 13;
+/** One whole engine: what these keys press is each browser's own decision. */
+async function holdKeys(engine, on) {
+    const { ctx, page } = await open({ viewport: { width: 1280, height: 800 } }, { on, desktopShell: true });
+    const say = (what) => `${engine}: ${what}`;
+    /** A quick press; and one held long enough to repeat (Playwright marks a second down as one). */
+    const tap = async (name) => { await page.keyboard.down(name); await frame(page); await page.keyboard.up(name); await frame(page); };
+    const heldDown = async (name) => {
+        await page.keyboard.down(name);
+        await page.keyboard.down(name);
+        await page.keyboard.down(name);
+        await frame(page);
+        await page.keyboard.up(name);
+        await frame(page);
+    };
+    const reset = () => page.evaluate(() => { window.__log.length = 0; window.__hold.down = 0; window.__hold.up = 0; });
+    const hold = () => page.evaluate(() => ({ ...window.__hold }));
+    const controls = async () => { await page.evaluate(() => { window.__log.length = 0; window.__mountControls(); }); await frame(page); };
+    const CONTROLS = ['c-button', 'c-link', 'c-check', 'c-radio', 'c-inbutton', 'c-summary', 'c-owned'];
+    const toggled = () => page.evaluate(() => ({
+        check: document.getElementById('c-check').checked,
+        radio: document.getElementById('c-radio').checked,
+        open: document.querySelector('details').open,
+        hash: location.hash,
+    }));
+    const untouched = (t) => !t.check && !t.radio && !t.open && !t.hash;
+
+    for (const [name, code] of [['Space', SPACE], ['Enter', ENTER]]) {
+        await controls();
+        await page.evaluate((code) => window.__bindHold(code), code);
+        for (const id of CONTROLS) {
+            await reset();
+            await page.locator('#' + id).focus();
+            await tap(name);
+            await heldDown(name);
+            const did = await logged(page);
+            const h = await hold();
+            ck(did.length === 0 && untouched(await toggled()), say(`a hold on ${name}: taps and held keys press nothing on #${id}`), JSON.stringify({ did, t: await toggled() }));
+            ck(h.down === 2 && h.up === 2, say(`a hold on ${name}: on #${id} its down and up both still arrive`), JSON.stringify(h));
+        }
+        // Typing stays typing, and the hold still holds: you hold push-to-talk while typing.
+        for (const [id, typed] of [['c-text', name === 'Space' ? ' ' : ''], ['c-area', name === 'Space' ? ' ' : '\n']]) {
+            await reset();
+            await page.locator('#' + id).fill('');
+            await page.locator('#' + id).focus();
+            await tap(name);
+            const value = await page.locator('#' + id).inputValue();
+            ck(value === typed && (await hold()).down === 1, say(`CONTROL: a hold on ${name}: in #${id} it still types and still holds`), JSON.stringify({ value, hold: await hold() }));
+        }
+        await reset();
+        await page.locator('#c-edit').focus();
+        await tap(name);
+        const edited = await page.evaluate(() => document.getElementById('c-edit').innerHTML);
+        ck(edited !== '' && (await hold()).down === 1, say(`CONTROL: a hold on ${name}: in editable text it still types and still holds`), JSON.stringify(edited));
+        await page.evaluate(() => window.__unbindHold());
+
+        // CONTROL: no hold, and the same key does press every one of them.
+        await controls();
+        const fired = {};
+        for (const id of CONTROLS) {
+            await reset();
+            await page.locator('#' + id).focus();
+            await tap(name);
+            fired[id] = (await logged(page)).length;
+        }
+        const t = await toggled();
+        const expected = name === 'Space'
+            // Enter on a checkbox or radio presses nothing, in any browser; Space on a link scrolls.
+            ? fired['c-button'] && fired['c-check'] && fired['c-radio'] && fired['c-inbutton'] && fired['c-summary'] && fired['c-owned']
+            : fired['c-button'] && fired['c-link'] && fired['c-inbutton'] && fired['c-summary'] && fired['c-owned'];
+        ck(!!expected, say(`CONTROL: no hold: ${name} does press them`), JSON.stringify({ fired, t }));
+    }
+
+    // Only these two keys. A hold on Tab or Escape keeps what the key does.
+    await controls();
+    await page.evaluate(() => window.__bindHold(9));
+    await reset();
+    await page.locator('#c-button').focus();
+    await tap('Tab');
+    // On to the link, or past it: Safari's Tab skips links unless told otherwise.
+    ck(['c-link', 'c-check'].includes(await focusOn(page)) && (await hold()).down === 1, say('CONTROL: a hold on Tab: the focus still moves on, and it holds'), await focusOn(page));
+    await page.evaluate(() => window.__bindHold(27));
+    await reset();
+    await page.locator('#c-button').focus();
+    await tap('Escape');
+    const esc = await page.evaluate(() => window.__lastKey);
+    ck(esc.key === 'Escape' && !esc.prevented && (await hold()).down === 1, say('CONTROL: a hold on Escape: its default is left alone, and it holds'), JSON.stringify(esc));
+    await page.evaluate(() => window.__unbindHold());
+
+    // Bound with a modifier: a bare Space is no such key, and Ctrl+Space is.
+    await controls();
+    await page.evaluate((code) => window.__bindHold(code, { ctrl: true }), SPACE);
+    await reset();
+    await page.locator('#c-button').focus();
+    await tap('Space');
+    ck(JSON.stringify(await logged(page)) === '["button"]' && (await hold()).down === 0, say('CONTROL: a hold on Ctrl+Space: a bare Space still presses the button, and holds nothing'), JSON.stringify(await logged(page)));
+    await reset();
+    await page.keyboard.down('Control');
+    await tap('Space');
+    await page.keyboard.up('Control');
+    await frame(page);
+    ck((await logged(page)).length === 0 && (await hold()).down === 1, say('a hold on Ctrl+Space: Ctrl+Space holds, and presses nothing'), JSON.stringify(await logged(page)));
+    await page.evaluate(() => window.__unbindHold());
+
+    // A press action has the same key and the same repeats: its first press was always swallowed.
+    await controls();
+    await page.evaluate((code) => window.__bindPress(code), SPACE);
+    await reset();
+    await page.locator('#c-button').focus();
+    await heldDown('Space');
+    ck(JSON.stringify(await logged(page)) === '["press-action"]', say('a press action on Space held down: acts once, and its repeats press no button'), JSON.stringify(await logged(page)));
+    await page.evaluate(() => window.__unbindPress());
+
+    // ---- THE REAL CHAIN: the menu and the question, with a hold on Space. ----
+    const fresh = async (opts) => { await page.evaluate((o) => { window.__log.length = 0; window.__mountMode(o); }, opts); await frame(page); };
+    const clickOn = async (selector, text) => {
+        const box = await (text ? page.locator(selector, { hasText: text }) : page.locator(selector)).first().boundingBox();
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await frame(page);
+    };
+    const SEL = '[data-testid="mode-selector"]';
+    const questionOpen = () => page.evaluate(() => !!document.querySelector('.app-question'));
+    const threeTaps = async () => { await tap('Space'); await tap('Space'); await tap('Space'); };
+    await page.evaluate((code) => window.__bindHold(code), SPACE);
+
+    await fresh();
+    await reset();
+    await clickOn(SEL);
+    await clickOn('.context-menu-item', 'Movie Night');
+    await threeTaps();
+    ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), say('chain: a mouse\'s pick, then three push-to-talk taps: no menu and no Off'), JSON.stringify(await logged(page)));
+    ck((await hold()).down === 3 && (await hold()).up === 3, say('chain: and all three really were push-to-talk'), JSON.stringify(await hold()));
+
+    await fresh();
+    await reset();
+    await clickOn(SEL);
+    await clickOn('#rig-row');
+    await threeTaps();
+    ck((await logged(page)).length === 0 && !await menuOpen(page), say('CONTROL: chain: a click elsewhere, then taps: nothing'), JSON.stringify(await logged(page)));
+
+    // The focus on the selector, as a key's menu leaves it: the hold is all that stands in the way.
+    await fresh();
+    await reset();
+    await page.locator(SEL).focus();
+    await threeTaps();
+    ck((await logged(page)).length === 0 && !await menuOpen(page), say('chain: the focus on the selector, then taps: the hold opens nothing'), JSON.stringify(await logged(page)));
+    await tap('Enter');
+    ck(await menuOpen(page), say('CONTROL: chain: Enter, which is not the hold, still opens it'));
+    await threeTaps();
+    ck((await logged(page)).length === 0 && await menuOpen(page), say('chain: with Off under the focus, the taps press nothing'), JSON.stringify(await logged(page)));
+    await tap('Enter');
+    ck(JSON.stringify(await logged(page)) === '["switch:null"]', say('CONTROL: chain: and Enter there does press Off'), JSON.stringify(await logged(page)));
+
+    // The question, whose OK has the focus: taps do not answer it. Its own keys still do.
+    await fresh({ people: 2 });
+    await reset();
+    await clickOn(SEL);
+    await clickOn('.context-menu-item', 'Movie Night');
+    ck(await questionOpen(), say('chain: with people in the rooms, a pick asks'));
+    await threeTaps();
+    ck(await questionOpen() && (await logged(page)).length === 0, say('chain: three taps on its OK do not answer it'), JSON.stringify(await logged(page)));
+    ck((await hold()).down === 3 && (await hold()).up === 3, say('chain: the hold still hears them behind the question'), JSON.stringify(await hold()));
+    await tap('Enter');
+    ck(!await questionOpen() && JSON.stringify(await logged(page)) === '["switch:4"]', say('CONTROL: chain: Enter on OK, which is not the hold, answers it'), JSON.stringify(await logged(page)));
+    await fresh({ people: 2 });
+    await clickOn(SEL);
+    await clickOn('.context-menu-item', 'Movie Night');
+    await tap('Escape');
+    ck(!await questionOpen() && JSON.stringify(await logged(page)) === '["refused"]', say('CONTROL: chain: Escape refuses it'), JSON.stringify(await logged(page)));
+    await page.evaluate(() => window.__unbindHold());
+    await fresh({ people: 2 });
+    await clickOn(SEL);
+    await clickOn('.context-menu-item', 'Movie Night');
+    await tap('Space');
+    ck(!await questionOpen() && JSON.stringify(await logged(page)) === '["switch:4"]', say('CONTROL: chain: with no hold, Space on OK does answer it'), JSON.stringify(await logged(page)));
+    await ctx.close();
+}
+
+await holdKeys(CHANNEL, browser);
+for (const [engine, type, off, opts] of [
+    ['firefox', firefox, process.env.FIREFOX === '0', { firefoxUserPrefs: { 'media.volume_scale': '0' } }],
+    ['webkit', webkit, process.env.WEBKIT === '0', {}],
+]) {
+    if (off) { console.log(`SKIP ${engine}: switched off`); continue; }
+    const other = await type.launch({ headless: true, ...opts }).catch((e) => { console.log(`SKIP ${engine}: ${String(e.message).split('\n')[0]} (npx playwright install ${engine})`); return null; });
+    if (!other) continue;
+    await holdKeys(engine, other);
+    await other.close();
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

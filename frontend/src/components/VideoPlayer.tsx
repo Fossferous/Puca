@@ -384,6 +384,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     };
 
     const onKeyDown = (e: ReactKeyboardEvent<HTMLSpanElement>) => {
+        if (e.defaultPrevented) return; // a hotkey's (api/hotkeys.ts), a push-to-talk on Space among them
         const t = e.target as HTMLElement;
         const inPanel = t.closest('.vpl-panel');
         if (inPanel && e.key === 'Tab') { onPanelTab(e, inPanel); return; }

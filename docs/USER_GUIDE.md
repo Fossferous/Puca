@@ -1276,7 +1276,8 @@ An invite link clicked somewhere else — an email, a web page, a game launcher,
 The two call shortcuts, plus **Open Settings**, **Search Messages**, **Push to
 Talk (hold)** and **Push to Mute (hold)**, can be rebound under **Settings →
 Keybinds**. Push to talk and push to mute only do anything once you switch
-**Voice & Video** to that mode.
+**Voice & Video** to that mode. Bound to Space or Enter they press nothing in
+Púca's window, except in a text box, where the key still types.
 
 ---
 

@@ -227,7 +227,8 @@ function NoteCardImpl({
             // a checkbox, a chip, the tools) bubbles here too, and must keep
             // its native activation rather than open the note.
             onKeyDown={e => {
-                if (e.target !== e.currentTarget) return;
+                // defaultPrevented: a hotkey's (api/hotkeys.ts), a push-to-talk on Space among them.
+                if (e.target !== e.currentTarget || e.defaultPrevented) return;
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(card); }
             }}
             onContextMenu={e => {
@@ -379,7 +380,7 @@ function NoteCardImpl({
                         tabIndex={0}
                         title={`Show notes labelled ${l}`}
                         onClick={e => { e.stopPropagation(); onLabelClick(l); }}
-                        onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onLabelClick(l); } }}
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.defaultPrevented) { e.stopPropagation(); onLabelClick(l); } }}
                     >
                         <TagIcon /> <Highlight text={l} ranges={findRanges(l, terms)} />
                     </span>

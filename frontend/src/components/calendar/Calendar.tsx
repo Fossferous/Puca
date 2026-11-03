@@ -208,6 +208,7 @@ export function Calendar(props: CalendarProps) {
 
     // Month grid keyboard: roving focus over the day cells.
     const onGridKey = (e: React.KeyboardEvent) => {
+        if (e.defaultPrevented) return; // a hotkey's (api/hotkeys.ts), a push-to-talk on Space among them
         const moves: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 };
         let next: string | null = null;
         if (e.key in moves) next = addDaysToKey(focusDay, moves[e.key]);
@@ -232,6 +233,7 @@ export function Calendar(props: CalendarProps) {
 
     // An entry chip's keys: Enter opens its menu, [ and ] move it a day.
     const onEntryKey = (e: React.KeyboardEvent, entry: CalendarEntry, dayKey: string | null) => {
+        if (e.defaultPrevented) return; // a hotkey's (api/hotkeys.ts), a push-to-talk on Space among them
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setMenuFor({ entry, dayKey }); return; }
         if ((e.key === '[' || e.key === ']') && entry.movable) {
             e.preventDefault();
