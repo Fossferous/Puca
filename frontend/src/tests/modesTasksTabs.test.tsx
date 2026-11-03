@@ -26,6 +26,7 @@ const settle = async () => {
 
 const SERVER = 's1';
 let activeMode: number | null = null;
+let onlyHidden = false;
 const channel = (id: number, name: string, modeIds: number[], parent?: number) => ({
     id, name, channel_type: 0, server_id: SERVER, has_checklist: true, mode_ids: modeIds, parent_id: parent ?? null, my_permissions: 1 << 10,
 });
@@ -43,6 +44,7 @@ function installServer() {
         if (path === '/task-tab-prefs') return SAVED;
         if (path === '/servers') return [{ id: SERVER, name: 'S', owner_id: 1, active_mode_id: activeMode }];
         if (path === `/servers/${SERVER}/channels`) {
+            if (onlyHidden) return [channel(2, 'Game notes', [7])];
             return [
                 channel(1, 'Always', []),
                 channel(2, 'Game notes', [7]),
@@ -73,6 +75,7 @@ const hasTab = (name: string) => tabNames().some(t => t.includes(name));
 beforeEach(() => {
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
     activeMode = null;
+    onlyHidden = false;
     installServer();
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -96,6 +99,22 @@ describe('the Tasks tab bar and a server mode', () => {
         await mount();
         expect(hasTab('Game notes')).toBe(true);
         expect(hasTab('Under the collection')).toBe(true);
+    });
+
+    it('counts what it can show: All notes leaves out what the mode hides', async () => {
+        await mount();
+        await act(async () => { container.querySelector<HTMLElement>('.tasks-tab-filter')!.click(); });
+        await settle();
+        const count = document.querySelector('.tasks-filter-count');
+        expect(count?.textContent, 'two of the four').toBe('2');
+    });
+
+    it('with every checklist behind a mode that is off, it says so, and offers no filter that changes nothing', async () => {
+        onlyHidden = true;
+        await mount();
+        expect(container.textContent).toContain('belongs to a server mode that is off');
+        expect(container.textContent).not.toContain('Show all notes');
+        expect(container.querySelector('.tasks-tab-filter')).toBeNull();
     });
 
     it('a save of the order keeps a hidden tab in its slot', async () => {

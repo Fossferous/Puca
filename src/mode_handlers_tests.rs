@@ -1518,6 +1518,232 @@ mod db {
         assert_eq!(audit, "Clocktower off, 2 disconnected");
     }
 
+    /// A mode is not access control, so the resync's join check finds anyone a mode ended still
+    /// allowed, and would forget them: a cut LiveKit did not confirm is owed as a cut. And only
+    /// what it confirmed counts as disconnected, which leaves out someone who holds a mint
+    /// and never arrived.
+    #[tokio::test]
+    async fn a_cut_livekit_did_not_confirm_is_owed_again_and_not_counted() {
+        use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy};
+        use crate::sfu::Recheck;
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        no_env_proxy();
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town, f.lobby]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let room = crate::sfu::room_name_for_channel(f.town as i64);
+        let (socketless, in_room, reserved) = (format!("u{}#gone", f.mover), format!("u{}#here", f.plain), format!("u{}#soon", f.owner));
+        {
+            let mut usage = state.sfu_rooms.entry(room.clone()).or_default();
+            usage.participants.insert(socketless.clone(), std::time::Instant::now());
+            usage.participants.insert(in_room.clone(), std::time::Instant::now());
+            usage.reservations.insert(reserved.clone(), std::time::Instant::now());
+        }
+        let mut sock = Sock::in_room(&state, f.plain, f.town);
+        sock.drain();
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let (status, body) = crate::sfu::TEST_LIVEKIT.scope(base, switch(&state, &f, f.owner, None)).await;
+        let seen = asked(srv).await;
+        let owed = |identity: &str| state.sfu_rooms.get(&room).and_then(|u| u.recheck.get(identity).map(|m| m.what));
+        let (socketless_owes, in_room_owes) = (owed(&socketless), owed(&in_room));
+        teardown(&pool, &f).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(seen.len(), 3, "each was asked for");
+        assert_eq!(socketless_owes, Some(Recheck::Cut), "a socket that died");
+        assert_eq!(in_room_owes, Some(Recheck::Cut), "someone in the room, whose client may ignore being told");
+        assert_eq!(body["disconnected"], 1, "the one the room let go of, and neither LiveKit refused to confirm");
+    }
+
+    /// The media replays read a snapshot, and a broadcast reaches the joiner the moment they are
+    /// in the room. An await between the two lets a stop overtake its own start, for a tile
+    /// with nothing behind it. A stamp on the database is one, and it can also wait on a row lock.
+    #[test]
+    fn the_join_stamp_waits_until_the_replays_are_out() {
+        let ws = include_str!("ws.rs");
+        let stamp = ws.find("note_voice_join(").expect("the stamp");
+        for replay in ["// Send existing streams", "// Send existing screen shares", "// Send existing camera users"] {
+            assert!(ws.find(replay).expect(replay) < stamp, "{replay} comes first");
+        }
+    }
+
+    /// An idle member is moved into the AFK channel without having chosen anything, and the tick
+    /// does not count it: the stamp must not either, or that one move starts the mode's clock.
+    #[tokio::test]
+    async fn the_afk_channel_does_not_count_as_using_the_mode() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let afk = subchannel(&pool, &f.sid, "idle", 1, rooms).await;
+        let attic = subchannel(&pool, &f.sid, "attic", 1, rooms).await;
+        sqlx::query("UPDATE channels SET is_afk = true WHERE id = $1").bind(afk).execute(&pool).await.unwrap();
+        let mode = make(&state, &f, "Clocktower", &[rooms]).await;
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        let stamped = || async {
+            sqlx::query_scalar::<_, bool>("SELECT active_mode_occupied_at IS NOT NULL FROM servers WHERE id = $1")
+                .bind(&f.sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        note_voice_join(&state, afk as i64).await;
+        let after_afk = stamped().await;
+        note_voice_join(&state, attic as i64).await;
+        let after_attic = stamped().await;
+        teardown(&pool, &f).await;
+
+        assert!(!after_afk, "landing in AFK");
+        assert!(after_attic, "control: a room under the same collection");
+    }
+
+    /// A switch and a delete take the server's row and then the mode's. An edit that ticks Turn off
+    /// when empty writes both, so it has to take them in that order too, or the two can deadlock.
+    #[tokio::test]
+    async fn an_edit_takes_the_server_row_before_the_mode_row() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let mode = make(&state, &f, "Clocktower", &[f.town]).await;
+        // On and used, with the option off: ticking it is what writes the server's row.
+        assert_eq!(switch(&state, &f, f.owner, Some(mode)).await.0, StatusCode::OK);
+        note_voice_join(&state, f.town as i64).await;
+        assert_eq!(patch(&state, &f, f.owner, mode, json!({ "auto_off": false })).await, StatusCode::OK);
+        // Holding the server's row, as a delete does on its way to the mode's.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM servers WHERE id = $1 FOR UPDATE").bind(&f.sid).execute(&mut *holder).await.unwrap();
+        let probe = async {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            let free = sqlx::query("SELECT 1 FROM server_modes WHERE id = $1 FOR UPDATE NOWAIT").bind(mode).execute(&pool).await;
+            holder.commit().await.unwrap();
+            free.is_ok()
+        };
+        let (status, mode_row_was_free) = tokio::join!(patch(&state, &f, f.owner, mode, json!({ "auto_off": true })), probe);
+        teardown(&pool, &f).await;
+
+        assert_eq!(status, StatusCode::OK, "control: the edit went through once the row was let go");
+        assert!(mode_row_was_free, "waiting on the server's row, the edit must hold nothing a delete needs");
+    }
+
+    /// Every guard on these columns compares text, and the writers accept any spelling of a uuid.
+    #[tokio::test]
+    async fn an_avatar_a_sound_and_an_emoji_are_stored_under_their_one_spelling() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let avatar = upload(&pool, f.owner, "image/png", 1000).await;
+        let sound = upload(&pool, f.owner, "audio/ogg", 1000).await;
+        let emoji = upload(&pool, f.owner, "image/png", 1000).await;
+        let profile = |body: Value| {
+            let state = Arc::clone(&state);
+            let owner = f.owner;
+            async move {
+                crate::handlers::update_profile(State(state), Extension(claims(owner)), Json(serde_json::from_value(body).unwrap()))
+                    .await
+                    .into_response()
+                    .status()
+            }
+        };
+        let set = profile(json!({
+            "avatar_file_id": avatar.to_uppercase(),
+            "join_sound_file_id": sound.to_uppercase(),
+        }))
+        .await;
+        let (stored_avatar, stored_sound): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT avatar_file_id, join_sound_file_id FROM users WHERE id = $1")
+                .bind(f.owner as i32)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // The same file under another spelling is not a replacement: the in-use check finds it.
+        let again = profile(json!({ "avatar_file_id": avatar.to_uppercase(), "join_sound_file_id": sound.to_uppercase() })).await;
+        let avatar_kept = file_exists(&pool, &avatar).await;
+        let sound_kept = file_exists(&pool, &sound).await;
+        let made = crate::reaction_handlers::create_emoji(
+            State(Arc::clone(&state)),
+            Path(f.sid.clone()),
+            Extension(claims(f.owner)),
+            Json(serde_json::from_value(json!({ "name": "party", "file_id": emoji.to_uppercase() })).unwrap()),
+        )
+        .await
+        .into_response()
+        .status();
+        let guarded = crate::upload_handlers::file_is_referenced(&pool, &emoji).await.unwrap();
+        let _ = sqlx::query("DELETE FROM server_emojis WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL, join_sound_file_id = NULL WHERE id = $1").bind(f.owner as i32).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM uploaded_files WHERE uploader_id = ANY($1)").bind(f.users.clone()).execute(&pool).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(set, StatusCode::OK);
+        assert_eq!(stored_avatar.as_deref(), Some(avatar.as_str()));
+        assert_eq!(stored_sound.as_deref(), Some(sound.as_str()));
+        assert_eq!(again, StatusCode::OK);
+        assert!(avatar_kept, "the avatar was not reclaimed from under itself");
+        assert!(sound_kept, "nor the sound");
+        assert!(made.is_success(), "{made}");
+        assert!(guarded, "the in-use check finds the emoji");
+    }
+
+    /// The rows a writer stored before it knew better, and a value that is no uuid left alone.
+    #[tokio::test]
+    async fn the_migration_rewrites_file_ids_into_their_one_spelling() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let braced = format!("{{{}}}", id.to_uppercase().replace('-', ""));
+        sqlx::query("UPDATE users SET avatar_file_id = $1, join_sound_file_id = $2, leave_sound_file_id = 'no uuid at all' WHERE id = $3")
+            .bind(id.to_uppercase())
+            .bind(&braced)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/077_canonical_file_ids.sql")).execute(&pool).await.unwrap();
+        let row: (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT avatar_file_id, join_sound_file_id, leave_sound_file_id FROM users WHERE id = $1")
+                .bind(f.owner as i32)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        teardown(&pool, &f).await;
+
+        assert_eq!(row.0.as_deref(), Some(id.as_str()));
+        assert_eq!(row.1.as_deref(), Some(id.as_str()));
+        assert_eq!(row.2.as_deref(), Some("no uuid at all"));
+    }
+
+    /// A member denied a collection has no row of it, so a subchannel's own row has to say which
+    /// modes it goes with. And the collection keeps its own, whichever row was read first.
+    #[tokio::test]
+    async fn a_channel_row_says_which_modes_its_collection_is_in() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let attic = subchannel(&pool, &f.sid, "attic", 1, rooms).await;
+        let mode = make(&state, &f, "Clocktower", &[rooms]).await;
+        let listed = crate::channel_handlers::list_channels(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.owner)))
+            .await
+            .into_response();
+        let (_, rows) = read(listed).await;
+        teardown(&pool, &f).await;
+
+        let row = |id: i32| rows.as_array().unwrap().iter().find(|r| r["id"] == json!(id)).unwrap().clone();
+        assert_eq!(row(attic)["parent_mode_ids"], json!([mode]));
+        assert_eq!(row(attic)["mode_ids"], json!([]));
+        assert_eq!(row(rooms)["mode_ids"], json!([mode]));
+        assert_eq!(row(f.town)["parent_mode_ids"], json!([]));
+    }
+
     /// Someone being there, for the auto-off: a person in the room or a LiveKit session
     /// with no room entry is; a stream-only account (it can sit there unattended) is not,
     /// though the disconnect still reaches it.

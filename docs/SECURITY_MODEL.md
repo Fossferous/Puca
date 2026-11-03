@@ -118,8 +118,8 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Presence/online state, voice-channel join and leave events, and when each
   of your devices last went quiet or came back (idle/away presence, below)
 - A server's modes (docs/SERVER_MODES.md): their names and which channels they
-  list, which one is on, when it switched, and when its voice channels last had
-  someone in them
+  list, their background picture and accent colour, which one is on, who switched
+  it and when, and when its voice channels last had someone in them
 - For a personal note (Púca Notes, migration 065): whether it has text,
   pictures or a voice note and roughly how much (the sealed envelopes' sizes,
   which also hint at how many pictures), the encrypted uploads themselves as

@@ -242,11 +242,16 @@ export type NoteFilter =
  * `archive` shows only them; `search` looks everywhere — an archived hit is
  * still a hit, and the card says it is archived.
  */
+/** The cards a list, a count or a label speaks for. See `filterNotes`. */
+export function unhiddenNotes(all: NoteCard[]): NoteCard[] {
+    return all.filter(c => !c.hiddenByMode);
+}
+
 export function filterNotes(all: NoteCard[], filter: NoteFilter): NoteCard[] {
     // A checklist channel a mode hides leaves the grid and stays a card: search and
     // reminders still reach it, as a #mention reaches the channel, and the prune still
     // knows it exists.
-    const cards = filter.kind === 'search' ? all : all.filter(c => !c.hiddenByMode);
+    const cards = filter.kind === 'search' ? all : unhiddenNotes(all);
     switch (filter.kind) {
         case 'all':
             return cards.filter(c => !c.archived);

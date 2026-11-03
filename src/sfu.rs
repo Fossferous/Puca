@@ -2188,11 +2188,20 @@ fn mint_service_token(
 /// backend restart is known at all.
 pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, user_id: i64) -> Evicted {
     let Some(cfg) = sfu_config() else { return Evicted::default() };
-    evict_with(state, &cfg, channel_id, user_id).await
+    evict_with(state, &cfg, channel_id, user_id, Recheck::JoinCheck).await
 }
 
-/// The body of [`evict_user_from_channel`], with the configuration passed in.
-async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id: i64) -> Evicted {
+/// [`evict_user_from_channel`] for someone who is still allowed in the channel: a mode that
+/// ended (a mode is not access control). The resync's join check would find them allowed and
+/// forget the debt, so a removal LiveKit did not confirm is owed as a cut.
+pub async fn cut_user_from_channel(state: &Arc<AppState>, channel_id: i64, user_id: i64) -> Evicted {
+    let Some(cfg) = sfu_config() else { return Evicted::default() };
+    evict_with(state, &cfg, channel_id, user_id, Recheck::Cut).await
+}
+
+/// The body of [`evict_user_from_channel`], with the configuration passed in, and what
+/// a removal LiveKit did not confirm leaves owed.
+async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id: i64, unconfirmed: Recheck) -> Evicted {
     let room = room_name_for_channel(channel_id);
     // The INTENT, before the map is read: a resync whose snapshot is in flight
     // may be about to add a session of this user that the map does not have
@@ -2221,7 +2230,7 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
         // checks these sessions again, and cuts the ones still refused. Owed,
         // not counted: this is not a resync pass (see `owe`).
         let left: Vec<(String, String)> = identities.iter().map(|i| (room.clone(), i.clone())).collect();
-        owe(state, &left, Recheck::JoinCheck);
+        owe(state, &left, unconfirmed);
     }
     out
 }
@@ -2778,7 +2787,7 @@ async fn reauth_join(state: &AppState, cfg: &SfuConfig, room: &str, identity: &s
         ChannelPermAccess::Allowed { .. } => "VIEW_CHANNEL or CONNECT denied",
     };
     tracing::warn!("SFU join re-auth: evicting user {} from sfu channel {} ({})", uid, cid, reason);
-    evict_with(state, cfg, cid, uid).await;
+    evict_with(state, cfg, cid, uid, Recheck::JoinCheck).await;
 }
 
 /// Apply one authenticated LiveKit webhook event to `sfu_rooms`. Every arm
@@ -4177,7 +4186,7 @@ pub(crate) mod resync_tests {
             None,
         )
         .await;
-        let out = evict_with(&state, &cfg_for(&base), 7, 5).await;
+        let out = evict_with(&state, &cfg_for(&base), 7, 5, Recheck::JoinCheck).await;
         assert_eq!(out, Evicted { tried: 1, removed: 1 });
         let seen = asked(srv).await;
         assert_eq!(seen[0].claims["video"]["roomAdmin"], true, "a verified admin token");
@@ -4303,7 +4312,7 @@ pub(crate) mod resync_tests {
         let state = test_state();
         *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
         // No stand-in: with nothing known there is nothing to call.
-        let out = evict_with(&state, &cfg_for("http://127.0.0.1:9"), 7, 5).await;
+        let out = evict_with(&state, &cfg_for("http://127.0.0.1:9"), 7, 5, Recheck::JoinCheck).await;
         assert_eq!(out, Evicted::default());
         let g = state.sfu_resync_journal.lock().unwrap();
         assert!(g.as_ref().unwrap().evict_intents.contains(&("sfu_7".to_string(), 5)), "the case the intent exists for");
@@ -4555,7 +4564,7 @@ pub(crate) mod resync_tests {
         )
         .await;
         // What a kick, a ban or the join webhook's re-auth calls.
-        let out = evict_with(&state, &cfg_for(&base), 7, 5).await;
+        let out = evict_with(&state, &cfg_for(&base), 7, 5, Recheck::JoinCheck).await;
         asked(srv).await;
         assert_eq!(out, Evicted { tried: 1, removed: 0 });
         assert_eq!(
@@ -4613,7 +4622,7 @@ pub(crate) mod resync_tests {
             .map(|_| ("/twirp/livekit.RoomService/RemoveParticipant", 503, r#"{"code":"unavailable"}"#.to_string()))
             .collect();
         let (base, srv) = livekit_stand_in(refused, None).await;
-        assert_eq!(evict_with(&state, &cfg_for(&base), 7, 5).await, Evicted { tried: 3, removed: 0 });
+        assert_eq!(evict_with(&state, &cfg_for(&base), 7, 5, Recheck::JoinCheck).await, Evicted { tried: 3, removed: 0 });
         asked(srv).await;
         let raised = Some(Mark { what: Recheck::JoinCheck, passes: 0 });
         assert_eq!(marks(), [raised, want[1], want[2]], "a failed kick owes, and counts nothing");

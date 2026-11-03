@@ -631,6 +631,7 @@ export function ServerSettingsModal({
                                 serverId={serverId}
                                 serverName={serverName}
                                 isOwner={isOwner}
+                                modesSupported={modesSupported}
                             />
                         </div>
                     )}

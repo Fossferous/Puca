@@ -56,6 +56,8 @@ vi.mock('../api/servers', async (importOriginal) => ({
         { id: 6, name: 'Rooms', channel_type: 2, server_id: SERVER, mode_ids: [99] },
         { id: 7, name: 'Room A', channel_type: 0, server_id: SERVER, parent_id: 6, mode_ids: [] },
         { id: 8, name: 'Voice Under', channel_type: 1, server_id: SERVER, parent_id: 6, mode_ids: [] },
+        { id: 10, name: 'Hall', channel_type: 2, server_id: SERVER, mode_ids: [98] },
+        { id: 11, name: 'Stranded', channel_type: 1, server_id: SERVER, parent_id: 10, mode_ids: [99] },
     ],
     listRoles: async () => [{ ...MEMBER, permissions: roleBits }],
     listMembersWithRoles: async () => (signedIn === null ? [] : [{ id: signedIn, roles: [{ permissions: myBits }] }]),
@@ -385,6 +387,18 @@ describe('Server Settings, Modes', () => {
         expect(rowOf('Room A').querySelector('.mode-channel-parent')?.textContent).toBe('with Rooms');
     });
 
+    it('says when a channel is listed under nothing, and does not offer it as the main channel', async () => {
+        // Ticked in this card too, which would otherwise offer it.
+        stored = modes({ modes: [{ ...clocktower, channel_ids: [1, 2, 4, 11] }] });
+        await render(<ModesSettings serverId={SERVER} />);
+        const rowOf = (name: string) => [...container.querySelectorAll('label.mode-channel')]
+            .find(l => l.querySelector('.mode-channel-name')?.textContent === name)!;
+        expect(rowOf('Stranded').textContent).toContain('not listed: it and Hall are in different modes');
+        expect(rowOf('Voice Under').textContent, 'control: an ordinary subchannel').not.toContain('not listed');
+        const options = [...container.querySelectorAll('select option')].map(o => o.textContent);
+        expect(options).not.toContain('Stranded');
+    });
+
     it('offers a voice room under a ticked collection as the main channel', async () => {
         await render(<ModesSettings serverId={SERVER} />);
         const options = () => [...container.querySelectorAll('select option')].map(o => o.textContent);
@@ -427,6 +441,15 @@ describe('the role editor', () => {
         });
         for (let i = 0; i < 4; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
     };
+
+    it('offers no Switch Modes row on a backend with no modes, where it would be a right to nothing', async () => {
+        await act(async () => {
+            root.render(<RoleSettingsModal isOpen onClose={() => {}} serverId={SERVER} serverName="S" isOwner embedded modesSupported={false} />);
+        });
+        for (let i = 0; i < 4; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        expect(row('Create Invites'), 'control: the editor is up').toBeTruthy();
+        expect(row('Switch Modes')).toBeFalsy();
+    });
 
     it('someone with Manage Roles and not Switch Modes cannot tick it, because the server would ignore it', async () => {
         await openAsMember(PERMISSIONS.MANAGE_ROLES);

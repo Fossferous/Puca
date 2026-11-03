@@ -8,31 +8,36 @@
  */
 import { describe, it, expect } from 'vitest';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pictureStyle, type PictureTheme } from '../api/modeLook';
+import { DETAIL_KEEP_MIN, DETAIL_TARGET, detailToKeep, measureDetail, softenDetail } from '../api/serverModes';
 import {
     ACCENT_MIN_LABEL_CONTRAST,
     ACCENT_MIN_SURFACE_CONTRAST,
-    SCRIM_MAX,
-    SCRIM_MIN,
     TEXT_MIN_CONTRAST,
     accentTokens,
     adoptModeFrame,
     applyActiveMode,
     channelInMode,
     channelsEndedBySwitch,
-    composite,
     contrast,
     listedNow,
+    luminance,
+    neverListed,
     notificationNav,
     parseCssColor,
     parseServerModeChanged,
     parseServerModesEdited,
-    scrimAlpha,
+    pictureLimit,
+    pictureRoleColour,
+    pictureTextColours,
+    planTone,
     shownByMode,
     shownWithParent,
-    textFloor,
+    toneMap,
     usableHome,
+    type PictureLimit,
     type Rgb,
     type ServerMode,
 } from '../api/serverModes';
@@ -133,6 +138,46 @@ describe('what a mode hides', () => {
         it('an open collection keeps its text subchannels, not its voice rooms or one another mode hides', () => {
             expect(listedOf({ openChannelId: collection.id })).toEqual([collection.id, s1.id, s2.id]);
         });
+    });
+});
+
+describe('a collection the reader has no row of', () => {
+    // Denied the collection: its row is withheld, and a child does not inherit VIEW.
+    const voice = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [], parent_mode_ids: [7] };
+
+    it('still takes its subchannel with it, from what the row says', () => {
+        expect(shownWithParent(voice, [voice], null)).toBe(false);
+        expect(shownWithParent(voice, [voice], 8)).toBe(false);
+        expect(shownWithParent(voice, [voice], 7)).toBe(true);
+        expect(channelInMode(voice, [voice], 7)).toBe(true);
+        expect(channelInMode(voice, [voice], 8)).toBe(false);
+    });
+
+    it('agrees with the row when there is one, and with an older server that says nothing', () => {
+        const parent = { id: 1, channel_type: 2, mode_ids: [7] };
+        const old = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [] };
+        expect(shownWithParent(old, [parent, old], null), 'the collection\'s own row').toBe(false);
+        expect(shownWithParent(old, [old], null), 'nothing to go on: listed, as before').toBe(true);
+    });
+});
+
+describe('a channel listed under nothing', () => {
+    const parent = { id: 1, channel_type: 2, mode_ids: [7] };
+
+    it('is one ticked in one mode while its collection is in another', () => {
+        const sub = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [8] };
+        expect(neverListed(sub, [parent, sub])).toBe(true);
+        for (const on of [null, 7, 8]) expect(shownWithParent(sub, [parent, sub], on), `with ${on} on`).toBe(false);
+    });
+
+    it('CONTROLS: in the same mode, in none, or with no collection, it can be listed', () => {
+        const same = { id: 2, parent_id: 1, channel_type: 1, mode_ids: [7] };
+        const none = { id: 3, parent_id: 1, channel_type: 1, mode_ids: [] };
+        const top = { id: 4, channel_type: 1, mode_ids: [8] };
+        expect(neverListed(same, [parent, same])).toBe(false);
+        expect(shownWithParent(same, [parent, same], 7)).toBe(true);
+        expect(neverListed(none, [parent, none])).toBe(false);
+        expect(neverListed(top, [parent, top])).toBe(false);
     });
 });
 
@@ -424,61 +469,202 @@ describe('an accent on eight themes', () => {
 });
 
 describe('a background on eight themes', () => {
-    const BLACK: Rgb = [0, 0, 0];
     const WHITE: Rgb = [255, 255, 255];
-    const GREY: Rgb = [128, 128, 128];
 
-    /** The reader's text against the picture's worst point, under the veil. */
-    const worst = (extremes: readonly Rgb[], surface: Rgb, text: Rgb, alpha: number) =>
-        Math.min(...extremes.map(p => contrast(text, composite(surface, p, alpha))));
+    /** Every colour there is, coarsely. */
+    const everyColour = () => {
+        const out: number[] = [];
+        for (let r = 0; r <= 255; r += 17) for (let g = 0; g <= 255; g += 17) for (let b = 0; b <= 255; b += 17) out.push(r, g, b, 255);
+        return new Uint8ClampedArray(out);
+    };
+    const solid = ([r, g, b]: Rgb, n = 64) => {
+        const out = new Uint8ClampedArray(n * 4);
+        for (let i = 0; i < n; i++) out.set([r, g, b, 255], i * 4);
+        return out;
+    };
+    /** Mostly one colour with a small bright part, so that the exposure answers to the rest and
+     *  the bright part goes to the limit. A solid picture only ever reaches where it is exposed to. */
+    const withSpark = (rest: Rgb, spark: Rgb) => {
+        const out = solid(rest, 100);
+        for (let i = 0; i < 10; i++) out.set([spark[0], spark[1], spark[2], 255], i * 4);
+        return out;
+    };
+    const PICTURES: Record<string, () => Uint8ClampedArray> = {
+        'every colour': everyColour,
+        'a white spark on grey': () => withSpark([90, 90, 90], WHITE),
+        'a black spark on grey': () => withSpark([200, 200, 200], [0, 0, 0]),
+        white: () => solid(WHITE),
+        black: () => solid([0, 0, 0]),
+        grey: () => solid([128, 128, 128]),
+        'pure red': () => solid([255, 0, 0]),
+        'pure green': () => solid([0, 255, 0]),
+        'pure blue': () => solid([0, 0, 255]),
+    };
+    const mapped = (rgba: Uint8ClampedArray, limit: PictureLimit) => {
+        const out = rgba.slice();
+        toneMap(out, planTone(out, limit));
+        return out;
+    };
+    const pixels = (rgba: Uint8ClampedArray) => {
+        const out: Rgb[] = [];
+        for (let i = 0; i < rgba.length; i += 4) out.push([rgba[i], rgba[i + 1], rgba[i + 2]]);
+        return out;
+    };
+    /** The worst contrast of any colour over any pixel. */
+    const worst = (rgba: Uint8ClampedArray, colours: readonly Rgb[]) =>
+        Math.min(...pixels(rgba).map(p => Math.min(...colours.map(c => contrast(c, p)))));
+    const tokensOf = ([normal, muted, link]: Rgb[]): Record<string, Rgb> => ({
+        '--text-normal': normal,
+        '--text-muted': muted,
+        '--text-faint': muted,
+        '--text-link': link,
+        '--text-danger': [242, 63, 67],
+        '--text-warning': [240, 178, 50],
+        '--text-positive': [35, 165, 90],
+    });
+    const reading = (theme: { primary: Rgb; texts: Rgb[] }) => {
+        const limit = pictureLimit(theme.primary);
+        const text = pictureTextColours(tokensOf(theme.texts), limit);
+        return { limit, colours: Object.values(text).map(c => parseCssColor(c)!) };
+    };
 
-    it('keeps every text colour readable at the picture\'s lightest and darkest points', () => {
+    it('holds every text colour to AA over every pixel the curve can make, on every theme', () => {
         for (const [name, theme] of Object.entries(themes())) {
-            for (const extremes of [[BLACK, WHITE], [WHITE], [BLACK], [GREY], [[20, 0, 40], [255, 240, 0]]] as Rgb[][]) {
-                const alpha = scrimAlpha(extremes, theme.primary, theme.texts);
-                for (const text of theme.texts) {
-                    expect(worst(extremes, theme.primary, text, alpha), `${name} ${JSON.stringify(extremes)} a=${alpha}`)
-                        .toBeGreaterThanOrEqual(textFloor(text, theme.primary));
-                }
+            const { limit, colours } = reading(theme);
+            for (const [what, picture] of Object.entries(PICTURES)) {
+                expect(worst(mapped(picture(), limit), colours), `${what} on ${name}`).toBeGreaterThanOrEqual(TEXT_MIN_CONTRAST);
             }
         }
     });
 
-    it('dims no further than the picture needs: a dark picture shows more on a dark theme, and on a light one the reverse', () => {
+    it('fails a curve that goes too far: the negative control', () => {
         const { dark, light } = themes();
-        const nightOnDark = scrimAlpha([[5, 5, 20], [40, 40, 70]], dark.primary, dark.texts);
-        const whiteOnDark = scrimAlpha([[200, 200, 200], [255, 255, 255]], dark.primary, dark.texts);
-        expect(nightOnDark).toBe(SCRIM_MIN);
-        expect(whiteOnDark).toBeGreaterThan(nightOnDark + 0.1);
-        const nightOnLight = scrimAlpha([[5, 5, 20], [40, 40, 70]], light.primary, light.texts);
-        const whiteOnLight = scrimAlpha([[250, 250, 250], [255, 255, 255]], light.primary, light.texts);
-        expect(whiteOnLight).toBe(SCRIM_MIN);
-        expect(nightOnLight).toBeGreaterThan(whiteOnLight + 0.1);
+        const onDark = reading(dark);
+        const tooBright = mapped(withSpark([90, 90, 90], WHITE), { ...onDark.limit, luminance: onDark.limit.luminance * 1.6 });
+        expect(worst(tooBright, onDark.colours)).toBeLessThan(TEXT_MIN_CONTRAST);
+        const onLight = reading(light);
+        const tooDark = mapped(withSpark([200, 200, 200], [0, 0, 0]), { ...onLight.limit, luminance: onLight.limit.luminance / 1.6 });
+        expect(worst(tooDark, onLight.colours)).toBeLessThan(TEXT_MIN_CONTRAST);
     });
 
-    it('holds text that has AA on its theme to AA, and text that does not to within a tenth of what it has', () => {
-        const { dark, light } = themes();
-        const muted = dark.texts[1];
-        expect(contrast(muted, dark.primary)).toBeGreaterThan(TEXT_MIN_CONTRAST);
-        expect(textFloor(muted, dark.primary)).toBe(TEXT_MIN_CONTRAST);
-        const link = light.texts[2];
-        const own = contrast(link, light.primary);
-        expect(own, 'the light theme\'s links, on plain white').toBeLessThan(TEXT_MIN_CONTRAST);
-        expect(textFloor(link, light.primary)).toBeCloseTo(own * 0.9, 5);
-    });
-
-    it('fails a fixed veil on a bright picture: the negative control', () => {
+    it('fails the veil this replaced at the most it could show, and the theme\'s own text over the curve: negative controls', () => {
         const { dark } = themes();
-        const muted = dark.texts[1];
-        expect(worst([WHITE], dark.primary, muted, SCRIM_MIN)).toBeLessThan(TEXT_MIN_CONTRAST);
+        const veil = (over: Rgb, under: Rgb, a: number): Rgb => [0, 1, 2].map(i => over[i] * a + under[i] * (1 - a)) as unknown as Rgb;
+        expect(contrast(dark.texts[1], veil(dark.primary, WHITE, 0.6))).toBeLessThan(TEXT_MIN_CONTRAST);
+        expect(worst(mapped(withSpark([90, 90, 90], WHITE), pictureLimit(dark.primary)), [dark.texts[1]])).toBeLessThan(TEXT_MIN_CONTRAST);
     });
 
-    it('stays inside its bounds', () => {
-        for (const theme of Object.values(themes())) {
-            const a = scrimAlpha([BLACK, WHITE], theme.primary, theme.texts);
-            expect(a).toBeGreaterThanOrEqual(SCRIM_MIN);
-            expect(a).toBeLessThanOrEqual(SCRIM_MAX);
+    it('moves a text colour only as far as it must, and keeps its hue', () => {
+        const limit = pictureLimit(themes().dark.primary);
+        const moved = pictureTextColours({ '--text-link': [0, 168, 252], '--text-muted': WHITE }, limit);
+        expect(moved['--text-muted'], 'already holds').toBe('#ffffff');
+        const link = parseCssColor(moved['--text-link'])!;
+        expect(luminance(link)).toBeGreaterThan(luminance([0, 168, 252]));
+        expect(link[2], 'still blue').toBeGreaterThan(link[0]);
+    });
+
+    it('moves a role\'s colour the same way, on a dark theme and a light one, and leaves what it cannot read', () => {
+        const { dark, light } = themes();
+        const gold = '#f0b232';
+        for (const theme of [dark, light]) {
+            const limit = pictureLimit(theme.primary);
+            const moved = parseCssColor(pictureRoleColour(gold, limit))!;
+            expect(worst(mapped(withSpark([200, 200, 200], WHITE), limit), [moved]), 'it holds').toBeGreaterThanOrEqual(TEXT_MIN_CONTRAST);
+            expect(moved[0], 'still gold').toBeGreaterThanOrEqual(moved[2]);
         }
+        expect(pictureRoleColour('not a colour', pictureLimit(dark.primary))).toBe('not a colour');
+    });
+
+    const hueOf = ([r, g, b]: Rgb) => {
+        const max = Math.max(r, g, b);
+        const d = max - Math.min(r, g, b);
+        if (d === 0) return 0;
+        const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        return (h * 60 + 360) % 360;
+    };
+    const satOf = ([r, g, b]: Rgb) => {
+        const max = Math.max(r, g, b);
+        return max === 0 ? 0 : (max - Math.min(r, g, b)) / max;
+    };
+
+    it('keeps hue and colour on a dark theme: nothing goes grey', () => {
+        const limit = pictureLimit(themes().dark.primary);
+        const before = pixels(everyColour());
+        const after = pixels(mapped(everyColour(), limit));
+        let compared = 0;
+        before.forEach((p, i) => {
+            const q = after[i];
+            // Too few levels left to name a hue in, or a colourless one.
+            if (Math.max(...q) < 32 || Math.max(...p) - Math.min(...p) < 34) return;
+            compared++;
+            const off = Math.abs(hueOf(p) - hueOf(q));
+            expect(Math.min(off, 360 - off), `${p} -> ${q}`).toBeLessThan(12);
+            expect(satOf(q), `${p} -> ${q}`).toBeGreaterThan(satOf(p) * 0.55);
+        });
+        expect(compared, 'control: this looked at something').toBeGreaterThan(500);
+    });
+
+    it('keeps the order of what is brighter, so shapes stay shapes', () => {
+        for (const theme of Object.values(themes())) {
+            const limit = pictureLimit(theme.primary);
+            const ramp = new Uint8ClampedArray(256 * 4);
+            for (let v = 0; v < 256; v++) ramp.set([v, v, v, 255], v * 4);
+            const out = pixels(mapped(ramp, limit)).map(luminance);
+            for (let v = 1; v < 256; v++) expect(out[v], `step ${v}`).toBeGreaterThanOrEqual(out[v - 1] - 0.002);
+            expect(out[255] - out[0], 'and something is left of the ramp').toBeGreaterThan(0.08);
+        }
+    });
+
+    it('a bright moon costs only the moon', () => {
+        const limit = pictureLimit(themes().dark.primary);
+        const sky: Rgb = [20, 24, 70];
+        const picture = solid(sky, 1000);
+        for (let i = 0; i < 40; i++) picture.set([255, 255, 240, 255], i * 4);
+        const plan = planTone(picture, limit);
+        expect(plan.gain, 'the sky is not dimmed for it').toBeGreaterThanOrEqual(1);
+        const out = pixels(mapped(picture, limit));
+        expect(luminance(out[500])).toBeGreaterThanOrEqual(luminance(sky) * 0.98);
+        // To within what eight bits can say.
+        expect(luminance(out[0]), 'the moon itself is what gives').toBeLessThanOrEqual(limit.luminance * 1.02);
+    });
+
+    it('a bright picture is exposed down, not flattened against the limit', () => {
+        const limit = pictureLimit(themes().dark.primary);
+        const picture = new Uint8ClampedArray(4 * 1000);
+        for (let i = 0; i < 1000; i++) picture.set(i % 3 === 0 ? [240, 240, 240, 255] : i % 3 === 1 ? [160, 190, 230, 255] : [90, 150, 70, 255], i * 4);
+        const [cloud, sky, grass] = pixels(mapped(picture, limit)).map(luminance);
+        expect(cloud).toBeGreaterThan(sky * 1.1);
+        expect(sky).toBeGreaterThan(grass * 1.3);
+    });
+
+    it('takes a picture in bands to the same result as whole: how a phone is spared', () => {
+        const limit = pictureLimit(themes().dark.primary);
+        const whole = mapped(everyColour(), limit);
+        const banded = everyColour();
+        const plan = planTone(banded, limit);
+        for (let at = 0; at < banded.length; at += 4 * 97) toneMap(banded.subarray(at, at + 4 * 97), plan);
+        expect(banded).toEqual(whole);
+    });
+
+    it('never changes anyone\'s theme: Settings is the one writer of data-theme, and nothing follows the time of day or the OS', () => {
+        const root = resolve(__dirname, '..');
+        const writers: string[] = [];
+        const followers: string[] = [];
+        const walk = (dir: string) => {
+            for (const e of readdirSync(dir, { withFileTypes: true })) {
+                const full = resolve(dir, e.name);
+                if (e.isDirectory()) {
+                    if (e.name !== 'tests') walk(full);
+                } else if (/\.(ts|tsx)$/.test(e.name)) {
+                    const text = readFileSync(full, 'utf8');
+                    if (/setAttribute\(\s*['"]data-theme['"]|dataset\.theme\s*=/.test(text)) writers.push(e.name);
+                    if (/prefers-color-scheme/.test(text)) followers.push(e.name);
+                }
+            }
+        };
+        walk(root);
+        expect(writers).toEqual(['settingsStore.ts']);
+        expect(followers).toEqual([]);
     });
 });
 
@@ -495,5 +681,154 @@ describe('reading colours', () => {
         expect(parseCssColor('red')).toBeNull();
         expect(parseCssColor('#12')).toBeNull();
         expect(parseCssColor('')).toBeNull();
+    });
+});
+
+describe('what a picture sets on the chat', () => {
+    const theme: PictureTheme = {
+        limit: { kind: 'ceiling', luminance: 0.125 },
+        text: { '--text-normal': 'rgb(1, 1, 1)', '--text-warning': 'rgb(2, 2, 2)', '--text-danger': 'rgb(3, 3, 3)', '--mode-brand-text': 'rgb(4, 4, 4)' },
+        composer: 'composer', hover: 'hover', active: 'active', mention: 'mention', mentionHover: 'mention hover', halo: 'halo',
+    };
+
+    it('gives the rules in Chat.css what they ask for', () => {
+        const style = pictureStyle('data:image/jpeg;base64,AAAA', theme);
+        expect(style['--mode-brand-text']).toBe('rgb(4, 4, 4)');
+        expect(style['--mode-reply-bg']).toBe('hover');
+        expect(style['--mode-reply-hover-bg']).toBe('active');
+        expect(style['--mode-mention-bg']).toBe('mention');
+        expect(style['--mode-chip-bg']).toBe('var(--bg-secondary)');
+        expect(style['--mode-warning-text']).toBe('rgb(2, 2, 2)');
+        expect(style['--mode-danger-text']).toBe('rgb(3, 3, 3)');
+        expect(style.color).toBe('rgb(1, 1, 1)');
+    });
+});
+
+describe('a picture that is busy at the size of a word', () => {
+    const W = 400;
+    const H = 240;
+    /** A picture from a function of x and y. */
+    const drawn = (at: (x: number, y: number) => [number, number, number]) => {
+        const out = new Uint8ClampedArray(4 * W * H);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+            const [r, g, b] = at(x, y);
+            const i = 4 * (y * W + x);
+            out[i] = r; out[i + 1] = g; out[i + 2] = b; out[i + 3] = 255;
+        }
+        return out;
+    };
+    // Squares of about half a word, each its own colour and lightness: confetti.
+    const paper = (x: number, y: number) => (Math.floor(x / 4) * 73 + Math.floor(y / 4) * 151) % 256;
+    const confetti = () => drawn((x, y) => { const v = paper(x, y); return [v, (v * 3) % 256, 255 - v]; });
+    // One hard edge across a calm picture: a moon, a horizon.
+    const horizon = () => drawn((_, y) => y < 122 ? [20, 30, 60] : [70, 90, 60]);
+    const lightness = (px: Uint8ClampedArray, x: number, y: number) => {
+        const i = 4 * (y * W + x);
+        return 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+    };
+
+    it('tells them apart: flat is nothing, a horizon is calm, confetti is busy', () => {
+        expect(measureDetail(drawn(() => [90, 90, 90]), W, H).detail).toBe(0);
+        expect(measureDetail(horizon(), W, H).detail).toBeLessThan(DETAIL_TARGET);
+        expect(measureDetail(confetti(), W, H).detail).toBeGreaterThan(DETAIL_TARGET * 2);
+    });
+
+    it('leaves a calm picture alone, to the byte', () => {
+        const px = horizon();
+        const shape = measureDetail(px, W, H);
+        expect(detailToKeep(shape.detail)).toBe(1);
+        const before = px.slice();
+        softenDetail(px, W, 0, shape, detailToKeep(shape.detail));
+        expect(px).toEqual(before);
+    });
+
+    it('keeps less the busier it is, and never less than the floor', () => {
+        expect(detailToKeep(DETAIL_TARGET)).toBe(1);
+        expect(detailToKeep(DETAIL_TARGET * 2)).toBeCloseTo(0.5);
+        expect(detailToKeep(1)).toBe(DETAIL_KEEP_MIN);
+    });
+
+    it('brings the busyness down towards the target', () => {
+        const px = confetti();
+        const shape = measureDetail(px, W, H);
+        const keep = detailToKeep(shape.detail);
+        expect(keep, 'control: this one is past what it may lose').toBe(DETAIL_KEEP_MIN);
+        softenDetail(px, W, 0, shape, keep);
+        const after = measureDetail(px, W, H).detail;
+        expect(after).toBeLessThan(shape.detail * 0.45);
+        expect(after).toBeGreaterThan(0);
+    });
+
+    it('and a picture only somewhat busy reaches the target', () => {
+        const busy = (DETAIL_TARGET * 2) * 255 * 2;
+        const px = drawn((x, y) => { const v = 120 + (paper(x, y) % 2 ? busy / 2 : -busy / 2); return [v, v, v]; });
+        const shape = measureDetail(px, W, H);
+        const keep = detailToKeep(shape.detail);
+        expect(keep, 'control: it does need softening, and not all the way').toBeLessThan(1);
+        expect(keep).toBeGreaterThan(DETAIL_KEEP_MIN);
+        softenDetail(px, W, 0, shape, keep);
+        expect(measureDetail(px, W, H).detail).toBeLessThan(DETAIL_TARGET * 1.25);
+    });
+
+    it('in bands, as a phone does it, it comes out the same', () => {
+        const whole = confetti();
+        const shape = measureDetail(whole, W, H);
+        const keep = detailToKeep(shape.detail);
+        const banded = whole.slice();
+        softenDetail(whole, W, 0, shape, keep);
+        const band = 4 * W * 50;
+        for (let at = 0; at < banded.length; at += band) softenDetail(banded.subarray(at, at + band), W, at / (4 * W), shape, keep);
+        expect(banded).toEqual(whole);
+    });
+
+    it('moves lightness and keeps the colour', () => {
+        // Mid-bright pixels that only need scaling, so nothing here clips or mixes.
+        const px = drawn((x, y) => (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? [180, 90, 60] : [90, 45, 30]);
+        const shape = measureDetail(px, W, H);
+        softenDetail(px, W, 0, shape, 0.5);
+        const lin = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        for (const [x, y] of [[100, 100], [104, 100], [200, 60], [204, 60]]) {
+            const i = 4 * (y * W + x);
+            const was = (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? lin(180) / lin(90) : lin(90) / lin(45);
+            expect(lin(px[i]) / lin(px[i + 1]), `the same colour at ${x},${y}`).toBeCloseTo(was, 0);
+            expect(px[i + 1]).toBeGreaterThan(px[i + 2]);
+        }
+        expect(Math.abs(lightness(px, 100, 100) - lightness(px, 104, 100))).toBeLessThan(0.5 * Math.abs(143 - 72) + 3);
+    });
+
+    it('stays under a dark theme\'s ceiling and over a light theme\'s floor', () => {
+        const lin = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        const luminance = (px: Uint8ClampedArray, i: number) => 0.2126 * lin(px[i]) + 0.7152 * lin(px[i + 1]) + 0.0722 * lin(px[i + 2]);
+        const range = (px: Uint8ClampedArray) => {
+            let [low, high] = [1, 0];
+            for (let i = 0; i < px.length; i += 4) {
+                const y = luminance(px, i);
+                if (y < low) low = y;
+                if (y > high) high = y;
+            }
+            return [low, high];
+        };
+        const ceiling = drawn((x, y) => { const v = paper(x, y) % 100; return [v, v, v]; });
+        const under = range(ceiling)[1];
+        const shape = measureDetail(ceiling, W, H);
+        softenDetail(ceiling, W, 0, shape, 0.3);
+        expect(range(ceiling)[1]).toBeLessThanOrEqual(under + 0.002);
+        expect(range(ceiling)[0], 'control: it did move the dark ones up').toBeGreaterThan(0);
+
+        const floor = drawn((x, y) => { const v = 150 + paper(x, y) % 100; return [v, v, v]; });
+        const over = range(floor)[0];
+        const lightShape = measureDetail(floor, W, H);
+        softenDetail(floor, W, 0, lightShape, 0.3);
+        expect(range(floor)[0]).toBeGreaterThanOrEqual(over - 0.002);
+        expect(range(floor)[1], 'control: it did bring the bright ones down').toBeLessThan(0.9);
+    });
+
+    it('does not turn the noise in the blacks into coloured speckle', () => {
+        // A black patch with a JPEG's stray chroma beside a bright one: pulled up by the mean.
+        const px = drawn((x, y) => (Math.floor(x / 4) + Math.floor(y / 4)) % 2 ? [3, 0, 0] : [200, 200, 200]);
+        const shape = measureDetail(px, W, H);
+        softenDetail(px, W, 0, shape, 0.3);
+        const dark = 4 * (0 * W + 4);
+        expect(px[dark] - px[dark + 1], 'nearly grey').toBeLessThan(24);
     });
 });

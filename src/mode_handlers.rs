@@ -677,6 +677,11 @@ pub async fn update_mode(
         Ok(tx) => tx,
         Err(e) => return failed(e),
     };
+    // Locked in the order a switch and a delete take them, server first: ticking Turn off
+    // when empty writes that row below, and the other way round the two can deadlock.
+    if let Err(e) = sqlx::query("SELECT 1 FROM servers WHERE id = $1 FOR UPDATE").bind(&server_id).execute(&mut *tx).await {
+        return failed(e);
+    }
     let current: Option<(String, Option<String>, Option<String>, Option<i32>, bool)> = match sqlx::query_as(
         "SELECT name, background_file_id, accent_color, home_channel_id, auto_off \
          FROM server_modes WHERE id = $1 AND server_id = $2 FOR UPDATE",
@@ -924,10 +929,11 @@ async fn settle(state: &Arc<AppState>, switch: Switch) -> HashMap<i32, usize> {
         })
         .collect();
     let cuts = sfu_only.into_iter().map(|(channel, user)| async move {
-        (channel, crate::sfu::evict_user_from_channel(state, channel as i64, user).await)
+        (channel, crate::sfu::cut_user_from_channel(state, channel as i64, user).await)
     });
+    // Only what LiveKit confirmed: this can also be someone who holds a mint and never arrived.
     for (channel, out) in futures::future::join_all(cuts).await {
-        if out.tried > 0 {
+        if out.removed > 0 {
             *gone.entry(channel).or_default() += 1;
         }
     }
@@ -1180,6 +1186,7 @@ pub async fn note_voice_join(state: &AppState, channel_id: i64) {
         "UPDATE servers s SET active_mode_occupied_at = NOW() \
          FROM channels c JOIN server_modes m ON m.server_id = c.server_id \
          WHERE c.id = $1 AND s.id = c.server_id AND m.id = s.active_mode_id \
+           AND NOT COALESCE(c.is_afk, false) \
            AND (m.home_channel_id = c.id \
                 OR EXISTS (SELECT 1 FROM server_mode_channels mc WHERE mc.mode_id = m.id AND mc.channel_id IN (c.id, c.parent_id)))",
     )

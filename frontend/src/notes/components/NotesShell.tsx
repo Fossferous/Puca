@@ -33,7 +33,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { PlusIcon, WarningIcon } from '../../components/Icons';
 import {
     type NoteCard, type NoteFilter, type NoteRef,
-    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, isLabelRoute, labelFromPath, moveNoteInOrder,
+    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, unhiddenNotes, groupReminders, isLabelRoute, labelFromPath, moveNoteInOrder,
     reminderBadgeCount, sortNoteCards, splitPinned,
 } from '../model/notesModel';
 import {
@@ -246,7 +246,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     const cardsByKey = useMemo(() => new Map(cards.map(c => [c.key, c])), [cards]);
     const visible = useMemo(() => sortNoteCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
-    const labels = useMemo(() => allLabels(cards), [cards]);
+    const labels = useMemo(() => allLabels(unhiddenNotes(cards)), [cards]);
     // --- Pages: All notes, then one per label (model/notesPages.ts) ----------------
     // The pager IS the grid on the routes it has pages for — `/` and
     // `/label/<name>`. Everywhere else (Reminders, Calendar, Archive, Trash,
@@ -286,10 +286,13 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
     const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, grid: isGridPath(path), enabled: onScreen && !openKey, accept: ownsKey });
     const reminders = useMemo(() => groupReminders(cards, now), [cards, now]);
-    const counts = useMemo(() => ({
-        notes: cards.filter(c => !c.archived).length,
-        archived: cards.filter(c => c.archived).length,
-    }), [cards]);
+    const counts = useMemo(() => {
+        const unhidden = unhiddenNotes(cards);
+        return {
+            notes: unhidden.filter(c => !c.archived).length,
+            archived: unhidden.filter(c => c.archived).length,
+        };
+    }, [cards]);
 
     const openCard = openKey ? cardsByKey.get(openKey) ?? null : null;
     useEffect(() => {

@@ -20,14 +20,14 @@
 //      toast saying why, in a room under a ticked collection, the channels and the look go;
 //   6. Switch Modes (bit 31): a role holding it switches, and it stays a positive
 //      number in the database's answer after an edit that sends the whole mask;
-//   7. the look on all eight themes, with and without high contrast, on a bright
-//      picture and a dark one: every text colour at 4.5:1 (or within a tenth of the
-//      theme's own lower figure) over every pixel of a 32x32 reduction of the picture
-//      through the real veil, and the accent at 4.5:1 with a white label and 3:1 on
-//      the surfaces.
-//      NEGATIVE CONTROL: a fixed 60% veil over the bright picture must fail. High
-//      contrast and the personal switch must take picture and accent away, and the
-//      theme's own brand must come back.
+//   7. the look on all eight themes, with and without high contrast, on a bright picture
+//      and a dark one: the picture really there and mapped per theme, every run of real text
+//      on it (messages, links, timestamps, the date line, the header, the composer's
+//      placeholder) at 4.5:1 over every pixel actually rendered behind it, read from a
+//      screenshot with the text made transparent, and the accent at 4.5:1 with a white label
+//      and 3:1 on the surfaces. NEGATIVE CONTROL: the theme's own text colours over the same
+//      picture must fail. High contrast and the personal switch must take picture and accent
+//      away, and the theme's own brand must come back. A mode never changes the reader's theme.
 //   8. the phone: nothing overflows 390 px (a 460 px element injected must be caught),
 //      the selector and the notice's buttons are 44 px and hit at their centres, the
 //      menu is inside the window.
@@ -58,6 +58,7 @@
 //   APP=http://127.0.0.1:5421 API=http://127.0.0.1:5321 OUT=<dir> node e2e/modes-walk.mjs
 //   ... LK_API=http://127.0.0.1:7895 LK_KEY=... LK_SECRET=... PGDB=... PGPORT=... [SFU_ONLY=1] node e2e/modes-walk.mjs
 import { chromium } from '@playwright/test';
+import { drawScene } from './mode-scenes.mjs';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -214,28 +215,11 @@ const listed = (page) => page.evaluate(() =>
     [...document.querySelectorAll('.sidebar .channel-name, .sidebar .voice-channel')].map(e => e.textContent.trim()));
 const lists = (names, name) => names.some(n => n.includes(name));
 
-/** A picture as a PNG on disk, drawn in the page: `top` fading to `bottom`, with a
- *  scene on it if asked: what a real picture does, where a gradient says little. */
-async function picture(page, file, top, bottom, scene = false) {
-    const b64 = await page.evaluate(([top, bottom, scene]) => {
-        const c = document.createElement('canvas');
-        c.width = 1600; c.height = 900;
-        const g = c.getContext('2d');
-        const grad = g.createLinearGradient(0, 0, 0, 900);
-        grad.addColorStop(0, top); grad.addColorStop(1, bottom);
-        g.fillStyle = grad; g.fillRect(0, 0, 1600, 900);
-        if (scene) {
-            g.fillStyle = '#f4efd8';
-            g.beginPath(); g.arc(1180, 210, 110, 0, Math.PI * 2); g.fill();
-            g.fillStyle = '#0a0812';
-            for (const [x, w, h] of [[120, 150, 300], [330, 110, 220], [520, 190, 360], [800, 130, 260], [1040, 170, 330], [1300, 150, 240]]) {
-                g.fillRect(x, 900 - h, w, h);
-                g.beginPath(); g.moveTo(x - 12, 900 - h); g.lineTo(x + w / 2, 900 - h - 90); g.lineTo(x + w + 12, 900 - h); g.fill();
-            }
-        }
-        return c.toDataURL('image/png').split(',')[1];
-    }, [top, bottom, scene]);
-    fs.writeFileSync(file, Buffer.from(b64, 'base64'));
+/** A picture as a JPEG on disk, drawn in the page (e2e/mode-scenes.mjs). */
+async function picture(page, name) {
+    const file = path.join(OUT, `${name}.jpg`);
+    fs.writeFileSync(file, Buffer.from(await page.evaluate(drawScene, name), 'base64'));
+    return file;
 }
 
 /** The phone's geometry for what `rootSel` matches, measured as games-walk does. */
@@ -275,13 +259,9 @@ async function pick(page, phone, label) {
     await (phone ? item.tap() : item.click());
 }
 
-/**
- * The real look on the page, measured: the veil's alpha out of .chat-main's actual
- * background, the picture's actual lightest and darkest points out of its actual
- * pixels, and each text colour's contrast against both, through that veil.
- */
-async function measureLook(page, fixedVeil = null) {
-    return page.evaluate(async ({ fixedVeil }) => {
+/** Is the picture up, and what does the accent do on this theme? */
+async function measureLook(page) {
+    return page.evaluate(() => {
         // What the page paints, by the arithmetic the WCAG defines.
         const lin = c => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
         const lum = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
@@ -295,46 +275,116 @@ async function measureLook(page, fixedVeil = null) {
             p.remove();
             return m.slice(0, 3);
         };
-        const main = document.querySelector('.chat-main');
-        const bg = getComputedStyle(main).backgroundImage;
-        const m = /url\("([^"]+)"\)/.exec(bg);
-        const veil = /rgba\((\d+), (\d+), (\d+), ([\d.]+)\)/.exec(bg);
-        const surface = read('--bg-primary');
         const accent = read('--brand-primary');
-        const secondary = read('--bg-secondary');
-        const out = {
-            picture: !!m,
-            alpha: veil ? Number(veil[4]) : null,
+        return {
+            picture: /url\("data:image\/jpeg/.test(getComputedStyle(document.querySelector('.chat-main')).backgroundImage),
             accent,
             labelContrast: contrast(accent, [255, 255, 255]),
-            surfaceContrast: Math.min(contrast(accent, surface), contrast(accent, secondary)),
-            worst: null,
+            surfaceContrast: Math.min(contrast(accent, read('--bg-primary')), contrast(accent, read('--bg-secondary'))),
         };
-        if (!m) return out;
+    });
+}
+
+/**
+ * Every run of text drawn directly on the picture, against the pixels actually behind it. The
+ * page is photographed with its text transparent, and each run's colour is compared with
+ * every pixel of its box, so the JPEG, the scaling and anything translucent on the way all
+ * count. Text on a surface of its own (a button, a chip, the notice) is not on the picture.
+ */
+/**
+ * Fades and colour transitions over: a colour on its way counts against the ink, and a fixed wait
+ * promises nothing on a busy machine (the Mode menu read 1.00:1, every item, at its first keyframe).
+ * What loops never finishes and is not waited for.
+ */
+const settled = (page) => page.evaluate(() => Promise.race([
+    Promise.all(document.getAnimations()
+        .filter(a => a.effect?.getComputedTiming().iterations !== Infinity)
+        .map(a => a.finished.catch(() => {}))),
+    new Promise(done => setTimeout(done, 5000)),
+]).then(() => {}));
+
+async function textOverPicture(page) {
+    await page.mouse.move(1, 1);
+    await settled(page);
+    const runs = await page.evaluate(() => {
+        const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+        const root = document.querySelector('.chat-main');
+        const onItsOwnSurface = (el) => {
+            for (let e = el; e && e !== root; e = e.parentElement) {
+                const cs = getComputedStyle(e);
+                if ((rgba(cs.backgroundColor)?.[3] ?? 0) >= 0.9 || cs.backgroundImage !== 'none') return true;
+            }
+            return false;
+        };
+        const inView = (r) => r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+        const faded = (el) => { let a = 1; for (let e = el; e; e = e.parentElement) a *= Number(getComputedStyle(e).opacity); return a; };
+        const out = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const el = node.parentElement;
+            if (!node.textContent.trim() || el.closest('[aria-hidden="true"], button:disabled, [aria-disabled="true"], option, script, style')) continue;
+            if (onItsOwnSurface(el)) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const rects = [...range.getClientRects()].filter(inView);
+            const cs = getComputedStyle(el);
+            if (!rects.length || cs.visibility === 'hidden') continue;
+            const [r, g, b, a] = rgba(cs.color);
+            const alpha = a * faded(el);
+            if (alpha > 0) out.push({ text: node.textContent.trim().slice(0, 24), colour: [r, g, b], alpha, rects: rects.map(q => [q.left, q.top, q.right, q.bottom]) });
+        }
+        for (const box of root.querySelectorAll('textarea[placeholder]')) {
+            if (onItsOwnSurface(box)) continue;
+            const q = box.getBoundingClientRect();
+            const [r, g, b, a] = rgba(getComputedStyle(box, '::placeholder').color);
+            if (inView(q)) out.push({ text: 'placeholder', colour: [r, g, b], alpha: a, rects: [[q.left, q.top + q.height * 0.2, Math.min(q.right, q.left + 240), q.bottom - q.height * 0.2]] });
+        }
+        return out;
+    });
+    const hide = await page.addStyleTag({ content: '.chat-main, .chat-main * { color: transparent !important; text-shadow: none !important; -webkit-text-fill-color: transparent !important; caret-color: transparent !important; } .chat-main *::placeholder { color: transparent !important; }' });
+    await settled(page);
+    const png = await page.screenshot();
+    await hide.evaluate(e => e.remove());
+    // Colours with a transition are on their way back from transparent: the next reader waits.
+    await settled(page);
+    return page.evaluate(async ({ b64, runs }) => {
         const img = new Image();
-        img.src = m[1];
+        img.src = `data:image/png;base64,${b64}`;
         await img.decode();
         const c = document.createElement('canvas');
-        c.width = 32; c.height = 32;
-        const g = c.getContext('2d');
-        g.drawImage(img, 0, 0, 32, 32);
-        const { data } = g.getImageData(0, 0, 32, 32);
-        const alpha = fixedVeil ?? out.alpha;
-        let worst = Infinity;
-        for (const token of ['--text-normal', '--text-muted', '--text-link']) {
-            const text = read(token);
-            // api/serverModes.ts textFloor: AA, or within a tenth of a theme's own lower figure.
-            const own = contrast(text, surface);
-            const floor = own >= 4.5 ? 4.5 : own * 0.9;
-            for (let i = 0; i < data.length; i += 4) {
-                const under = [0, 1, 2].map(k => surface[k] * alpha + data[i + k] * (1 - alpha));
-                worst = Math.min(worst, contrast(text, under) - floor);
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const g = c.getContext('2d', { willReadFrequently: true });
+        g.drawImage(img, 0, 0);
+        const scale = img.naturalWidth / innerWidth;
+        const lin = new Float64Array(256);
+        for (let i = 0; i < 256; i++) { const v = i / 255; lin[i] = v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }
+        const lum = (r, gg, b) => 0.2126 * lin[Math.round(r)] + 0.7152 * lin[Math.round(gg)] + 0.0722 * lin[Math.round(b)];
+        const bad = [];
+        let tightest = Infinity;
+        for (const run of runs) {
+            let worst = Infinity;
+            for (const [l, t, r, b] of run.rects) {
+                const x = Math.max(0, Math.floor(l * scale));
+                const y = Math.max(0, Math.floor(t * scale));
+                const w = Math.min(c.width - x, Math.ceil((r - l) * scale));
+                const h = Math.min(c.height - y, Math.ceil((b - t) * scale));
+                if (w <= 0 || h <= 0) continue;
+                const { data } = g.getImageData(x, y, w, h);
+                for (let i = 0; i < data.length; i += 4) {
+                    const under = lum(data[i], data[i + 1], data[i + 2]);
+                    const a = run.alpha;
+                    const ink = lum(run.colour[0] * a + data[i] * (1 - a), run.colour[1] * a + data[i + 1] * (1 - a), run.colour[2] * a + data[i + 2] * (1 - a));
+                    const ratio = (Math.max(ink, under) + 0.05) / (Math.min(ink, under) + 0.05);
+                    if (ratio < worst) worst = ratio;
+                }
             }
+            if (worst < tightest) tightest = worst;
+            if (worst < 4.5) bad.push(`${run.text} ${worst.toFixed(2)}`);
         }
-        // How far above (or below, if negative) the floor the worst pixel of the worst text is.
-        out.worst = Math.round(worst * 100) / 100;
-        return out;
-    }, { fixedVeil });
+        return { measured: runs.length, tightest: Math.round(tightest * 100) / 100, bad: [...new Set(bad)].slice(0, 10) };
+    }, { b64: png.toString('base64'), runs });
 }
 
 async function setTheme(page, theme, contrastOn) {
@@ -342,7 +392,7 @@ async function setTheme(page, theme, contrastOn) {
         document.documentElement.setAttribute('data-theme', theme);
         document.documentElement.setAttribute('data-contrast', contrastOn ? 'high' : 'normal');
     }, [theme, contrastOn]);
-    await sleep(350);
+    await settled(page);
 }
 
 /**
@@ -353,7 +403,7 @@ async function setTheme(page, theme, contrastOn) {
 async function menuLegible(page, label) {
     await page.locator('[data-testid="mode-selector"]').click();
     await page.locator('.context-menu').waitFor({ timeout: 5000 });
-    await sleep(200); // It fades in, and opacity counts against the ink.
+    await settled(page); // It fades in, and opacity counts against the ink.
     const menu = await illegibleText(page, '.context-menu');
     check(`${label}: the Mode menu is legible`, menu.measured >= 2 && menu.bad.length === 0, menu);
     await page.keyboard.press('Escape');
@@ -714,10 +764,8 @@ try {
     await card.getByRole('button', { name: 'Save', exact: true }).click();
     await until(async () => (await A.locator('[data-testid="mode-card"] .notice.success').count()) > 0
         || !(await A.locator('[data-testid="mode-card"]').first().getByRole('button', { name: 'Save', exact: true }).isEnabled()), 8000);
-    const bright = path.join(OUT, 'bright.png');
-    const night = path.join(OUT, 'night.png');
-    await picture(A, bright, '#ffffff', '#fff6c8');
-    await picture(A, night, '#05040e', '#1c1a33');
+    const night = await picture(A, 'night');
+    const bright = await picture(A, 'daylight');
     await A.locator('[data-testid="mode-card"] input[type="file"]').setInputFiles(night);
     await until(async () => (await A.locator('[data-testid="mode-card"] img.mode-background-preview').count()) > 0, 15000);
     let stored = await modesApi(A, 'listModes', [srv.id]);
@@ -773,7 +821,8 @@ try {
     await sleep(800);
 
     // A real #mention of a channel the mode hides, through the real composer: what the
-    // docs mean by "a mention still opens it".
+    // docs mean by "a mention still opens it". On a row with its author's name: on a one-line
+    // row the phone's toolbar, shown by the tap, takes the click from the second mention.
     await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
     const say = A.locator('textarea[placeholder^="Message #"]');
     await say.waitFor({ timeout: 8000 });
@@ -802,12 +851,15 @@ try {
     await sleep(600);
     await shot(B, '02-phone-back-in-lounge');
 
+    const themeBefore = await A.evaluate(() => document.documentElement.getAttribute('data-theme'));
     await pick(A, false, MODE);
     const shown = await until(async () => {
         const n = await listed(B);
         return lists(n, 'Town Square') && lists(n, 'Cottage') && lists(n, 'game-chat') && lists(n, 'Rooms') && lists(n, 'room-a') && lists(n, 'Attic');
     }, 8000);
     check('the phone lists the mode\'s channels at once, with no reload', !!shown, await listed(B));
+    await until(async () => (await measureLook(A)).picture, 8000);
+    check('a mode with a picture leaves the reader\'s theme alone', await A.evaluate(() => document.documentElement.getAttribute('data-theme')) === themeBefore, themeBefore);
     check('the phone gets a label, not a button', await until(async () =>
         (await B.locator('[data-testid="mode-label"]').count()) > 0 && (await B.locator('[data-testid="mode-selector"]').count()) === 0, 5000));
     check('the owner who pressed it gets no notice', await A.locator('[data-testid="mode-notice"]').count() === 0);
@@ -986,7 +1038,42 @@ try {
     check('the accent stays with its server: not behind Friends', !!await until(async () => await accentOf(A) === '', 4000), await accentOf(A));
     await A.locator(`.server-icon[title="${srvName}"]`).click();
     check('and comes back with it', !!await until(async () => await accentOf(A) !== '', 4000));
-    const pictures = { night, bright };
+    // What a message can hold, through the real composer: each has colours of its own, and the
+    // look holds for what is really on the screen. One at a time: a row's actions open once the
+    // server has given it its id.
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
+    await say.waitFor({ timeout: 8000 });
+    const posted = async (appears) => {
+        await A.locator(appears).last().waitFor({ timeout: 8000 });
+        await until(async () => (await A.locator('.msg-action-btn[title="Sending…"]').count()) === 0, 8000);
+    };
+    const post = async (text, appears) => {
+        await say.fill(text);
+        await say.press('Enter');
+        await posted(appears);
+    };
+    await post('the rules are at https://example.invalid/rules for anyone new', '.message-content a[href^="https://example.invalid"]');
+    await post('**bold** *lean* `code` and @everyone to read them', '.message-content .mention.everyone');
+    await post('> a quoted line', '.message-content .message-quote');
+    await post('```\nlet block = 1;\n```', '.message-content .code-block');
+    const linked = A.locator('.message', { hasText: 'the rules are at' }).first();
+    await linked.hover();
+    await linked.locator('.msg-action-btn[title="Reply"]').click();
+    await post('a reply to it', '.message-reply-ref .reply-author');
+    const notes = path.join(OUT, 'notes.txt');
+    fs.writeFileSync(notes, 'a file, shown as a chip\n');
+    await A.locator('.message-form input[type="file"]').setInputFiles(notes);
+    await A.locator('.composer-chip:not(.composer-chip-uploading)').first().waitFor({ timeout: 8000 });
+    await say.press('Enter');
+    await posted('.message-attachment');
+    const reacted = A.locator('.message', { hasText: 'a reply to it' }).first();
+    await reacted.hover();
+    await reacted.locator('.msg-action-btn[title="Add Reaction"]').click();
+    await A.locator('.toolbar-react-picker .emoji-btn').first().click();
+    await A.locator('.reaction-badge').first().waitFor({ timeout: 8000 });
+    await A.mouse.move(1, 1);
+    await shot(A, '07-what-a-message-holds');
+    const pictures = { night, daylight: bright };
     for (const [label, file] of Object.entries(pictures)) {
         await A.locator('.server-settings-btn').first().click();
         await A.locator('.server-settings-nav .nav-item', { hasText: 'Modes' }).click();
@@ -997,8 +1084,11 @@ try {
         await until(async () => (await measureLook(A)).picture, 8000);
         for (const theme of THEMES) {
             await setTheme(A, theme, false);
-            const m = await until(async () => { const v = await measureLook(A); return v.picture && v.alpha !== null ? v : null; }, 6000);
-            check(`${label} on ${theme}: every text colour holds at the picture's worst point`, !!m && m.worst >= 0, m);
+            const m = await until(async () => { const v = await measureLook(A); return v.picture ? v : null; }, 6000);
+            const onPicture = await textOverPicture(A);
+            check(`${label} on ${theme}: every run of real text holds at 4.5:1 over every rendered pixel behind it`, !!m && onPicture.measured >= 8 && onPicture.bad.length === 0, onPicture);
+            const chip = await A.locator('.message-attachment').first().evaluate(e => getComputedStyle(e).backgroundColor);
+            check(`${label} on ${theme}: a file's chip, whose colours are fixed, is on a surface of its own`, !/rgba/.test(chip), chip);
             check(`${label} on ${theme}: accent ${m ? `rgb(${m.accent})` : ''} carries a white label (4.5:1) and shows on the surfaces (3:1)`, !!m && m.labelContrast >= 4.5 && m.surfaceContrast >= 3, m && { label: m.labelContrast.toFixed(2), surface: m.surfaceContrast.toFixed(2) });
             const legible = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}: the notice and the selector are legible`, legible.measured >= 3 && legible.bad.length === 0, legible);
@@ -1009,43 +1099,44 @@ try {
             const legibleHigh = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}, high contrast: the notice and the selector are legible`, legibleHigh.measured >= 3 && legibleHigh.bad.length === 0, legibleHigh);
             await menuLegible(A, `${label} on ${theme}, high contrast`);
-            const hc = await measureLook(A);
+            const hc = await until(async () => { const v = await measureLook(A); return v.picture ? null : v; }, 4000);
             const themeBrand = await A.evaluate(() => document.documentElement.style.getPropertyValue('--brand-primary'));
-            check(`${label} on ${theme}: high contrast takes the picture and the accent away`, !hc.picture && themeBrand === '', { picture: hc.picture, themeBrand });
+            check(`${label} on ${theme}: high contrast takes the picture and the accent away`, !!hc && themeBrand === '', { picture: hc?.picture, themeBrand });
             await shot(A, `07-${label}-${theme}-high-contrast`);
         }
         await setTheme(A, 'dark', false);
-        const dim = await until(async () => { const v = await measureLook(A); return v.picture ? v : null; }, 6000);
-        if (label === 'bright') {
-            const fixed = await measureLook(A, 0.6);
-            check('NEGATIVE CONTROL: a fixed 60% veil over the bright picture fails the same measure', fixed.worst < 0, fixed.worst);
-            check('the bright picture is dimmed further than the dark one was', dim.alpha > stored.nightAlpha, { bright: dim.alpha, night: stored.nightAlpha });
-        } else {
-            stored = { ...stored, nightAlpha: dim.alpha };
+        await until(async () => (await measureLook(A)).picture, 6000);
+        if (label === 'daylight') {
+            // The same check with the text colours the theme had: it has to be able to fail.
+            const keep = await A.evaluate(() => {
+                const main = document.querySelector('.chat-main');
+                const kept = {};
+                for (const t of ['--text-normal', '--text-muted', '--text-faint', '--text-link', '--header-primary', '--header-secondary']) {
+                    kept[t] = main.style.getPropertyValue(t);
+                    main.style.removeProperty(t);
+                }
+                return kept;
+            });
+            const own = await textOverPicture(A);
+            check('NEGATIVE CONTROL: the theme\'s own text colours fail the same check over this picture', own.bad.length > 0, own);
+            await A.evaluate((kept) => {
+                const main = document.querySelector('.chat-main');
+                for (const [t, v] of Object.entries(kept)) main.style.setProperty(t, v);
+            }, keep);
         }
     }
 
-    // A picture with something in it, to look at. A bright moon on a dark scene:
-    // the moon decides how far the whole picture is dimmed.
-    const scene = path.join(OUT, 'scene.png');
-    await picture(A, scene, '#141a3a', '#3a2a55', true);
-    await A.locator('.server-settings-btn').first().click();
-    await A.locator('.server-settings-nav .nav-item', { hasText: 'Modes' }).click();
-    await A.locator('[data-testid="mode-card"] input[type="file"]').first().setInputFiles(scene);
-    await sleep(2500);
-    await A.locator('.server-settings-content .close-btn').click();
-    await A.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 });
-    await until(async () => (await measureLook(A)).picture, 8000);
-    for (const theme of ['dark', 'light', 'purple']) {
-        await setTheme(A, theme, false);
-        const m = await until(async () => { const v = await measureLook(A); return v.picture ? v : null; }, 6000);
-        check(`a real picture on ${theme}: every text colour holds`, !!m && m.worst >= 0, m && { alpha: m.alpha, worst: m.worst });
-        await shot(A, `07-scene-${theme}`);
-    }
+    // The picture is mapped per theme, and mapped again when the reader changes theme.
+    // The end of it: every JPEG starts with the same header.
+    const pictureUrl = () => A.evaluate(() => /url\("([^"]+)/.exec(getComputedStyle(document.querySelector('.chat-main')).backgroundImage)?.[1].slice(-200) ?? null);
+    const onDark = await pictureUrl();
+    await setTheme(A, 'light', false);
+    const onLight = await until(async () => { const u = await pictureUrl(); return u && u !== onDark ? u : null; }, 6000);
+    check('changing theme maps the picture again', !!onDark && !!onLight && onDark !== onLight, { onDark: onDark?.slice(0, 30), onLight: onLight?.slice(0, 30) });
     await setTheme(A, 'dark', false);
+    await until(async () => (await measureLook(A)).picture, 6000);
 
-    // Timestamps: --text-faint is not measured (it would nearly hide the picture), so over
-    // a picture it takes --text-muted, which is. Control: outside .chat-main it does not.
+    // Timestamps sit on the picture too, in a colour that holds. Outside the chat, nothing moved.
     const faint = await A.evaluate(() => {
         const color = (parent, token) => {
             const p = document.createElement('span');
@@ -1056,13 +1147,16 @@ try {
             return c;
         };
         const main = document.querySelector('.chat-main');
-        return { inFaint: color(main, '--text-faint'), inMuted: color(main, '--text-muted'), outFaint: color(document.body, '--text-faint') };
+        return { inFaint: color(main, '--text-faint'), outFaint: color(document.body, '--text-faint') };
     });
-    check('over a picture, timestamps take the colour the veil holds', faint.inFaint === faint.inMuted && faint.outFaint !== faint.inMuted, faint);
+    check('over a picture, timestamps take a reading colour, and the rest of the window keeps the theme\'s', faint.inFaint !== faint.outFaint, faint);
 
-    // A picture nobody can read is treated as black and white, the worst case.
-    const unreadable = await A.evaluate(async () => (await import('/src/api/modeLook.ts')).measureExtremes('data:image/png;base64,AAAA'));
-    check('a picture that cannot be read is measured as black and white', JSON.stringify(unreadable) === JSON.stringify([[0, 0, 0], [255, 255, 255]]), unreadable);
+    // A picture nobody can read is no picture at all.
+    const unreadable = await A.evaluate(async () => {
+        const m = await import('/src/api/modeLook.ts');
+        return m.mapPicture('data:image/png;base64,AAAA', { kind: 'ceiling', luminance: 0.125 });
+    });
+    check('a picture that cannot be read gives no picture', unreadable === null, unreadable);
 
     // The server icon's own menu: the same fixed dark surface and the same old mistake.
     for (const high of [false, true]) {
@@ -1290,6 +1384,27 @@ try {
     await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
     await sleep(600);
     await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(400);
+
+    // A navigation target opens and never joins: any app on a phone can send one.
+    const navigate = (target) => A.evaluate(async (t) => {
+        (await import('/src/api/mobileApp.ts')).deferNav(t);
+        window.dispatchEvent(new CustomEvent('sovereign-navigate'));
+    }, target);
+    const inACall = async () => (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0;
+    check('control: the owner is in no call', !(await inACall()));
+    await navigate(`channel:${srv.id}:${town.id}`);
+    await sleep(3000);
+    check('a navigation target to a voice channel joins nothing', !(await inACall()));
+    await A.locator(`.server-icon[title="elsewhere_${stamp}"]`).click();
+    await sleep(800);
+    await navigate(`channel:${srv.id}:${town.id}`);
+    await until(async () => (await A.locator('.server-name').first().innerText()) === srvName, 8000);
+    await sleep(3000);
+    check('from another server too, where it opens the server and joins nothing', (await A.locator('.server-name').first().innerText()) === srvName && !(await inACall()));
+    await navigate(`channel:${srv.id}:${gameChat.id}`);
+    check('control: a target to a text channel opens it', !!await until(async () => (await header(A)).includes('game-chat'), 8000), await header(A).catch(String));
+    await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
     await sleep(400);
 
     // A collection's merged feed leaves out a subchannel a mode hides, as the list does.

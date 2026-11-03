@@ -90,11 +90,16 @@ name and press **Add mode**. Then tick the channels it should show, and press
 **Save**. A collection's subchannels show and hide with it. You can also choose:
 
 - **Main voice channel**: where **Join** goes when the mode starts, and where **Call
-  everyone back** brings people.
-- **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat on a
-  dimmed layer, dimmed as far as that picture needs for messages to stay readable on
-  each person's theme. It is stored unencrypted, like the server icon, so whoever
-  runs the server can see it. Animated pictures are not supported.
+  everyone to** brings people.
+- **Background**: a JPEG, PNG or WebP picture. It is shown behind the chat in its own
+  colours. Each person's device darkens or lightens it only as far as messages need to
+  stay readable on their theme, so one bright moon does not dim the whole sky. A very
+  busy picture, such as confetti or a crowd, also has its fine detail softened so that it
+  does not compete with the words; its colours stay, and a calm picture is untouched. While a
+  picture shows, smaller text in the chat is a little lighter (or, on the Light theme,
+  darker) than usual, for the same reason. The picture never changes anyone's theme. It
+  is stored unencrypted, like the server icon, so whoever runs the server can see it.
+  Animated pictures are not supported.
 - **Accent colour**: recolours buttons and highlights while the mode is on. It is
   lightened or darkened for each person's theme so button labels stay readable.
 - **Turn off when empty**: on by default. The mode turns itself off once its voice
@@ -118,7 +123,7 @@ the name of its main voice channel: it pulls everyone in the mode's voice channe
 that channel. It can't move anyone ranked at or above you, and tells you how many it left.
 
 **A mode tidies the list. It does not keep anyone out.** Anyone allowed to see a channel
-can still open it from a mention, a notification or a link, and people on an older
+can still open it from a mention or a notification, and people on an older
 version of Púca see every channel. To keep someone out of a channel, use its permissions
 (*Channel permissions*, below). A voice channel with people in it stays listed even while
 hidden, so a call is never invisible.

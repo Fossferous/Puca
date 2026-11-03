@@ -22,6 +22,7 @@ vi.mock('../api/servers', async (importOriginal) => ({
 }));
 
 const { useChannelSources } = await import('../notes/model/notesQueries');
+const { MODES_CHANGED_EVENT } = await import('../api/serverModes');
 
 let root: Root;
 let container: HTMLDivElement;
@@ -60,5 +61,17 @@ describe('Notes\' channel sources and a server mode', () => {
         activeMode = 7;
         await mount();
         expect(hidden()).toEqual({ Always: false, 'Game notes': false, Under: false });
+    });
+
+    it('hears a switch in the app around it, while it stays mounted', async () => {
+        await mount();
+        expect(hidden()['Game notes'], 'control: hidden while the mode is off').toBe(true);
+        activeMode = 7;
+        await act(async () => {
+            window.dispatchEvent(new CustomEvent(MODES_CHANGED_EVENT));
+            for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0));
+        });
+        expect(hidden()['Game notes']).toBe(false);
+        expect(hidden().Under).toBe(false);
     });
 });

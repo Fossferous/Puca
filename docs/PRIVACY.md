@@ -18,8 +18,8 @@ account with the project: your account exists only on the server you joined.
 The server is run by whoever invited you, and it necessarily sees:
 
 - your username, display name, avatar, and any email address you give it
-  (avatars, server icons, custom emoji and notification sounds are stored as
-  ordinary images and audio, not encrypted);
+  (avatars, server icons, server mode backgrounds, custom emoji and notification
+  sounds are stored as ordinary images and audio, not encrypted);
 - which servers and channels you are a member of, your roles, who you are
   friends with, whom you have blocked;
 - who talks to whom and when: the timing and size of every message and
@@ -37,8 +37,8 @@ channel or conversation, by design, can open it. A phone photo carries a hidden
 label (EXIF) with a GPS position, the camera's make and model, the time it was
 taken and sometimes the editing program, so Púca removes it **on your device,
 before the photo is encrypted**, for every JPEG, PNG and WebP you attach in a
-channel, a DM, a task or a note, and for avatars, server icons and custom
-emoji (which the server stores as ordinary pictures). Nothing is re-compressed
+channel, a DM, a task or a note, and for avatars, server icons, server mode
+backgrounds and custom emoji (which the server stores as ordinary pictures). Nothing is re-compressed
 or resized: the picture's bytes are copied as they are and only the metadata
 containers are left out. A rotation flag is kept in a block Púca writes itself,
 so a portrait photo is not sent lying down. Not covered: GIF, SVG, AVIF, TIFF,

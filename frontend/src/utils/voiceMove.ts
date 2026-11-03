@@ -34,6 +34,25 @@ export function movedOutOfHere(
     return inCallId == null && cut?.channelId === from && now - cut.at < MOVE_AFTER_CUT_MS;
 }
 
+/**
+ * What is left of the note once a RoomLeft for `roomId` has arrived. A move never sends one
+ * (ws::SelfNotice), so that removal was not a move, and the note must not turn a later
+ * VoiceMoved into pulling a device out of no call into the next one, unattended.
+ */
+export function cutAfterRoomLeft(cut: SfuCut | null, roomId: string): SfuCut | null {
+    return cut && roomId === `voice_${cut.channelId}` ? null : cut;
+}
+
+/**
+ * Does a notification, a toast or a navigation target open this channel the way a click does?
+ * Not a voice channel: a click there joins the call with the microphone open, and a target
+ * need not come from a person. Android's main activity is exported, so any app on the phone can
+ * start it with `sovereign_nav=channel:<server>:<channel>`. Opening never joins.
+ */
+export function opensFromNav(channel: { channel_type?: number }): boolean {
+    return channel.channel_type !== 1;
+}
+
 /** The subset of `Channel` these rules need. */
 export interface VoiceMoveChannel {
     id: number;

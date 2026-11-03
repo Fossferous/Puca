@@ -235,6 +235,7 @@ const GATES = [
         ['e2e-photo-metadata', 'photo-metadata-real-browser.mjs'],
         ['e2e-plaintext-disk', 'plaintext-disk-real-browser.mjs'],
         ['e2e-game-sounds-offline', 'game-sounds-offline-real-browser.mjs'],
+        ['e2e-modes-look', 'modes-look-real-browser.mjs'],
         // These two default to frontend/e2e/e2e-artifacts/, which is NOT
         // ignored: new files there would change every whole-tree key mid-run
         // and no stamp would ever be written. frontend/e2e-artifacts/ is.

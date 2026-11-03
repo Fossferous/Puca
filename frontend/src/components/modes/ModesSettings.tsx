@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { keys, useChannels, useServerModes } from '../../hooks/queries';
 import { BackgroundRefused, prepareBackground } from '../../api/modeLook';
-import { accentTokens, createMode, deleteMode, shownWithParent, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
+import { accentTokens, createMode, deleteMode, neverListed, shownWithParent, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
 import type { Channel } from '../../api/servers';
 import { uploadFile } from '../../api/uploads';
 import { statusOf } from '../../api/client';
@@ -154,7 +154,9 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
     // its own, ticked here or by its collection, or one that is always listed.
     const homeChoices = voice.filter(c => {
         const parent = parentOf(c);
-        return c.id === homeId || channelIds.includes(c.id) || (parent && channelIds.includes(parent.id))
+        if (c.id === homeId) return true;
+        if (neverListed(c, channels)) return false;
+        return channelIds.includes(c.id) || (parent && channelIds.includes(parent.id))
             || shownWithParent(c, channels, mode.id);
     });
 
@@ -177,6 +179,7 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
                 </span>
                 <span className="mode-channel-name">{c.name}</span>
                 {parent && <span className="mode-channel-parent">{withCollection ? `with ${parent.name}` : `in ${parent.name}`}</span>}
+                {neverListed(c, channels) && <span className="mode-channel-parent">not listed: it and {parent?.name} are in different modes</span>}
             </label>
         );
     };
@@ -247,7 +250,8 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
                     />
                 </div>
                 <span className="setting-help">
-                    Shown behind the chat on a dimmed layer, so messages stay readable on every theme. Stored
+                    Shown behind the chat in its own colours. Each person's device darkens or lightens it only as
+                    far as messages need to stay readable on their theme. Stored
                     unencrypted, like the server icon: whoever runs this server can see it. Anyone can turn
                     server backgrounds off in their own settings, and High Contrast hides them.
                 </span>
@@ -355,7 +359,7 @@ export function ModesSettings({ serverId }: ModesSettingsProps) {
             </p>
             <p className="setting-help modes-intro">
                 A mode tidies the list. It does not keep anyone out: anyone allowed to see a channel can still
-                open it from a mention, a notification or a link, and people on an older version of Púca see every
+                open it from a mention or a notification, and people on an older version of Púca see every
                 channel. To keep someone out of a channel, use its permissions. Who can switch modes is the Switch
                 Modes permission in Roles.
             </p>
