@@ -5478,14 +5478,14 @@ export function Chat({ onLogout }: ChatProps) {
                         data={modesData}
                         activeModeId={activeModeId}
                         homeName={activeHome?.name ?? null}
-                        onOpen={(at, opener) => modesData && showContextMenuAt(at, modeMenuItems({
+                        onOpen={(at, opener, fromKeyboard) => modesData && showContextMenuAt(at, modeMenuItems({
                             data: modesData,
                             activeModeId,
                             homeName: activeHome?.name ?? null,
                             onSwitch: (id) => { void switchMode(id); },
                             onCallBack: () => { void callBackToHome(); },
                             onManage: () => { setSettingsInitialTab('modes'); setShowSettingsModal(true); },
-                        }), opener, 'Mode')}
+                        }), opener, 'Mode', fromKeyboard)}
                     />
                 )}
 
@@ -7118,6 +7118,7 @@ export function Chat({ onLogout }: ChatProps) {
                     onClose={hideContextMenu}
                     opener={contextMenu.opener}
                     label={contextMenu.label}
+                    fromKeyboard={contextMenu.fromKeyboard}
                 />
             )}
 

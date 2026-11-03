@@ -10,7 +10,7 @@ interface ModeSelectorProps {
     /** The active mode's main voice channel when Call everyone back can reach it. */
     homeName: string | null;
     /** Open the menu at this place, just under the selector, which it gives the focus back to. */
-    onOpen: (at: { x: number; y: number }, opener: HTMLElement) => void;
+    onOpen: (at: { x: number; y: number }, opener: HTMLElement, fromKeyboard: boolean) => void;
 }
 
 /**
@@ -43,7 +43,8 @@ export function ModeSelector({ data, activeModeId, homeName, onOpen }: ModeSelec
             aria-haspopup="menu"
             onClick={(e) => {
                 const box = e.currentTarget.getBoundingClientRect();
-                onOpen({ x: box.left, y: box.bottom + 4 }, e.currentTarget);
+                // A click no pointer counted is a key's: Enter or Space on the button.
+                onOpen({ x: box.left, y: box.bottom + 4 }, e.currentTarget, e.detail === 0);
             }}
         >
             {label}

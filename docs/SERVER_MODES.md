@@ -132,7 +132,9 @@ Storyteller role can run a game without being able to delete channels.
 
 The selector is the only control that switches a mode, so its menu is a real one from the
 keyboard: the focus goes to its first item, the arrow keys, Home and End walk it, Escape gives
-the focus back to the selector and Tab closes it and goes on from there.
+the focus back to the selector and Tab closes it and goes on from there. Opened with a mouse or
+a finger the focus goes to the menu and to none of its items, since nothing would show it there
+and a stray Enter or Space could turn the mode off. The arrow keys still go in from there.
 
 **It is bit 31, the last one JavaScript's 32-bit operators reach,** and they read it
 as the sign. `mask | bit` on a role holding it comes out negative, in this client

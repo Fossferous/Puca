@@ -24,9 +24,11 @@
 // With real keys: the first enabled item takes the focus, role=menu and menuitem, the arrows,
 // Home and End walk it, Escape gives the focus back to the selector, Tab closes it and goes on
 // from there, and an Enter held down from opening it presses nothing. NEGATIVE CONTROLS: the same
-// items opened by a right click take no focus and no role, and arrows there move nothing; opened
-// with a mouse or a finger the first item has the focus and wears no ring. At 390x844: 44 px
-// rows, nothing clipped, inside the window, and a tap lands.
+// items opened by a right click take no focus and no role, and arrows there move nothing. Opened
+// with a mouse or a finger the focus is on the menu and on none of its items, no row wears anything
+// and Enter and Space press nothing, or a stray key would turn the mode off with nothing on screen
+// to say so; the arrows still go in. At 390x844: 44 px rows, nothing clipped, inside the window,
+// and a tap lands.
 //
 // It bundles the REAL UserContextMenu and ServerList plus the app's global CSS
 // (index.css, mobile.css) with esbuild. SILENT and headless: no media at all.
@@ -80,7 +82,7 @@ function ModeRig({ disabledFirst }) {
         <div className="chat-container">
             <div>
                 <button id="rig-before">before</button>
-                <ModeSelector data={MODES} activeModeId={3} homeName="Town Square" onOpen={(at, opener) => showContextMenuAt(at, items(), opener, 'Mode')} />
+                <ModeSelector data={MODES} activeModeId={3} homeName="Town Square" onOpen={(at, opener, fromKeyboard) => showContextMenuAt(at, items(), opener, 'Mode', fromKeyboard)} />
                 <button id="rig-after">after</button>
                 <div id="rig-row" onContextMenu={(e) => showContextMenu(e, items())}>A row to right-click</div>
             </div>
@@ -91,6 +93,7 @@ function ModeRig({ disabledFirst }) {
                     onClose={hideContextMenu}
                     opener={contextMenu.opener}
                     label={contextMenu.label}
+                    fromKeyboard={contextMenu.fromKeyboard}
                 />
             )}
         </div>
@@ -480,6 +483,8 @@ const focusOn = (page) => page.evaluate(() => {
 });
 const logged = (page) => page.evaluate(() => window.__log.slice());
 const menuOpen = (page) => page.evaluate((m) => !!document.querySelector(m), MM);
+/** The focus is on the menu itself, and so on none of its items. */
+const onTheMenu = (page) => page.evaluate((m) => document.activeElement === document.querySelector(m), MM);
 const key = async (page, name) => { await page.keyboard.press(name); await frame(page); };
 /** How the row with the focus looks, and whether a browser calls it a keyboard's focus. */
 const ring = (page) => page.evaluate(() => {
@@ -607,16 +612,45 @@ const ring = (page) => page.evaluate(() => {
     await key(page, 'Escape');
     ck(!await menuOpen(page) && await focusOn(page) === beforeArrow, 'NEGATIVE CONTROL: right click: Escape closes it and gives the focus to nobody', await focusOn(page));
 
-    // A mouse on the selector: the focus goes in, and shows nothing a mouse user would notice.
+    // A mouse on the selector: the focus goes to the menu, and to none of its items. Nothing on
+    // the screen would say an item had it, and Off is the first: a stray Enter or Space, or a
+    // push-to-talk on Space coming up, would turn the mode off. The control is the keyboard's
+    // open above, where "a new press of Enter does press Off".
     await fresh();
     const sel = await page.locator('[data-testid="mode-selector"]').boundingBox();
-    await page.mouse.click(sel.x + sel.width / 2, sel.y + sel.height / 2);
-    await frame(page);
-    ck(await focusOn(page) === 'Off', 'mouse: the first item has the focus too', await focusOn(page));
+    const clickSelector = async () => { await page.mouse.click(sel.x + sel.width / 2, sel.y + sel.height / 2); await frame(page); };
+    await clickSelector();
+    ck(await onTheMenu(page), 'mouse: the focus is on the menu, on no item', await focusOn(page));
     await page.mouse.move(2, 2);
-    await frame(page);
+    await page.waitForTimeout(150); // The row's fill has a 0.1 s transition.
     const quiet = await ring(page);
-    ck(!quiet.visible && quiet.outline === 'none' && quiet.background === 'rgba(0, 0, 0, 0)', 'mouse: and wears no ring or fill', JSON.stringify(quiet));
+    ck(!quiet.visible && quiet.outline === 'none', 'mouse: which shows no ring', JSON.stringify(quiet));
+    const rowsWearing = await page.evaluate((m) => [...document.querySelectorAll(`${m} button`)].filter((b) => {
+        const c = getComputedStyle(b);
+        return c.outlineStyle !== 'none' || c.backgroundColor !== 'rgba(0, 0, 0, 0)';
+    }).map((b) => b.textContent), MM);
+    ck(rowsWearing.length === 0, 'mouse: and no item wears a ring or a fill', JSON.stringify(rowsWearing));
+    await key(page, 'Enter');
+    ck((await logged(page)).length === 0 && await menuOpen(page), 'mouse: a stray Enter presses nothing, and the menu stays', JSON.stringify(await logged(page)));
+    await key(page, 'Space');
+    ck((await logged(page)).length === 0 && await menuOpen(page), 'mouse: nor does a stray Space, or a push-to-talk on it', JSON.stringify(await logged(page)));
+    ck(await onTheMenu(page), 'mouse: and the focus is still on the menu', await focusOn(page));
+    await key(page, 'ArrowDown');
+    ck(await focusOn(page) === 'Off', 'mouse: Down goes in at the first item', await focusOn(page));
+    await page.waitForTimeout(150);
+    const lit = await ring(page);
+    ck(lit.visible && lit.outline !== 'none' && lit.background === 'rgb(88, 101, 242)', 'mouse: and there it shows, as a keyboard\'s does', JSON.stringify(lit));
+    await key(page, 'Escape');
+    ck(!await menuOpen(page) && await focusOn(page) === 'mode-selector', 'mouse: Escape gives the focus back to the selector', await focusOn(page));
+    await clickSelector();
+    await key(page, 'ArrowUp');
+    ck(await focusOn(page) === 'Manage modes', 'mouse: Up goes in at the last item', await focusOn(page));
+    await key(page, 'Escape');
+    await clickSelector();
+    await key(page, 'Tab');
+    ck(!await menuOpen(page) && await focusOn(page) === 'rig-after', 'mouse: Tab closes it and goes on from the selector', await focusOn(page));
+    ck((await logged(page)).length === 0, 'mouse: and all of that pressed nothing', JSON.stringify(await logged(page)));
+    await clickSelector();
     for (const name of ROWS) {
         const p = await probe(page, MM, name);
         ck(reachable(p), `mouse: "${name}" is on screen and what a pointer hits`, desc(p));
@@ -648,9 +682,9 @@ const ring = (page) => page.evaluate(() => {
     const sel = await page.locator('[data-testid="mode-selector"]').boundingBox();
     await page.touchscreen.tap(sel.x + sel.width / 2, sel.y + sel.height / 2);
     await page.waitForTimeout(400); // It scales in from 95%: measured any sooner, 44 px reads 42.
-    ck(await focusOn(page) === 'Off', 'phone: the first item has the focus', await focusOn(page));
+    ck(await onTheMenu(page), 'phone: the focus is on the menu, on no item', await focusOn(page));
     const quiet = await ring(page);
-    ck(!quiet.visible && quiet.outline === 'none', 'phone: and wears no ring', JSON.stringify(quiet));
+    ck(!quiet.visible && quiet.outline === 'none', 'phone: which shows no ring', JSON.stringify(quiet));
     const box = await menuBox(page, MM);
     ck(box.ok, 'phone: the menu is wholly inside the window', JSON.stringify(box));
     const shape = await page.evaluate((m) => {

@@ -30,11 +30,17 @@ interface ContextMenuProps {
     opener?: HTMLElement;
     /** What a screen reader calls it: a menu a control opened has a role to name. */
     label?: string;
+    /**
+     * Whether a key pressed the opener, so the first item takes the focus. From a mouse or a finger
+     * the menu itself does: nothing would show the focus on an item, and a stray Enter or Space, or
+     * a push-to-talk bound to Space coming up (hotkeys.ts never prevents a hold), would press it.
+     */
+    fromKeyboard?: boolean;
 }
 
 const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<HTMLButtonElement>('.context-menu-item:not(:disabled)') ?? [])];
 
-export function ContextMenu({ items, position, onClose, opener, label }: ContextMenuProps) {
+export function ContextMenu({ items, position, onClose, opener, label, fromKeyboard }: ContextMenuProps) {
     const menuRef = React.useRef<HTMLDivElement>(null);
     const [adjustedPosition, setAdjustedPosition] = useState(position);
 
@@ -88,8 +94,8 @@ export function ContextMenu({ items, position, onClose, opener, label }: Context
 
     useEffect(() => {
         // preventScroll: it is scaling in, and it is already where it should be.
-        if (opener) enabledItems(menuRef.current)[0]?.focus({ preventScroll: true });
-    }, [opener]);
+        if (opener) (fromKeyboard ? enabledItems(menuRef.current)[0] : menuRef.current)?.focus({ preventScroll: true });
+    }, [opener, fromKeyboard]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (!opener) return;
@@ -123,6 +129,7 @@ export function ContextMenu({ items, position, onClose, opener, label }: Context
             className="context-menu"
             role={opener ? 'menu' : undefined}
             aria-label={opener ? label : undefined}
+            tabIndex={opener ? -1 : undefined}
             onKeyDown={handleKeyDown}
             style={{
                 left: adjustedPosition.x,

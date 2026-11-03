@@ -30,7 +30,7 @@
 //      away, and the theme's own brand must come back. A mode never changes the reader's theme.
 //   8. the phone: nothing overflows 390 px (a 460 px element injected must be caught),
 //      the selector and the notice's buttons are 44 px and hit at their centres, the
-//      menu is inside the window, and its first item has the focus with no ring on it.
+//      menu is inside the window, and the focus is on it, on no item, with no ring.
 //      The owner's selector from real keys: Enter puts the focus in the menu, arrows and End
 //      walk it, Escape gives it back, Tab closes it. NEGATIVE CONTROL: a right click's menu
 //      takes no focus and no role. (Every key is in e2e/user-menu-move-to-real-browser.mjs.)
@@ -1326,9 +1326,9 @@ try {
     check('phone: every menu item is a 44 px target', menu.heights.every(h => h >= 44), menu.heights);
     const phoneFocus = await B.evaluate(() => {
         const a = document.activeElement;
-        return { first: a === document.querySelector('.context-menu .context-menu-item'), ring: a.matches(':focus-visible') };
+        return { menu: a === document.querySelector('.context-menu'), ring: a.matches(':focus-visible') };
     });
-    check('phone: the first item has the focus, and a tap shows no ring on it', phoneFocus.first && !phoneFocus.ring, phoneFocus);
+    check('phone: a tap puts the focus on the menu, on no item, and shows no ring', phoneFocus.menu && !phoneFocus.ring, phoneFocus);
     await shot(B, '09-phone-menu');
     await B.mouse.click(5, 800);
     await sleep(300);

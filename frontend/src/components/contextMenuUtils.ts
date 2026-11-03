@@ -176,9 +176,10 @@ export function useContextMenu() {
     const [contextMenu, setContextMenu] = useState<{
         items: ContextMenuItem[];
         position: { x: number; y: number };
-        /** showContextMenuAt's: the control it opened from, and what to call the menu. */
+        /** showContextMenuAt's: the control it opened from, what to call the menu, and how it was pressed. */
         opener?: HTMLElement;
         label?: string;
+        fromKeyboard?: boolean;
     } | null>(null);
 
     const showContextMenu = useCallback((
@@ -194,9 +195,9 @@ export function useContextMenu() {
     }, []);
 
     /** The same menu, anchored to a place rather than to the pointer: under the
-     *  control that opens it, whichever way it was pressed. */
-    const showContextMenuAt = useCallback((position: { x: number; y: number }, items: ContextMenuItem[], opener: HTMLElement, label: string) => {
-        setContextMenu({ items, position, opener, label });
+     *  control that opens it. */
+    const showContextMenuAt = useCallback((position: { x: number; y: number }, items: ContextMenuItem[], opener: HTMLElement, label: string, fromKeyboard: boolean) => {
+        setContextMenu({ items, position, opener, label, fromKeyboard });
     }, []);
 
     const hideContextMenu = useCallback(() => {

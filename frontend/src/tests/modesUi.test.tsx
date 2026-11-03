@@ -151,6 +151,15 @@ describe('the selector', () => {
         expect(onOpen.mock.calls[0][1], 'and says what opened it, for the focus to go back to').toBe(container.querySelector('[data-testid="mode-selector"]'));
     });
 
+    it('says whether a key pressed it: a browser counts a pointer\'s clicks, and none for a key\'s', async () => {
+        onOpen.mockClear();
+        await render(<ModeSelector data={modes()} activeModeId={null} homeName={null} onOpen={onOpen} />);
+        const b = container.querySelector('[data-testid="mode-selector"]')!;
+        await act(async () => { b.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })); });
+        await act(async () => { b.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); });
+        expect(onOpen.mock.calls.map(c => c[2])).toEqual([true, false]);
+    });
+
     it('is a plain label for everyone else while a mode is on, and nothing when none is', async () => {
         const member = modes({ can_switch: false, can_edit: false, can_call_back: false });
         await render(<ModeSelector data={member} activeModeId={3} homeName={null} onOpen={onOpen} />);

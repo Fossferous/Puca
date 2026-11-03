@@ -206,6 +206,17 @@ describe('a switch answered after the mode moved', () => {
         expect(said(NOTHING_SWITCHED)).toBe(false);
     });
 
+    it('Chat tells its menu how it was pressed: a key goes in to Off, a pointer stops at the menu', async () => {
+        await mountChat();
+        const selector = document.querySelector<HTMLElement>('[data-testid="mode-selector"]')!;
+        await act(async () => { selector.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })); });
+        expect(document.activeElement?.textContent).toBe('Off');
+        await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+        expect(document.querySelector('.context-menu')).toBeNull();
+        await act(async () => { selector.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); });
+        expect(document.activeElement).toBe(document.querySelector('.context-menu'));
+    });
+
     it('Cancel is still only Cancel', async () => {
         await mountChat();
         await pressOff();
