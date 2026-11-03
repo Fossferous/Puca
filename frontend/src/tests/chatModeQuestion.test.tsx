@@ -209,6 +209,8 @@ describe('a switch answered after the mode moved', () => {
         await settle();
         expect(h.sent).toEqual([]);
         expect(said(NOTHING_SWITCHED)).toBe(false);
+        // The menu's item was the last to have it, and it went with the menu.
+        expect(document.activeElement, 'the focus is back on the selector').toBe(document.querySelector('[data-testid="mode-selector"]'));
     });
 
     it('on the web a native confirm stops the page, so this path finds nothing and OK switches', async () => {

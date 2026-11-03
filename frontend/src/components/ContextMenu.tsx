@@ -21,9 +21,20 @@ interface ContextMenuProps {
     items: ContextMenuItem[];
     position: { x: number; y: number };
     onClose: () => void;
+    /**
+     * The control that opened this, when one did (showContextMenuAt), however it was pressed.
+     * This renders last in the page, so with the focus left on that control everything between
+     * them is in the way of a keyboard. So such a menu is a real menu: the focus goes in and comes
+     * back, and the arrow keys walk it. A menu at the pointer (a right click) has none of that.
+     */
+    opener?: HTMLElement;
+    /** What a screen reader calls it: a menu a control opened has a role to name. */
+    label?: string;
 }
 
-export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
+const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<HTMLButtonElement>('.context-menu-item:not(:disabled)') ?? [])];
+
+export function ContextMenu({ items, position, onClose, opener, label }: ContextMenuProps) {
     const menuRef = React.useRef<HTMLDivElement>(null);
     const [adjustedPosition, setAdjustedPosition] = useState(position);
 
@@ -61,6 +72,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
 
         const handleEscape = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
+                opener?.focus({ preventScroll: true });
                 onClose();
             }
         };
@@ -72,12 +84,46 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
             document.removeEventListener('mousedown', handleClickOutside);
             document.removeEventListener('keydown', handleEscape);
         };
-    }, [onClose]);
+    }, [onClose, opener]);
+
+    useEffect(() => {
+        // preventScroll: it is scaling in, and it is already where it should be.
+        if (opener) enabledItems(menuRef.current)[0]?.focus({ preventScroll: true });
+    }, [opener]);
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (!opener) return;
+        // Held down, the Enter that opened this repeats, and the first item has the focus now.
+        if (e.repeat && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            return;
+        }
+        if (e.key === 'Tab') {
+            // Not prevented: from the control it goes on to what comes after it, not to whatever
+            // comes after the end of the page.
+            opener.focus({ preventScroll: true });
+            onClose();
+            return;
+        }
+        const enabled = enabledItems(menuRef.current);
+        const at = enabled.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === 'ArrowDown' ? enabled[(at + 1) % enabled.length]
+            : e.key === 'ArrowUp' ? enabled[(at <= 0 ? enabled.length : at) - 1]
+            : e.key === 'Home' ? enabled[0]
+            : e.key === 'End' ? enabled[enabled.length - 1]
+            : undefined;
+        if (!next) return;
+        e.preventDefault();
+        next.focus();
+    };
 
     return (
         <div
             ref={menuRef}
             className="context-menu"
+            role={opener ? 'menu' : undefined}
+            aria-label={opener ? label : undefined}
+            onKeyDown={handleKeyDown}
             style={{
                 left: adjustedPosition.x,
                 top: adjustedPosition.y,
@@ -85,15 +131,18 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         >
             {items.map((item, index) => {
                 if (item.separator) {
-                    return <div key={`sep-${index}`} className="context-menu-separator" />;
+                    return <div key={`sep-${index}`} className="context-menu-separator" role={opener ? 'separator' : undefined} />;
                 }
 
                 return (
                     <button
                         key={item.id}
                         className={`context-menu-item ${item.danger ? 'danger' : ''} ${item.disabled ? 'disabled' : ''}`}
+                        role={opener ? 'menuitem' : undefined}
                         onClick={() => {
                             if (!item.disabled && item.onClick) {
+                                // First: a question this opens gives the focus back to what had it.
+                                opener?.focus({ preventScroll: true });
                                 item.onClick();
                                 onClose();
                             }

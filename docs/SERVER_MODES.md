@@ -127,6 +127,10 @@ Manage Channels. An edit never disconnects anyone.
 The owner and administrators can do all of it. Switch Modes is separate so that a
 Storyteller role can run a game without being able to delete channels.
 
+The selector is the only control that switches a mode, so its menu is a real one from the
+keyboard: the focus goes to its first item, the arrow keys, Home and End walk it, Escape gives
+the focus back to the selector and Tab closes it and goes on from there.
+
 **It is bit 31, the last one JavaScript's 32-bit operators reach,** and they read it
 as the sign. `mask | bit` on a role holding it comes out negative, in this client
 (which masks it with `unsignedMask`) and in every older client's role editor, which
@@ -333,6 +337,10 @@ Clients ship before the backend, so all four combinations have to make sense:
   eight themes as read from `styles/theme.css`, with negative controls.
 - `frontend/src/tests/modesUi.test.tsx`: the selector, its menu, the notice, the settings
   tab, the role editor's positive masks, the personal switch.
+- `frontend/src/tests/chatModeQuestion.test.tsx`: a switch or a delete answered after the mode moved, through
+  the real Chat and the real in-page question. `modeLookRetry.test.tsx`: a picture that failed to download.
+- `frontend/e2e/user-menu-move-to-real-browser.mjs`: the selector's menu from real keys, with a right click's
+  as the negative control, and at 390x844.
 - `frontend/e2e/modes-walk.mjs`: the whole story live through a real backend, two
   accounts, a 1280x800 desktop and a 390x844 coarse-pointer phone, all eight themes with
   and without high contrast. With a loopback LiveKit (header of the file) it also runs on

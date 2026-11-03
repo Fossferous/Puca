@@ -30,7 +30,10 @@
 //      away, and the theme's own brand must come back. A mode never changes the reader's theme.
 //   8. the phone: nothing overflows 390 px (a 460 px element injected must be caught),
 //      the selector and the notice's buttons are 44 px and hit at their centres, the
-//      menu is inside the window.
+//      menu is inside the window, and its first item has the focus with no ring on it.
+//      The owner's selector from real keys: Enter puts the focus in the menu, arrows and End
+//      walk it, Escape gives it back, Tab closes it. NEGATIVE CONTROL: a right click's menu
+//      takes no focus and no role. (Every key is in e2e/user-menu-move-to-real-browser.mjs.)
 //   9. a message toast about a hidden channel on another server opens it; a picture over
 //      the limit arrives as a JPEG of at most 1920 px, a GIF is refused, a picture nobody
 //      can read is treated as black and white; the real personal-switch checkbox;
@@ -408,6 +411,41 @@ async function menuLegible(page, label) {
     check(`${label}: the Mode menu is legible`, menu.measured >= 2 && menu.bad.length === 0, menu);
     await page.keyboard.press('Escape');
     await page.locator('.context-menu').waitFor({ state: 'detached', timeout: 5000 });
+}
+
+/** The real selector's menu from real keys, and Chat's right-click menu as the control. */
+async function menuFromTheKeyboard(page) {
+    const focusOn = () => page.evaluate(() => {
+        const a = document.activeElement;
+        return a?.getAttribute('data-testid') || a?.textContent?.trim() || 'body';
+    });
+    const gone = () => page.locator('.context-menu').waitFor({ state: 'detached', timeout: 5000 });
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await page.keyboard.press('Enter');
+    await page.locator('.context-menu').waitFor({ timeout: 5000 });
+    check('keyboard: Enter on the real selector opens a menu with the focus on its first item',
+        await focusOn() === 'Off' && await page.locator('.context-menu').getAttribute('role') === 'menu', await focusOn());
+    await page.keyboard.press('ArrowDown');
+    check('keyboard: Down moves on from it', await focusOn() !== 'Off', await focusOn());
+    await page.keyboard.press('End');
+    check('keyboard: End is the last item', await focusOn() === 'Manage modes', await focusOn());
+    await page.keyboard.press('Escape');
+    await gone();
+    check('keyboard: Escape closes it, and the focus is back on the selector', await focusOn() === 'mode-selector', await focusOn());
+    await page.keyboard.press('Enter');
+    await page.locator('.context-menu').waitFor({ timeout: 5000 });
+    await page.keyboard.press('Tab');
+    await gone();
+    check('keyboard: Tab closes it, and the focus goes on from the selector', await focusOn() !== 'mode-selector', await focusOn());
+    await page.locator('.sidebar .channel').first().click({ button: 'right' });
+    await page.locator('.context-menu').waitFor({ timeout: 5000 });
+    const atPointer = await page.evaluate(() => {
+        const menu = document.querySelector('.context-menu');
+        return { inside: menu.contains(document.activeElement), role: menu.getAttribute('role'), items: menu.querySelectorAll('button').length };
+    });
+    check('NEGATIVE CONTROL: a right click in the same Chat opens the same menu with no focus in it and no role', !atPointer.inside && atPointer.role === null && atPointer.items > 0, atPointer);
+    await page.keyboard.press('Escape');
+    await gone();
 }
 
 function keepSockets() {
@@ -805,6 +843,7 @@ try {
     check('hiding is not access: the API still gives the member the channel, with its permissions and why it is hidden',
         !!apiTown && apiTown.mode_ids?.includes(mode.id) && apiTown.my_permissions > 0, apiTown);
     check('the owner has a selector saying Off', /Off/.test(await A.locator('[data-testid="mode-selector"]').innerText()));
+    await menuFromTheKeyboard(A);
     const openable = await B.evaluate(async ([id]) => {
         const { apiClient } = await import('/src/api/client.ts');
         const rows = await apiClient.get(`/channels/${id}/messages`).then(() => 'ok').catch(e => String(e.status ?? e));
@@ -1043,6 +1082,16 @@ try {
     // server has given it its id.
     await A.locator('.sidebar .channel', { hasText: 'lounge' }).first().click();
     await say.waitFor({ timeout: 8000 });
+    // A list of its own in the real composer: the chat around it wears the picture's halo, and it not.
+    await say.fill('@');
+    await A.locator('.composer-autocomplete .autocomplete-item').first().waitFor({ timeout: 8000 });
+    const listHalo = await A.evaluate(() => ({
+        chat: getComputedStyle(document.querySelector('.chat-main')).textShadow,
+        row: getComputedStyle(document.querySelector('.autocomplete-item')).textShadow,
+        avatar: getComputedStyle(document.querySelector('.ac-avatar')).textShadow,
+    }));
+    check('the composer\'s real autocomplete list has no halo, and the chat around it does', listHalo.chat !== 'none' && listHalo.row === 'none' && listHalo.avatar === 'none', listHalo);
+    await say.fill('');
     const posted = async (appears) => {
         await A.locator(appears).last().waitFor({ timeout: 8000 });
         await until(async () => (await A.locator('.msg-action-btn[title="Sending…"]').count()) === 0, 8000);
@@ -1275,6 +1324,11 @@ try {
     });
     check('phone: the menu is inside the window and every item is what a tap hits', menu.inside && menu.hit, menu);
     check('phone: every menu item is a 44 px target', menu.heights.every(h => h >= 44), menu.heights);
+    const phoneFocus = await B.evaluate(() => {
+        const a = document.activeElement;
+        return { first: a === document.querySelector('.context-menu .context-menu-item'), ring: a.matches(':focus-visible') };
+    });
+    check('phone: the first item has the focus, and a tap shows no ring on it', phoneFocus.first && !phoneFocus.ring, phoneFocus);
     await shot(B, '09-phone-menu');
     await B.mouse.click(5, 800);
     await sleep(300);

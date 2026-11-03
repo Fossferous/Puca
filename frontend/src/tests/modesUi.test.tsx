@@ -146,6 +146,7 @@ describe('the selector', () => {
         await press(container.querySelector('[data-testid="mode-selector"]')!);
         expect(onOpen).toHaveBeenCalledTimes(1);
         expect(onOpen.mock.calls[0][0]).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+        expect(onOpen.mock.calls[0][1], 'and says what opened it, for the focus to go back to').toBe(container.querySelector('[data-testid="mode-selector"]'));
     });
 
     it('is a plain label for everyone else while a mode is on, and nothing when none is', async () => {

@@ -58,6 +58,20 @@
     color: #fff;
 }
 
+/* The row a keyboard is on, in a menu a control opened: as under a pointer, and ringed, since a
+   pointer resting on another row fills that one too. A mouse or a finger opening it puts the
+   focus on the first row as well, and that wears none of this. */
+.context-menu[role="menu"] .context-menu-item:focus-visible:not(.disabled) {
+    background: #5865f2;
+    color: #fff;
+    outline: 2px solid #fff;
+    outline-offset: -2px;
+}
+
+.context-menu[role="menu"] .context-menu-item.danger:focus-visible:not(.disabled) {
+    background: #f23f42;
+}
+
 .context-menu-item.disabled {
     opacity: 0.5;
     cursor: not-allowed;
