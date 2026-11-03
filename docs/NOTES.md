@@ -1788,7 +1788,7 @@ records the same deletion for chat.
 
 - Only `http` and `https` become links. `javascript:`, `data:`, `file:`,
   `mailto:` and a scheme-less `//host` stay plain text
-  (`frontend/src/utils/linkSegments.ts`, sharing chat's `URL_RE`).
+  (`frontend/src/utils/linkSegments.ts`, sharing chat's `urlAt`).
 - A link opens OUTSIDE the app: a new browser tab on the web, the desktop
   shell's `open_external` under Tauri, and the system browser from the
   Android apps — where it is a top-level navigation the Capacitor bridge
