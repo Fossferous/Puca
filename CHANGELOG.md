@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.855 — 2026-11-03
 
+Server modes, and the desktop app asks before destructive actions again
 ### Added
 
 - **Server modes: channels that only show when you need them.** A mode is a set of channels that are listed only while it is on, such as the town square and private rooms of a game of Blood on the Clocktower. Set one up under **Server Settings > Modes** (Manage Channels), then pick it from **Mode** under the server's name. A new **Switch Modes** permission decides who can do that, so someone can run a game without being able to delete channels. One mode is on at a time, and everyone online sees the change at once. **Turning a mode off disconnects everyone in its voice channels**, with a warning first; messages in its text channels are kept and come back with it. A mode can also have:
