@@ -1282,7 +1282,8 @@ button.message-attachment.error { color: #ffb4b4; }
     transform: scale(1.08);
 }
 
-/* A media-bearing spoiler becomes a positioned, clipped block so the cover
+/* A spoiler holding media, a file or the placeholder for a picture from another site becomes a
+   positioned, clipped block so the cover
    stays inside rounded corners and the chip can centre over it. Engines
    without :has() (none we ship to) still get the blur+dim above — only the
    chip and the tidier box degrade.
@@ -1292,7 +1293,7 @@ button.message-attachment.error { color: #ffb4b4; }
      (same as the block treatment everywhere else); vertical-align keeps
      the overflow:hidden inline-block from adopting its odd bottom-edge
      baseline against surrounding text. */
-.spoiler:has(.message-image, .message-video, .message-audio) {
+.spoiler:has(.message-image, .message-image-blocked, .message-video, .message-audio, .message-attachment) {
     display: inline-block;
     position: relative;
     overflow: hidden;
@@ -1324,7 +1325,7 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* The always-visible label (design §5: no hover-gated affordance). Plain
    text, not a glyph — the icon gate stays clean. */
-.spoiler:has(.message-image, .message-video, .message-audio):not(.revealed)::after {
+.spoiler:has(.message-image, .message-image-blocked, .message-video, .message-audio, .message-attachment):not(.revealed)::after {
     content: 'SPOILER';
     position: absolute;
     top: 50%;
@@ -1365,6 +1366,19 @@ button.message-attachment.error { color: #ffb4b4; }
    hidden words around their transparent letters. */
 .spoiler:not(.revealed) {
     text-shadow: none;
+}
+
+/* A colour or a chip of its own would paint these over the spoiler's transparent, with their words:
+   code, a link, a mention or a channel, the name on a file's Download chip, and the host on the
+   placeholder for a picture from another site. Not painted they also take no press, which goes to
+   the spoiler and reveals it, and no focus, so nothing opens, saves, goes to a channel or asks another
+   site for a picture before it is seen. A press on one once revealed is for it (Spoiler). */
+.spoiler:not(.revealed) .inline-code,
+.spoiler:not(.revealed) .message-link,
+.spoiler:not(.revealed) .mention,
+.spoiler:not(.revealed) .message-attachment,
+.spoiler:not(.revealed) .message-image-blocked {
+    visibility: hidden;
 }
 
 .spoiler:hover:not(.revealed) {

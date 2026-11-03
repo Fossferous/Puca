@@ -11,9 +11,11 @@
  *  - PRESS actions (toggle mute, open settings, …): fire once per keydown.
  *
  * Hold actions deliberately keep working while an input/textarea has focus —
- * you hold PTT *while typing* — and never preventDefault, so the key still
- * types. Press actions are suppressed in editable targets unless the binding
- * carries a modifier (Ctrl+M in the composer is a command; plain M is typing).
+ * you hold PTT *while typing* — and never preventDefault there, so the key still
+ * types. Anywhere else a hold on Space or Enter does (swallowsHoldKey): those
+ * two press whatever has the focus. Press actions are suppressed in editable
+ * targets unless the binding carries a modifier (Ctrl+M in the composer is a
+ * command; plain M is typing).
  *
  * Bindings are read through a getter on every event, not captured at register
  * time, so a rebind in Settings applies immediately without re-registering. A
@@ -169,6 +171,37 @@ export function isEditableTarget(t: EventTarget | null): boolean {
     return t.isContentEditable || t.closest('[data-owns-keys]') !== null;
 }
 
+/** The <input>s that Space or Enter press. Every other kind is a field. */
+const PRESSED_INPUT_TYPES = new Set(['button', 'checkbox', 'color', 'file', 'image', 'radio', 'reset', 'submit']);
+const VK_RETURN = 13;
+const VK_SPACE = 32;
+const pressesControls = (e: KeyboardEvent) => e.keyCode === VK_SPACE || e.keyCode === VK_RETURN;
+
+/**
+ * Must this keydown of a hold's key be kept from what has the focus?
+ *
+ * Space and Enter press a focused control, so a push-to-talk on one clicked it
+ * on every press, anywhere in the app: the Mute button, a checkbox, and through
+ * the mode selector (a click no pointer counted, which reads as a key's) its menu,
+ * then Off, then the question's OK. So they are swallowed, except where they type.
+ * That is narrower than isEditableTarget, which is about what is a command: to it
+ * a checkbox and a button inside [data-owns-keys] are typing, and these keys press
+ * both. Any other key's default stays, a Tab or an Escape bound as a hold among them.
+ *
+ * Every keydown of it, the repeats too, and the keydown is all it takes. Measured
+ * in Edge, Firefox and WebKit (e2e/user-menu-move-to-real-browser.mjs): a prevented
+ * keydown brings no keypress, which is Enter's click, and leaves no button armed for
+ * Space's click at the key-up. One repeat let through arms it, or clicks. A handler
+ * of a control's own has to ask e.defaultPrevented: this stops the browser, not them.
+ */
+function swallowsHoldKey(e: KeyboardEvent): boolean {
+    if (!pressesControls(e)) return false;
+    const t = e.target;
+    if (t instanceof HTMLTextAreaElement) return false;
+    if (t instanceof HTMLInputElement) return PRESSED_INPUT_TYPES.has(t.type);
+    return !(t instanceof HTMLElement && t.isContentEditable);
+}
+
 /**
  * Would this key event fire a REGISTERED action right now?
  *
@@ -261,14 +294,15 @@ function onKeyDown(e: KeyboardEvent): void {
     // A first press in this window (not a repeat) is a new keystroke, whatever
     // happened to the last one's key-up.
     if (!e.repeat) spentKeys.delete(e.keyCode);
+    // A repeat acts on nothing. These two are heard only to keep them from what has the focus.
+    if (e.repeat && !pressesControls(e)) return;
     for (const entry of holdActions.values()) {
+        if (!eventMatchesBinding(e, entry.getBinding(), 'subset')) continue;
+        if (swallowsHoldKey(e)) e.preventDefault();
         // Repeats keep arriving while held — only the first press transitions.
         if (entry.held || e.repeat) continue;
-        if (eventMatchesBinding(e, entry.getBinding(), 'subset')) {
-            pressHold(entry, e.keyCode);
-        }
+        pressHold(entry, e.keyCode);
     }
-    if (e.repeat) return;
     for (const [id, entry] of pressActions) {
         const b = entry.getBinding();
         // eventMatchesBinding already rejects an unbound action, so b is real
@@ -280,6 +314,9 @@ function onKeyDown(e: KeyboardEvent): void {
         const hasModifier = b.ctrl || b.alt;
         if (isEditableTarget(e.target) && !hasModifier) continue;
         e.preventDefault();
+        // Only swallowed: held down, Space or Enter would press a focused button
+        // with their repeats, though the first keydown was swallowed.
+        if (e.repeat) continue;
         // The keystroke is still swallowed above; the ACTION belongs to the
         // native feed when it is live, which saw this very key-down through
         // the hook. Firing here too would toggle twice.

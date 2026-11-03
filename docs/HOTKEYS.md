@@ -163,6 +163,12 @@ into Púca's own window. So while the native feed is live:
 - **Hold actions fire from both feeds**; `held` makes that idempotent, and a
   release is honoured from whichever feed sees it (press in the game,
   release after alt-tabbing back, or the reverse).
+- **A hold on Space or Enter presses nothing in Púca's window.** Those two
+  press whatever has the focus, so the in-app listener swallows them, repeats
+  included, except where they type: a text field, a textarea, editable text. A
+  control with a key handler of its own asks `defaultPrevented`. Any other key
+  bound as a hold keeps what it does. A press action swallows its repeats the
+  same way on these two keys.
 - Each native event carries `foreground` (from `GetForegroundWindow`), used
   only for the editable-target rule: with Púca in front and the caret in the
   composer, a plain bound letter is typing, not a command. Ctrl/Alt combos

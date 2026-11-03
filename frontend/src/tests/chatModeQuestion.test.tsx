@@ -4,8 +4,9 @@
  * can land while it is open. PUT /modes/active names only what to turn on, and the server ends
  * whatever is on by then: the answer to "3 people are in Game Night" would disconnect everyone in
  * Movie Night, whom nobody warned about. A menu left open is the same on every platform, with no
- * question at all when the rooms it knows of are empty. Through the real Chat, its real menu, the
- * real question and the real frame handler; and the real Modes tab for the sibling, deleting a mode.
+ * question at all when the rooms it knows of are empty, and for Call everyone back too. Through the
+ * real Chat, its real menu, the real question and the real frame handler; and the real Modes tab
+ * for the sibling, deleting a mode.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act } from 'react';
@@ -21,6 +22,8 @@ const MOVIE_NIGHT = 4;
 const h = vi.hoisted(() => ({
     tauri: true,
     activeModeId: 3 as number | null,
+    /** Whether each mode has its main voice channel, which is what offers Call everyone. */
+    homes: false,
     /** What was sent to the server that changes something. */
     sent: [] as { method: string; path: string; body: unknown }[],
 }));
@@ -53,7 +56,7 @@ vi.stubGlobal('ResizeObserver', NoObserver);
 vi.stubGlobal('IntersectionObserver', NoObserver);
 
 const mode = (id: number, name: string, channelIds: number[]) => ({
-    id, name, background_file_id: null, accent_color: null, home_channel_id: null, auto_off: false, channel_ids: channelIds,
+    id, name, background_file_id: null, accent_color: null, home_channel_id: h.homes ? channelIds[0] : null, auto_off: false, channel_ids: channelIds,
 });
 const serverRow = () => ({ id: 's1', name: 'Srv', owner_id: ME, created_at: '2026-10-01T00:00:00Z', active_mode_id: h.activeModeId });
 const reply = (status: number, body: unknown) => {
@@ -65,7 +68,7 @@ vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     if (method !== 'GET' && /\/modes/.test(u)) {
         h.sent.push({ method, path: u.slice(u.indexOf('/servers')), body: init?.body ? JSON.parse(String(init.body)) : undefined });
-        return reply(200, { active_mode_id: null, disconnected: 0 });
+        return reply(200, { active_mode_id: null, disconnected: 0, moved: 3, skipped: 0 });
     }
     if (/\/config$/.test(u)) return reply(200, { app_url: 'https://app.example.com', registration_invite_required: false, srp_version: 2 });
     if (/\/servers$/.test(u)) return reply(200, [serverRow()]);
@@ -103,6 +106,7 @@ let modeFrames: ((m: Frame) => void)[] = [];
 beforeEach(() => {
     h.tauri = true;
     h.activeModeId = GAME_NIGHT;
+    h.homes = false;
     h.sent = [];
     modeFrames = [];
     dialogs = mountAppDialogs();
@@ -225,8 +229,22 @@ describe('a switch answered after the mode moved', () => {
         await settle();
         expect(h.sent).toEqual([]);
         expect(said(NOTHING_SWITCHED)).toBe(false);
-        // The menu's item was the last to have it, and it went with the menu.
+        // Opened by a click no pointer counted, so as a key's: the menu's item was the last to have
+        // the focus and it went with the menu, so the selector took it first, for a keyboard to go on.
         expect(document.activeElement, 'the focus is back on the selector').toBe(document.querySelector('[data-testid="mode-selector"]'));
+    });
+
+    it("a pointer's menu: Cancel leaves the focus on nothing, where a stray Space or Enter opens nothing", async () => {
+        await mountChat();
+        const selector = document.querySelector<HTMLElement>('[data-testid="mode-selector"]')!;
+        selector.focus();
+        await act(async () => { selector.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); });
+        await pressOffInMenu();
+        expect(question(), 'Off asks').not.toBeNull();
+        await act(async () => { [...question()!.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.click(); });
+        await settle();
+        expect(h.sent).toEqual([]);
+        expect(document.activeElement, 'the focus is on nothing').toBe(document.body);
     });
 
     it('on the web a native confirm stops the page, so this path finds nothing and OK switches', async () => {
@@ -283,6 +301,65 @@ describe('a switch answered after the mode moved', () => {
             await answerOk();
             expect(h.sent).toEqual([{ method: 'PUT', path: '/servers/s1/modes/active', body: { mode_id: null } }]);
             expect(said(NOTHING_SWITCHED)).toBe(false);
+        });
+    });
+
+    describe('Call everyone from a menu left open: its request names only the server, and the server uses the mode on by then', () => {
+        const CALLED_BACK = [{ method: 'POST', path: '/servers/s1/modes/active/call-back', body: undefined }];
+        async function pressCallBack(name: string) {
+            const item = [...document.querySelectorAll<HTMLElement>('.context-menu .context-menu-item')].find(b => b.textContent === `Call everyone to ${name}`);
+            expect(item, `the menu offers Call everyone to ${name}`).toBeTruthy();
+            await act(async () => { item!.click(); });
+            await settle();
+        }
+        beforeEach(() => { h.homes = true; });
+
+        it('another mode came on behind the menu: nothing is sent, and it says so', async () => {
+            await mountChat();
+            await openMenu();
+            await frame(MOVIE_NIGHT, GAME_NIGHT);
+            expect(document.querySelector('.context-menu'), 'the frame leaves the menu open').not.toBeNull();
+            await pressCallBack('Town Square');
+            expect(h.sent, 'everyone in Movie Night would be moved to its main channel, under a toast saying Town Square').toEqual([]);
+            expect(said(NOTHING_SWITCHED)).toBe(true);
+            expect(said('Moved 3')).toBe(false);
+        });
+
+        it('someone turned it off behind the menu: the same', async () => {
+            await mountChat();
+            await openMenu();
+            await frame(null, GAME_NIGHT);
+            await pressCallBack('Town Square');
+            expect(h.sent).toEqual([]);
+            expect(said(NOTHING_SWITCHED)).toBe(true);
+        });
+
+        it('CONTROL: nothing moved: it calls them back', async () => {
+            await mountChat();
+            await openMenu();
+            await pressCallBack('Town Square');
+            expect(h.sent).toEqual(CALLED_BACK);
+            expect(said('Moved 3 to Town Square.')).toBe(true);
+            expect(said(NOTHING_SWITCHED)).toBe(false);
+        });
+
+        it('CONTROL: it moved and came back: Town Square is true again', async () => {
+            await mountChat();
+            await openMenu();
+            await frame(MOVIE_NIGHT, GAME_NIGHT);
+            await frame(GAME_NIGHT, MOVIE_NIGHT);
+            await pressCallBack('Town Square');
+            expect(h.sent).toEqual(CALLED_BACK);
+            expect(said('Moved 3 to Town Square.')).toBe(true);
+        });
+
+        it('CONTROL: a menu built after the frame names the mode that is on', async () => {
+            await mountChat();
+            await frame(MOVIE_NIGHT, GAME_NIGHT);
+            await openMenu();
+            await pressCallBack('Screening Room');
+            expect(h.sent).toEqual(CALLED_BACK);
+            expect(said('Moved 3 to Screening Room.')).toBe(true);
         });
     });
 });

@@ -81,7 +81,7 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote,
     return (
         <div ref={ref} id={`notes-reminder-${task.id}`} className={`notes-reminder-row${isNote ? ' note' : ''}${flash ? ' flash' : ''}`} role="button" tabIndex={0}
             onClick={() => onOpen(row)}
-            onKeyDown={e => { if (e.key === 'Enter') onOpen(row); }}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.defaultPrevented) onOpen(row); }}
         >
             {isNote ? (
                 <span className="notes-reminder-mark" aria-hidden="true"><BellIcon /></span>

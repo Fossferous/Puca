@@ -53,7 +53,13 @@
 //      all eight themes the volume slider's empty part, the chosen speed's
 //      fill and a hover still show on the panel's solid surface, read back
 //      from the screen. NEGATIVE CONTROL: the panel taking the chat's tokens
-//      fails the same check.
+//      fails the same check;
+//  12. a spoilered FILE on the same path, which has no player to cover: its
+//      name is not painted, the spoiler says so with its pill and is a 44 px
+//      target, its Download takes no focus, a press on it only reveals, and a
+//      press on the revealed chip saves and leaves it revealed. NEGATIVE
+//      CONTROL: with the hiding rule taken out of the stylesheet, the name is
+//      on the screen.
 //
 // Every layout check also asks that the bar is inside its player and that
 // the centre Play button does not overlap the timeline (a tap on its rim
@@ -96,6 +102,7 @@ const FILES = {
     vspoil: { name: 'secret.webm', ...seal(asset('portrait-180x320.webm')) },
     vtask: { name: 'walkthrough.webm', ...seal(asset('portrait-180x320.webm')) },
     vsmall: { name: 'reaction.webm', ...seal(asset('small-landscape-192x108.webm')) },
+    fspoil: { name: 'secret-plans.pdf', ...seal(Buffer.from('%PDF-1.4 not really a document')) },
 };
 const ref = (id) => `[${FILES[id].name}](sovereign-enc:${id}?k=${FILES[id].key}&m=video%2Fwebm)`;
 const MSGS = [
@@ -111,6 +118,11 @@ const SMALL_MSGS = [
     { id: 'm-before', content: 'A message above the clip.' },
     { id: 'm-small', content: ref('vsmall') },
     ...Array.from({ length: 40 }, (_, i) => ({ id: `s${i}`, content: `Line ${i + 1} after the clip, so the list scrolls.` })),
+];
+
+// A page of its own for a spoilered file: no player, so nothing covers it but the spoiler.
+const FILE_MSGS = [
+    { id: 'm-file', content: `||[${FILES.fspoil.name}](sovereign-enc:fspoil?k=${FILES.fspoil.key}&m=application%2Fpdf)||` },
 ];
 
 // ---- the page: the real MessageContent in a message list ------------------
@@ -231,7 +243,7 @@ async function open(name, ctxOpts, initScript, msgs = MSGS) {
     if (initScript) await page.addInitScript(initScript);
     await page.goto(origin + '/');
     // Every video decrypted, mounted and its metadata loaded.
-    const chatVideos = msgs.filter((m) => m.content.includes('sovereign-enc:')).length;
+    const chatVideos = msgs.filter((m) => m.content.includes('m=video%2Fwebm')).length;
     const ok = await page.waitForFunction((n) => {
         const vids = [...document.querySelectorAll('.message-video video, .task-attachments video')];
         return vids.length === n && vids.every((v) => v.readyState >= 1 && v.closest('.vpl'));
@@ -844,6 +856,85 @@ function checkLayout(tag, L, { coarse, expectSize }) {
     ck(Math.abs(S.frame.w - 192) < 1 && Math.abs(S.frame.h - 108) < 1, 'desktop small landscape (positive control): with a mouse it keeps its own 192x108', `${S.frame.w}x${S.frame.h}`);
     ck(S.short === 'true' && !!S.ctl.play?.hit, 'desktop small landscape: short, so the bar carries its own Play, pressable');
     await shot(page, '41-desktop-small-landscape');
+    await ctx.close();
+}
+
+// ============ 12. a spoilered file ===========================================
+for (const [tag, ctxOpts, touch] of [
+    ['desktop', { viewport: { width: 1280, height: 800 } }, false],
+    ['phone', { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, true],
+]) {
+    const { ctx, page } = await open(`spoilered file, ${tag}`, ctxOpts, null, FILE_MSGS);
+    const CHIP = '[data-msg="m-file"] button.message-attachment';
+    const SP = '[data-msg="m-file"] .spoiler';
+    const loaded = await page.waitForSelector(CHIP, { state: 'attached', timeout: 20000 }).then(() => true, () => false);
+    ck(loaded, `spoilered file, ${tag}: it decrypts into its download chip behind the spoiler`);
+    await reveal(page, 'm-file');
+    await sleep(200);
+    const hidden = await page.evaluate(([chip, sp]) => {
+        const c = document.querySelector(chip);
+        const s = document.querySelector(sp);
+        const b = s.getBoundingClientRect();
+        c.focus();
+        const at = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+        return {
+            name: c.textContent.trim(), visibility: getComputedStyle(c).visibility, focused: document.activeElement === c,
+            pill: getComputedStyle(s, '::after').content, w: b.width, h: b.height, hitsTheSpoiler: at === s,
+        };
+    }, [CHIP, SP]);
+    ck(hidden.name === FILES.fspoil.name && hidden.visibility === 'hidden', `spoilered file, ${tag}: its name is there and not painted`, JSON.stringify(hidden));
+    ck(hidden.pill === '"SPOILER"' && hidden.w >= 44 && hidden.h >= 44, `spoilered file, ${tag}: the spoiler says so, a 44 px target`, JSON.stringify(hidden));
+    ck(!hidden.focused && hidden.hitsTheSpoiler, `spoilered file, ${tag}: its Download takes no focus, and a press lands on the spoiler`, JSON.stringify(hidden));
+    const box = await page.locator(SP).boundingBox();
+    await shot(page, `60-spoilered-file-hidden-${tag}`);
+    const shown = await page.screenshot({ clip: box });
+    const taken = await page.evaluate(() => {
+        window.__taken = [];
+        for (const sheet of document.styleSheets) {
+            [...sheet.cssRules].forEach((rule, i) => {
+                if (rule.selectorText?.includes('.spoiler:not(.revealed) .message-attachment')) window.__taken.push([sheet, rule.cssText, i]);
+            });
+        }
+        for (const [sheet, , i] of window.__taken) sheet.deleteRule(i);
+        return window.__taken.length;
+    });
+    const bare = await page.screenshot({ clip: box });
+    const nameThrough = await page.evaluate((chip) => getComputedStyle(document.querySelector(chip)).visibility, CHIP);
+    await page.evaluate(() => { for (const [sheet, text, i] of window.__taken) sheet.insertRule(text, i); });
+    await sleep(300); // Every button has a 0.2 s transition, and visibility waits for it to end.
+    ck(taken === 1 && nameThrough === 'visible' && !shown.equals(bare), `NEGATIVE CONTROL: spoilered file, ${tag}: with the hiding rule taken out, the name is on the screen`, JSON.stringify({ taken, nameThrough }));
+
+    const downloads = [];
+    page.on('download', (d) => downloads.push(d.suggestedFilename()));
+    const pressAt = async (b) => {
+        if (touch) await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+        else await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+        await sleep(300);
+    };
+    await pressAt(box);
+    const revealed = await page.evaluate(([chip, sp]) => {
+        const c = document.querySelector(chip);
+        return { revealed: document.querySelector(sp).classList.contains('revealed'), visibility: getComputedStyle(c).visibility, colour: getComputedStyle(c).color, phase: c.className };
+    }, [CHIP, SP]);
+    ck(revealed.revealed && revealed.visibility === 'visible' && !/, 0\)$/.test(revealed.colour) && downloads.length === 0, `spoilered file, ${tag}: the first press only reveals it, saving nothing`, JSON.stringify({ revealed, downloads }));
+    const chipBox = await page.locator(CHIP).boundingBox();
+    ck(chipBox.width > 0 && chipBox.x >= 0 && chipBox.x + chipBox.width <= ctxOpts.viewport.width, `spoilered file, ${tag}: revealed, the chip fits`, JSON.stringify(chipBox));
+    await shot(page, `60-spoilered-file-revealed-${tag}`);
+    const saved = page.waitForEvent('download', { timeout: 10000 }).catch(() => null);
+    await pressAt(chipBox);
+    const dl = await saved;
+    await sleep(200);
+    const after = await page.evaluate((sp) => document.querySelector(sp).classList.contains('revealed'), SP);
+    ck(dl?.suggestedFilename() === FILES.fspoil.name && after, `spoilered file, ${tag}: a press on the revealed chip saves it and leaves it revealed`, JSON.stringify({ file: dl?.suggestedFilename(), after }));
+    // Above the chip (its margin), a mouse hides it again, and it goes as it came. A finger there is
+    // moved onto the chip by the browser's own touch adjustment, which is what a finger should get.
+    if (!touch) {
+        const whole = await page.locator(SP).boundingBox();
+        await pressAt({ x: whole.x, y: whole.y + 2, width: whole.width, height: 0 });
+        await sleep(100);
+        const hiddenAgain = await page.evaluate(([chip, sp]) => ({ revealed: document.querySelector(sp).classList.contains('revealed'), visibility: getComputedStyle(document.querySelector(chip)).visibility }), [CHIP, SP]);
+        ck(!hiddenAgain.revealed && hiddenAgain.visibility === 'hidden' && downloads.length === 1, `spoilered file, ${tag}: a press above the chip hides it again, saving nothing`, JSON.stringify({ hiddenAgain, downloads }));
+    }
     await ctx.close();
 }
 

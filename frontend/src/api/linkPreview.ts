@@ -1,5 +1,7 @@
 // Link preview utilities for fetching and displaying URL metadata
 
+import { parseMessage, type Node } from '../utils/messageParser';
+
 export interface LinkPreviewData {
     url: string;
     title?: string;
@@ -11,12 +13,41 @@ export interface LinkPreviewData {
 const URL_REGEX = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/gi;
 
 /**
- * Extract URLs from message content
+ * The web addresses a message gets a card for, read from what the message
+ * renders (utils/messageParser). Run over the raw text this printed a spoiler's
+ * link in full on a card anyone could press, and took the `)` of `[text](url)`
+ * into the address. A spoiler gets no card, revealed or not: its link is in the
+ * message once revealed. A picture has none either, it is drawn in the message,
+ * and a link's label is only words, whatever they look like.
  */
 export function extractUrls(content: string): string[] {
-    const matches = content.match(URL_REGEX);
+    const found: string[] = [];
+    const walk = (nodes: Node[]) => {
+        for (const node of nodes) {
+            switch (node.type) {
+                case 'strong':
+                case 'em':
+                case 'underline':
+                case 'strike':
+                case 'blockquote':
+                    walk(node.children);
+                    break;
+                case 'link':
+                case 'url':
+                    // Not an attachment's or a clip's ref, whose address is a key.
+                    if (/^https?:\/\//i.test(node.href)) found.push(node.href);
+                    break;
+                case 'text':
+                case 'code':
+                case 'codeblock':
+                    found.push(...(node.value.match(URL_REGEX) ?? []));
+                    break;
+            }
+        }
+    };
+    walk(parseMessage(content));
     // Filter out duplicates and return unique URLs
-    return matches ? [...new Set(matches)] : [];
+    return [...new Set(found)];
 }
 
 /**

@@ -33,6 +33,125 @@ function key(type: 'keydown' | 'keyup', keyCode: number, opts: Partial<KeyboardE
     window.dispatchEvent(e);
 }
 
+describe('a key that presses what has the focus', () => {
+    afterEach(() => {
+        resetHotkeysForTest();
+        setNativeFeedStateForTest(false, null);
+        setHotkeyCaptureMode(false);
+        document.body.innerHTML = '';
+    });
+    const ENTER: KeyBinding = { keyCode: 13, ctrl: false, alt: false, shift: false, label: 'Enter' };
+    const TAB: KeyBinding = { keyCode: 9, ctrl: false, alt: false, shift: false, label: 'Tab' };
+    const bindHold = (b: KeyBinding) => {
+        const hold = { down: 0, up: 0 };
+        registerHold('t', () => b, { onDown: () => { hold.down++; }, onUp: () => { hold.up++; } });
+        return hold;
+    };
+    const place = (html: string) => {
+        document.body.innerHTML = html;
+        return document.body.querySelector<HTMLElement>('[data-under-test]')!;
+    };
+    /** A keydown at this element: was its default prevented by the time the window heard it? */
+    const down = (el: EventTarget, keyCode: number, repeat = false) => {
+        const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, repeat });
+        Object.defineProperty(e, 'keyCode', { value: keyCode });
+        el.dispatchEvent(e);
+        return e.defaultPrevented;
+    };
+
+    it.each([
+        ['a button', '<button data-under-test>x</button>'],
+        ['a link', '<a data-under-test href="#x">x</a>'],
+        ['a checkbox', '<input data-under-test type="checkbox">'],
+        ['a radio', '<input data-under-test type="radio">'],
+        ['an input button', '<input data-under-test type="submit">'],
+        ['a select', '<select data-under-test></select>'],
+        ['a button in a dialog that owns its keys', '<div data-owns-keys=""><button data-under-test>x</button></div>'],
+        ['nothing in particular', '<div data-under-test>x</div>'],
+    ])('a hold on Space or Enter keeps the key from %s', (_what, html) => {
+        for (const [binding, code] of [[SPACE, 32], [ENTER, 13]] as const) {
+            const hold = bindHold(binding);
+            const el = place(html);
+            expect(down(el, code), 'its first keydown').toBe(true);
+            expect(down(el, code, true), 'a repeat: one let through arms the button').toBe(true);
+            expect(hold.down, 'and the action only sees the first').toBe(1);
+            resetHotkeysForTest();
+        }
+    });
+
+    it('a hold the native feed already took down still keeps the key from the button', () => {
+        const hold = bindHold(SPACE);
+        const el = place('<button data-under-test>x</button>');
+        setNativeFeedStateForTest(true, []);
+        nativeKeyEvent('down', { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false }, undefined, { foreground: true });
+        expect(hold.down, 'the hook saw it first').toBe(1);
+        expect(down(el, 32)).toBe(true);
+    });
+
+    it.each([
+        ['a text field', '<input data-under-test type="text">'],
+        ['a field of no stated type', '<input data-under-test>'],
+        ['a search field', '<input data-under-test type="search">'],
+        ['a textarea', '<textarea data-under-test></textarea>'],
+    ])('CONTROL: in %s a hold leaves the key to type, and still holds', (_what, html) => {
+        for (const [binding, code] of [[SPACE, 32], [ENTER, 13]] as const) {
+            const hold = bindHold(binding);
+            const el = place(html);
+            expect(down(el, code)).toBe(false);
+            expect(down(el, code, true)).toBe(false);
+            expect(hold.down).toBe(1);
+            resetHotkeysForTest();
+        }
+    });
+
+    it('CONTROL: no hold bound, or bound to another key, leaves Space alone', () => {
+        const el = place('<button data-under-test>x</button>');
+        expect(down(el, 32), 'nothing registered').toBe(false);
+        bindHold(ENTER);
+        expect(down(el, 32), 'a hold on Enter').toBe(false);
+    });
+
+    it('CONTROL: a hold on any other key keeps what that key does', () => {
+        const hold = bindHold(TAB);
+        const el = place('<button data-under-test>x</button>');
+        expect(down(el, 9)).toBe(false);
+        expect(down(el, 9, true)).toBe(false);
+        expect(hold.down).toBe(1);
+    });
+
+    it('CONTROL: while a new key is being chosen, nothing is touched', () => {
+        bindHold(SPACE);
+        const el = place('<button data-under-test>x</button>');
+        setHotkeyCaptureMode(true);
+        expect(down(el, 32)).toBe(false);
+    });
+
+    it('a press action keeps its repeats from the button, and acts once', () => {
+        let pressed = 0;
+        registerPress('p', () => SPACE, () => { pressed++; });
+        const el = place('<button data-under-test>x</button>');
+        expect(down(el, 32)).toBe(true);
+        expect(down(el, 32, true), 'the repeat').toBe(true);
+        expect(pressed).toBe(1);
+    });
+
+    it('CONTROL: the repeats of a press action in a field still type', () => {
+        registerPress('p', () => SPACE, () => {});
+        const el = place('<input data-under-test>');
+        expect(down(el, 32)).toBe(false);
+        expect(down(el, 32, true)).toBe(false);
+    });
+
+    it('CONTROL: the repeats of a press action on any other key are left alone', () => {
+        registerPress('p', () => CTRL_M, () => {});
+        const el = place('<button data-under-test>x</button>');
+        const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, repeat: true, ctrlKey: true });
+        Object.defineProperty(e, 'keyCode', { value: 77 });
+        el.dispatchEvent(e);
+        expect(e.defaultPrevented).toBe(false);
+    });
+});
+
 describe('eventMatchesBinding', () => {
     it('requires the exact modifier set (press actions)', () => {
         expect(eventMatchesBinding({ keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false }, CTRL_M)).toBe(true);

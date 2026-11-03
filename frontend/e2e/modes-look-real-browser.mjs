@@ -27,6 +27,18 @@
 //      any text. The composer's autocomplete list: no halo on a solid surface of its own, where on
 //      Light it fills the white label's letters. NEGATIVE CONTROLS: with the reset taken out, the
 //      same counts find the words, and find more white in the chosen row.
+//   7. What has a colour or a chip of its own, in a spoiler: inline code, a link, a bare URL, a
+//      mention, @everyone, a channel, the placeholder for a picture from another site (a bare address
+//      and the markdown form), through the REAL parser on all eight themes. Nothing of them is
+//      painted, at rest or under the pointer, read back from the screen. A press on one only reveals
+//      and asks no other site for anything, and a hidden link or placeholder takes no focus. Such a
+//      picture is a box with the SPOILER pill. Once revealed, its placeholder and the picture are each
+//      for themselves and leave it revealed. Revealed, each looks as it does outside a spoiler, and a
+//      press on a link or a channel is for that and leaves it revealed (a press on the words hides
+//      it again). NEGATIVE CONTROL: with the hiding rule taken out of the stylesheet, the same count
+//      finds every kind. Each is rendered as Chat renders a message, beside the REAL LinkPreview: no
+//      card under the message gives a spoilered link away, hidden or revealed, and a link outside a
+//      spoiler has its card, with the link's own address (the control).
 //
 // No server, no build, nothing leaves the machine (one page served on 127.0.0.1), silent.
 //
@@ -80,15 +92,51 @@ const chatBuild = await build({
         contents: `
             import './index.css';
             import './components/Chat.css';
+            import { useState } from 'react';
             import { createRoot } from 'react-dom/client';
             import { MessageContent } from './components/MessageContent';
+            import { LinkPreview } from './components/LinkPreview';
             import { mapPicture, pictureStyle, readPictureTheme } from './api/modeLook';
             window.__chat = { mapPicture, pictureStyle, readPictureTheme };
+            // What a press did, with nothing really opened.
+            window.__pressed = [];
+            window.open = (where) => { window.__pressed.push('opened ' + where); return null; };
+            document.addEventListener('click', (e) => {
+                const a = e.target.closest?.('a');
+                if (a) { e.preventDefault(); window.__pressed.push('opened ' + a.getAttribute('href')); }
+            }, true);
+            const MEMBERS = [{ id: 2, username: 'alice' }];
+            const CHANNELS = [{ id: 7, name: 'general' }];
+            const said = (content) => <MessageContent content={content} members={MEMBERS} channels={CHANNELS} onChannelClick={() => window.__pressed.push('channel')} />;
+            const KINDS = {
+                code: '||\`the code\`||',
+                link: '||[the link](https://example.invalid/hidden)||',
+                url: '||https://example.invalid/bare||',
+                mention: '||@alice||',
+                everyone: '||@everyone||',
+                channel: '||#general||',
+                mixed: '||words \`the code\` [the link](https://example.invalid/mixed) @alice||',
+                formats: '||**bold** *lean* __under__ ~~struck~~ :fire:||',
+                picture: '||https://example.invalid/the-ending.png||',
+                pictureMd: '||![the ending](https://example.invalid/the-ending-too.png)||',
+            };
+            const OPEN = '\`the code\` [the link](https://example.invalid/open) @alice @everyone #general';
+            function Kinds() {
+                const [n, set] = useState(0);
+                window.__resetKinds = () => set((x) => x + 1);
+                return (
+                    <div className="message-content" id="kinds" key={n}>
+                        {Object.entries(KINDS).map(([kind, content]) => <div key={kind} data-kind={kind}>{said(content)}<LinkPreview content={content} /></div>)}
+                    </div>
+                );
+            }
             createRoot(document.getElementById('root')).render(
                 <main className="chat-main" id="main" style={{ height: '100%' }}>
                     <div className="message-content" id="said">
                         <MessageContent content="Plain words. ||the demon is **Alice**||" members={[]} />
                     </div>
+                    <Kinds />
+                    <div className="message-content" id="open">{said(OPEN)}<LinkPreview content={OPEN} /></div>
                     <form className="message-form" style={{ marginTop: 'auto' }} onSubmit={(e) => e.preventDefault()}>
                         <div className="input-wrapper">
                             <div className="composer-autocomplete">
@@ -568,6 +616,44 @@ try {
     };
     // Where the halo is the colour of the bar at rest, and only hovering shows it.
     const SAME_AS_THE_BAR = new Set(['light', 'amoled']);
+    // The spoilers of 7, by what each holds, and the ones with a look of their own.
+    const KINDS = ['code', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats', 'picture', 'pictureMd'];
+    const OWN_LOOK = KINDS.filter((kind) => kind !== 'formats');
+    // A box with the SPOILER pill on it, so these are read against themselves with what is in them
+    // out of the way, not against the bar's colour.
+    const BOXES = new Set(['picture', 'pictureMd']);
+    const inKind = (kind) => `[data-kind="${kind}"] .spoiler`;
+    /** Whatever is on the page differs with what is in a spoiler hidden: 0 when nothing of it was painted. */
+    const paintedInBox = async (kind) => {
+        const clip = await chat.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, inKind(kind));
+        const shown = await chat.screenshot({ clip });
+        await chat.addStyleTag({ content: '#kinds .spoiler * { visibility: hidden !important; }' }).then((h) => h.evaluate((el) => { el.id = 'bar-only'; }));
+        const bare = await chat.screenshot({ clip });
+        await chat.evaluate(() => document.getElementById('bar-only').remove());
+        return shown.equals(bare) ? 0 : 1;
+    };
+    const paintedIn = (kind) => (BOXES.has(kind) ? paintedInBox(kind) : paintedOn(inKind(kind)));
+    // What the page asks another site for, answered here so nothing leaves the machine.
+    const asked = [];
+    const ONE_PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==', 'base64');
+    await chat.route(/example\.invalid/, (route) => {
+        asked.push(route.request().url());
+        route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL });
+    });
+    /** Take the rule that hides them out of the REAL stylesheet, and put it back as it was. */
+    const takeOutHidingRule = () => chat.evaluate(() => {
+        window.__taken = [];
+        for (const sheet of document.styleSheets) {
+            [...sheet.cssRules].forEach((rule, i) => {
+                if (rule.selectorText?.includes('.spoiler:not(.revealed) .inline-code')) window.__taken.push([sheet, rule.cssText, i]);
+            });
+        }
+        for (const [sheet, , i] of window.__taken) sheet.deleteRule(i);
+        return window.__taken.length;
+    });
+    const putBackHidingRule = () => chat.evaluate(() => {
+        for (const [sheet, text, i] of window.__taken) sheet.insertRule(text, i);
+    });
     for (const theme of THEMES) {
         await chat.evaluate(async ({ theme, source }) => {
             document.documentElement.setAttribute('data-theme', theme);
@@ -601,6 +687,123 @@ try {
         await chat.mouse.click(...await centreOf('.spoiler'));
         const again = await restAndHover();
         check(`spoiler on ${theme}: hidden again, nothing is painted`, again.rest === 0 && again.hovered === 0, again);
+
+        // ── 7. What has a colour or a chip of its own.
+        await chat.evaluate(() => { window.__resetKinds(); window.__pressed.length = 0; });
+        await settled();
+        const counted = async () => {
+            const out = {};
+            for (const kind of KINDS) out[kind] = await paintedIn(kind);
+            return out;
+        };
+        const atRest = await counted();
+        check(`spoiler holding each kind on ${theme}: nothing is painted at rest, chips included`, Object.values(atRest).every((n) => n === 0), atRest);
+        const cards = () => chat.evaluate(() => ({
+            hidden: [...document.querySelectorAll('#kinds .link-preview-card')].map((a) => a.getAttribute('href')),
+            open: [...document.querySelectorAll('#open .link-preview-card')].map((a) => a.getAttribute('href')),
+        }));
+        const cardsAtRest = await cards();
+        check(`spoiler holding a link on ${theme}: no card under the message gives it away`, cardsAtRest.hidden.length === 0, cardsAtRest);
+        check(`CONTROL: a link outside a spoiler on ${theme}: it has its card`, cardsAtRest.open.length === 1, cardsAtRest);
+        check(`a link outside a spoiler on ${theme}: its card has the link's own address`, cardsAtRest.open[0] === 'https://example.invalid/open', cardsAtRest);
+        const underPointer = {};
+        for (const kind of KINDS) {
+            await chat.mouse.move(...await centreOf(inKind(kind)));
+            await settled();
+            underPointer[kind] = await paintedIn(kind);
+        }
+        await chat.mouse.move(2, 2);
+        await settled();
+        check(`spoiler holding each kind on ${theme}: nor under the pointer`, Object.values(underPointer).every((n) => n === 0), underPointer);
+
+        const ruleOut = await takeOutHidingRule();
+        const shownThrough = await counted();
+        await putBackHidingRule();
+        await settled(); // A button's visibility takes its transition to come back, as all of a button's does.
+        check(`NEGATIVE CONTROL: spoiler holding each kind on ${theme}: with the hiding rule taken out, the same count finds each`,
+            ruleOut === 1 && OWN_LOOK.every((kind) => shownThrough[kind] > 0), { ruleOut, shownThrough });
+
+        const hiddenLink = await chat.evaluate(() => {
+            const a = document.querySelector('[data-kind="link"] a');
+            a.focus();
+            const r = a.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return { focused: document.activeElement === a, hitsTheSpoiler: !!hit?.matches('.spoiler'), width: r.width };
+        });
+        check(`hidden link on ${theme}: takes no focus, and a pointer on it lands on the spoiler`, !hiddenLink.focused && hiddenLink.hitsTheSpoiler && hiddenLink.width > 0, hiddenLink);
+        const hiddenPlaceholder = await chat.evaluate(() => {
+            const button = document.querySelector('[data-kind="picture"] .message-image-blocked');
+            button.focus();
+            const r = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return {
+                focused: document.activeElement === button,
+                hitsTheSpoiler: !!hit?.matches('.spoiler'),
+                width: r.width,
+                pill: getComputedStyle(button.closest('.spoiler'), '::after').content,
+            };
+        });
+        check(`hidden picture from another site on ${theme}: takes no focus, a pointer on it lands on the spoiler, and it has the pill`,
+            !hiddenPlaceholder.focused && hiddenPlaceholder.hitsTheSpoiler && hiddenPlaceholder.width > 0 && hiddenPlaceholder.pill === '"SPOILER"', hiddenPlaceholder);
+        for (const kind of KINDS) await chat.mouse.click(...await centreOf(inKind(kind)));
+        await chat.mouse.move(2, 2);
+        await settled();
+        const afterPress = await chat.evaluate(() => ({ pressed: window.__pressed.slice(), revealed: document.querySelectorAll('#kinds .spoiler.revealed').length }));
+        check(`spoiler holding each kind on ${theme}: the first press only reveals: nothing opened, no channel entered`, afterPress.pressed.length === 0 && afterPress.revealed === KINDS.length, afterPress);
+        const placeholders = await chat.evaluate(() => ({
+            placeholders: document.querySelectorAll('#kinds .message-image-blocked').length,
+            pictures: document.querySelectorAll('#kinds .message-image').length,
+            pill: getComputedStyle(document.querySelector('[data-kind="picture"] .spoiler'), '::after').content,
+        }));
+        check(`spoiler holding a picture from another site on ${theme}: the first press asks that site for nothing, and the placeholder is there to ask`,
+            asked.length === 0 && placeholders.placeholders === 2 && placeholders.pictures === 0 && placeholders.pill === 'none', { asked, ...placeholders });
+        const cardsRevealed = await cards();
+        check(`spoiler holding a link on ${theme}: revealed, it is in the message, and still no card`, cardsRevealed.hidden.length === 0, cardsRevealed);
+
+        const looks = await chat.evaluate(() => {
+            const read = (el) => { const c = getComputedStyle(el); return { colour: c.color, background: c.backgroundColor, visibility: c.visibility }; };
+            return Object.fromEntries(['.inline-code', '.message-link', '.mention:not(.everyone):not(.channel)', '.mention.everyone', '.mention.channel'].map((s) => [s, {
+                revealed: read(document.querySelector(`#kinds ${s}`)),
+                outside: read(document.querySelector(`#open ${s}`)),
+            }]));
+        });
+        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !/, 0\)$/.test(l.revealed.colour)), looks);
+        const painted = {};
+        for (const kind of OWN_LOOK) {
+            const clip = await chat.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, inKind(kind));
+            const shown = await chat.screenshot({ clip });
+            await chat.addStyleTag({ content: '#kinds .spoiler * { visibility: hidden !important; }' }).then((h) => h.evaluate((el) => { el.id = 'bar-only'; }));
+            const bare = await chat.screenshot({ clip });
+            await chat.evaluate(() => document.getElementById('bar-only').remove());
+            painted[kind] = !shown.equals(bare);
+        }
+        check(`revealed on ${theme}: each is really on the screen`, Object.values(painted).every(Boolean), painted);
+
+        for (const kind of ['link', 'url', 'channel', 'code']) await chat.mouse.click(...await centreOf(inKind(kind)));
+        await chat.mouse.move(2, 2);
+        const stayed = await chat.evaluate(() => ({
+            pressed: window.__pressed.slice(),
+            link: !!document.querySelector('[data-kind="link"] .spoiler.revealed'),
+            url: !!document.querySelector('[data-kind="url"] .spoiler.revealed'),
+            channel: !!document.querySelector('[data-kind="channel"] .spoiler.revealed'),
+            code: !!document.querySelector('[data-kind="code"] .spoiler.revealed'),
+        }));
+        check(`revealed on ${theme}: a press on a link or a channel is for that, and leaves it revealed`,
+            JSON.stringify(stayed.pressed) === JSON.stringify(['opened https://example.invalid/hidden', 'opened https://example.invalid/bare', 'channel']) && stayed.link && stayed.url && stayed.channel, stayed);
+        check(`CONTROL: revealed on ${theme}: a press on anything else hides it again`, !stayed.code, stayed);
+
+        // Revealed, the placeholder asks for the picture, and the picture opens: each stays revealed.
+        await chat.mouse.click(...await centreOf('[data-kind="picture"] .message-image-blocked'));
+        await chat.waitForFunction(() => document.querySelector('[data-kind="picture"] .message-image img')?.complete, null, { timeout: 5000 });
+        const afterAsking = await chat.evaluate(() => ({ revealed: !!document.querySelector('[data-kind="picture"] .spoiler.revealed') }));
+        // The browser keeps the picture for the next theme, so only the first one asks the network.
+        check(`revealed picture on ${theme}: its placeholder asks for it, and leaves it revealed`,
+            afterAsking.revealed && (theme !== THEMES[0] || JSON.stringify(asked) === JSON.stringify(['https://example.invalid/the-ending.png'])), { ...afterAsking, asked });
+        await chat.evaluate(() => { document.querySelector('[data-kind="picture"] .message-image img').style.cssText = 'display:block;width:60px;height:60px'; window.__pressed.length = 0; });
+        await chat.mouse.click(...await centreOf('[data-kind="picture"] .message-image img'));
+        const afterPicture = await chat.evaluate(() => ({ pressed: window.__pressed.slice(), revealed: !!document.querySelector('[data-kind="picture"] .spoiler.revealed') }));
+        check(`revealed picture on ${theme}: a press on it is for it, and leaves it revealed`, afterPicture.revealed && afterPicture.pressed.includes('opened https://example.invalid/the-ending.png'), afterPicture);
+        asked.length = 0;
 
         const list = await chat.evaluate(() => Object.fromEntries(['.composer-autocomplete', '.autocomplete-header', '.autocomplete-item.active', '.ac-avatar', '.ac-name', '.ac-sub']
             .map((s) => [s, getComputedStyle(document.querySelector(s)).textShadow])));

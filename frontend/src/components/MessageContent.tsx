@@ -64,7 +64,10 @@ function RemoteImage({ href, alt }: { href: string; alt?: string }) {
         );
     }
     return (
-        <span className="message-image">
+        // stopPropagation: a revealed spoiler wraps this, and a press on the picture would bubble
+        // into its toggle, hiding it again (the attachment's picture does the same). Unrevealed
+        // spoilers never see this (pointer-events:none), so the revealing press still works.
+        <span className="message-image" onClick={(e) => e.stopPropagation()}>
             <img
                 src={href}
                 alt={alt ?? ''}
@@ -656,7 +659,13 @@ function Spoiler({ children }: { children: React.ReactNode }) {
     return (
         <span
             className={`spoiler ${revealed ? 'revealed' : ''}`}
-            onClick={() => setRevealed(!revealed)}
+            onClick={(e) => {
+                // Revealed, a press on a link, a channel or a Download is for that one, and would
+                // otherwise hide what it just pressed. Hidden, they take no press (Chat.css).
+                const control = (e.target as Element).closest('a, button, [role="button"]');
+                if (revealed && control && e.currentTarget.contains(control)) return;
+                setRevealed(!revealed);
+            }}
         >
             <SpoilerCover.Provider value={!revealed}>{children}</SpoilerCover.Provider>
         </span>

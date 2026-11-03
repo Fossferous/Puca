@@ -60,7 +60,8 @@ A hidden channel's unread messages stay out of the server rail's bubble, because
 nothing in that server's list could clear them. Its own count comes back with the
 mode. (A message arriving live can show in the bubble until the next refresh, at most
 a minute later: only the server knows every server's modes.) Entering a server opens
-the first channel it lists, never a hidden one.
+the first channel it lists, never a hidden one, and nor one under a collection denied to
+that member, which has no row either, unless the server lists nothing else.
 
 Every other list of channels follows the same rule, so no two disagree: Move to on a
 member, the targets for forwarding and for Send to Púca, a collection's merged feed,
@@ -102,8 +103,11 @@ asks nothing at all if that mode's rooms were empty. Frames keep arriving behind
 every platform, and on the desktop behind the question, which is in the page, so if the mode has
 moved by the press or the answer, nothing is switched and the app says so; deleting a mode does
 the same. The request names only what to turn on, so the server would otherwise end whichever
-mode is on by then. A native dialog stops the page, so on the web and Android the gap while one
-is being answered is the server's alone and is left open.
+mode is on by then. **Call everyone to** a main channel, pressed in a menu left open, is refused
+the same way, since its request names only the server: it would move people to the main channel
+of the mode that is on by then, under a message naming the old one. A native dialog stops the
+page, so on the web and Android the gap while one is being answered is the server's alone and
+is left open.
 
 **Someone the room has lost track of goes too.** A LiveKit session whose socket is not
 in `voice_<id>` (it died, or the backend has just restarted) has no room entry to find,
@@ -134,7 +138,10 @@ The selector is the only control that switches a mode, so its menu is a real one
 keyboard: the focus goes to its first item, the arrow keys, Home and End walk it, Escape gives
 the focus back to the selector and Tab closes it and goes on from there. Opened with a mouse or
 a finger the focus goes to the menu and to none of its items, since nothing would show it there
-and a stray Enter or Space could turn the mode off. The arrow keys still go in from there.
+and a stray Enter or Space could turn the mode off. The arrow keys still go in from there. When
+that menu closes the focus goes to nothing, not back to the selector, where the same stray keys
+would open it again with Off under the focus. Tab still goes on from the selector, except in
+Safari, and after a question the menu asked, where it starts from the top of the page.
 
 **It is bit 31, the last one JavaScript's 32-bit operators reach,** and they read it
 as the sign. `mask | bit` on a role holding it comes out negative, in this client

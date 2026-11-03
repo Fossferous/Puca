@@ -8,7 +8,7 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, clearAllStreams, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
 import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
@@ -164,7 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, landingRows, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -313,6 +313,17 @@ interface UnsentMessage {
     wire?: string;
     wentAt?: number;
 }
+
+/** What the notice says of a message that cannot go back in the box it was written in. */
+function unsentNotice(reason: string, text: string, hadChips: boolean, where: string | null): string {
+    const attachments = hadChips ? ' Its attachments were not sent either.' : '';
+    return text.trim()
+        ? `${reason}${attachments}\n\nWhat you wrote${where ? ` in ${where}` : ''}:\n${text}`
+        : `${reason}${attachments}`;
+}
+
+/** What is said of a call whose channel left the list: deleted, or View taken away. */
+const callGoneToast = (channelName: string) => `${channelName} is no longer available, so you left its call.`;
 
 /** How long after a DM goes its refusal may still be on the way. */
 const DM_REFUSAL_WINDOW_MS = 10_000;
@@ -1523,6 +1534,18 @@ export function Chat({ onLogout }: ChatProps) {
         if ((viewMode === 'voice' || viewMode === 'table') && !currentVoiceChannel) setViewMode('chat');
     }, [viewMode, currentVoiceChannel]);
 
+    // What a call was watching goes with that call, however it ended. Only a hang-up runs
+    // VoicePanel's leaveVoice: a channel deleted, a kick or a move just unmounts the panel,
+    // which stops the media and left the stage on a dead picture, or on a header with no
+    // tiles in the next call. Keyed on the channel and not on the panel's own unmount: a
+    // touch screen crossing the phone layout's width moves the panel in or out of its portal
+    // below, a remount in the SAME call, which rejoins with what they watch still chosen.
+    const voiceChannelId = currentVoiceChannel?.id;
+    useEffect(() => {
+        if (voiceChannelId === undefined) return undefined;
+        return () => clearAllStreams();
+    }, [voiceChannelId]);
+
     // Games (docs/GAMES.md): the store hears the socket for the whole session
     // (a newcomer's GameTable arrives right after RoomJoined, before anyone
     // opens the view), and is told which call this client shows.
@@ -1628,10 +1651,7 @@ export function Chat({ onLogout }: ChatProps) {
                     if (fileId) discardUpload(fileId);
                 }
             }
-            const attachments = unsent.chips.length > 0 ? ' Its attachments were not sent either.' : '';
-            return unsent.text.trim()
-                ? `${reason}${attachments}\n\nWhat you wrote in ${unsent.where}:\n${unsent.text}`
-                : `${reason}${attachments}`;
+            return unsentNotice(reason, unsent.text, unsent.chips.length > 0, unsent.where);
         }
         setInput(prev => (prev.trim() ? `${unsent.text}\n${prev}` : unsent.text));
         // takeSentAttachments revoked the previews; the uploads themselves stand.
@@ -1693,6 +1713,27 @@ export function Chat({ onLogout }: ChatProps) {
         setReplyingTo(null);
         clearComposerAttachments({ discardUploads: true });
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id, clearComposerAttachments]);
+
+    // The open conversation is going and they did not ask to go anywhere else: a channel
+    // deleted or its View taken away, a collection deleted, the server gone. The composer
+    // belongs to no conversation, so what it holds would be there in whichever one opens
+    // next, one Enter from being sealed for the wrong people. It goes in a notice instead,
+    // as a send that comes back too late does. Their own click on another channel keeps it.
+    // The effect above takes the reply and the chips, as the conversation's id changes.
+    // A ref refreshed every render: a frame's handler can be older than the words.
+    const composerGoesWithRef = useRef<(gone: 'channel' | 'collection' | 'server') => void>(() => { });
+    composerGoesWithRef.current = (gone) => {
+        const channelName = currentChannel ? `#${currentChannel.name}` : null;
+        const goneName = gone === 'server' ? currentServer?.name : gone === 'collection' ? currentCollection?.name : channelName;
+        if (input.trim() || pendingAttachments.length > 0) {
+            // A checklist channel has no box: what is in it was written somewhere earlier.
+            leaveNotice(unsentNotice(`${goneName} is no longer available, so your message was not sent.`, input, pendingAttachments.length > 0, composerShown ? channelName : null));
+        }
+        setInput('');
+        setAutocomplete(null);
+        // It grew with what was written; only a send puts it back.
+        if (inputRef.current) inputRef.current.style.height = 'auto';
+    };
 
     // Forward state — the decrypted content being forwarded (null = closed).
     // Content is all a forward needs: it's re-encrypted by the target's own
@@ -1925,10 +1966,12 @@ export function Chat({ onLogout }: ChatProps) {
                 return withoutDeletedChannel(old || [], channelId);
             });
 
-            // If we deleted the current channel, switch to another
-            if (currentChannel?.id === channelId) {
+            // If we deleted the current channel, switch to another. Asked of the ref: this
+            // press may be a while old, and they may have gone somewhere else meanwhile.
+            if (currentChannelIdRef.current === channelId) {
+                composerGoesWithRef.current('channel');
                 // accessing channels from cache would be ideal, but we can look at local state 'channels'
-                const remaining = modeShownChannels.filter(c => c.id !== channelId && c.channel_type === 0);
+                const remaining = landingRows(modeShownChannels.filter(c => c.id !== channelId), channels).filter(c => c.channel_type === 0);
                 setCurrentChannel(remaining[0] || null);
             }
         } catch (error) {
@@ -2119,8 +2162,11 @@ export function Chat({ onLogout }: ChatProps) {
     // drop it — otherwise the auto-select below can resurrect a stale copy.
     useEffect(() => {
         if (currentServer && !isServersLoading && !servers.some(s => s.id === currentServer.id)) {
+            composerGoesWithRef.current('server');
             setCurrentServer(null);
             setCurrentChannel(null);
+            // With no server the list is a new [] every render, and a collection's feed is keyed on it.
+            setCurrentCollection(null);
             setMessages([]);
             setShowFriendsPanel(true);
             setShowDevicesView(false);
@@ -2187,9 +2233,11 @@ export function Chat({ onLogout }: ChatProps) {
             // the text view would join a room the server refuses it (an alert)
             // and fetch history it refuses too. It gets no text view at all.
             // Nor into a channel a mode hides: entering a server would otherwise open
-            // it for every member, and being open would keep it listed.
-            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
-            const landing = modeShownChannels.find(c => c.channel_type === 0) || fallback;
+            // it for every member, and being open would keep it listed. Nor one with no
+            // row because its collection is denied to them, if anything else is listed.
+            const rows = landingRows(modeShownChannels, channels);
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : rows[0];
+            const landing = rows.find(c => c.channel_type === 0) || fallback;
             // A collection opens as a click on its row opens it: one page, the feed of
             // its text channels, which says so when it has none.
             if (landing?.channel_type === 2) setCurrentCollection(landing);
@@ -2409,6 +2457,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentChannel) {
             const fresh = channels.find(c => c.id === currentChannel.id);
             if (!fresh) {
+                composerGoesWithRef.current('channel');
                 setCurrentChannel(null);
                 setMessages([]);
                 setShowChecklist(false);
@@ -2423,6 +2472,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentCollection) {
             const freshCollection = channels.find(c => c.id === currentCollection.id);
             if (!freshCollection) {
+                composerGoesWithRef.current('collection');
                 setCurrentCollection(null);
                 setMessages([]);
                 if (isMobile) setMobilePanel('channels');
@@ -2437,6 +2487,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (currentVoiceChannel && currentVoiceChannel.server_id === currentServer.id &&
             !channels.some(c => c.id === currentVoiceChannel.id)) {
             setCurrentVoiceChannel(null);
+            showToast(callGoneToast(currentVoiceChannel.name));
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the refreshed channel list
     }, [channels, channelsFetched, currentServer?.id]);
@@ -2712,9 +2763,13 @@ export function Chat({ onLogout }: ChatProps) {
             const payload = msg.payload as { server_id: string };
             queryClient.invalidateQueries({ queryKey: keys.servers });
             if (currentServer?.id === payload.server_id) {
+                composerGoesWithRef.current('server');
                 setCurrentServer(null);
                 setCurrentChannel(null);
-                setCurrentVoiceChannel(null);
+                setCurrentCollection(null);
+                // Only a call on this server: voice persists while browsing other servers,
+                // and being removed from this one says nothing about those.
+                setCurrentVoiceChannel(prev => (prev?.server_id === payload.server_id ? null : prev));
                 setMessages([]);
                 setShowFriendsPanel(true);
                 setShowDevicesView(false);
@@ -4116,6 +4171,7 @@ export function Chat({ onLogout }: ChatProps) {
             // Auto-select the new channel if it's a text channel
             if (newChannelType === 0) {
                 setCurrentChannel(newChannel);
+                setCurrentCollection(null); // Made from a collection's page: its page would stay on top
                 setShowFriendsPanel(false);
                 setShowDevicesView(false);
                 setShowNotesView(false);
@@ -4258,8 +4314,9 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         if (currentVoiceChannel && voiceServerChannels && !voiceServerChannels.some(c => c.id === currentVoiceChannel.id)) {
             setCurrentVoiceChannel(null);
+            showToast(callGoneToast(currentVoiceChannel.name));
         }
-    }, [currentVoiceChannel, voiceServerChannels]);
+    }, [currentVoiceChannel, voiceServerChannels, showToast]);
     const voiceGamesEnabled = currentVoiceChannel
         ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
         : undefined;
@@ -4359,22 +4416,26 @@ export function Chat({ onLogout }: ChatProps) {
     const noticeHome = modeNotice?.serverId === currentServer?.id ? usableHome(noticeMode, channels) : null;
     const [settingsInitialTab, setSettingsInitialTab] = useState<'overview' | 'modes'>('overview');
 
+    // A press in the mode menu knows only the render that built the menu. The page goes on running
+    // behind a menu left open, on every platform, and behind a desktop question (api/appDialogs.ts),
+    // and a frame moves this row at once. Each request names only the server and what it wants, and
+    // the server acts on whichever mode is on when it arrives. With nothing moved, as behind a native
+    // dialog, which stops the page, this finds nothing.
+    const modeMovedBehindMenu = () => {
+        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer?.id);
+        if (!row || (row.active_mode_id ?? null) === activeModeId) return false;
+        showToast('The mode changed while you were deciding. Nothing was switched.');
+        return true;
+    };
     const switchMode = async (modeId: number | null) => {
         if (!currentServer || !modesData || modeId === activeModeId) return;
         const people = channelsEndedBySwitch(channels, activeModeId, modeId)
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
         if (warning && !await askConfirm(warning)) return;
-        // All of the above is from the render that built the menu. The page goes on running behind
-        // a menu left open, on every platform, and behind a desktop question (api/appDialogs.ts),
-        // and a frame moves this row at once: the warning, or the empty rooms that asked for none,
-        // may have been about a mode that is no longer on, and this would end the calls of the one
-        // that is. With nothing moved, as behind a native dialog, which stops the page, it finds nothing.
-        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer.id);
-        if (row && (row.active_mode_id ?? null) !== activeModeId) {
-            showToast('The mode changed while you were deciding. Nothing was switched.');
-            return;
-        }
+        // The warning, or the empty rooms that asked for none, may have been about a mode that is
+        // no longer on, and this would end the calls of the one that is.
+        if (modeMovedBehindMenu()) return;
         try {
             await setActiveMode(currentServer.id, modeId);
         } catch {
@@ -4383,6 +4444,9 @@ export function Chat({ onLogout }: ChatProps) {
     };
     const callBackToHome = async () => {
         if (!currentServer || !activeHome) return;
+        // It would move everyone in the rooms of the mode that is on to that mode's main channel, say
+        // they went to this one, and walk the presser here, away from them.
+        if (modeMovedBehindMenu()) return;
         try {
             const { moved, skipped } = await callEveryoneBack(currentServer.id);
             // The server moves everyone but the person asking: walk over like them.
@@ -4545,6 +4609,8 @@ export function Chat({ onLogout }: ChatProps) {
         setCurrentServer(server);
         setMessages([]);
         setCurrentChannel(null); // Will be auto-selected by useEffect when channels load
+        // Its row is not in this server's list, which would read as the collection deleted.
+        setCurrentCollection(null);
         setCurrentDM(null); // Leaving the DM/home view for a server
         setDmMessages([]);
     };
@@ -4604,6 +4670,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // current server).
                 setCurrentServer(null);
                 setCurrentChannel(null);
+                setCurrentCollection(null);
                 setFriendsTab('online');
                 setShowFriendsPanel(true);   // home content on desktop
                 setShowDevicesView(false);
@@ -5419,7 +5486,10 @@ export function Chat({ onLogout }: ChatProps) {
                         // Remove from local list
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
-                        if (currentServer?.id === server.id) {
+                        // Asked of the ref: this press is a round trip old, and they may have gone
+                        // somewhere else meanwhile, where the box and the screen are that place's.
+                        if (embedCurrentServerRef.current?.id === server.id) {
+                            composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {
                                 switchServer(remaining[0]);
@@ -5427,6 +5497,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setCurrentServer(null);
                                 // Channels/Messages cleaned up by hooks/state
                                 setCurrentChannel(null);
+                                setCurrentCollection(null);
                             }
                         }
                     } catch (error) {
@@ -5440,7 +5511,9 @@ export function Chat({ onLogout }: ChatProps) {
                         // Remove from local list
                         queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
 
-                        if (currentServer?.id === server.id) {
+                        // Asked of the ref, as for a leave.
+                        if (embedCurrentServerRef.current?.id === server.id) {
+                            composerGoesWithRef.current('server');
                             const remaining = servers.filter(s => s.id !== server.id);
                             if (remaining.length > 0) {
                                 switchServer(remaining[0]);
@@ -5448,6 +5521,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setCurrentServer(null);
                                 // Channels cleaned up by hooks
                                 setCurrentChannel(null);
+                                setCurrentCollection(null);
                             }
                         }
                     } catch (error) {

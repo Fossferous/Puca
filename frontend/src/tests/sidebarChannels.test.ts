@@ -5,6 +5,7 @@ import {
     drawnUnderCollection,
     hiddenWithCollection,
     keptByHideMuted,
+    landingRows,
     parentChoices,
     reorderedChannelIds,
     withoutDeletedChannel,
@@ -106,6 +107,37 @@ describe('the row every text channel and collection gets', () => {
 
     it('stops at a row with no parent, whatever spelling of none the server sent', () => {
         expect(drawnAtTop({ id: 1, name: 'a', channel_type: TEXT }, [])).toBe(true);
+    });
+});
+
+describe('what someone who chose no channel may land on', () => {
+    const hidden = { id: 50, name: 'staff-plans', channel_type: TEXT, parent_id: 99 };
+    const open = { id: 51, name: 'general', channel_type: TEXT, parent_id: null };
+    const room = { id: 52, name: 'Staff room', channel_type: VOICE, parent_id: 99 };
+
+    it('leaves out a row under a collection the reader cannot see, in the list\'s order', () => {
+        const rows = [hidden, open];
+        expect(landingRows(rows, rows)).toEqual([open]);
+    });
+
+    it('a voice room under one is drawn all the same, in its own section', () => {
+        const rows = [hidden, room];
+        expect(landingRows(rows, rows)).toEqual([room]);
+    });
+
+    it('takes such a row only when nothing else is drawn', () => {
+        expect(landingRows([hidden], [hidden])).toEqual([hidden]);
+    });
+
+    it('CONTROL: a row under a collection the reader can see is drawn', () => {
+        const parent = { id: 99, name: 'Open', channel_type: COLLECTION, parent_id: null };
+        const rows = [hidden, open, parent];
+        expect(landingRows(rows, rows)).toEqual(rows);
+    });
+
+    it('reads the parents from the whole list, not the rows it is given', () => {
+        const parent = { id: 99, name: 'Open', channel_type: COLLECTION, parent_id: null };
+        expect(landingRows([hidden, open], [hidden, open, parent])).toEqual([hidden, open]);
     });
 });
 

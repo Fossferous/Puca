@@ -140,6 +140,7 @@ For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 ### Send a Message
 - Type in the message box and press **Enter**
 - **Shift+Enter** inserts a new line
+- If the channel goes away while you are writing (it is deleted, you lose access to it, or you are no longer on the server), Púca moves you to another channel and empties the box, so nothing can go to the wrong people. A notice has your words until you dismiss it. Pressing another channel yourself keeps what you wrote in the box
 
 ### Format Text
 | Syntax | Result |
@@ -151,7 +152,7 @@ For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 | `` `code` `` | `code` |
 | ```` ``` ```` on its own lines | code block |
 | `> quote` | block quote |
-| `\|\|spoiler\|\|` | Blurred until clicked |
+| `\|\|spoiler\|\|` | Hidden until clicked, along with any code, link, picture, mention or file in it. The first click only reveals, and a link in a spoiler has no preview under the message |
 | `[text](https://example.com)` | a link that reads *text* |
 
 ### Mention Users and Channels
@@ -300,6 +301,9 @@ Púca removes the hidden details a phone adds to a photo (where it was taken, th
 2. Allow microphone access when the browser or app asks
 3. You are connected. Clicking the channel again opens the voice view; it never disconnects you
 4. If a warning appears instead, the app did not connect you — read it, then press **Join Voice** if you still want to join
+
+If the voice channel you are in is deleted, or you lose access to it, you leave its call, a message names the channel,
+and any share you were watching closes.
 
 A channel's **Speak** and **Connect** permissions (see
 [Channel permissions](#channel-permissions-manage-channels)) change what
@@ -1276,7 +1280,8 @@ An invite link clicked somewhere else — an email, a web page, a game launcher,
 The two call shortcuts, plus **Open Settings**, **Search Messages**, **Push to
 Talk (hold)** and **Push to Mute (hold)**, can be rebound under **Settings →
 Keybinds**. Push to talk and push to mute only do anything once you switch
-**Voice & Video** to that mode.
+**Voice & Video** to that mode. Bound to Space or Enter they press nothing in
+Púca's window, except in a text box, where the key still types.
 
 ---
 
