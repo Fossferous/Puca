@@ -222,6 +222,105 @@ describe('on the desktop a question is in the page', () => {
         await expect(pending).resolves.toBe('new words');
     });
 
+    describe('a text of several lines', () => {
+        const LINES = 'first line\nsecond line\n```\nfn main() {}\n```';
+        const lines = () => question()!.querySelector('textarea')!;
+        const type = (value: string) => act(() => {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(lines(), value);
+            lines().dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        /** The key on the field. Was it left for the browser, or stopped from typing? */
+        const key = async (init: KeyboardEventInit) => {
+            const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init });
+            await act(async () => { lines().dispatchEvent(event); });
+            return { typedByTheBrowser: !event.defaultPrevented };
+        };
+
+        it('keeps them, in a field that can hold them, with the focus and all of it selected', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            expect(question()!.querySelector('input'), 'an <input> takes the line breaks out').toBeNull();
+            expect(lines().value).toBe(LINES);
+            expect(document.activeElement).toBe(lines());
+            expect([lines().selectionStart, lines().selectionEnd]).toEqual([0, LINES.length]);
+            await click(ok());
+            await expect(pending).resolves.toBe(LINES);
+        });
+
+        it('an edit keeps every line, and Enter is the answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            type('first line, fixed\nsecond line');
+            expect(await key({}), 'or it would be a new line as well').toEqual({ typedByTheBrowser: false });
+            await expect(pending).resolves.toBe('first line, fixed\nsecond line');
+            expect(question()).toBeNull();
+        });
+
+        it('Shift+Enter is a new line and no answer, held or not', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ shiftKey: true })).toEqual({ typedByTheBrowser: true });
+            expect(await key({ shiftKey: true, repeat: true })).toEqual({ typedByTheBrowser: true });
+            expect(done).not.toHaveBeenCalled();
+            await click(cancel());
+        });
+
+        it('a held Enter is no answer, and no new line either', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ repeat: true })).toEqual({ typedByTheBrowser: false });
+            expect(done).not.toHaveBeenCalled();
+            // CONTROL: a fresh one is.
+            await key({});
+            expect(done).toHaveBeenCalledWith(LINES);
+        });
+
+        it('a held Space is only spaces, in here', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            expect(await key({ key: ' ', repeat: true })).toEqual({ typedByTheBrowser: true });
+            await click(cancel());
+            await pending;
+        });
+
+        it('an Enter or an Escape an IME is using is no answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ isComposing: true })).toEqual({ typedByTheBrowser: true });
+            // WebKit says it only this way, for the Enter that ends a composition.
+            expect(await key({ keyCode: 229 })).toEqual({ typedByTheBrowser: true });
+            // Stopped, or the browser cancels the modal <dialog> with it (the real browser script).
+            expect(await key({ key: 'Escape', isComposing: true })).toEqual({ typedByTheBrowser: false });
+            expect(done).not.toHaveBeenCalled();
+            expect(question()).not.toBeNull();
+            // CONTROL: with none composing, the same Escape is Cancel.
+            await key({ key: 'Escape' });
+            expect(done).toHaveBeenCalledWith(null);
+        });
+
+        it('Tab to OK and a held Enter there is still no answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            act(() => { ok().focus(); });
+            const repeat = new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true });
+            await act(async () => { ok().dispatchEvent(repeat); });
+            expect(repeat.defaultPrevented, 'the browser would have pressed OK with it').toBe(true);
+            await click(cancel());
+            await pending;
+        });
+
+        it('CONTROL: a question of one line stays the field it was, and leaves Enter to the browser', async () => {
+            const { answer: pending } = await asked(() => askText('Name?', 'one line'));
+            const input = question()!.querySelector('input')!;
+            expect(question()!.querySelector('textarea')).toBeNull();
+            const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+            await act(async () => { input.dispatchEvent(enter); });
+            expect(enter.defaultPrevented).toBe(false);
+            expect(question(), 'jsdom turns no key into an answer; the real browser script does').not.toBeNull();
+            await click(cancel());
+            await pending;
+        });
+    });
+
     it('Cancel on a text question is null, not the text', async () => {
         const { answer: pending } = await asked(() => askText('Ban Bob? Enter reason (optional):'));
         await click(cancel());

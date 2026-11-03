@@ -12,7 +12,9 @@
 //  - the page's own listeners hear what a native dialog kept from them: Cancel on "Discard
 //    this note?" is a press outside QuickAdd's root, which saves and closes the composer;
 //  - a question has to be over everything, a fullscreen element included, with no list of
-//    the app's z-indexes to keep in step.
+//    the app's z-indexes to keep in step;
+//  - a message of several lines needs a field that can hold them: Enter there is a new line
+//    until something says otherwise, and what an IME does with Enter is the IME's.
 //
 // It bundles the REAL AppDialogs, api/appDialogs, api/hotkeys and theme.css (esbuild). Each
 // guard has a control: this browser does deliver that keypress to a newly focused button,
@@ -36,6 +38,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const outDir = process.argv[2] ?? null;
 if (outDir) mkdirSync(outDir, { recursive: true });
 
+/** A message of several lines, as Edit hands it to the question. */
+const LINES = 'first line\nsecond line\n```\nfn main() {}\n```';
+
 const entry = `
 import './styles/theme.css';
 import { createRoot } from 'react-dom/client';
@@ -52,6 +57,8 @@ window.__nativeFeed = () => setNativeFeedStateForTest(true, ['voice.ptt']);
 window.__nativeKey = down => handleNativeHotkeyPayload({ keyCode: 86, ctrlKey: false, altKey: false, shiftKey: false, down });
 // What useNotesShortcuts is: behind a question, none of these keys are for it.
 window.addEventListener('keydown', () => { log.shortcut++; });
+// What the page was told about a key, ahead of everything: is this rig showing what it says?
+window.addEventListener('keydown', e => { log.lastKey = { key: e.key, isComposing: e.isComposing, keyCode: e.keyCode }; }, true);
 // What QuickAdd's outside press is.
 document.addEventListener('pointerdown', e => {
     if (!document.getElementById('composer').contains(e.target)) log.outside++;
@@ -67,6 +74,8 @@ function App() {
     return (
         <div id="composer" style={{ padding: 16, boxSizing: 'border-box', maxWidth: '100%' }}>
             <input id="field" onKeyDown={e => { if (e.key === 'Enter') window.__ask('Turn it into a heading?'); }} />
+            <input id="edit-field" onKeyDown={e => { if (e.key === 'Enter') window.__askText('Edit message:', ${JSON.stringify(LINES)}); }} />
+            <button id="edit" onClick={() => window.__askText('Edit message:', ${JSON.stringify(LINES)})}>Edit</button>
             <input id="plain-field" onKeyDown={e => { if (e.key === 'Enter') document.getElementById('plain-button').focus(); }} />
             <button id="plain-button" onClick={() => { log.plainClicked++; }}>plain</button>
             <button id="delete" onClick={() => void window.__site()}>Delete</button>
@@ -367,6 +376,96 @@ async function holdsUntilAnswered(page, site) {
 }
 
 {
+    console.log('a text of several lines');
+    const { page, close } = await open();
+    const FIELD = 'dialog.app-question textarea';
+    const answers = async () => (await log(page)).answers;
+    check('CONTROL: this browser\'s one-line field takes the line breaks out, or none of this is needed',
+        await page.evaluate(v => { const i = document.createElement('input'); i.type = 'text'; i.value = v; return i.value === v.replaceAll('\n', ''); }, LINES));
+
+    await page.evaluate(v => window.__askText('Edit message:', v), LINES);
+    await page.waitForSelector(FIELD);
+    check('the field holds the lines as they are', await page.inputValue(FIELD) === LINES);
+    check('and has the focus, its text selected', await page.evaluate(n => {
+        const f = document.activeElement;
+        return f?.tagName === 'TEXTAREA' && f.selectionStart === 0 && f.selectionEnd === n;
+    }, LINES.length));
+    check('OK is on the screen and is what is hit', await hitsItself(page, '.app-question-ok'));
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' edited');
+    await page.keyboard.press('Shift+Enter');
+    await page.keyboard.type('third');
+    const typed = `${LINES} edited\nthird`;
+    check('a real edit keeps every line, and Shift+Enter is one more', await page.inputValue(FIELD) === typed, JSON.stringify(await page.inputValue(FIELD)));
+    check('and no answer', await questionOpen(page) && (await answers()).length === 0);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('Enter answers, with the lines in the answer', (await answers()).at(-1) === typed && !await questionOpen(page), JSON.stringify((await answers()).at(-1)));
+
+    // Held from the press that asked, as "a held Enter does not answer" is for yes and no.
+    await page.focus('#edit');
+    await page.keyboard.down('Enter');
+    await page.waitForSelector(FIELD);
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter');
+    await settle(page);
+    check('a held Enter is no answer', await questionOpen(page) && (await answers()).length === 1);
+    check('and types nothing over the selected text', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.up('Enter');
+    await settle(page);
+    check('nor is letting go of it', await questionOpen(page));
+    await page.keyboard.press('Control+End');
+    await page.keyboard.down('Shift');
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await page.keyboard.up('Shift');
+    await settle(page);
+    check('a held Shift+Enter is more lines, and no answer', await questionOpen(page) && await page.inputValue(FIELD) === `${LINES}\n\n`, JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('Escape is Cancel', (await answers()).at(-1) === null && !await questionOpen(page));
+
+    await page.focus('#edit-field');
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(300);
+    check('the Enter that asked is no answer', await questionOpen(page) && (await answers()).length === 2);
+    check('and no new line: its keypress reached the field', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+
+    // An IME, through the browser's own composition (a real one needs a real IME; this is
+    // the state the browser is in while one is at work).
+    const cdp = await page.context().newCDPSession(page);
+    await page.keyboard.press('Control+End');
+    await cdp.send('Input.imeSetComposition', { text: 'か', selectionStart: 1, selectionEnd: 1 });
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('CONTROL: that Enter reached the page as a composing one, or this proves nothing', (await log(page)).lastKey.isComposing === true, JSON.stringify((await log(page)).lastKey));
+    check('an Enter an IME is using is no answer', await questionOpen(page) && (await answers()).length === 2);
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('nor is its Escape', (await log(page)).lastKey.isComposing === true && await questionOpen(page), JSON.stringify((await log(page)).lastKey));
+    await cdp.send('Input.insertText', { text: 'か' });
+    await settle(page);
+    // WebKit's Enter that ends a composition: not composing any more, and keyCode 229.
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 229 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 229 });
+    await settle(page);
+    check('CONTROL: that one says 229 and not composing', JSON.stringify((await log(page)).lastKey) === '{"key":"Enter","isComposing":false,"keyCode":229}', JSON.stringify((await log(page)).lastKey));
+    check('and is no answer either', await questionOpen(page) && (await answers()).length === 2);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('CONTROL: the same key with nothing composing answers', (await answers()).length === 3 && !await questionOpen(page), JSON.stringify(await answers()));
+
+    await page.evaluate(() => window.__askText('Name?', 'one line'));
+    await page.waitForSelector('dialog.app-question input');
+    check('a question of one line stays the field it was', await page.locator(FIELD).count() === 0);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('and Enter answers it as a browser does', (await answers()).at(-1) === 'one line', JSON.stringify((await answers()).at(-1)));
+    await close();
+}
+
+{
     console.log('the mouse, inside a question');
     const { page, close } = await open();
     await page.evaluate(() => window.__ask('Discard this note?'));
@@ -474,6 +573,12 @@ async function holdsUntilAnswered(page, site) {
         const button = await page.locator('.app-question-btn', { hasText: name }).boundingBox();
         check(`${name} is a 44 px target`, button.height >= 44 && button.width >= 44, JSON.stringify(button));
     }
+    await page.keyboard.press('Escape');
+    await page.evaluate(n => window.__askText('Edit message:', Array.from({ length: n }, (_, i) => `line ${i}`).join('\n')), 80);
+    await page.waitForSelector('dialog.app-question textarea');
+    const tall = await page.locator('dialog.app-question').boundingBox();
+    check('a very long message stays inside the window', tall.y >= 0 && tall.y + tall.height <= 844, JSON.stringify(tall));
+    check('with OK on the screen and hit', await hitsItself(page, '.app-question-ok'));
     await page.keyboard.press('Escape');
     await page.evaluate(() => window.__notice('Message failed to send. Check your connection and try again.'));
     await page.waitForSelector('.app-notice');
