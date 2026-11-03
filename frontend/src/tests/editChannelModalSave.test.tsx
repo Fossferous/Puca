@@ -3,8 +3,9 @@
  *
  *  - The parent goes only when it changed. The server obeys a null now, so a save from a row
  *    older than another manager's move would otherwise take the channel back out.
- *  - The topic always goes, empty included: left out, the server keeps the old one, and the
- *    editor's own refetch puts it back.
+ *  - So does the topic, for the same reason: an empty field from a row with no topic would wipe
+ *    one another manager has just set. A topic the person emptied goes as empty: left out, the
+ *    server keeps the old one, and the editor's own refetch puts it back.
  *
  * Mounted with raw `react-dom/client` + `act`, as the repo's other component tests are:
  * @testing-library/react is not a dependency here.
@@ -113,6 +114,38 @@ describe('Edit Channel: the parent', () => {
 });
 
 describe('Edit Channel: the topic', () => {
+    it('leaves an untouched empty field out: the row can be older than another manager\'s new topic', async () => {
+        await open(chan({ description: null }));
+        await save();
+        expect(sent()).not.toHaveProperty('description');
+    });
+
+    it('and for a row from a server that sent no topic at all', async () => {
+        await open(chan());
+        await save();
+        expect(sent()).not.toHaveProperty('description');
+    });
+
+    it('and an untouched topic, which would undo another manager\'s change to it', async () => {
+        await open(chan({ description: 'the town square' }));
+        await save();
+        expect(sent()).not.toHaveProperty('description');
+    });
+
+    it('and nothing but spaces typed where there was no topic, which is still none', async () => {
+        await open(chan({ description: null }));
+        await change(container.querySelector<HTMLTextAreaElement>('#channel-topic')!, '   ');
+        await save();
+        expect(sent()).not.toHaveProperty('description');
+    });
+
+    it('sends a first topic for a channel that had none', async () => {
+        await open(chan({ description: null }));
+        await change(container.querySelector<HTMLTextAreaElement>('#channel-topic')!, 'read the pins');
+        await save();
+        expect(sent().description).toBe('read the pins');
+    });
+
     it('sends an emptied topic as empty: left out, the server would keep the old one', async () => {
         await open(chan({ description: 'the town square' }));
         await change(container.querySelector<HTMLTextAreaElement>('#channel-topic')!, '');
