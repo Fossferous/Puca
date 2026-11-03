@@ -42,6 +42,12 @@ describe('a link in a spoiler has no card', () => {
         ['it in bold', '**||https://example.invalid/the-butler-did-it||**'],
         ['it in a quote', '> ||https://example.invalid/the-butler-did-it||'],
         ['in code in it', '||`https://example.invalid/the-butler-did-it`||'],
+        ['a word glued on after it', '||https://example.invalid/the-butler-did-it||!'],
+        ['more words glued on', '||https://example.invalid/the-butler-did-it||-- more'],
+        ['a letter glued on', '||https://example.invalid/the-butler-did-it||b'],
+        ['it in bold, and more glued on', '**||https://example.invalid/the-butler-did-it||**!'],
+        ['in lean with a `_` in the address', '_||https://example.invalid/the-butler-did-it_too||_'],
+        ['in a quote, and more glued on', '> ||https://example.invalid/the-butler-did-it||!'],
     ])('%s', async (_, content) => {
         expect(await said(content)).toEqual([]);
         expect(host!.textContent, 'the message itself still holds it').toContain(content.includes('who did it') ? 'who did it' : 'the-butler-did-it');
@@ -108,6 +114,21 @@ describe('the link and the card go to the whole address', () => {
         ['ending in (v=vs.85)', 'https://example.org/library/ms123(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)'],
     ])('a bracket it opened: %s', async (_, content, href) => {
         await bothGoTo(content, href);
+    });
+
+    it.each([
+        ['my_file is at ', 'https://example.org/my_file.txt'],
+        ['API_URL=', 'https://example.org/v1_beta'],
+        ['my_repo: ', 'https://example.org/me/my_repo'],
+        ['5*3 is at ', 'https://example.org/a*b'],
+        ['old~~name: ', 'https://example.org/old~~name'],
+    ])('words with a delimiter before it: %s', async (words, href) => {
+        await bothGoTo(words + href, href);
+        expect(host!.textContent?.startsWith(words)).toBe(true);
+    });
+
+    it('bold around an address that holds a `*`, and something after the bold', async () => {
+        await bothGoTo('**https://example.org/a*b**!', 'https://example.org/a*b');
     });
 });
 

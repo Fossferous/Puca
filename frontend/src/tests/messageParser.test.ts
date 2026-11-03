@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseMessage, extractMentions, isSafeUrl, type Node } from '../utils/messageParser';
+import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
 function text(nodes: Node[]): string {
@@ -127,6 +128,184 @@ describe('an address ending in a bracket it opened keeps it', () => {
         ['one opened and never closed', 'https://example.org/a(b, and then c)', 'https://example.org/a(b'],
     ])('CONTROL: a bracket that is not the address\'s: %s', (_, content, href) => {
         expect(hrefs(content)).toEqual([href]);
+    });
+});
+
+describe('a delimiter in the words before an address does not close inside it', () => {
+    it.each([
+        ['my_file is at ', 'https://example.org/my_file.txt'],
+        ['API_URL=', 'https://example.org/v1_beta'],
+        ['my_repo: ', 'https://example.org/me/my_repo'],
+        ['a__b at ', 'https://example.org/a__b'],
+        ['5*3 is at ', 'https://example.org/a*b'],
+        ['a**b is at ', 'https://example.org/a**b'],
+        ['old~~name: ', 'https://example.org/old~~name'],
+    ])('%s%s', (words, href) => {
+        expect(parseMessage(words + href)).toEqual([{ type: 'text', value: words }, { type: 'url', href }]);
+    });
+
+    it('it closes after the address', () => {
+        expect(parseMessage('_see https://example.org/a_b now_')).toEqual([
+            { type: 'em', children: [{ type: 'text', value: 'see ' }, { type: 'url', href: 'https://example.org/a_b' }, { type: 'text', value: ' now' }] },
+        ]);
+        expect(parseMessage('~~see https://example.org/a~~b~~ more')).toEqual([
+            { type: 'strike', children: [{ type: 'text', value: 'see ' }, { type: 'url', href: 'https://example.org/a~~b' }] },
+            { type: 'text', value: ' more' },
+        ]);
+    });
+
+    it('a link\'s target is an address too', () => {
+        expect(parseMessage('_a [the link](https://example.org/b_c) d_')).toEqual([
+            { type: 'em', children: [{ type: 'text', value: 'a ' }, { type: 'link', label: 'the link', href: 'https://example.org/b_c' }, { type: 'text', value: ' d' }] },
+        ]);
+    });
+
+    it.each([
+        ['**', 'strong'],
+        ['*', 'em'],
+        ['__', 'underline'],
+        ['_', 'em'],
+        ['~~', 'strike'],
+    ])('it closes inside when the address ends with it: %s', (d, type) => {
+        const href = 'https://example.org/a';
+        const wrapped = { type, children: [{ type: 'url', href }] };
+        expect(parseMessage(`${d}${href}${d}`)).toEqual([wrapped]);
+        expect(parseMessage(`${d}${href}${d}, and more`)).toEqual([wrapped, { type: 'text', value: ', and more' }]);
+        // URL_RE takes these into the address. They are the sentence's.
+        expect(parseMessage(`${d}${href}${d}!`)).toEqual([wrapped, { type: 'text', value: '!' }]);
+        expect(parseMessage(`${d}${href}${d}?`)).toEqual([wrapped, { type: 'text', value: '?' }]);
+        expect(parseMessage(`${d}${href}${d}-- more`)).toEqual([wrapped, { type: 'text', value: '-- more' }]);
+    });
+
+    it('it closes at the end of an address that holds another of it', () => {
+        expect(hrefs('**https://example.org/a**b**')).toEqual(['https://example.org/a**b']);
+        expect(hrefs('_https://example.org/a_b_')).toEqual(['https://example.org/a_b']);
+        expect(parseMessage('***https://example.org/a***')).toEqual([
+            { type: 'strong', children: [{ type: 'em', children: [{ type: 'url', href: 'https://example.org/a' }] }] },
+        ]);
+    });
+
+    it('CONTROL: one with more of the address after it is the address\'s', () => {
+        expect(hrefs('**https://example.org/a**b')).toEqual(['https://example.org/a**b']);
+        expect(hrefs('_https://example.org/a_/b')).toEqual(['https://example.org/a_/b']);
+    });
+});
+
+describe('a spoiler never stops being one', () => {
+    type Parsed = { type: string; href?: string; children?: Parsed[] };
+    /** What a parse hides and what it prints, by the words in it. */
+    const words = (node: unknown) => JSON.stringify(node).match(/w\d+/g) ?? [];
+    const hiddenBy = (nodes: Parsed[], out = new Set<string>()) => {
+        for (const n of nodes) {
+            if (n.type === 'spoiler') for (const w of words(n)) out.add(w);
+            else if (n.children) hiddenBy(n.children, out);
+        }
+        return out;
+    };
+    const printedBy = (nodes: Parsed[], out = new Set<string>()) => {
+        for (const n of nodes) {
+            if (n.type === 'spoiler') continue;
+            if (n.children) printedBy(n.children, out);
+            else for (const w of words(n)) out.add(w);
+        }
+        return out;
+    };
+    /** The words the parser as it was hid in `content` that `nodes` prints. */
+    const leaked = (content: string, nodes: Parsed[]) => {
+        const printed = printedBy(nodes);
+        return [...hiddenBy(parsedAsItWas(content))].filter(w => printed.has(w));
+    };
+    /** The addresses under a spoiler, and those not. */
+    const addresses = (content: string) => {
+        const hidden: string[] = [];
+        const shown: string[] = [];
+        const walk = (nodes: Node[], under: boolean) => {
+            for (const n of nodes) {
+                if (n.type === 'url') (under ? hidden : shown).push(n.href);
+                else if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+            }
+        };
+        walk(parseMessage(content), false);
+        return { hidden, shown };
+    };
+
+    it.each([
+        ['||https://example.org/the-butler||', 'https://example.org/the-butler'],
+        ['||https://example.org/the-butler||!', 'https://example.org/the-butler'],
+        ['||https://example.org/the-butler||-- more', 'https://example.org/the-butler'],
+        ['||https://example.org/the-butler||b', 'https://example.org/the-butler'],
+        ['||https://example.org/a_b||', 'https://example.org/a_b'],
+        ['**||https://example.org/the-butler||**', 'https://example.org/the-butler'],
+        ['**||https://example.org/the-butler||**!', 'https://example.org/the-butler'],
+        ['_||https://example.org/a_b||_', 'https://example.org/a_b'],
+        ['_||https://example.org/a_b||_!', 'https://example.org/a_b'],
+        ['> ||https://example.org/the-butler||!', 'https://example.org/the-butler'],
+    ])('%s', (content, href) => {
+        expect(addresses(content)).toEqual({ hidden: [href], shown: [] });
+    });
+
+    it('two in one line', () => {
+        expect(addresses('||https://example.org/a|| and ||https://example.org/b_c||!')).toEqual({
+            hidden: ['https://example.org/a', 'https://example.org/b_c'],
+            shown: [],
+        });
+        expect(addresses('||https://example.org/a||!||https://example.org/b||!')).toEqual({
+            hidden: ['https://example.org/a', 'https://example.org/b'],
+            shown: [],
+        });
+    });
+
+    it('beside words and an address the delimiter is stepped over for, each is what it should be', () => {
+        expect(addresses('my_file at https://example.org/my_file ||https://example.org/hidden||')).toEqual({
+            hidden: ['https://example.org/hidden'],
+            shown: ['https://example.org/my_file'],
+        });
+        expect(addresses('||https://example.org/hidden|| my_file at https://example.org/my_file')).toEqual({
+            hidden: ['https://example.org/hidden'],
+            shown: ['https://example.org/my_file'],
+        });
+        expect(addresses('my_file ||https://example.org/hidden|| https://example.org/my_file')).toEqual({
+            hidden: ['https://example.org/hidden'],
+            shown: ['https://example.org/my_file'],
+        });
+    });
+
+    it('the address gives way before the spoiler does: a `_` in the spoiler, or a `||` in the address', () => {
+        // Stepping over the address would close the `_` inside the spoiler.
+        expect(hiddenBy(parseMessage('w0_w1 https://example.org/w2_w3 ||w4_w5||'))).toEqual(new Set(['w4', 'w5']));
+        expect(hiddenBy(parseMessage('_https://example.org/w0_w1||w2||_'))).toEqual(new Set(['w2']));
+    });
+
+    // What goes wrong, in any order. Everything the parser as it was hid must not be printed now.
+    const PARTS = ['||', '||', '||', '**', '*', '__', '_', '_', '~~', '`', ' ', ' ', ' ', 'W', 'W', 'W',
+        'https://x/W', 'https://x/W_W', 'https://x/W*W', 'https://x/W~~W', 'Https://x/W', 'Https://x/W_W',
+        'HTTP://x/W*W', 'https://x/W||W', 'Https://x/W||W', ':', '://', ':https:', '//', ':W_W:', '@W', '#W_W',
+        '(', ')', '[W](', ']', '![W](', '!', '.', ',', '>', '"', '<', '\n', '> ', 'W_W', 'W*W', 'W~~W',
+        'https://x/(W', 'https://x/W)', 'Link:https://x/W_W', 'Link:Https://x/W', '[W](https://x/(W)', '-', '?'];
+
+    it('as a property, over text made of what goes wrong', () => {
+        let seed = 20261103;
+        const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+        let spoilers = 0;
+        const bad: string[] = [];
+        for (let k = 0; k < 150000; k++) {
+            let id = 0;
+            let content = '';
+            for (let j = 1 + next(10); j > 0; j--) content += PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`);
+            if (hiddenBy(parsedAsItWas(content)).size) spoilers++;
+            const out = leaked(content, parseMessage(content));
+            if (out.length) bad.push(`${JSON.stringify(content)} prints ${out.join(', ')}`);
+        }
+        expect(bad).toEqual([]);
+        // Over nothing it would prove nothing.
+        expect(spoilers).toBeGreaterThan(5000);
+    });
+
+    it('CONTROL: the check finds words that are printed, and leaves alone words that are not', () => {
+        expect(leaked('||w0||', parseMessage('w0'))).toEqual(['w0']);
+        expect(leaked('||w0|| w1', parseMessage('||w0|| w1'))).toEqual([]);
+        // What stepping over this address with no care would give: the address takes the spoiler in.
+        expect(leaked('w0_https://x/w1_w2||w3||', [{ type: 'url', href: 'https://x/w1_w2||w3||' }])).toEqual(['w3']);
     });
 });
 

@@ -74,6 +74,31 @@ export function urlAt(rest: string): string | null {
     return m && withBalancedTail(m[0], rest.slice(m[0].length));
 }
 
+/**
+ * Is there a spoiler ahead in `input`, from `at` on? A spoiler must never stop
+ * being one, and reading an address better can cost one. The `_`, `*`, `~~` and
+ * backticks of a text pair up in order, so one that used to be a delimiter and
+ * is now part of an address moves every pairing after it, and a later one can
+ * land inside `||…||` and take that spoiler apart, printing its words. So where
+ * text is read otherwise than it used to be and this says yes, it is read as it
+ * used to be unless nothing else in the text can pair differently for it.
+ * messageParser.test.ts holds this as a property against the parser as it was.
+ */
+function spoilerAhead(input: string, at: number): boolean {
+    const open = input.indexOf('||', at);
+    return open !== -1 && input.lastIndexOf('||') > open;
+}
+
+/** The run of text from `at` on that an address takes in if nothing stops it sooner. */
+function wordAt(input: string, at: number): string {
+    return /^[^\s<]*/.exec(input.slice(at))![0];
+}
+
+/** How many `||` are in `text`. */
+function barsIn(text: string): number {
+    return text.split('||').length - 1;
+}
+
 // Allow letters, numbers, underscore, dot, hyphen in mention/channel names.
 const NAME_RE = /^[a-z0-9_.-]+/i;
 
@@ -352,8 +377,8 @@ function parseInline(input: string, depth: number): Node[] {
     return nodes;
 }
 
-/** Find the matching closing delimiter for `open` starting at `from`. */
-function findClosing(input: string, from: number, open: string): number {
+/** The first `open` from `from` on, outside inline code. */
+function firstDelimiter(input: string, from: number, open: string): number {
     let i = from;
     while (i < input.length) {
         // Don't let a closing delimiter be found inside inline code.
@@ -368,6 +393,85 @@ function findClosing(input: string, from: number, open: string): number {
         i += 1;
     }
     return -1;
+}
+
+/** Where the delimiter `open` closes inside the address `href`: at the last one,
+ *  if the address ends with it (`**https://x/a**`), give or take what a sentence
+ *  puts after it (`**https://x/a**!`, where URL_RE takes the `!` in). Otherwise
+ *  -1, and every one in there is the address's own. */
+function closeInAddress(href: string, open: string): number {
+    const last = href.lastIndexOf(open);
+    return last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length)) ? last : -1;
+}
+
+/**
+ * With a spoiler ahead (see `spoilerAhead`), may a delimiter that used to close at
+ * `first` close at `found` instead, -1 being not at all? Only if each `||` keeps
+ * the partner it had and nothing else can pair differently for it.
+ */
+function closeMayMove(input: string, from: number, first: number, found: number, open: string): boolean {
+    // An address took in the backtick that opened inline code.
+    if (found !== -1 && found < first) return false;
+    // `**` or `__` left open is a `*` or a `_` that still opens.
+    if (found === -1 && open !== '~~' && open.length === 2) return false;
+    const stop = found === -1 ? input.length : found;
+    const after = found === -1 ? '' : input.slice(found + open.length);
+    const around = `${input.slice(from, stop)} ${after}`.replace(/https?:\/\/[^\s<>"]+/gi, '');
+    if (/[*_~`[]|\|\|\|/.test(around) || /https?:\/\/[^\s<]*\|\|/i.test(after)) return false;
+    const before = barsIn(input.slice(from, first));
+    const crossed = barsIn(input.slice(first, stop));
+    const beyond = barsIn(after);
+    if (crossed === 0) return true;
+    if (beyond === 0) return before % 2 === 0 || crossed === 1;
+    return before % 2 === 0 && crossed % 2 === 0;
+}
+
+/**
+ * Find the matching closing delimiter for `open` starting at `from`. A delimiter
+ * in the words before an address does not close inside it, or `my_file is at
+ * https://x/my_file.txt` is a link to https://x/my.
+ */
+function findClosing(input: string, from: number, open: string): number {
+    const first = firstDelimiter(input, from, open);
+    // A spoiler closes at the first `||`, always, in an address or not: URL_RE reads
+    // all of `https://x/a||!` as one address, and it is still a spoiler.
+    if (open === '||' || first === -1) return first;
+    const guarded = spoilerAhead(input, from);
+    let swallows = false;
+    let found = -1;
+    let i = from;
+    while (i < input.length) {
+        // Don't let a closing delimiter be found inside inline code.
+        if (input[i] === '`') {
+            const close = input.indexOf('`', i + 1);
+            if (close !== -1) {
+                i = close + 1;
+                continue;
+            }
+        }
+        if (input[i] === 'h') {
+            const href = urlAt(input.slice(i));
+            if (href) {
+                // An address takes in any `||` in its word, but for the one that
+                // closes a spoiler opened before it.
+                if (guarded && barsIn(wordAt(input, i)) > barsIn(input.slice(from, i)) % 2) swallows = true;
+                const inside = closeInAddress(href, open);
+                if (inside !== -1) {
+                    found = i + inside;
+                    break;
+                }
+                i += href.length;
+                continue;
+            }
+        }
+        if (input.startsWith(open, i)) {
+            found = i;
+            break;
+        }
+        i += 1;
+    }
+    if (found === first || !guarded) return found;
+    return !swallows && closeMayMove(input, from, first, found, open) ? found : first;
 }
 
 /** Collect the plain-text names of all users mentioned in a message. */
