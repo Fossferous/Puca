@@ -4605,6 +4605,8 @@ export function Chat({ onLogout }: ChatProps) {
         setCurrentServer(server);
         setMessages([]);
         setCurrentChannel(null); // Will be auto-selected by useEffect when channels load
+        // Its row is not in this server's list, which would read as the collection deleted.
+        setCurrentCollection(null);
         setCurrentDM(null); // Leaving the DM/home view for a server
         setDmMessages([]);
     };

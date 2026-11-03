@@ -109,6 +109,9 @@ let host: HTMLElement | null = null;
 let queryClient: QueryClient;
 let frames: Record<string, ((m: Frame) => void)[]> = {};
 let dialogs: ReturnType<typeof mountAppDialogs>;
+/** Each time a collection's page asks for its feed. With no list to read it asks on every render,
+ *  and that render's answer causes the next: stopped here, so that fails a test and hangs nothing. */
+let feedLoads = 0;
 
 beforeEach(() => {
     dialogs = mountAppDialogs();
@@ -117,6 +120,10 @@ beforeEach(() => {
     h.discarded = [];
     h.deleted = [];
     h.rows = [];
+    feedLoads = 0;
+    vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
+        if (String(said).startsWith('[Chat] Loading collection messages') && ++feedLoads > 300) throw new Error('the feed is going round');
+    });
     h.channels = [GENERAL, STAFF, OTHER];
     h.servers = [{ id: 's1', name: 'Srv', owner_id: ME + 1, created_at: '2026-10-01T00:00:00Z' }];
     vi.spyOn(window, 'alert').mockImplementation(() => {});
@@ -461,6 +468,52 @@ describe('the conversation goes away while someone is writing in it', () => {
         expect(headerText()).toContain('far-general');
         expect(composer()!.value).toBe('');
         expect(dialogs.notices()[0]).toContain('for the staff only');
+    });
+});
+
+const SRV = { id: 's1', name: 'Srv', owner_id: ME + 1, created_at: '2026-10-01T00:00:00Z' };
+const FAR = { id: 's2', name: 'Far', owner_id: ME + 1, created_at: '2026-10-02T00:00:00Z' };
+const PRIVATE = row(20, 'Private', { channel_type: 2 });
+const FAR_GENERAL = row(30, 'far-general', { server_id: 's2' });
+const FEW = 20;
+
+const clickServer = async (name: string) => {
+    await act(async () => { document.querySelector<HTMLElement>(`.server-icon[title="${name}"]`)!.click(); });
+};
+const landedOn = async (name: string) => {
+    for (let i = 0; i < 60 && !headerText().includes(name); i++) await settle();
+    await settled(5);
+    expect(headerText()).toContain(name);
+};
+describe('another server, from a collection\'s page with words kept behind it', () => {
+    it('a click on one already visited: the words are there on its channel, and nothing is said', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, PRIVATE, FAR_GENERAL];
+        await mountChat();
+        await clickServer('Far');
+        await landedOn('far-general');
+        await clickServer('Srv');
+        for (let i = 0; i < 60 && !rowNamed('Private'); i++) await settle();
+        await settled(5);
+        await type('from general');
+        await open('Private');
+        await clickServer('Far');
+        await landedOn('far-general');
+        expect(composer()!.value).toBe('from general');
+        expect(dialogs.notices()).toEqual([]);
+    });
+
+    it('a click on one whose list has not come yet: the same, and the page does not go round waiting for it', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, PRIVATE, FAR_GENERAL];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        await clickServer('Far');
+        await landedOn('far-general');
+        expect(feedLoads).toBeLessThan(FEW);
+        expect(composer()!.value).toBe('from general');
+        expect(dialogs.notices()).toEqual([]);
     });
 });
 
