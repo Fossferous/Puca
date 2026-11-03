@@ -60,7 +60,7 @@ const SURFACES = [
 // Light as it was, on top of the real stylesheet. Must fail, surface by surface.
 const OLD_LIGHT = `
 [data-theme="light"] {
-    --bg-floating: #0d0e10; --bg-nested: #0a0b0c; --bg-hover: #1e1f22;
+    --bg-floating: #0d0e10; --bg-hover: #1e1f22;
     --background-primary: initial; --background-secondary: initial; --background-tertiary: initial;
     --background-floating: initial; --background-modifier-accent: initial;
     --background-modifier-hover: initial; --background-modifier-selected: initial;
@@ -221,35 +221,43 @@ const pageReader = () => {
         probe.remove();
         return colour;
     };
+    const stopsOf = (image) => {
+        if (!image.includes('gradient(')) return [];
+        return (image.match(/rgba?\([^)]+\)|color\(srgb [^)]+\)/g) ?? []).map(parts);
+    };
     // Translucent layers composited down to the first opaque one, or the theme's page behind it. A
-    // gradient has no one colour behind every word: `gradient` says so, and those are not read.
-    const paint = (el, page) => {
-        const layers = [];
-        let gradient = false;
+    // gradient has no one colour behind the words, so each of its stops is an answer: this returns
+    // them all, and the reading takes the worst. Skipping gradients once hid the card table's tile.
+    const paints = (el, page) => {
+        let stacks = [[]];
         for (let e = el; e && e !== document.documentElement; e = e.parentElement) {
             const style = getComputedStyle(e);
-            if (style.backgroundImage !== 'none') gradient = true;
+            const stops = stopsOf(style.backgroundImage);
+            if (stops.length) stacks = stacks.flatMap(stack => stops.map(stop => [...stack, stop]));
             const colour = parts(style.backgroundColor);
-            if (colour[3] === 0) continue;
-            layers.push(colour);
-            if (colour[3] >= 1) break;
+            if (colour[3] > 0) stacks = stacks.map(stack => [...stack, colour]);
+            if (colour[3] >= 1 || (stops.length && stops.every(stop => stop[3] >= 1))) break;
         }
-        let under = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop().slice(0, 3) : page.slice(0, 3);
-        for (const layer of layers.reverse()) under = over(layer, under);
-        return { under, gradient };
+        return stacks.map((stack) => {
+            let under = page.slice(0, 3);
+            for (const layer of [...stack].reverse()) under = over(layer, under);
+            return under;
+        });
     };
+    const paint = (el, page) => paints(el, page)[0];
     const hasWords = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
     window.__measure = (root) => {
         const page = pageColour();
         const rows = [];
         const add = (el, kind, need) => {
-            const { under, gradient } = paint(el, page);
-            if (gradient) return;
-            const ink = over(parts(getComputedStyle(el).color), under);
+            const colour = parts(getComputedStyle(el).color);
+            const worst = paints(el, page)
+                .map((under) => { const ink = over(colour, under); return { under, ink, value: ratio(ink, under) }; })
+                .sort((a, b) => a.value - b.value)[0];
             rows.push({
                 kind, need, at: el.getAttribute('data-at') || el.tagName, cls: String(el.className || '').slice(0, 60),
-                ratio: Math.round(ratio(ink, under) * 100) / 100,
-                ink: ink.map(Math.round).join(','), under: under.map(Math.round).join(','),
+                ratio: Math.round(worst.value * 100) / 100,
+                ink: worst.ink.map(Math.round).join(','), under: worst.under.map(Math.round).join(','),
             });
         };
         for (const el of [root, ...root.querySelectorAll('*')]) {
@@ -271,7 +279,7 @@ const pageReader = () => {
             ...row, surface: section.getAttribute(attr), from: section.getAttribute('data-from'),
         }))
     ));
-    window.__paper = (el) => paint(el, pageColour()).under.map(Math.round).join(',');
+    window.__paper = el => paint(el, pageColour()).map(Math.round).join(',');
 };
 
 // ---- checks -------------------------------------------------------------------------------------

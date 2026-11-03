@@ -28,6 +28,8 @@
 [data-theme="light"] .emoji-close-btn,
 [data-theme="light"] .emoji-list-section h3 { color: var(--text-muted); }
 [data-theme="light"] .recovery-copy-btn { color: var(--text-normal); }
+/* A role's colour is set inline and still wins. */
+[data-theme="light"] .user-profile-popup .profile-info h3 { color: var(--header-primary); }
 [data-theme="light"] .permission-help-modal h3,
 [data-theme="light"] .permission-help-modal > p,
 [data-theme="light"] .permission-instructions p,
@@ -63,6 +65,7 @@
 
 /* Dark words on a pale fill: --bg-primary is white on this theme. */
 [data-theme="light"] .emoji-save-btn,
+[data-theme="light"] .message-avatar,
 [data-theme="light"] .tab-badge,
 [data-theme="light"] .nav-badge,
 [data-theme="light"] .user-profile-popup .kick-btn { color: #11111b; }
