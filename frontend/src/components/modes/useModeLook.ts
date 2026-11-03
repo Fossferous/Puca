@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { cachedFileUrl, fetchFileUrl } from '../../api/authedMedia';
+import { cachedFileUrl, fetchFileUrl, fileFetchRunning } from '../../api/authedMedia';
 import { mapPicture, pictureStyle, readPictureTheme, readThemeColor } from '../../api/modeLook';
 import { accentTokens, type PictureLimit, type Rgb, type ServerMode } from '../../api/serverModes';
 
@@ -74,18 +74,35 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     // accent is in the key for the names written in it.
     const key = fileId ? `${fileId}|${look}|${accent ?? ''}` : null;
     const [mapped, setMapped] = useState<{ key: string; look: ModeLook } | null>(null);
+    // A fetch that fell over with the connection gets one more go each time the socket is back.
+    // Nothing else would ask: the refetch that follows answers the same file, accent and look.
+    const [attempt, setAttempt] = useState(0);
+    useEffect(() => {
+        const again = () => setAttempt(n => n + 1);
+        window.addEventListener('wsConnected', again);
+        return () => window.removeEventListener('wsConnected', again);
+    }, []);
     useEffect(() => {
         if (!fileId || !key || mapped?.key === key) return;
         let stale = false;
         void (async () => {
-            const source = cachedFileUrl(fileId) ?? await fetchFileUrl(fileId);
+            const cached = cachedFileUrl(fileId);
+            // A download that began before this attempt can be the one the socket's reconnect was
+            // about, still hanging: if it falls over, that says nothing of the connection now, and
+            // this attempt has spent its go on it. So one of its own, which starts a fresh one.
+            const joined = !cached && fileFetchRunning(fileId);
+            const source = cached ?? await fetchFileUrl(fileId);
+            if (!source && joined && !stale) {
+                setAttempt(n => n + 1);
+                return;
+            }
             const theme = readPictureTheme();
             if (!source || !theme || stale) return;
             const picture = await mapPicture(source, theme.limit);
             if (picture && !stale) setMapped({ key, look: { style: pictureStyle(picture.url, theme) as CSSProperties, limit: theme.limit } });
         })();
         return () => { stale = true; };
-    }, [fileId, key, mapped?.key]);
+    }, [fileId, key, mapped?.key, attempt]);
 
     return key && mapped?.key === key ? mapped.look : undefined;
 }

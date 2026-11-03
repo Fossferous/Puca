@@ -27,8 +27,9 @@ nothing in this feature changes one.
 
 A channel a mode hides is still there for everyone allowed to see it:
 
-- it is still in `GET /servers/:id/channels`, with `mode_ids` saying why a client
-  should not list it, and an older client lists it;
+- it is still in `GET /servers/:id/channels`, and an older client lists it. A channel is
+  listed only if its own `mode_ids` and its collection's `parent_mode_ids` each allow the
+  mode that is on: an empty list allows any mode, and the AFK channel is exempt;
 - a #mention or a notification still opens it, and it can be joined;
 - its messages are kept, its keys are untouched, and it comes back with the mode.
 
@@ -96,6 +97,14 @@ and no others, so what they are told follows from what actually happened to them
 rather than from a guess at their channel's modes. `ServerModeChanged` goes out first,
 which is how the client knows what the mode was called.
 
+A warning is about the mode that was on when it was asked, and so is a menu left open, which
+asks nothing at all if that mode's rooms were empty. Frames keep arriving behind an open menu on
+every platform, and on the desktop behind the question, which is in the page, so if the mode has
+moved by the press or the answer, nothing is switched and the app says so; deleting a mode does
+the same. The request names only what to turn on, so the server would otherwise end whichever
+mode is on by then. A native dialog stops the page, so on the web and Android the gap while one
+is being answered is the server's alone and is left open.
+
 **Someone the room has lost track of goes too.** A LiveKit session whose socket is not
 in `voice_<id>` (it died, or the backend has just restarted) has no room entry to find,
 so it is cut at LiveKit directly and counted, as a transport change already did. A
@@ -120,6 +129,12 @@ Manage Channels. An edit never disconnects anyone.
 
 The owner and administrators can do all of it. Switch Modes is separate so that a
 Storyteller role can run a game without being able to delete channels.
+
+The selector is the only control that switches a mode, so its menu is a real one from the
+keyboard: the focus goes to its first item, the arrow keys, Home and End walk it, Escape gives
+the focus back to the selector and Tab closes it and goes on from there. Opened with a mouse or
+a finger the focus goes to the menu and to none of its items, since nothing would show it there
+and a stray Enter or Space could turn the mode off. The arrow keys still go in from there.
 
 **It is bit 31, the last one JavaScript's 32-bit operators reach,** and they read it
 as the sign. `mask | bit` on a role holding it comes out negative, in this client
@@ -225,7 +240,9 @@ a landscape is left as it is, down to the byte. A busy picture has its fine deta
 brought towards the mean around it until it reaches `DETAIL_TARGET`, keeping at least
 `DETAIL_KEEP_MIN` of it (`softenDetail`). Colour is not touched, and shapes larger than a word
 are not either. The text's shadow is a tight dark halo with a soft one around it (light on a
-light theme); the check above does not count it.
+light theme); the check above does not count it. A shadow has its own colour, so an unrevealed
+spoiler resets it (its letters are transparent and the halo would draw them), and so does the
+composer's autocomplete list, a solid surface of its own. A button takes none from the browser.
 
 The bound holds every pixel by construction, so what is left to measure is what the
 browser does afterwards. The result is stored as a JPEG, which rings a little at hard edges
@@ -325,6 +342,10 @@ Clients ship before the backend, so all four combinations have to make sense:
   eight themes as read from `styles/theme.css`, with negative controls.
 - `frontend/src/tests/modesUi.test.tsx`: the selector, its menu, the notice, the settings
   tab, the role editor's positive masks, the personal switch.
+- `frontend/src/tests/chatModeQuestion.test.tsx`: a switch or a delete answered after the mode moved, through
+  the real Chat and the real in-page question. `modeLookRetry.test.tsx`: a picture that failed to download.
+- `frontend/e2e/user-menu-move-to-real-browser.mjs`: the selector's menu from real keys, with a right click's
+  as the negative control, and at 390x844.
 - `frontend/e2e/modes-walk.mjs`: the whole story live through a real backend, two
   accounts, a 1280x800 desktop and a 390x844 coarse-pointer phone, all eight themes with
   and without high contrast. With a loopback LiveKit (header of the file) it also runs on

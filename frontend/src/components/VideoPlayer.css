@@ -391,6 +391,12 @@
     text-align: left;
     -webkit-user-select: none;
     user-select: none;
+    /* A solid surface inside the chat, where a mode's picture sets these three for what lies
+       over the picture (api/modeLook.ts). On this surface they all but vanish: the volume
+       slider's empty part, the chosen speed's fill, a hover. So they come from its own ink. */
+    --bg-modifier-hover: color-mix(in srgb, currentColor 14%, transparent);
+    --bg-modifier-active: color-mix(in srgb, currentColor 30%, transparent);
+    --bg-modifier-selected: color-mix(in srgb, currentColor 22%, transparent);
 }
 
 .vpl-panel-speed {

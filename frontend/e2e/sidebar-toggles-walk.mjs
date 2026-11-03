@@ -15,7 +15,14 @@
 //      collection, a room it hides stays listed while someone is in it, and Parent
 //      Collection is still what the mode reads. The real field's "No parent (top level)"
 //      takes a text channel and a voice room out of their collection, for the phone too
-//      with no reload, and a voice room out of the mode with it.
+//      with no reload, and a voice room out of the mode with it. Another member's list hears
+//      of a delete and a reorder with no reload, and a delete closes what they had open of
+//      it: a channel, a collection, a call, on the server they are looking at or not. A
+//      manager who cannot see all of a collection is told why they cannot delete it. An open
+//      collection's header follows a rename, an emptied topic stays empty, a cancelled Create
+//      Subchannel leaves no parent behind, and a channel under a collection inside a
+//      collection has a row, and that collection is not offered as a parent. A channel under
+//      a collection a member is denied has no row for them, though the server lists it.
 //      NEGATIVE CONTROL: a # row for a voice room injected into the list must be caught.
 //   B. Every switch on Server Settings > Overview (and Modes) is a switch: a track with
 //      a knob, a label beside it, on and off plainly different, at 3:1 on all eight
@@ -341,8 +348,10 @@ try {
     const moved = await mk('Moved', 1);
     const doomed = await mk('Doomed', 2);
     const goneRoom = await mk('Gone room', 1, doomed.id);
-    // Two levels down, which the API still takes and a database may already hold.
-    const deeper = await mk('Deeper', 2, doomed.id);
+    // Two levels down, which a PATCH still takes and a database may already hold. A create
+    // drops a collection's parent: an old client's Create Subchannel means one of its own.
+    const deeper = await mk('Deeper', 2);
+    await api(A, 'PATCH', `/channels/${deeper.id}`, { parent_id: doomed.id });
     const deepRoom = await mk('Deep room', 1, deeper.id);
     await api(A, 'POST', `/servers/${srv.id}/modes`, { name: 'Night', channel_ids: [secret.id] });
     const inv = await api(A, 'POST', `/servers/${srv.id}/invites`, {});
@@ -350,6 +359,9 @@ try {
     await api(C, 'POST', `/invites/${inv.code}/join`);
     const phoneSrvName = 'sbp_' + stamp;
     const phoneSrv = await api(B, 'POST', '/servers', { name: phoneSrvName });
+    // Somewhere for the third account to look at while it is in a call on the other server.
+    const thirdSrvName = 'sbc_' + stamp;
+    await api(C, 'POST', '/servers', { name: thirdSrvName });
     // A server with no text channel, whose first row is a collection of voice rooms.
     const landSrvName = 'sbl_' + stamp;
     const landSrv = await api(A, 'POST', '/servers', { name: landSrvName });
@@ -476,6 +488,7 @@ try {
     await until(async () => (await voiceOrder(A)).join() !== order.join(), 5000);
     order = await voiceOrder(A);
     check('dragging a room under one collection onto a room outside it moves it there', order.join() === 'default,Den,Town,Cellar,Attic,Moved,Gone room,Deep room,AFK', order);
+    check('and another member\'s list takes that order, with no reload: the frame makes it refetch', !!await until(async () => (await voiceOrder(B)).join() === order.join(), 8000), await voiceOrder(B));
     const stored = await api(A, 'GET', `/servers/${srv.id}/channels`);
     const storedVoice = stored.filter(c => c.channel_type === 1).map(c => c.name);
     // Crypt is hidden by the mode and keeps its slot, between Attic and Moved: numbering only
@@ -609,13 +622,46 @@ try {
     check('its menu still offers Create Subchannel, Mute, Edit and Delete', ['Create Subchannel', 'Mute Channel', 'Edit', 'Delete'].every(w => items.some(i => i.includes(w))), items);
     await A.keyboard.press('Escape');
     await sleep(150);
+    // With its page open: the header has to follow, with no press on the row.
+    await textRow(A, 'Rooms').click();
+    await until(async () => (await header(A)) === 'Rooms', 6000);
     await menu(A, textRow(A, 'Rooms'), 'Edit');
     const nameField = A.locator('.edit-channel-modal input[type="text"]').first();
     await nameField.fill('Rooms renamed');
-    await A.locator('.edit-channel-modal').getByRole('button', { name: /^Save/ }).click();
-    await A.locator('.edit-channel-modal').waitFor({ state: 'detached', timeout: 6000 });
+    const topicField = () => A.locator('#channel-topic');
+    const saveEdit = async () => {
+        await A.locator('.edit-channel-modal').getByRole('button', { name: /^Save/ }).click();
+        await A.locator('.edit-channel-modal').waitFor({ state: 'detached', timeout: 6000 });
+    };
+    const headerTopic = () => A.locator('.chat-header .channel-description');
+    await topicField().fill('where the rooms are');
+    await saveEdit();
     check('it edits', !!await until(async () => named(await sidebarRows(A), 'Rooms renamed').length === 1, 6000));
     check('and its rooms stay in the voice list', oneVoiceRow(await sidebarRows(A), 'Cellar'));
+    // Past the refetch the editor's own frame makes, which is what used to leave the old row.
+    await sleep(800);
+    check('the open collection\'s header takes the new name', (await header(A)) === 'Rooms renamed', await header(A));
+    check('and the title of its page', (await empty().locator('h2').innerText()) === 'Rooms renamed', await empty().locator('h2').innerText());
+    check('and the header its new topic', (await headerTopic().count()) === 1 && (await headerTopic().innerText()) === 'where the rooms are');
+    // An emptied topic: the form used to leave it out, and the refetch put the old one back.
+    await menu(A, textRow(A, 'Rooms renamed'), 'Edit');
+    await topicField().fill('');
+    await saveEdit();
+    await sleep(800);
+    const rowOfRooms = (await api(A, 'GET', `/servers/${srv.id}/channels`)).find(c => c.id === rooms.id);
+    check('Channel Topic can be emptied', !rowOfRooms.description, rowOfRooms.description);
+    check('and the header shows none, past the refetch', (await headerTopic().count()) === 0);
+    // And a save that says nothing about the parent leaves a parent set behind this form's back.
+    await menu(A, textRow(A, 'Rooms renamed'), 'Edit');
+    await api(A, 'PATCH', `/channels/${rooms.id}`, { parent_id: mixed.id });
+    await topicField().fill('moved while the form was open');
+    await saveEdit();
+    await sleep(300);
+    check('a save from a form opened before someone else\'s move does not undo it', (await parentOf(rooms.id)) === mixed.id, await parentOf(rooms.id));
+    await api(A, 'PATCH', `/channels/${rooms.id}`, { parent_id: null, description: '' });
+    await until(async () => !named(await sidebarRows(A), 'Rooms renamed')[0]?.sub, 5000);
+    await textRow(A, 'lobby').click();
+    await until(async () => (await header(A)) === 'lobby', 6000);
 
     // Hide Muted Channels: a muted collection stays only as the header of what is under it,
     // and a voice room is not under it. The switch is the server menu's own.
@@ -691,6 +737,68 @@ try {
     const more = await until(() => rowCalled('mixed-more'), 5000);
     check('control: a text channel made the same way is nested', more?.parent_id === mixed.id, more);
 
+    // Create Subchannel, then Cancel: Cancel only hides the form, and what it hid must not come
+    // back with the next +. Elsewhere it named a collection the next server does not have, and
+    // every create was refused for a reason nobody could see.
+    const parentPick = () => A.locator('.parent-channel-select');
+    const cancelCreate = () => A.locator('form:has(button.create-btn) button.cancel-btn').click();
+    const typedCreate = async (name) => {
+        await A.locator('form:has(button.create-btn) input[type="text"]').fill(name);
+        await A.locator('button.create-btn').click();
+        await A.locator('button.create-btn').waitFor({ state: 'detached', timeout: 6000 });
+    };
+    await menu(A, textRow(A, 'Mixed'), 'Create Subchannel');
+    await parentPick().waitFor({ timeout: 6000 });
+    check('control: Create Subchannel starts under its collection', (await parentPick().inputValue()) === String(mixed.id), await parentPick().inputValue());
+    await A.locator('.type-btn', { hasText: 'Checklist' }).click();
+    await cancelCreate();
+    await A.locator('.add-channel-btn[title="Create Text Channel"]').click();
+    check('the + after a cancelled Create Subchannel starts at the top level', (await parentPick().inputValue()) === '', await parentPick().inputValue());
+    check('as a plain text channel', /Text$/.test((await A.locator('.type-btn.active').innerText()).trim()), await A.locator('.type-btn.active').innerText());
+    await typedCreate('after-cancel');
+    const afterCancel = await until(() => rowCalled('after-cancel'), 5000);
+    check('and what it makes has no parent', !!afterCancel && (afterCancel.parent_id ?? null) === null && !afterCancel.has_checklist, afterCancel);
+    await menu(A, textRow(A, 'Mixed'), 'Create Subchannel');
+    await parentPick().waitFor({ timeout: 6000 });
+    await cancelCreate();
+    await A.locator(`.server-icon[title="${landSrvName}"]`).click();
+    await until(async () => named(await sidebarRows(A), 'Vault').length === 1, 8000);
+    dialogs.length = 0;
+    await A.locator('.add-channel-btn[title="Create Voice Channel"]').click();
+    await typedCreate('Far from Mixed');
+    const onOtherServer = await until(async () => (await api(A, 'GET', `/servers/${landSrv.id}/channels`)).find(c => c.name === 'Far from Mixed'), 5000);
+    check('on another server it creates, with no refusal', !!onOtherServer && (onOtherServer.parent_id ?? null) === null && dialogs.length === 0, { onOtherServer, dialogs });
+    await A.locator(`.server-icon[title="${srvName}"]`).click();
+    await until(async () => (await voiceOrder(A)).includes('Town'), 8000);
+
+    // A channel under a collection inside a collection: nothing draws it there, and it still
+    // needs a row. Only the API or an older client can make one now, and the pickers stop adding to it.
+    const inner = await mk('Inner', 2);
+    const underInner = await mk('under-inner', 0, inner.id);
+    await api(A, 'PATCH', `/channels/${inner.id}`, { parent_id: mixed.id });
+    for (const [who, page] of [['desktop', A], ['phone', B]]) {
+        const found = await until(async () => {
+            const row = named(await sidebarRows(page), 'under-inner');
+            return row.length === 1 && !row[0].sub ? row : null;
+        }, 8000);
+        check(`${who}: a channel under a collection inside a collection has one row, at the top level`, !!found, named(await sidebarRows(page), 'under-inner'));
+        check(`${who} control: the collection it is under keeps its row under its own parent`, named(await sidebarRows(page), 'Inner')[0]?.sub === true, named(await sidebarRows(page), 'Inner'));
+    }
+    const optionsOf = (field) => field.locator('option').allInnerTexts();
+    await A.locator('.add-channel-btn[title="Create Text Channel"]').click();
+    const nestOptions = await optionsOf(parentPick());
+    check('Nest Under does not offer a collection inside a collection', nestOptions.includes('Mixed') && !nestOptions.includes('Inner'), nestOptions);
+    await cancelCreate();
+    await menu(A, textRow(A, 'lobby'), 'Edit');
+    const parentOptions = await optionsOf(A.locator('#channel-parent'));
+    check('nor does Parent Collection', parentOptions.includes('Mixed') && !parentOptions.includes('Inner'), parentOptions);
+    await A.locator('.edit-channel-modal .close-button').click();
+    await menu(A, textRow(A, 'under-inner'), 'Edit');
+    check('except on the channel already in it, as what it is under', (await A.locator('#channel-parent').inputValue()) === String(inner.id), await A.locator('#channel-parent').inputValue());
+    await A.locator('#channel-parent').selectOption({ label: NO_PARENT });
+    await saveEdit();
+    check('and from there it can leave', !!await until(async () => (await parentOf(underInner.id)) === null, 5000), await parentOf(underInner.id));
+
     // Deleting takes the rooms with it (the foreign key cascades): they are not drawn under
     // it any more, so the confirmation has to say so, and the list has to lose them.
     dialogs.length = 0;
@@ -704,6 +812,99 @@ try {
     check('and so does everything in it, at every level, with no reload', !hasRow(afterDelete, 'Gone room') && !hasRow(afterDelete, 'Deeper') && !hasRow(afterDelete, 'Deep room'), afterDelete.map(r => r.name));
     const gone = await api(A, 'GET', `/servers/${srv.id}/channels`);
     check('as the server says', !gone.some(c => [doomed.id, goneRoom.id, deeper.id, deepRoom.id].includes(c.id)), gone.map(c => c.name));
+    // Nobody but the deleter used to hear of it: no mode names these, so only the new frame can.
+    const phoneLost = await until(async () => {
+        const left = await sidebarRows(B);
+        return ['Doomed', 'Gone room', 'Deeper', 'Deep room'].every(n => !hasRow(left, n)) ? left : null;
+    }, 8000);
+    check('another member\'s list loses all of it too, with no reload', !!phoneLost, (await sidebarRows(B)).map(r => r.name));
+
+    // What they had open of it closes. The third account in a room of it and reading a channel
+    // of it, the phone on the collection's own page.
+    const vanish = await mk('Vanishing', 2);
+    await mk('vanish-notes', 0, vanish.id);
+    const vanishRoom = await mk('Vanish room', 1, vanish.id);
+    const farAway = await mk('Far away', 2);
+    const farRoom = await mk('Far room', 1, farAway.id);
+    const spare = await mk('spare', 0);
+    await C.reload({ waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    await dismiss(C);
+    await C.locator(`.server-icon[title="${srvName}"]`).click();
+    await until(async () => (await voiceOrder(C)).includes('Vanish room'), 8000);
+    const inCall = (page) => page.locator('.voice-panel-compact .voice-connected-label').count();
+    await voiceRow(C, vanishRoom.id).click();
+    check('fixture: the third account is in the room', !!await until(async () => (await inCall(C)) > 0, 25000));
+    await textRow(C, 'vanish-notes').click();
+    check('fixture: and reading the channel', !!await until(async () => (await header(C)) === 'vanish-notes', 6000), await header(C));
+    await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
+    await sleep(400);
+    await textRow(B, 'Vanishing').tap();
+    check('fixture: the phone has the collection open', !!await until(async () => (await header(B)) === 'Vanishing', 6000), await header(B).catch(String));
+    await api(A, 'DELETE', `/channels/${vanish.id}`);
+    check('another member reading a channel in it is taken off it', !!await until(async () => (await header(C)) !== 'vanish-notes', 8000), await header(C));
+    check('their call in a room of it ends', !!await until(async () => (await inCall(C)) === 0, 8000), await inCall(C));
+    const thirdRows = await sidebarRows(C);
+    check('and neither is listed', !hasRow(thirdRows, 'vanish-notes') && !hasRow(thirdRows, 'Vanish room'), thirdRows.map(r => r.name));
+    check('another member with the collection open is taken off it', !!await until(async () => (await header(B).catch(() => '')) !== 'Vanishing', 8000), await header(B).catch(String));
+
+    // A call on a server they are not looking at has its own list.
+    await voiceRow(C, farRoom.id).click();
+    check('fixture: the third account is in a room again', !!await until(async () => (await inCall(C)) > 0, 25000));
+    await C.locator(`.server-icon[title="${thirdSrvName}"]`).click();
+    await until(async () => !(await voiceOrder(C)).includes('Far room'), 8000);
+    check('control: looking at another server keeps the call', (await inCall(C)) > 0);
+    await api(A, 'DELETE', `/channels/${spare.id}`);
+    await sleep(1500);
+    check('control: and so does the delete of another channel over there', (await inCall(C)) > 0);
+    await api(A, 'DELETE', `/channels/${farAway.id}`);
+    check('the delete of the room they are in ends the call, wherever they are looking', !!await until(async () => (await inCall(C)) === 0, 8000), await inCall(C));
+
+    // A manager who cannot see all of a collection: the question can only name what they
+    // can see, so the server refuses, and the person is told why and what to do.
+    const guarded = await mk('Guarded', 2);
+    await mk('guarded-notes', 0, guarded.id);
+    const staffRoom = await mk('Staff room', 1, guarded.id);
+    const roles = await api(A, 'GET', `/servers/${srv.id}/roles`);
+    const everyone = roles.find(r => r.is_default);
+    await api(A, 'PUT', `/channels/${staffRoom.id}/overwrites/${everyone.id}`, { allow: 0, deny: 1 << 0 });
+    const mods = await api(A, 'POST', `/servers/${srv.id}/roles`, { name: 'Mods', permissions: (1 << 17) | (1 << 0) });
+    const thirdId = await C.evaluate(() => JSON.parse(atob(localStorage.getItem('auth_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub);
+    await api(A, 'PUT', `/servers/${srv.id}/members/${thirdId}/roles/${mods.id}`);
+    await C.locator(`.server-icon[title="${srvName}"]`).click();
+    await until(async () => named(await sidebarRows(C), 'Guarded').length === 1, 8000);
+    check('fixture: the manager has no row of the room hidden from them', !hasRow(await sidebarRows(C), 'Staff room'), (await sidebarRows(C)).map(r => r.name));
+    dialogs.length = 0;
+    await menu(C, textRow(C, 'Guarded'), 'Delete');
+    await until(() => dialogs.length > 1, 5000);
+    check('a manager who cannot see all of a collection is told why it was not deleted, and what to do', dialogs.some(d => /nothing was deleted/.test(d) && /ask someone who can see every channel/.test(d)), dialogs);
+    const stillGuarded = await api(A, 'GET', `/servers/${srv.id}/channels`);
+    check('and nothing was', [guarded.id, staffRoom.id].every(id => stillGuarded.some(c => c.id === id)), stillGuarded.map(c => c.name));
+    dialogs.length = 0;
+    await menu(A, textRow(A, 'Guarded'), 'Delete');
+    await until(() => dialogs.length > 0, 3000);
+    check('control: someone who can see all of it is asked, and the question names the room', (dialogs[0] ?? '').includes('Staff room'), dialogs);
+    check('and it goes, for the manager too', !!await until(async () => !hasRow(await sidebarRows(C), 'Guarded'), 8000), (await sidebarRows(C)).map(r => r.name));
+
+    // A collection a member is denied. What is in it has no row for them, though the server lists
+    // it (a channel's permissions are its own, so nothing comes down from the collection): denying
+    // the collection is how an owner makes it look private.
+    const deniedOne = await mk('Denied', 2);
+    await mk('denied-notes', 0, deniedOne.id);
+    await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
+    await sleep(400);
+    const beforeDeny = await until(async () => {
+        const row = named(await sidebarRows(B), 'denied-notes');
+        return row.length === 1 && row[0].sub ? row : null;
+    }, 8000);
+    check('control: a member who can see a collection has a row for what is in it, under it', !!beforeDeny, named(await sidebarRows(B), 'denied-notes'));
+    await api(A, 'PUT', `/channels/${deniedOne.id}/overwrites/${everyone.id}`, { allow: 0, deny: 1 << 0 });
+    check('fixture: denied it, the member has no row for the collection', !!await until(async () => !hasRow(await sidebarRows(B), 'Denied'), 8000), (await sidebarRows(B)).map(r => r.name));
+    const listedForThem = (await api(B, 'GET', `/servers/${srv.id}/channels`)).map(c => c.name);
+    check('fixture: and the server still lists them what is in it, which is the point', listedForThem.includes('denied-notes') && !listedForThem.includes('Denied'), listedForThem);
+    check('a channel under a collection a member is denied has no row for them', !hasRow(await sidebarRows(B), 'denied-notes'), (await sidebarRows(B)).map(r => r.name));
+    check('control: someone who can see the collection keeps it there, under it', named(await sidebarRows(A), 'denied-notes')[0]?.sub === true, named(await sidebarRows(A), 'denied-notes'));
+    await api(A, 'DELETE', `/channels/${deniedOne.id}`);
 
     // ── A7. The phone.
     await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});

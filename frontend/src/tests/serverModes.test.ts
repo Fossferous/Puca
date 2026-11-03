@@ -831,4 +831,30 @@ describe('a picture that is busy at the size of a word', () => {
         const dark = 4 * (0 * W + 4);
         expect(px[dark] - px[dark + 1], 'nearly grey').toBeLessThan(24);
     });
+
+    // A cosmetic seam, no more: this strip is a few CSS px at the very edge of the chat, under the
+    // composer's padding, and no text is read over it. It is still darker than anything in the
+    // picture, which softening says it cannot be.
+    it.each([
+        ['bottom edge', 1024, 768, 'rows'],
+        ['right edge', 1072, 600, 'cols'],
+    ] as const)('a last patch one odd pixel across, which no sample lands in, leaves no dark seam along the %s (%ix%i)', (_edge, width, height, along) => {
+        const lin = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        const px = new Uint8ClampedArray(4 * width * height);
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const v = 150 + paper(x, y) % 100;
+            const i = 4 * (y * width + x);
+            px[i] = v; px[i + 1] = v; px[i + 2] = v; px[i + 3] = 255;
+        }
+        const shape = measureDetail(px, width, height);
+        expect(detailToKeep(shape.detail), 'control: it is busy enough to be softened').toBeLessThan(1);
+        const pixels = along === 'rows' ? height : width;
+        const patch = along === 'rows' ? shape.patchHeight : shape.patchWidth;
+        expect(pixels % patch, 'control: its last patch would be one pixel across').toBe(1);
+        expect((pixels - 1) % 2, 'control: at an odd coordinate, so read by no sample').toBe(1);
+        softenDetail(px, width, 0, shape, detailToKeep(shape.detail));
+        let lowest = 1;
+        for (let i = 0; i < px.length; i += 4) lowest = Math.min(lowest, lin(px[i]));
+        expect(lowest, 'nothing below the darkest pixel it came in with').toBeGreaterThanOrEqual(lin(150) - 0.002);
+    });
 });

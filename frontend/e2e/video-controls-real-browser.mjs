@@ -47,7 +47,13 @@
 //  10. the panels never outlive their place: F from inside the volume panel
 //      closes it before going fullscreen, Tab out of it closes it, a click
 //      on the picture that dismisses one plays nothing, and wheel-scrolling
-//      the chat until the speed button is out of sight closes the menu.
+//      the chat until the speed button is out of sight closes the menu;
+//  11. under a mode's picture (docs/SERVER_MODES.md), whose look sets
+//      --bg-modifier-* on the whole chat for what lies over the picture: on
+//      all eight themes the volume slider's empty part, the chosen speed's
+//      fill and a hover still show on the panel's solid surface, read back
+//      from the screen. NEGATIVE CONTROL: the panel taking the chat's tokens
+//      fails the same check.
 //
 // Every layout check also asks that the bar is inside its player and that
 // the centre Play button does not overlap the timeline (a tap on its rim
@@ -116,12 +122,13 @@ import { createRoot } from 'react-dom/client';
 import { MessageContent } from './components/MessageContent';
 import { TaskAttachments } from './components/TaskAttachments';
 import { saveSettings, loadSettings } from './components/settingsStore';
+import { pictureStyle, readPictureTheme } from './api/modeLook';
 import { __setPlaintextWorkerFactory } from './api/plaintextHost';
 import { __setCipherWriterFactory } from './api/cipherStore';
 
 __setPlaintextWorkerFactory(() => new Worker('/w/plaintext.js', { type: 'module' }));
 __setCipherWriterFactory(() => new Worker('/w/writer.js', { type: 'module' }));
-window.__rig = { saveSettings, loadSettings };
+window.__rig = { saveSettings, loadSettings, pictureStyle, readPictureTheme };
 function App() {
     return (
         <div className="rig-list" data-scroller="">
@@ -547,6 +554,87 @@ function checkLayout(tag, L, { coarse, expectSize }) {
     }
     ck(poor.length === 0, 'themes: menu text, the chosen speed and the bar\'s ink keep their contrast in all eight themes, with and without high contrast', poor.join('; '));
     await page.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
+
+    // ---- 11. the panels under a mode's picture, whose tokens the whole chat inherits.
+    const colourAt = async (x, y) => {
+        const png = await page.screenshot({ clip: { x: Math.round(x), y: Math.round(y), width: 1, height: 1 } });
+        return page.evaluate(async (b64) => {
+            const img = new Image();
+            img.src = `data:image/png;base64,${b64}`;
+            await img.decode();
+            const c = document.createElement('canvas');
+            c.width = c.height = 1;
+            const g = c.getContext('2d');
+            g.drawImage(img, 0, 0);
+            const [r, gg, b] = g.getImageData(0, 0, 1, 1).data;
+            return `rgb(${r}, ${gg}, ${b})`;
+        }, png.toString('base64'));
+    };
+    /** How far what the panel draws stands off its own surface, read from the screen. */
+    const panelMarks = async () => {
+        await reveal(page, 'm-portrait');
+        await sleep(100);
+        // A narrow player: a wide one has its volume slider in the bar.
+        await page.mouse.click(...center((await layoutOf(page, 'm-portrait')).ctl.volume.rect));
+        await page.waitForSelector('.vpl-panel-volume', { timeout: 3000 });
+        const slider = await page.evaluate(() => { const r = document.querySelector('.vpl-panel-volume [role="slider"]').getBoundingClientRect(); return { l: r.left, t: r.top, w: r.width, h: r.height }; });
+        await page.mouse.click(slider.l + slider.w * 0.5, slider.t + slider.h / 2);
+        await page.mouse.move(2, 2);
+        await sleep(150);
+        const volume = await page.evaluate(() => {
+            const p = document.querySelector('.vpl-panel-volume').getBoundingClientRect();
+            const t = document.querySelector('.vpl-panel .vpl-track').getBoundingClientRect();
+            return { surface: [p.left + 4, p.top + 4], track: [t.left + t.width * 0.85, t.top + t.height / 2] };
+        });
+        const surface = await colourAt(...volume.surface);
+        const track = await colourAt(...volume.track);
+        await page.keyboard.press('Escape');
+        await sleep(100);
+        await page.mouse.click(...center((await layoutOf(page, 'm-portrait')).ctl.speed.rect));
+        await page.waitForSelector('.vpl-panel-speed', { timeout: 3000 });
+        await page.mouse.move(2, 2);
+        await sleep(150);
+        const speed = await page.evaluate(() => {
+            const at = (el) => { const r = el.getBoundingClientRect(); return [r.left + 6, r.top + 6]; };
+            const items = [...document.querySelectorAll('.vpl-panel-speed [role="menuitemradio"]')];
+            return { chosen: at(items.find((i) => i.getAttribute('aria-checked') === 'true')), plain: at(items.find((i) => i.getAttribute('aria-checked') === 'false')) };
+        });
+        const chosen = await colourAt(...speed.chosen);
+        const unhovered = await colourAt(...speed.plain);
+        await page.mouse.move(...speed.plain);
+        await sleep(100);
+        const hovered = await colourAt(...speed.plain);
+        await page.keyboard.press('Escape');
+        await page.mouse.move(2, 2);
+        await sleep(100);
+        return {
+            track: contrast(track, surface),
+            chosen: contrast(chosen, surface),
+            hover: contrast(hovered, unhovered),
+        };
+    };
+    const standsOff = (m) => m.track >= 1.5 && m.chosen >= 1.3 && m.hover >= 1.2;
+    const show = (m) => JSON.stringify({ track: +m.track.toFixed(2), chosen: +m.chosen.toFixed(2), hover: +m.hover.toFixed(2) });
+    for (const theme of themes) {
+        await page.evaluate((theme) => {
+            document.documentElement.setAttribute('data-theme', theme);
+            const look = window.__rig.pictureStyle('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', window.__rig.readPictureTheme());
+            const chat = document.querySelector('.rig-list');
+            for (const [k, v] of Object.entries(look)) {
+                if (k.startsWith('--')) chat.style.setProperty(k, v);
+                else chat.style[k] = v;
+            }
+        }, theme);
+        await sleep(200);
+        const own = await panelMarks();
+        ck(standsOff(own), `picture on ${theme}: the slider's empty part, the chosen speed's fill and a hover stand off the panel`, show(own));
+        await page.addStyleTag({ content: '.vpl-panel { --bg-modifier-hover: inherit !important; --bg-modifier-active: inherit !important; --bg-modifier-selected: inherit !important; }' });
+        const inherited = await panelMarks();
+        await page.evaluate(() => [...document.querySelectorAll('style')].filter((s) => s.textContent.includes('--bg-modifier-hover: inherit')).forEach((s) => s.remove()));
+        ck(!standsOff(inherited), `NEGATIVE CONTROL: picture on ${theme}: with the chat's tokens on the panel, the same check fails`, show(inherited));
+        await page.evaluate(() => document.querySelector('.rig-list').removeAttribute('style'));
+    }
+    await page.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); });
     await ctx.close();
 }
 

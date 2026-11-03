@@ -27,6 +27,8 @@ const MAX_CHANNEL_NAME_LEN: usize = 100;
 const MAX_CHANNEL_DESC_LEN: usize = 1024;
 /// Bound the N+1 feed fan-out (one query per child channel).
 const MAX_FEED_CHILDREN: usize = 50;
+/// The channel type that holds other channels.
+const COLLECTION: i32 = 2;
 
 // --- DTOs ---
 
@@ -300,6 +302,11 @@ pub async fn create_channel(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Channel name too long").into_response();
     }
 
+    // A collection has no parent. Dropped, not refused: an installed client's Create
+    // Subchannel keeps the parent when Collection is chosen after it, and means a
+    // collection of its own (its form hides the field for one).
+    let parent_id = if payload.channel_type == COLLECTION { None } else { payload.parent_id };
+
     // The parent and category come from the BODY, so they must be re-checked
     // against the PATH server — the permission check above only covers the
     // path. update_channel has carried this guard for reparenting since the
@@ -307,25 +314,9 @@ pub async fn create_channel(
     // with MANAGE_CHANNELS on their own server could create a channel already
     // grafted under another server's collection channel (the FK enforces
     // existence, not same-server) and inject content into that server's feed.
-    if let Some(parent_id) = payload.parent_id {
-        // Width matched to this text's siblings (channels.id is INT4; a
-        // no-op cast at the create site, the fix at the update site — see
-        // the 22P03 note in device_token.rs).
-        let parent_server: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-                .bind(parent_id as i32)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-        match parent_server {
-            Some((Some(ref psid),)) if *psid == server_id => {}
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Parent channel must be in the same server",
-                )
-                    .into_response()
-            }
+    if let Some(parent_id) = parent_id {
+        if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await {
+            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
     }
     if let Some(category_id) = payload.category_id {
@@ -369,7 +360,7 @@ pub async fn create_channel(
     .bind(position)
     .bind(&server_id)
     .bind(payload.category_id)  // category_id for $5
-    .bind(payload.parent_id)    // parent_id for $6
+    .bind(parent_id)            // parent_id for $6
     .bind(is_afk)               // is_afk for $7
     .bind(has_checklist)        // has_checklist for $8
     .fetch_one(&state.pool)
@@ -428,7 +419,7 @@ pub async fn create_channel(
                 name: payload.name.clone(),
                 channel_type: payload.channel_type,
                 server_id: Some(server_id.clone()),
-                parent_id: payload.parent_id.map(|p| p as i64),
+                parent_id: parent_id.map(|p| p as i64),
                 is_afk,
                 has_checklist,
             };
@@ -455,7 +446,7 @@ pub async fn create_channel(
                 channel_type: payload.channel_type,
                 server_id: Some(server_id),
                 description: None,
-                parent_id: payload.parent_id.map(|p| p as i64),
+                parent_id: parent_id.map(|p| p as i64),
                 slowmode_seconds: 0,
                 is_afk,
                 has_checklist,
@@ -519,8 +510,8 @@ pub async fn update_channel(
     // detected afterwards. Read here rather than compared to the payload alone:
     // `sfu_mode: Some(true)` on a channel already true is not a change, and
     // putting a live call out for a no-op edit would be its own bug.
-    let before: Option<(i32, bool)> =
-        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
+    let before: Option<(i32, bool, Option<i32>)> =
+        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false), parent_id FROM channels WHERE id = $1")
             .bind(channel_id as i32)
             .fetch_optional(&state.pool)
             .await
@@ -530,25 +521,20 @@ pub async fn update_channel(
     // enforces existence, not same-server — without this a caller with
     // MANAGE_CHANNELS on their own server could graft their channel under another
     // server's collection channel and inject content into that server's feed.
+    //
+    // It must be a collection too, and not the channel itself: nothing else draws a
+    // child, so anything else takes the row off the sidebar with no way back in the UI.
+    //
+    // Only a parent that CHANGES is judged. An installed client sends the whole form on
+    // every save, so a rename of a row already under something else names that parent
+    // again, and has to keep working.
     if let Some(Some(parent_id)) = payload.parent_id {
-        // Width matched to this text's siblings (channels.id is INT4; a
-        // no-op cast at the create site, the fix at the update site — see
-        // the 22P03 note in device_token.rs).
-        let parent_server: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-                .bind(parent_id as i32)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-        match parent_server {
-            Some((Some(psid),)) if psid == server_id => {}
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Parent channel must be in the same server",
-                )
-                    .into_response()
-            }
+        let unchanged = before.is_some_and(|(_, _, parent)| parent == Some(parent_id));
+        if !unchanged
+            && (parent_id as i64 == channel_id
+                || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await)
+        {
+            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
     }
 
@@ -631,7 +617,7 @@ pub async fn update_channel(
             // rejoin on the transport the channel now has. AFTER the broadcast
             // above, so a client that reconnects immediately reads the new mode
             // rather than the one it just failed with.
-            if let Some((channel_type, was_sfu)) = before {
+            if let Some((channel_type, was_sfu, _)) = before {
                 if voice_transport_changed(channel_type, was_sfu, payload.sfu_mode) {
                     let room_id = format!("voice_{channel_id}");
                     // COLLECTED FIRST, deliberately: `rooms` is a DashMap and
@@ -712,6 +698,43 @@ pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Optio
     channel_type == VOICE && matches!(requested, Some(after) if after != before)
 }
 
+/// What a client is told when a channel it names cannot be a parent.
+const PARENT_REFUSED: &str = "Parent channel must be a collection in the same server";
+
+/// Is this channel a collection of this server? A failed read says no.
+async fn parent_is_a_collection_here(pool: &sqlx::PgPool, parent_id: i32, server_id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = $3)")
+        .bind(parent_id)
+        .bind(server_id)
+        .bind(COLLECTION)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+}
+
+/// May a delete take these channels along? The foreign key cascades through everything
+/// under the channel it names, messages included, with no undo, and the question a client
+/// asks first can only name the rows its own list holds. So a channel hidden from the
+/// caller would go without their having been told, and they could not have told anyone.
+/// Fail closed: a resolver error refuses, and so does a channel it did not answer for. An
+/// empty list is a plain delete, of a channel with nothing under it.
+fn may_delete_along(
+    under: &[i64],
+    perms: Result<std::collections::HashMap<i64, Permissions>, sqlx::Error>,
+) -> Result<(), (StatusCode, &'static str)> {
+    let perms = perms.map_err(|e| {
+        tracing::error!("delete_channel: resolving what goes with it failed: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel")
+    })?;
+    if under.iter().all(|id| perms.get(id).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL))) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        "This collection also holds channels you cannot see, and they would be deleted with it, so nothing was deleted. Your channel list is incomplete: ask someone who can see every channel to delete it.",
+    ))
+}
+
 /// Delete a channel
 pub async fn delete_channel(
     State(state): State<Arc<AppState>>,
@@ -743,7 +766,36 @@ pub async fn delete_channel(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response();
     }
 
-    // Deleting the server's PINNED CLIPS CHANNEL turns clips off with it.
+    // What the foreign key's cascade is about to take: this channel and everything under
+    // it, at any depth (a collection can sit inside a collection). UNION, not UNION ALL, so
+    // a loop that raw API calls made ends the walk where it comes back round.
+    let doomed: Vec<i32> = match sqlx::query_scalar(
+        "WITH RECURSIVE doomed(id) AS ( \
+             SELECT id FROM channels WHERE id = $1 \
+             UNION \
+             SELECT c.id FROM channels c JOIN doomed d ON c.parent_id = d.id \
+         ) SELECT id FROM doomed",
+    )
+    .bind(channel_id as i32)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("delete_channel: reading what goes with {} failed: {:?}", channel_id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel").into_response();
+        }
+    };
+
+    // Only what goes ALONG is judged: deleting one channel by its id is as it always was.
+    let under: Vec<i64> = doomed.iter().map(|&id| id as i64).filter(|&id| id != channel_id).collect();
+    let perms = get_user_channels_permissions(&state.pool, &server_id, claims.sub, &under).await;
+    if let Err(refusal) = may_delete_along(&under, perms) {
+        return refusal.into_response();
+    }
+
+    // Deleting the server's PINNED CLIPS CHANNEL turns clips off with it, whether
+    // it is the channel named or one the cascade takes.
     // The FK is ON DELETE SET NULL (050_clips.sql), so without this a
     // moderator with MANAGE_CHANNELS — who cannot touch server settings —
     // would leave the server clips-enabled with no pin: the exact state
@@ -755,12 +807,12 @@ pub async fn delete_channel(
     // if only this UPDATE lands the pin moves nowhere; if only the DELETE
     // lands we are back to the FK gap, which the settings guard tolerates.
     let _ = sqlx::query(
-        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = $2",
+        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = ANY($2)",
     )
     .bind(&server_id)
     // i32, matching the INTEGER column — an i64 bind against INT4 is the
     // intermittent 22P03 the cold-boot fix documents (sqlx caches by SQL text).
-    .bind(channel_id as i32)
+    .bind(&doomed)
     .execute(&state.pool)
     .await;
 
@@ -777,11 +829,23 @@ pub async fn delete_channel(
     }
 
     // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
-    state.games.close_room(
+    for id in &doomed {
+        state.games.close_room(
+            &state,
+            &format!("voice_{id}"),
+            crate::games_wire::GameEndReason::ChannelDeleted,
+        );
+    }
+
+    // TELL EVERYONE, as update_channel does: every member refetches the channel list, and
+    // the refetch is what takes the rows off theirs and closes whichever of them was open.
+    // Nothing else would until they left the server and came back.
+    crate::mode_handlers::push_to_members(
         &state,
-        &format!("voice_{channel_id}"),
-        crate::games_wire::GameEndReason::ChannelDeleted,
-    );
+        &server_id,
+        crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
+    )
+    .await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -859,6 +923,14 @@ pub async fn reorder_channels(
         )
             .into_response();
     }
+
+    // The list has one order, everyone's, not the dragger's own.
+    crate::mode_handlers::push_to_members(
+        &state,
+        &server_id,
+        crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
+    )
+    .await;
 
     StatusCode::OK.into_response()
 }
@@ -1246,6 +1318,24 @@ mod tests {
         assert_eq!(parse(serde_json::json!({ "parent_id": 7 })), Ok(Some(Some(7))), "a value: set it");
         assert_eq!(parse(serde_json::json!({ "parent_id": "7" })), Err(()), "not a channel id");
         assert_eq!(parse(serde_json::json!({ "parent_id": 5_000_000_000_i64 })), Err(()), "wider than the column");
+    }
+
+    #[test]
+    fn a_delete_takes_along_only_what_the_caller_can_see() {
+        use std::collections::HashMap;
+        let answered = |rows: &[(i64, Permissions)]| Ok(rows.iter().copied().collect::<HashMap<_, _>>());
+        let status = |under: &[i64], perms| may_delete_along(under, perms).map_err(|(s, _)| s);
+
+        assert_eq!(status(&[], answered(&[])), Ok(()), "nothing under it: a plain delete");
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::VIEW_CHANNEL)])), Ok(()));
+        assert_eq!(status(&[1], answered(&[(1, Permissions::ADMINISTRATOR)])), Ok(()), "an admin sees everything");
+
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::empty())])), Err(StatusCode::CONFLICT));
+        assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL)])), Err(StatusCode::CONFLICT), "no answer is no");
+        assert_eq!(status(&[1], Err(sqlx::Error::PoolTimedOut)), Err(StatusCode::INTERNAL_SERVER_ERROR), "a resolver error refuses");
+
+        let (_, sentence) = may_delete_along(&[1], answered(&[])).unwrap_err();
+        assert!(sentence.contains("nothing was deleted") && sentence.contains("ask someone who can see every channel"), "{sentence}");
     }
 
     #[test]

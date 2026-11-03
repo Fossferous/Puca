@@ -12,7 +12,9 @@
 //  - the page's own listeners hear what a native dialog kept from them: Cancel on "Discard
 //    this note?" is a press outside QuickAdd's root, which saves and closes the composer;
 //  - a question has to be over everything, a fullscreen element included, with no list of
-//    the app's z-indexes to keep in step.
+//    the app's z-indexes to keep in step;
+//  - a message of several lines needs a field that can hold them: Enter there is a new line
+//    until something says otherwise, and what an IME does with Enter is the IME's.
 //
 // It bundles the REAL AppDialogs, api/appDialogs, api/hotkeys and theme.css (esbuild). Each
 // guard has a control: this browser does deliver that keypress to a newly focused button,
@@ -20,6 +22,9 @@
 // the page, a z-index does not get over a fullscreen element. And the NEGATIVE CONTROLS,
 // which must fail the same check the real path passes: the old plugin's window.confirm,
 // run verbatim, and askConfirm with its await left off.
+//
+// It also measures NotesDialog, the small sheet of the .ics import and Notes, on every theme:
+// nothing else opens one on Light, where it was dark text on a near-black surface for months.
 //
 // SILENT and headless: no media at all. Nothing is ever fetched from outside.
 //
@@ -36,10 +41,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 const outDir = process.argv[2] ?? null;
 if (outDir) mkdirSync(outDir, { recursive: true });
 
+/** A message of several lines, as Edit hands it to the question. */
+const LINES = 'first line\nsecond line\n```\nfn main() {}\n```';
+
 const entry = `
 import './styles/theme.css';
+// Before every component's CSS, as Notes' own page and the desktop app load it.
+import './notes/notes.css';
+import './components/calendar/IcsImport.css';
 import { createRoot } from 'react-dom/client';
+import { useState } from 'react';
 import { AppDialogs } from './components/AppDialogs';
+import { NotesDialog } from './components/NotesDialog';
+import { ImageLightbox } from './components/ImageLightbox';
 import { askConfirm, askText, leaveNotice } from './api/appDialogs';
 import { handleNativeHotkeyPayload, registerHold, registerPress, setNativeFeedStateForTest } from './api/hotkeys';
 const log = window.__log = { answers: [], outside: 0, shortcut: 0, ticks: 0, destroyed: 0, plainClicked: 0, mic: false, muteToggles: 0 };
@@ -52,6 +66,8 @@ window.__nativeFeed = () => setNativeFeedStateForTest(true, ['voice.ptt']);
 window.__nativeKey = down => handleNativeHotkeyPayload({ keyCode: 86, ctrlKey: false, altKey: false, shiftKey: false, down });
 // What useNotesShortcuts is: behind a question, none of these keys are for it.
 window.addEventListener('keydown', () => { log.shortcut++; });
+// What the page was told about a key, ahead of everything: is this rig showing what it says?
+window.addEventListener('keydown', e => { log.lastKey = { key: e.key, isComposing: e.isComposing, keyCode: e.keyCode }; }, true);
 // What QuickAdd's outside press is.
 document.addEventListener('pointerdown', e => {
     if (!document.getElementById('composer').contains(e.target)) log.outside++;
@@ -64,9 +80,28 @@ window.__site = async () => { if (!await askConfirm('Disband this server?')) ret
 window.__oldSite = () => { if (!window.confirm('Disband this server?')) return; log.destroyed++; };
 window.__unawaitedSite = () => { if (!askConfirm('Disband this server?')) return; log.destroyed++; };
 function App() {
+    const [sheet, setSheet] = useState(false);
+    window.__sheet = setSheet;
+    const [viewer, setViewer] = useState(false);
+    window.__viewer = setViewer;
+    const [, redraw] = useState(0);
+    window.__redraw = () => redraw(n => n + 1);
     return (
         <div id="composer" style={{ padding: 16, boxSizing: 'border-box', maxWidth: '100%' }}>
+            {viewer && <ImageLightbox url="data:image/gif;base64,R0lGODlhAQABAAAAACw=" name="p.gif" onClose={() => setViewer(false)} />}
+            {sheet && (
+                <NotesDialog title="Import a calendar" onClose={() => setSheet(false)}>
+                    <p>Some words of the sheet.</p>
+                    <p className="notes-labels-hint">A hint under them.</p>
+                    <div className="ics-notes" role="note"><p>Not everything maps exactly:</p></div>
+                    <p className="notes-send-error">The message did not go.</p>
+                    <button type="button" className="notes-textbtn">Cancel</button>
+                    <button type="button" className="notes-textbtn primary">Import</button>
+                </NotesDialog>
+            )}
             <input id="field" onKeyDown={e => { if (e.key === 'Enter') window.__ask('Turn it into a heading?'); }} />
+            <input id="edit-field" onKeyDown={e => { if (e.key === 'Enter') window.__askText('Edit message:', ${JSON.stringify(LINES)}); }} />
+            <button id="edit" onClick={() => window.__askText('Edit message:', ${JSON.stringify(LINES)})}>Edit</button>
             <input id="plain-field" onKeyDown={e => { if (e.key === 'Enter') document.getElementById('plain-button').focus(); }} />
             <button id="plain-button" onClick={() => { log.plainClicked++; }}>plain</button>
             <button id="delete" onClick={() => void window.__site()}>Delete</button>
@@ -267,6 +302,38 @@ async function holdsUntilAnswered(page, site) {
 }
 
 {
+    console.log('a question over the picture viewer');
+    const { page, close } = await open();
+    const viewerOpen = () => page.locator('.image-lightbox').count().then(n => n > 0);
+    await page.evaluate(() => window.__viewer(true));
+    await page.waitForSelector('.image-lightbox');
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('CONTROL: Escape closes the viewer, with no question', !await viewerOpen());
+    await page.evaluate(() => window.__viewer(true));
+    await page.waitForSelector('.image-lightbox');
+    await page.evaluate(() => window.__ask('Update now?'));
+    await page.waitForSelector('dialog.app-question');
+    check('OK is on the screen and is what is hit, over the viewer', await hitsItself(page, '.app-question-ok'));
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('a real Escape answers the question', JSON.stringify((await log(page)).answers) === '[false]' && !await questionOpen(page));
+    check('and leaves the picture', await viewerOpen());
+    await page.evaluate(() => window.__ask('Update now?'));
+    await page.waitForSelector('dialog.app-question');
+    // Its onClose is new with each draw, so it now listens after the question does.
+    await page.evaluate(() => window.__redraw());
+    await settle(page);
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('and when the viewer has drawn again since', JSON.stringify((await log(page)).answers) === '[false,false]' && await viewerOpen());
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('the next Escape is the viewer\'s', !await viewerOpen());
+    await close();
+}
+
+{
     console.log('nothing happens until OK');
     const { page, close } = await open();
     check('the question holds the handler back', await holdsUntilAnswered(page, '__site'));
@@ -367,6 +434,158 @@ async function holdsUntilAnswered(page, site) {
 }
 
 {
+    console.log('a text of several lines');
+    const { page, close } = await open();
+    const FIELD = 'dialog.app-question textarea';
+    const answers = async () => (await log(page)).answers;
+    check('CONTROL: this browser\'s one-line field takes the line breaks out, or none of this is needed',
+        await page.evaluate(v => { const i = document.createElement('input'); i.type = 'text'; i.value = v; return i.value === v.replaceAll('\n', ''); }, LINES));
+
+    await page.evaluate(v => window.__askText('Edit message:', v), LINES);
+    await page.waitForSelector(FIELD);
+    check('the field holds the lines as they are', await page.inputValue(FIELD) === LINES);
+    check('and has the focus, its text selected', await page.evaluate(n => {
+        const f = document.activeElement;
+        return f?.tagName === 'TEXTAREA' && f.selectionStart === 0 && f.selectionEnd === n;
+    }, LINES.length));
+    check('OK is on the screen and is what is hit', await hitsItself(page, '.app-question-ok'));
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type(' edited');
+    await page.keyboard.press('Shift+Enter');
+    await page.keyboard.type('third');
+    const typed = `${LINES} edited\nthird`;
+    check('a real edit keeps every line, and Shift+Enter is one more', await page.inputValue(FIELD) === typed, JSON.stringify(await page.inputValue(FIELD)));
+    check('and no answer', await questionOpen(page) && (await answers()).length === 0);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('Enter answers, with the lines in the answer', (await answers()).at(-1) === typed && !await questionOpen(page), JSON.stringify((await answers()).at(-1)));
+
+    // Held from the press that asked, as "a held Enter does not answer" is for yes and no.
+    await page.focus('#edit');
+    await page.keyboard.down('Enter');
+    await page.waitForSelector(FIELD);
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter');
+    await settle(page);
+    check('a held Enter is no answer', await questionOpen(page) && (await answers()).length === 1);
+    check('and types nothing over the selected text', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.up('Enter');
+    await settle(page);
+    check('nor is letting go of it', await questionOpen(page));
+    await page.keyboard.press('Control+End');
+    await page.keyboard.down('Shift');
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await page.keyboard.up('Shift');
+    await settle(page);
+    check('a held Shift+Enter is more lines, and no answer', await questionOpen(page) && await page.inputValue(FIELD) === `${LINES}\n\n`, JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('Escape is Cancel', (await answers()).at(-1) === null && !await questionOpen(page));
+
+    await page.focus('#edit-field');
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(300);
+    check('the Enter that asked is no answer', await questionOpen(page) && (await answers()).length === 2);
+    check('and no new line: its keypress reached the field', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+
+    // An IME, through the browser's own composition (a real one needs a real IME; this is
+    // the state the browser is in while one is at work).
+    const cdp = await page.context().newCDPSession(page);
+    await page.keyboard.press('Control+End');
+    await cdp.send('Input.imeSetComposition', { text: 'か', selectionStart: 1, selectionEnd: 1 });
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('CONTROL: that Enter reached the page as a composing one, or this proves nothing', (await log(page)).lastKey.isComposing === true, JSON.stringify((await log(page)).lastKey));
+    check('an Enter an IME is using is no answer', await questionOpen(page) && (await answers()).length === 2);
+    await page.keyboard.press('Escape');
+    await settle(page);
+    check('nor is its Escape', (await log(page)).lastKey.isComposing === true && await questionOpen(page), JSON.stringify((await log(page)).lastKey));
+    await cdp.send('Input.insertText', { text: 'か' });
+    await settle(page);
+    // WebKit's Enter that ends a composition: not composing any more, and keyCode 229.
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 229 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 229 });
+    await settle(page);
+    check('CONTROL: that one says 229 and not composing', JSON.stringify((await log(page)).lastKey) === '{"key":"Enter","isComposing":false,"keyCode":229}', JSON.stringify((await log(page)).lastKey));
+    check('and is no answer either', await questionOpen(page) && (await answers()).length === 2);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('CONTROL: the same key with nothing composing answers', (await answers()).length === 3 && !await questionOpen(page), JSON.stringify(await answers()));
+
+    await page.evaluate(() => window.__askText('Name?', 'one line'));
+    await page.waitForSelector('dialog.app-question input');
+    check('a question of one line stays the field it was', await page.locator(FIELD).count() === 0);
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('and Enter answers it as a browser does', (await answers()).at(-1) === 'one line', JSON.stringify((await answers()).at(-1)));
+
+    // A key an IME passes on: a keydown saying 229, then the character with no keydown of its own
+    // (a space ending a Hangul syllable, by what is written about the Korean IME; only a real one
+    // can say it does this on WebView2). With no other key pressed since the question opened: the
+    // sections above all press Control+End first, which would hide it.
+    const typeThrough = { type: 'char', text: ' ', unmodifiedText: ' ', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 };
+    await page.evaluate(v => window.__askText('Edit message:', v), LINES);
+    await page.waitForSelector(FIELD);
+    await cdp.send('Input.dispatchKeyEvent', typeThrough);
+    await settle(page);
+    check('CONTROL: the character with nothing gone down here types nothing, as the Enter that asked does not', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Process', code: 'Space', windowsVirtualKeyCode: 229 });
+    await cdp.send('Input.dispatchKeyEvent', typeThrough);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Process', code: 'Space', windowsVirtualKeyCode: 229 });
+    await settle(page);
+    check('CONTROL: that keydown said 229', (await log(page)).lastKey.keyCode === 229, JSON.stringify((await log(page)).lastKey));
+    check('the same character after its 229 is typed, over the selected text', await page.inputValue(FIELD) === ' ', JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.press('Escape');
+    await settle(page);
+    await close();
+}
+
+{
+    console.log('a press on a notice, over a half-written note');
+    const { page, close } = await open();
+    await page.evaluate(() => window.__notice('Message failed to send.\n\nWhat you wrote in #general:\nthe words of it'));
+    await page.waitForSelector('.app-notice');
+    await page.focus('#field');
+    const before = (await log(page)).outside;
+    const box = sel => page.locator(sel).boundingBox();
+
+    const words = await box('.app-notice-text');
+    await page.mouse.move(words.x + 2, words.y + 6);
+    await page.mouse.down();
+    await page.mouse.move(words.x + words.width - 2, words.y + words.height - 4, { steps: 4 });
+    await page.mouse.up();
+    check('its words can be selected with a drag', await page.evaluate(() => getSelection().toString().includes('Message failed')), JSON.stringify(await page.evaluate(() => getSelection().toString().slice(0, 40))));
+    check('and that is no press outside the composer', (await log(page)).outside === before, `${(await log(page)).outside - before} heard`);
+
+    await page.focus('#field');
+    await page.keyboard.type('half a no');
+    const dismiss = await box('.app-notice-close');
+    await page.mouse.move(dismiss.x + dismiss.width / 2, dismiss.y + dismiss.height / 2);
+    await page.mouse.down();
+    check('a press on its X leaves the focus in the field', await page.evaluate(() => document.activeElement?.id === 'field'), await page.evaluate(() => document.activeElement?.tagName));
+    await page.mouse.up();
+    await settle(page);
+    check('the X dismisses it', await page.locator('.app-notice').count() === 0);
+    check('and is no press outside the composer', (await log(page)).outside === before, `${(await log(page)).outside - before} heard`);
+    await page.keyboard.type('te');
+    check('and typing goes on where it was', await page.inputValue('#field') === 'half a note', await page.inputValue('#field'));
+
+    // Tab still reaches it: a mouse press is all that keeps the focus away.
+    await page.evaluate(() => window.__notice('Slow down.'));
+    await page.waitForSelector('.app-notice');
+    await page.evaluate(() => document.querySelector('.app-notice-close').focus());
+    await page.keyboard.press('Enter');
+    await settle(page);
+    check('Enter on a focused X dismisses it too', await page.locator('.app-notice').count() === 0);
+
+    await page.mouse.click(1200, 700);
+    check('CONTROL: a press off the notice and off the composer is one', (await log(page)).outside === before + 1, `${(await log(page)).outside - before} heard`);
+    await close();
+}
+
+{
     console.log('the mouse, inside a question');
     const { page, close } = await open();
     await page.evaluate(() => window.__ask('Discard this note?'));
@@ -408,6 +627,57 @@ async function holdsUntilAnswered(page, site) {
     await page.evaluate(() => window.__notice('Message failed to send. Check your connection and try again.'));
     await page.evaluate(() => window.__askText('Edit message:', 'first'));
     await page.waitForSelector('dialog.app-question input');
+    // Behind the question, which takes nothing from its colours. Not itself one of these
+    // questions, but the same kind of surface (the .ics import, Notes' sheets), and nothing
+    // else measures it: the theme walks do not open it.
+    await page.evaluate(() => window.__sheet(true));
+    await page.waitForSelector('.notes-dialog');
+    const measureLooks = () => page.evaluate(() => {
+        const parts = c => c.match(/[\d.]+/g).map(Number);
+        // Translucent layers composited down to the first opaque one.
+        const paint = el => {
+            const layers = [];
+            for (let e = el; e; e = e.parentElement) {
+                const [r, g, b, a = 1] = parts(getComputedStyle(e).backgroundColor);
+                if (a === 0) continue;
+                layers.push([r, g, b, a]);
+                if (a >= 1) break;
+            }
+            let [r, g, b] = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop() : [255, 255, 255];
+            for (const [lr, lg, lb, la] of layers.reverse()) {
+                r = lr * la + r * (1 - la); g = lg * la + g * (1 - la); b = lb * la + b * (1 - la);
+            }
+            return [r, g, b];
+        };
+        const lum = rgb => {
+            const [r, g, b] = rgb.slice(0, 3).map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+        const q = s => document.querySelector(s);
+        const text = (name, el, need) => [name, ratio(parts(getComputedStyle(el).color), paint(el)), need];
+        return [
+            text('message', q('.app-question-message'), 4.5),
+            text('field', q('.app-question-input'), 4.5),
+            text('Cancel', q('.app-question-btn:not(.app-question-ok)'), 4.5),
+            text('OK', q('.app-question-ok'), 4.5),
+            ['OK\'s border', ratio(parts(getComputedStyle(q('.app-question-ok')).borderTopColor), paint(q('.app-question'))), 3],
+            text('notice', q('.app-notice-text'), 4.5),
+            text('notice\'s Dismiss', q('.app-notice-close'), 3),
+            text('sheet\'s title', q('.notes-dialog-head h3'), 4.5),
+            text('sheet\'s words', q('.notes-dialog-body p'), 4.5),
+            text('sheet\'s warning', q('.ics-notes p'), 4.5),
+            text('sheet\'s button', q('.notes-dialog-body .notes-textbtn:not(.primary)'), 4.5),
+            text('sheet\'s Close', q('.notes-dialog-head .notes-iconbtn'), 3),
+            // The app-wide tokens as text, on any surface of any theme: their own figures as
+            // a floor, none of which this surface can do anything about. --text-faint is
+            // 3.4 to 4:1, --brand-primary 4.15 to 4.3:1, and --color-danger over its own
+            // tint 4.45:1 on the yellow theme.
+            text('sheet\'s hint', q('.notes-dialog-body .notes-labels-hint'), 3),
+            text('sheet\'s main button', q('.notes-dialog-body .notes-textbtn.primary'), 4),
+            text('sheet\'s error', q('.notes-send-error'), 4.4),
+        ];
+    });
     for (const theme of themes) {
         for (const contrast of ['normal', 'high']) {
             await page.evaluate(([t, c]) => {
@@ -415,40 +685,7 @@ async function holdsUntilAnswered(page, site) {
                 document.documentElement.setAttribute('data-contrast', c);
             }, [theme, contrast]);
             await page.waitForTimeout(250); // past any colour transition
-            const pairs = await page.evaluate(() => {
-                const parts = c => c.match(/[\d.]+/g).map(Number);
-                // Translucent layers composited down to the first opaque one.
-                const paint = el => {
-                    const layers = [];
-                    for (let e = el; e; e = e.parentElement) {
-                        const [r, g, b, a = 1] = parts(getComputedStyle(e).backgroundColor);
-                        if (a === 0) continue;
-                        layers.push([r, g, b, a]);
-                        if (a >= 1) break;
-                    }
-                    let [r, g, b] = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop() : [255, 255, 255];
-                    for (const [lr, lg, lb, la] of layers.reverse()) {
-                        r = lr * la + r * (1 - la); g = lg * la + g * (1 - la); b = lb * la + b * (1 - la);
-                    }
-                    return [r, g, b];
-                };
-                const lum = rgb => {
-                    const [r, g, b] = rgb.slice(0, 3).map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
-                    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                };
-                const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
-                const q = s => document.querySelector(s);
-                const text = (name, el, need) => [name, ratio(parts(getComputedStyle(el).color), paint(el)), need];
-                return [
-                    text('message', q('.app-question-message'), 4.5),
-                    text('field', q('.app-question-input'), 4.5),
-                    text('Cancel', q('.app-question-btn:not(.app-question-ok)'), 4.5),
-                    text('OK', q('.app-question-ok'), 4.5),
-                    ['OK\'s border', ratio(parts(getComputedStyle(q('.app-question-ok')).borderTopColor), paint(q('.app-question'))), 3],
-                    text('notice', q('.app-notice-text'), 4.5),
-                    text('notice\'s Dismiss', q('.app-notice-close'), 3),
-                ];
-            });
+            const pairs = await measureLooks();
             for (const [name, value, need] of pairs) {
                 measured++;
                 if (value < need) poor.push(`${theme}/${contrast} ${name} ${value.toFixed(2)}:1`);
@@ -457,8 +694,18 @@ async function holdsUntilAnswered(page, site) {
             if (outDir) await page.screenshot({ path: join(outDir, `${theme}-${contrast}.png`) });
         }
     }
-    check('every text 4.5:1 and every mark 3:1, in each of 16 looks', poor.length === 0 && measured === 16 * 7, poor.join('; ') || `${measured} measured`);
+    check('every text 4.5:1 and every mark 3:1, the app-wide tokens at their own floors, in each of 16 looks', poor.length === 0 && measured === 16 * 15, poor.join('; ') || `${measured} measured`);
     check('and OK is what is hit in each', offScreen === 0, `${offScreen} missed`);
+    for (const contrast of ['normal', 'high']) {
+        await page.evaluate(c => {
+            document.documentElement.setAttribute('data-theme', 'light');
+            document.documentElement.setAttribute('data-contrast', c);
+            document.querySelector('.notes-dialog').style.background = 'var(--bg-floating)';
+        }, contrast);
+        await page.waitForTimeout(250);
+        const words = (await measureLooks()).find(([name]) => name === 'sheet\'s words')[1];
+        check(`CONTROL: the sheet's surface as it was, --bg-floating, fails this on Light (${contrast})`, words < 3, `${words.toFixed(2)}:1`);
+    }
     await close();
 }
 
@@ -474,6 +721,12 @@ async function holdsUntilAnswered(page, site) {
         const button = await page.locator('.app-question-btn', { hasText: name }).boundingBox();
         check(`${name} is a 44 px target`, button.height >= 44 && button.width >= 44, JSON.stringify(button));
     }
+    await page.keyboard.press('Escape');
+    await page.evaluate(n => window.__askText('Edit message:', Array.from({ length: n }, (_, i) => `line ${i}`).join('\n')), 80);
+    await page.waitForSelector('dialog.app-question textarea');
+    const tall = await page.locator('dialog.app-question').boundingBox();
+    check('a very long message stays inside the window', tall.y >= 0 && tall.y + tall.height <= 844, JSON.stringify(tall));
+    check('with OK on the screen and hit', await hitsItself(page, '.app-question-ok'));
     await page.keyboard.press('Escape');
     await page.evaluate(() => window.__notice('Message failed to send. Check your connection and try again.'));
     await page.waitForSelector('.app-notice');

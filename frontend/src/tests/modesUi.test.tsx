@@ -58,6 +58,8 @@ vi.mock('../api/servers', async (importOriginal) => ({
         { id: 8, name: 'Voice Under', channel_type: 1, server_id: SERVER, parent_id: 6, mode_ids: [] },
         { id: 10, name: 'Hall', channel_type: 2, server_id: SERVER, mode_ids: [98] },
         { id: 11, name: 'Stranded', channel_type: 1, server_id: SERVER, parent_id: 10, mode_ids: [99] },
+        { id: 12, name: 'Inner', channel_type: 2, server_id: SERVER, parent_id: 6, mode_ids: [] },
+        { id: 13, name: 'Under Inner', channel_type: 0, server_id: SERVER, parent_id: 12, mode_ids: [] },
     ],
     listRoles: async () => [{ ...MEMBER, permissions: roleBits }],
     listMembersWithRoles: async () => (signedIn === null ? [] : [{ id: signedIn, roles: [{ permissions: myBits }] }]),
@@ -146,6 +148,16 @@ describe('the selector', () => {
         await press(container.querySelector('[data-testid="mode-selector"]')!);
         expect(onOpen).toHaveBeenCalledTimes(1);
         expect(onOpen.mock.calls[0][0]).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+        expect(onOpen.mock.calls[0][1], 'and says what opened it, for the focus to go back to').toBe(container.querySelector('[data-testid="mode-selector"]'));
+    });
+
+    it('says whether a key pressed it: a browser counts a pointer\'s clicks, and none for a key\'s', async () => {
+        onOpen.mockClear();
+        await render(<ModeSelector data={modes()} activeModeId={null} homeName={null} onOpen={onOpen} />);
+        const b = container.querySelector('[data-testid="mode-selector"]')!;
+        await act(async () => { b.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })); });
+        await act(async () => { b.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); });
+        expect(onOpen.mock.calls.map(c => c[2])).toEqual([true, false]);
     });
 
     it('is a plain label for everyone else while a mode is on, and nothing when none is', async () => {
@@ -274,6 +286,15 @@ describe('Server Settings, Modes', () => {
         await type(container.querySelector('input[aria-label="New mode name"]')!, '  Werewolf ');
         await press(button('Add mode'));
         expect(createMode).toHaveBeenCalledWith(SERVER, { name: 'Werewolf' });
+    });
+
+    it('offers a channel under a collection inside a collection, once, and that collection once', async () => {
+        await render(<ModesSettings serverId={SERVER} />);
+        const rows = (name: string) => container.querySelectorAll(`input[aria-label="${name} belongs to Blood on the Clocktower"]`).length;
+        expect(rows('Under Inner')).toBe(1);
+        expect(rows('Inner')).toBe(1);
+        expect(rows('Room A'), 'control: a child of a top-level collection').toBe(1);
+        expect(rows('Rooms'), 'control: and that collection').toBe(1);
     });
 
     it('saves only what changed, so it cannot undo another manager\'s edit', async () => {

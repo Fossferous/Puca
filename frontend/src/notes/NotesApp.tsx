@@ -28,7 +28,7 @@ import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
 import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api/notesCacheScrub';
 import { currentUserIdFromToken } from '../api/auth';
 import { signOutWebPush } from '../api/webPushLocal';
-import { askConfirm } from '../api/appDialogs';
+import { askConfirm, closeAppDialogs } from '../api/appDialogs';
 
 export function NotesApp() {
     return (
@@ -58,6 +58,8 @@ function SessionGate() {
     /** Land on the login screen without touching the keys (App.tsx's rule:
      *  a re-authentication must never risk the E2EE identity). */
     const expire = useCallback((expired: boolean) => {
+        // logout()'s rule: nothing of this session on the login screen or in the next.
+        closeAppDialogs();
         softExpireSession();
         qc.clear();
         setSignedIn(false);
@@ -131,6 +133,7 @@ function SessionGate() {
     const awaitingSeed = useRef(false);
     useEffect(() => installSessionSync({
         onSignedOut: () => {
+            closeAppDialogs();
             awaitingSeed.current = false;
             qc.clear();
             invalidateNotesPrefs();

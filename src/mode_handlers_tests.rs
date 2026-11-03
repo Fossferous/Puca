@@ -1278,6 +1278,363 @@ mod db {
         assert_eq!(after_foreign, json!(shelf), "and another server's channel is still refused");
     }
 
+    async fn delete_channel_as(state: &Arc<AppState>, by: i64, channel: i32) -> (StatusCode, String) {
+        let resp = crate::channel_handlers::delete_channel(State(Arc::clone(state)), Path(channel as i64), Extension(claims(by)))
+            .await
+            .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Of these channels, the ones that exist, in id order.
+    async fn still_there(pool: &sqlx::PgPool, ids: &[i32]) -> Vec<i32> {
+        sqlx::query_scalar("SELECT id FROM channels WHERE id = ANY($1) ORDER BY id")
+            .bind(ids)
+            .fetch_all(pool)
+            .await
+            .expect("channels")
+    }
+
+    async fn deny_everyone_view(pool: &sqlx::PgPool, sid: &str, channel: i32) {
+        sqlx::query(
+            "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
+             SELECT $1, id, 0, $2 FROM server_roles WHERE server_id = $3 AND is_default",
+        )
+        .bind(channel as i64)
+        .bind(P::VIEW_CHANNEL.bits() as i64)
+        .bind(sid)
+        .execute(pool)
+        .await
+        .expect("deny");
+    }
+
+    /// A child of a collection the raw API left behind, and any move of one.
+    async fn move_under(pool: &sqlx::PgPool, channel: i32, parent: i32) {
+        sqlx::query("UPDATE channels SET parent_id = $1 WHERE id = $2").bind(parent).bind(channel).execute(pool).await.expect("move");
+    }
+
+    /// The cascade takes everything under a collection, and a question can name only what
+    /// the asker's list holds. So a manager who cannot see all of it is refused and told why,
+    /// at any depth, and nothing is touched. Those who see everything are unaffected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_holding_a_channel_the_caller_cannot_see_is_not_deleted() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        role(&pool, &f.sid, f.plain as i32, "admin", P::ADMINISTRATOR, 6).await;
+
+        // f.secret is denied to @everyone: the manager, who holds Manage Channels, has no row of it.
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let notes = subchannel(&pool, &f.sid, "notes", 0, rooms).await;
+        let deeper = subchannel(&pool, &f.sid, "deeper", 2, rooms).await;
+        move_under(&pool, f.secret, deeper).await;
+        sqlx::query("UPDATE servers SET clips_enabled = true, clip_channel_id = $1 WHERE id = $2")
+            .bind(notes)
+            .bind(&f.sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut member = Sock::open(&state, f.owner);
+        let whole = [rooms, notes, deeper, f.secret];
+
+        member.drain();
+        let two_down = delete_channel_as(&state, f.manager, rooms).await;
+        let told_of_a_refusal = member.drain();
+        let after_two_down = still_there(&pool, &whole).await;
+        let (clips_after_refusal,): (bool,) =
+            sqlx::query_as("SELECT clips_enabled FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+
+        move_under(&pool, f.secret, rooms).await;
+        let one_down = delete_channel_as(&state, f.manager, rooms).await;
+
+        // Directly by id, as it always was, and a collection with nothing hidden in it.
+        let lone = channel(&pool, &f.sid, "lone", 0).await;
+        deny_everyone_view(&pool, &f.sid, lone).await;
+        let hidden_by_id = delete_channel_as(&state, f.manager, lone).await;
+        let clean = channel(&pool, &f.sid, "clean", 2).await;
+        let clean_child = subchannel(&pool, &f.sid, "clean-child", 1, clean).await;
+        let visible = delete_channel_as(&state, f.manager, clean).await;
+        let after_visible = still_there(&pool, &[lone, clean, clean_child]).await;
+
+        // An administrator and the owner resolve to everything.
+        let admin = delete_channel_as(&state, f.plain, rooms).await;
+        let after_admin = still_there(&pool, &whole).await;
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        let hidden = subchannel(&pool, &f.sid, "hidden", 1, shelf).await;
+        deny_everyone_view(&pool, &f.sid, hidden).await;
+        let refused_again = delete_channel_as(&state, f.manager, shelf).await;
+        let owner = delete_channel_as(&state, f.owner, shelf).await;
+        let after_owner = still_there(&pool, &[shelf, hidden]).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(two_down.0, StatusCode::CONFLICT, "{two_down:?}");
+        assert!(two_down.1.contains("ask someone who can see every channel"), "and it says what to do: {}", two_down.1);
+        assert_eq!(after_two_down.len(), whole.len(), "and nothing went");
+        assert!(clips_after_refusal, "a refusal turns nothing off");
+        assert!(!told_of_a_refusal.iter().any(|m| matches!(m, M::ChannelUpdated { .. })), "nothing happened, so nobody is told");
+        assert_eq!(one_down.0, StatusCode::CONFLICT, "directly under it too: {one_down:?}");
+        assert_eq!(refused_again.0, StatusCode::CONFLICT, "a voice room counts as well");
+
+        assert_eq!(hidden_by_id.0, StatusCode::NO_CONTENT, "control: one channel by its id is as it was");
+        assert_eq!(visible.0, StatusCode::NO_CONTENT, "control: a collection they can see all of");
+        assert!(after_visible.is_empty(), "{after_visible:?}");
+        assert_eq!(admin.0, StatusCode::NO_CONTENT, "{admin:?}");
+        assert!(after_admin.is_empty(), "{after_admin:?}");
+        assert_eq!(owner.0, StatusCode::NO_CONTENT, "{owner:?}");
+        assert!(after_owner.is_empty(), "{after_owner:?}");
+    }
+
+    /// The pin and the card tables of everything the cascade takes, not just of the row named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collections_delete_ends_what_its_channels_carried() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let deeper = subchannel(&pool, &f.sid, "deeper", 2, rooms).await;
+        let pinned = subchannel(&pool, &f.sid, "pinned", 0, deeper).await;
+        let room = subchannel(&pool, &f.sid, "room", 1, deeper).await;
+        let other = channel(&pool, &f.sid, "other", 2).await;
+        subchannel(&pool, &f.sid, "other-room", 1, other).await;
+        sqlx::query("UPDATE servers SET clips_enabled = true, clip_channel_id = $1 WHERE id = $2")
+            .bind(pinned)
+            .bind(&f.sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let clips = || async {
+            sqlx::query_as::<_, (bool, Option<i32>)>("SELECT clips_enabled, clip_channel_id FROM servers WHERE id = $1")
+                .bind(&f.sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let room_id = format!("voice_{room}");
+        let mut player = Sock::in_room(&state, f.owner, room);
+        state.set_conn_games(f.owner, player.conn, true);
+        crate::games::handle_frame(
+            &state,
+            f.owner,
+            player.conn,
+            crate::protocol::ClientMessage::GameCreate {
+                room_id: room_id.clone(),
+                kind: crate::games_wire::GameKindWire::Holdem,
+                config: None,
+            },
+        )
+        .await;
+        let table_open = state.games.peek(&room_id).is_some();
+
+        let unrelated = delete_channel_as(&state, f.owner, other).await;
+        let clips_after_unrelated = clips().await;
+        let table_after_unrelated = state.games.peek(&room_id).is_some();
+        player.drain();
+        let gone = delete_channel_as(&state, f.owner, rooms).await;
+        let told = player.drain();
+        let clips_after = clips().await;
+        let table_after = state.games.peek(&room_id).is_some();
+        teardown(&pool, &f).await;
+
+        assert!(table_open, "control: the fixture has a table");
+        assert_eq!(unrelated.0, StatusCode::NO_CONTENT);
+        assert_eq!(clips_after_unrelated, (true, Some(pinned)), "control: another collection's delete leaves the pin");
+        assert!(table_after_unrelated, "and the table");
+        assert_eq!(gone.0, StatusCode::NO_CONTENT);
+        assert_eq!(clips_after, (false, None), "two levels down, the pin goes and clips go off with it");
+        assert!(!table_after, "and the table in the room two levels down ends");
+        assert!(
+            told.iter().any(|m| matches!(m, M::GameEnded { room_id: r, reason: crate::games_wire::GameEndReason::ChannelDeleted, .. } if *r == room_id)),
+            "and whoever sits at it is told why"
+        );
+    }
+
+    /// Nobody but the deleter or the dragger used to learn: every other member's list kept a
+    /// deleted row until it was next refetched, and the old order. The frame names only the
+    /// server, so the list has to say it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_delete_and_a_reorder_reach_every_member() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let room = subchannel(&pool, &f.sid, "room", 1, rooms).await;
+        let mut member = Sock::open(&state, f.plain);
+        let listed = |by: i64| {
+            let state = Arc::clone(&state);
+            let sid = f.sid.clone();
+            async move {
+                let resp = crate::channel_handlers::list_channels(State(state), Path(sid), Extension(claims(by))).await.into_response();
+                let (_, rows) = read(resp).await;
+                rows.as_array().expect("a list").iter().map(|r| r["id"].as_i64().unwrap() as i32).collect::<Vec<i32>>()
+            }
+        };
+        let told_to_refetch = |frames: &[M]| frames.iter().any(|m| matches!(m, M::ChannelUpdated { server_id } if *server_id == f.sid));
+        let reorder = |by: i64, ids: Vec<i64>| {
+            crate::channel_handlers::reorder_channels(
+                State(Arc::clone(&state)),
+                Path(f.sid.clone()),
+                Extension(claims(by)),
+                Json(crate::channel_handlers::ReorderChannelsRequest { channel_ids: ids }),
+            )
+        };
+
+        let before = listed(f.plain).await;
+        member.drain();
+        let deleted = delete_channel_as(&state, f.owner, rooms).await;
+        let told_of_delete = member.drain();
+        let after = listed(f.plain).await;
+
+        let new_order = vec![f.text as i64, f.lobby as i64, f.town as i64, f.cottage as i64];
+        let refused = reorder(f.plain, new_order.clone()).await.into_response().status();
+        let told_of_refusal = member.drain();
+        let reordered = reorder(f.owner, new_order).await.into_response().status();
+        let told_of_reorder = member.drain();
+        let order = listed(f.plain).await;
+        teardown(&pool, &f).await;
+
+        assert!(before.contains(&rooms) && before.contains(&room), "control: the member had both rows");
+        assert_eq!(deleted.0, StatusCode::NO_CONTENT);
+        assert!(told_to_refetch(&told_of_delete), "a delete tells another member: {told_of_delete:?}");
+        assert!(!after.contains(&rooms) && !after.contains(&room), "and their refetch loses both rows");
+
+        assert_eq!(refused, StatusCode::FORBIDDEN);
+        assert!(!told_to_refetch(&told_of_refusal), "control: a refused reorder tells nobody");
+        assert_eq!(reordered, StatusCode::OK);
+        assert!(told_to_refetch(&told_of_reorder), "a reorder tells another member: {told_of_reorder:?}");
+        assert_eq!(&order[..4], &[f.text, f.lobby, f.town, f.cottage], "and their refetch is in the new order");
+    }
+
+    /// Nothing but a collection draws a child: any other parent takes the row off the sidebar
+    /// with no way back. An unchanged value still passes, because an installed client sends
+    /// the whole form on every save, whatever state a row is already in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parent_that_changes_must_be_another_collection_of_this_server() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let elsewhere = setup(&pool).await;
+        let state = state_of(&pool);
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        let foreign_shelf = channel(&pool, &elsewhere.sid, "foreign-shelf", 2).await;
+        let notes = channel(&pool, &f.sid, "notes", 0).await;
+        let edit = |channel: i32, body: Value| {
+            crate::channel_handlers::update_channel(
+                State(Arc::clone(&state)),
+                Path(channel as i64),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let parent_of = |channel: i32| {
+            let pool = pool.clone();
+            async move {
+                let (parent,): (Option<i32>,) = sqlx::query_as("SELECT parent_id FROM channels WHERE id = $1").bind(channel).fetch_one(&pool).await.unwrap();
+                parent
+            }
+        };
+
+        let under_text = edit(notes, json!({ "parent_id": f.text })).await.into_response().status();
+        let under_voice = edit(notes, json!({ "parent_id": f.town })).await.into_response().status();
+        let under_foreign = edit(notes, json!({ "parent_id": foreign_shelf })).await.into_response().status();
+        let under_nothing = edit(notes, json!({ "parent_id": 2_000_000_000 })).await.into_response().status();
+        let under_itself = edit(shelf, json!({ "parent_id": shelf })).await.into_response().status();
+        let refused_left = (parent_of(notes).await, parent_of(shelf).await);
+        let under_shelf = edit(notes, json!({ "parent_id": shelf })).await.into_response().status();
+        let moved = parent_of(notes).await;
+
+        // Rows raw API calls left in these states: a save that resends them is no change.
+        move_under(&pool, f.cottage, f.text).await;
+        let old_row = edit(f.cottage, json!({ "name": "cottage-2", "parent_id": f.text })).await.into_response().status();
+        let old_row_left = parent_of(f.cottage).await;
+        move_under(&pool, f.lobby, f.lobby).await;
+        let looped = edit(f.lobby, json!({ "name": "lobby-2", "parent_id": f.lobby })).await.into_response().status();
+        let out_of_it = edit(f.lobby, json!({ "parent_id": null })).await.into_response().status();
+        let looped_left = parent_of(f.lobby).await;
+
+        let create = |body: Value| {
+            let state = Arc::clone(&state);
+            let sid = f.sid.clone();
+            async move {
+                read(crate::channel_handlers::create_channel(State(state), Path(sid), Extension(claims(f.owner)), Json(serde_json::from_value(body).unwrap()))
+                    .await
+                    .into_response())
+                .await
+            }
+        };
+        let new_under_text = create(json!({ "name": "c1", "channel_type": 0, "parent_id": f.text })).await.0;
+        let new_under_foreign = create(json!({ "name": "c2", "channel_type": 1, "parent_id": foreign_shelf })).await.0;
+        let new_under_shelf = create(json!({ "name": "c3", "channel_type": 1, "parent_id": shelf })).await;
+        let mut member = Sock::open(&state, f.plain);
+        member.drain();
+        let new_collection = create(json!({ "name": "c4", "channel_type": 2, "parent_id": shelf })).await;
+        let told = member.drain();
+        let stored = parent_of(new_collection.1["id"].as_i64().unwrap() as i32).await;
+        let new_collection_foreign = create(json!({ "name": "c5", "channel_type": 2, "parent_id": foreign_shelf })).await;
+        teardown(&pool, &f).await;
+        teardown(&pool, &elsewhere).await;
+
+        assert_eq!(under_text, StatusCode::BAD_REQUEST, "a text channel draws no child");
+        assert_eq!(under_voice, StatusCode::BAD_REQUEST, "nor does a voice channel");
+        assert_eq!(under_foreign, StatusCode::BAD_REQUEST, "another server's collection");
+        assert_eq!(under_nothing, StatusCode::BAD_REQUEST, "no such channel");
+        assert_eq!(under_itself, StatusCode::BAD_REQUEST, "a collection cannot hold itself");
+        assert_eq!(refused_left, (None, None), "and each refusal changes nothing");
+        assert_eq!(under_shelf, StatusCode::OK);
+        assert_eq!(moved, Some(shelf), "control: a collection of this server");
+
+        assert_eq!(old_row, StatusCode::OK, "a whole-form save of an old row still saves");
+        assert_eq!(old_row_left, Some(f.text), "and leaves it where it was");
+        assert_eq!(looped, StatusCode::OK, "even one that names itself");
+        assert_eq!(out_of_it, StatusCode::OK);
+        assert_eq!(looped_left, None, "and null is the way out");
+
+        assert_eq!(new_under_text, StatusCode::BAD_REQUEST);
+        assert_eq!(new_under_foreign, StatusCode::BAD_REQUEST);
+        assert_eq!(new_under_shelf.0, StatusCode::OK, "control: {:?}", new_under_shelf.1);
+        assert_eq!(new_under_shelf.1["parent_id"], json!(shelf));
+        assert_eq!(new_collection.0, StatusCode::OK, "an old client's Collection after Create Subchannel still creates");
+        assert_eq!(new_collection.1["parent_id"], Value::Null, "with no parent, in the answer");
+        assert_eq!(stored, None, "in the row");
+        assert!(
+            told.iter().any(|m| matches!(m, M::ChannelCreated { channel, .. } if channel.name == "c4" && channel.parent_id.is_none())),
+            "and in what every member is told: {told:?}"
+        );
+        assert_eq!(new_collection_foreign.0, StatusCode::OK, "dropped before it is judged");
+    }
+
+    /// Edit Channel sends "" for an emptied Channel Topic, and that is what clears one.
+    #[tokio::test]
+    async fn an_empty_topic_clears_it_and_a_left_out_one_leaves_it() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let edit = |body: Value| {
+            crate::channel_handlers::update_channel(
+                State(Arc::clone(&state)),
+                Path(f.text as i64),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let topic = || async {
+            let resp = crate::channel_handlers::list_channels(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.plain)))
+                .await
+                .into_response();
+            let (_, rows) = read(resp).await;
+            rows.as_array().expect("a list").iter().find(|c| c["id"] == f.text).expect("listed")["description"].clone()
+        };
+        let set = edit(json!({ "description": "the town square" })).await.into_response().status();
+        let renamed = edit(json!({ "name": "renamed" })).await.into_response().status();
+        let kept = topic().await;
+        let emptied = edit(json!({ "description": "" })).await.into_response().status();
+        let cleared = topic().await;
+        teardown(&pool, &f).await;
+
+        assert_eq!((set, renamed, emptied), (StatusCode::OK, StatusCode::OK, StatusCode::OK));
+        assert_eq!(kept, json!("the town square"), "control: left out, it stays");
+        assert_eq!(cleared, json!(""), "empty is stored, and every reader treats it as no topic");
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1719,6 +2076,70 @@ mod db {
         assert_eq!(row.0.as_deref(), Some(id.as_str()));
         assert_eq!(row.1.as_deref(), Some(id.as_str()));
         assert_eq!(row.2.as_deref(), Some("no uuid at all"));
+    }
+
+    /// One brace without the other: the pattern takes each as optional, and the cast refuses
+    /// it. Unchecked, the migration aborts and the backend does not boot on that host.
+    #[tokio::test]
+    async fn the_migration_leaves_a_value_with_one_brace_alone() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let opened = format!("{{{id}");
+        let closed = format!("{id}}}");
+        let cast = |value: String| {
+            let pool = pool.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT $1::text::uuid::text").bind(value).fetch_one(&pool).await.is_ok() }
+        };
+        let casts = (cast(opened.clone()).await, cast(closed.clone()).await, cast(format!("{{{id}}}")).await);
+
+        sqlx::query("UPDATE users SET avatar_file_id = $1, join_sound_file_id = $2, leave_sound_file_id = $1 WHERE id = $3")
+            .bind(&opened)
+            .bind(&closed)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE servers SET icon_file_id = $1 WHERE id = $2").bind(&closed).bind(&f.sid).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO server_emojis (id, server_id, name, uploader_id, file_id) VALUES ($1, $2, 'one', $3, $4)")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&f.sid)
+            .bind(f.owner as i32)
+            .bind(&opened)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO custom_emojis (server_id, name, file_id, creator_id) VALUES ($1, 'two', $2, $3)")
+            .bind(&f.sid)
+            .bind(&closed)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ran = sqlx::raw_sql(include_str!("../migrations/077_canonical_file_ids.sql")).execute(&pool).await.map(|_| ()).map_err(|e| e.to_string());
+        let user: (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT avatar_file_id, join_sound_file_id, leave_sound_file_id FROM users WHERE id = $1")
+                .bind(f.owner as i32)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (icon,): (Option<String>,) = sqlx::query_as("SELECT icon_file_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let (server_emoji,): (String,) = sqlx::query_as("SELECT file_id FROM server_emojis WHERE server_id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let (custom_emoji,): (String,) = sqlx::query_as("SELECT file_id FROM custom_emojis WHERE server_id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        // Before any assert: a row left behind would fail every later run of this file.
+        let _ = sqlx::query("DELETE FROM server_emojis WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM custom_emojis WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(casts, (false, false, true), "control: the cast refuses one brace and takes two");
+        assert_eq!(ran, Ok(()), "the migration runs");
+        assert_eq!(user.0.as_deref(), Some(opened.as_str()));
+        assert_eq!(user.1.as_deref(), Some(closed.as_str()));
+        assert_eq!(user.2.as_deref(), Some(opened.as_str()));
+        assert_eq!(icon.as_deref(), Some(closed.as_str()));
+        assert_eq!(server_emoji, opened);
+        assert_eq!(custom_emoji, closed);
     }
 
     /// A member denied a collection has no row of it, so a subchannel's own row has to say which

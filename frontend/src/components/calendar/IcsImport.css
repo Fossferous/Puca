@@ -4,6 +4,8 @@
 .ics-import { display: flex; flex-direction: column; gap: 10px; max-width: 520px; }
 .ics-import p { margin: 0; }
 .ics-notes { font-size: 13px; color: var(--text-warning, #f0b232); max-height: 200px; overflow-y: auto; }
+/* The shared amber is 1.7:1 on Light's dialog surface (Chat.css has the measure). */
+[data-theme="light"] .ics-notes { color: #8a5a00; }
 .ics-notes ul, .ics-failed { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); }
 .ics-row { display: flex; align-items: center; gap: 10px; }
 .ics-row > span { width: 64px; color: var(--text-muted); font-size: 13px; }

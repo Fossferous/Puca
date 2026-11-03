@@ -40,6 +40,7 @@ import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import { canCopyImages, copyImageToClipboard, describeCopyFailure } from '../api/copyImage';
 import { CheckIcon, CloseIcon } from './Icons';
 import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
+import { appQuestionOpen } from '../api/appDialogs';
 import type { EncRef } from '../api/nativeDownloads';
 import { clampPanTo } from './deviceZoomFollow';
 import {
@@ -129,6 +130,11 @@ export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageL
         if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
+            // One of the app's own questions is over this (the update banner sits
+            // above the viewer, and can ask), and stopping the key takes nothing from
+            // what else listens here. Whichever of the two heard it first: this one
+            // binds again with each new onClose, and the question is gone once answered.
+            if (e.defaultPrevented || appQuestionOpen()) return;
             // Capture + stop: Escape is also the remote-control kill switch and
             // closes other overlays — the topmost one should win.
             e.stopPropagation();

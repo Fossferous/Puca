@@ -53,8 +53,11 @@ in this file is not registered there, so what IS listed is real.
 
 A mode is a named set of channels the client lists only while it is on, with an
 optional background and accent colour ([SERVER_MODES.md](SERVER_MODES.md)). **It is
-not access control:** a hidden channel is still in `GET /servers/:id/channels` (its
-`mode_ids` say why it is not listed), and every other route treats it as it always did.
+not access control:** a hidden channel is still in `GET /servers/:id/channels`, and every
+other route treats it as it always did. A channel is listed only if its own `mode_ids` and
+its collection's `parent_mode_ids` each allow the mode that is on: an empty list allows any
+mode, and the AFK channel is exempt. `parent_mode_ids` is on the channel's own row because
+a member denied the collection has no row of it to read.
 `GET /servers` carries `active_mode_id` on each server row: a number, or `null` for
 none. A backend that predates modes omits it, and a client must then offer none.
 
@@ -72,9 +75,10 @@ none. A backend that predates modes omits it, and a client must then offer none.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/servers/:id/channels` | ✅ | List channels |
-| POST | `/servers/:id/channels` | ✅ | Create channel |
-| POST | `/servers/:id/channels/reorder` | ✅ | Reorder channels |
-| PATCH | `/channels/:id` | ✅ | Edit a channel (Manage Channels). A field left out is left alone. `parent_id`: a channel in the same server sets the parent (another server's is a 400), `null` takes it out of its collection. Every member is sent `ChannelUpdated`, which names only the server, and refetches the list. |
+| POST | `/servers/:id/channels` | ✅ | Create channel (Manage Channels). `parent_id` must be a collection (`channel_type` 2) of this server, or 400. On a new collection it is dropped, not refused: a collection has no parent, and an installed client can still send one. |
+| POST | `/servers/:id/channels/reorder` | ✅ | Reorder channels (Manage Channels). Every member is sent `ChannelUpdated` once it commits, and refetches the list. |
+| PATCH | `/channels/:id` | ✅ | Edit a channel (Manage Channels). A field left out is left alone. `parent_id`: `null` takes it out of its collection; a value that changes the parent must be a collection (`channel_type` 2) of this server and not the channel itself, or 400. The value it already has always passes, so an installed client's whole-form save of an older row keeps working. An empty `description` clears the topic. Every member is sent `ChannelUpdated`, which names only the server, and refetches the list. |
+| DELETE | `/channels/:id` | ✅ | Delete a channel (Manage Channels) and, through the foreign key, everything under it at any depth, messages included. 409 when that would take a channel the caller cannot see, with a sentence to show them: nothing is deleted, and someone who can see every channel has to do it. The owner and administrators see everything. Deleting the pinned clips channel, on its own or with its collection, turns clips off; a card table in any room it takes ends with `GameEnded {reason: "channel_deleted"}`. Every member is sent `ChannelUpdated` and refetches the list. Answers 204. |
 | GET | `/servers/:id/voice-users` | ✅ | Who is in which voice channel of this server, limited to the channels the caller can VIEW. Rooms are matched by channel **id** only (`voice_<id>`); a channel's name is never read as a room id, so a channel called `voice_42` in a server you own no longer shows you the occupants of channel 42 somewhere else. |
 
 ---

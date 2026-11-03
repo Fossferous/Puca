@@ -18,6 +18,18 @@
 // user menu's GLOBAL `.context-submenu` rule used to turn into a side flyout
 // too (it is meant to expand inline), and which lives inside the server rail.
 //
+// And the mode selector's menu (docs/SERVER_MODES.md) from the KEYBOARD. It renders last in the
+// page, so with the focus left on the selector a keyboard had every control in the sidebar and
+// the chat between it and the menu, and the only control that switches a mode was out of reach.
+// With real keys: the first enabled item takes the focus, role=menu and menuitem, the arrows,
+// Home and End walk it, Escape gives the focus back to the selector, Tab closes it and goes on
+// from there, and an Enter held down from opening it presses nothing. NEGATIVE CONTROLS: the same
+// items opened by a right click take no focus and no role, and arrows there move nothing. Opened
+// with a mouse or a finger the focus is on the menu and on none of its items, no row wears anything
+// and Enter and Space press nothing, or a stray key would turn the mode off with nothing on screen
+// to say so; the arrows still go in. At 390x844: 44 px rows, nothing clipped, inside the window,
+// and a tap lands.
+//
 // It bundles the REAL UserContextMenu and ServerList plus the app's global CSS
 // (index.css, mobile.css) with esbuild. SILENT and headless: no media at all.
 //
@@ -40,17 +52,60 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { UserContextMenu } from './components/UserContextMenu';
 import { ServerList } from './components/ServerList';
+import { ContextMenu } from './components/ContextMenu';
+import { useContextMenu } from './components/contextMenuUtils';
+import { ModeSelector } from './components/modes/ModeSelector';
+import { modeMenuItems } from './components/modes/modeMenu';
 
 const log = [];
 window.__log = log;
 const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
 qc.setQueryData(['servers'], [{ id: 's1', name: 'Rig Server', owner_id: 1, created_at: '2026-01-01T00:00:00Z' }]);
 
+const mode = (id, name) => ({ id, name, background_file_id: null, accent_color: null, home_channel_id: 21, auto_off: false, channel_ids: [] });
+const MODES = {
+    active_mode_id: 3, can_switch: true, can_edit: true, can_call_back: true,
+    modes: [mode(3, 'Game Night'), mode(4, 'Movie Night'), mode(5, ${JSON.stringify(LONG_NAME)})],
+};
+/** Chat's wiring of the selector: the same hook, menu, items and calls. */
+function ModeRig({ disabledFirst }) {
+    const { contextMenu, showContextMenu, showContextMenuAt, hideContextMenu } = useContextMenu();
+    const items = () => {
+        const list = modeMenuItems({
+            data: MODES, activeModeId: 3, homeName: 'Town Square',
+            onSwitch: (id) => log.push('switch:' + id), onCallBack: () => log.push('callback'), onManage: () => log.push('manage'),
+        });
+        if (disabledFirst) list[0] = { ...list[0], disabled: true };
+        return list;
+    };
+    return (
+        <div className="chat-container">
+            <div>
+                <button id="rig-before">before</button>
+                <ModeSelector data={MODES} activeModeId={3} homeName="Town Square" onOpen={(at, opener, fromKeyboard) => showContextMenuAt(at, items(), opener, 'Mode', fromKeyboard)} />
+                <button id="rig-after">after</button>
+                <div id="rig-row" onContextMenu={(e) => showContextMenu(e, items())}>A row to right-click</div>
+            </div>
+            {contextMenu && (
+                <ContextMenu
+                    items={contextMenu.items}
+                    position={contextMenu.position}
+                    onClose={hideContextMenu}
+                    opener={contextMenu.opener}
+                    label={contextMenu.label}
+                    fromKeyboard={contextMenu.fromKeyboard}
+                />
+            )}
+        </div>
+    );
+}
+
 let setMount = () => {};
 function App() {
     const [mount, set] = useState(null);
     setMount = set;
     if (!mount) return null;
+    if (mount.kind === 'mode') return <ModeRig key={mount.n} disabledFirst={mount.disabledFirst} />;
     if (mount.kind === 'user') {
         return (
             <div className="chat-container">
@@ -103,6 +158,7 @@ window.__mountUser = (position, opts = {}) => setMount({
     listener: opts.listener ?? true, canMove: opts.canMove ?? true, roles: !!opts.roles,
 });
 window.__mountServer = () => setMount({ kind: 'server', n: ++n });
+window.__mountMode = (opts = {}) => setMount({ kind: 'mode', n: ++n, disabledFirst: !!opts.disabledFirst });
 createRoot(document.getElementById('root')).render(
     <QueryClientProvider client={qc}><App /></QueryClientProvider>
 );
@@ -413,6 +469,241 @@ for (const s of [DESK, TAP, VSHORT]) {
     }
     const expanded = await menuBox(page, SM);
     ck(expanded.ok, `${s.name}: the expanded server menu is wholly inside the viewport`, JSON.stringify(expanded));
+    await ctx.close();
+}
+
+// ======================= the mode selector's menu ===========================
+const MM = '.context-menu';
+const ROWS = ['Off', 'Game Night', 'Movie Night', LONG_NAME, 'Call everyone to Town Square', 'Manage modes'];
+/** What has the focus, by the name a check can read. */
+const focusOn = (page) => page.evaluate(() => {
+    const a = document.activeElement;
+    if (!a || a === document.body) return 'body';
+    return a.getAttribute('data-testid') || a.id || a.textContent.trim();
+});
+const logged = (page) => page.evaluate(() => window.__log.slice());
+const menuOpen = (page) => page.evaluate((m) => !!document.querySelector(m), MM);
+/** The focus is on the menu itself, and so on none of its items. */
+const onTheMenu = (page) => page.evaluate((m) => document.activeElement === document.querySelector(m), MM);
+const key = async (page, name) => { await page.keyboard.press(name); await frame(page); };
+/** How the row with the focus looks, and whether a browser calls it a keyboard's focus. */
+const ring = (page) => page.evaluate(() => {
+    const a = document.activeElement;
+    const c = getComputedStyle(a);
+    return { visible: a.matches(':focus-visible'), outline: c.outlineStyle, background: c.backgroundColor };
+});
+
+{
+    const { ctx, page } = await open({ viewport: { width: 1280, height: 800 } });
+    const fresh = async (opts) => { await page.evaluate((o) => { window.__log.length = 0; window.__mountMode(o); }, opts); await frame(page); };
+    await fresh();
+    await page.locator('#rig-before').focus();
+    await key(page, 'Tab');
+    ck(await focusOn(page) === 'mode-selector', 'keyboard: Tab reaches the selector', await focusOn(page));
+
+    await key(page, 'Enter');
+    ck(await menuOpen(page), 'keyboard: Enter on the selector opens the menu');
+    ck(await focusOn(page) === 'Off', 'keyboard: the first item has the focus, not the control behind it', await focusOn(page));
+    await page.waitForTimeout(150); // The row's fill has a 0.1 s transition.
+    const seen = await ring(page);
+    ck(seen.visible && seen.outline !== 'none' && seen.background === 'rgb(88, 101, 242)', 'keyboard: and it shows, ringed and filled', JSON.stringify(seen));
+    const roles = await page.evaluate((m) => {
+        const menu = document.querySelector(m);
+        return {
+            role: menu.getAttribute('role'),
+            label: menu.getAttribute('aria-label'),
+            items: [...menu.querySelectorAll('button')].map((b) => b.getAttribute('role')),
+            separators: [...menu.querySelectorAll('.context-menu-separator')].map((d) => d.getAttribute('role')),
+        };
+    }, MM);
+    ck(roles.role === 'menu' && roles.label === 'Mode' && roles.items.length === ROWS.length && roles.items.every((r) => r === 'menuitem')
+        && roles.separators.length === 1 && roles.separators[0] === 'separator', 'keyboard: role=menu with a name, role=menuitem on every item', JSON.stringify(roles));
+    ck((await logged(page)).length === 0, 'keyboard: opening it pressed nothing', JSON.stringify(await logged(page)));
+
+    const walked = [];
+    for (let i = 1; i < ROWS.length; i++) { await key(page, 'ArrowDown'); walked.push(await focusOn(page)); }
+    ck(JSON.stringify(walked) === JSON.stringify(ROWS.slice(1)), 'keyboard: Down walks every item in order, over the separator', JSON.stringify(walked));
+    await key(page, 'ArrowDown');
+    ck(await focusOn(page) === 'Off', 'keyboard: Down from the last comes round to the first', await focusOn(page));
+    await key(page, 'ArrowUp');
+    ck(await focusOn(page) === 'Manage modes', 'keyboard: Up from the first comes round to the last', await focusOn(page));
+    await key(page, 'ArrowUp');
+    ck(await focusOn(page) === 'Call everyone to Town Square', 'keyboard: Up goes back one, over nothing', await focusOn(page));
+    await key(page, 'Home');
+    ck(await focusOn(page) === 'Off', 'keyboard: Home is the first item', await focusOn(page));
+    await key(page, 'End');
+    ck(await focusOn(page) === 'Manage modes', 'keyboard: End is the last item', await focusOn(page));
+    await key(page, 'Escape');
+    ck(!await menuOpen(page) && await focusOn(page) === 'mode-selector', 'keyboard: Escape closes it and the focus is back on the selector', await focusOn(page));
+    ck((await logged(page)).length === 0, 'keyboard: and all of that pressed nothing', JSON.stringify(await logged(page)));
+
+    await key(page, 'Space');
+    ck(await menuOpen(page) && await focusOn(page) === 'Off', 'keyboard: Space opens it as well, focus on the first item', await focusOn(page));
+    await key(page, 'Tab');
+    ck(!await menuOpen(page) && await focusOn(page) === 'rig-after', 'keyboard: Tab closes it and goes on to what comes after the selector', await focusOn(page));
+    await page.keyboard.press('Shift+Tab');
+    await frame(page);
+    await key(page, 'Enter');
+    await page.keyboard.press('Shift+Tab');
+    await frame(page);
+    ck(!await menuOpen(page) && await focusOn(page) === 'rig-before', 'keyboard: Shift+Tab closes it and goes back from the selector', await focusOn(page));
+
+    await key(page, 'Tab');
+    await key(page, 'Enter');
+    await key(page, 'ArrowDown');
+    await key(page, 'ArrowDown');
+    await key(page, 'Enter');
+    ck(JSON.stringify(await logged(page)) === '["switch:4"]', 'keyboard: Enter on an item presses that item, once', JSON.stringify(await logged(page)));
+    ck(!await menuOpen(page) && await focusOn(page) === 'mode-selector', 'keyboard: and the focus is back on the selector, so a question has somewhere to return it', await focusOn(page));
+    await key(page, 'Enter');
+    await key(page, 'End');
+    await key(page, 'Space');
+    ck(JSON.stringify(await logged(page)) === '["switch:4","manage"]', 'keyboard: Space on an item presses it too', JSON.stringify(await logged(page)));
+
+    // The Enter that opens it, held down. Off is under it now, and Off can end calls.
+    await fresh();
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await page.keyboard.down('Enter');
+    await frame(page);
+    ck(await focusOn(page) === 'Off', 'held Enter: the first press opened it', await focusOn(page));
+    await page.keyboard.down('Enter'); // Playwright marks a second down as the key repeating.
+    await frame(page);
+    await page.keyboard.down('Enter');
+    await frame(page);
+    await page.keyboard.up('Enter');
+    await frame(page);
+    ck((await logged(page)).length === 0 && await menuOpen(page), 'held Enter: the repeats press nothing, and the menu stays', JSON.stringify(await logged(page)));
+    await key(page, 'Enter');
+    ck(JSON.stringify(await logged(page)) === '["switch:null"]', 'CONTROL: a new press of Enter does press Off', JSON.stringify(await logged(page)));
+
+    // An item that cannot be pressed takes no focus.
+    await fresh({ disabledFirst: true });
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await key(page, 'Enter');
+    ck(await focusOn(page) === 'Game Night', 'disabled first item: the focus starts on the first it can press', await focusOn(page));
+    await key(page, 'ArrowUp');
+    ck(await focusOn(page) === 'Manage modes', 'disabled first item: Up goes round past it', await focusOn(page));
+    await key(page, 'Home');
+    ck(await focusOn(page) === 'Game Night', 'disabled first item: Home stops short of it', await focusOn(page));
+    await key(page, 'Escape');
+
+    // NEGATIVE CONTROL: the same items at the pointer. A right click stays what it was.
+    await fresh();
+    const row = await page.locator('#rig-row').boundingBox();
+    await page.mouse.click(row.x + 20, row.y + row.height / 2, { button: 'right' });
+    await frame(page);
+    ck(await menuOpen(page), 'CONTROL: a right click opens the same items');
+    const atPointer = await page.evaluate((m) => {
+        const menu = document.querySelector(m);
+        return {
+            inside: menu.contains(document.activeElement),
+            role: menu.getAttribute('role'),
+            label: menu.getAttribute('aria-label'),
+            items: [...menu.querySelectorAll('button')].map((b) => b.getAttribute('role')),
+            count: menu.querySelectorAll('button').length,
+        };
+    }, MM);
+    ck(!atPointer.inside && atPointer.count === ROWS.length, 'NEGATIVE CONTROL: right click: the first item does NOT take the focus', JSON.stringify(atPointer));
+    ck(atPointer.role === null && atPointer.label === null && atPointer.items.every((r) => r === null), 'NEGATIVE CONTROL: right click: no menu role', JSON.stringify(atPointer));
+    const beforeArrow = await focusOn(page);
+    await key(page, 'ArrowDown');
+    await key(page, 'End');
+    ck(await focusOn(page) === beforeArrow, 'NEGATIVE CONTROL: right click: the arrows and End move nothing', await focusOn(page));
+    await key(page, 'Escape');
+    ck(!await menuOpen(page) && await focusOn(page) === beforeArrow, 'NEGATIVE CONTROL: right click: Escape closes it and gives the focus to nobody', await focusOn(page));
+
+    // A mouse on the selector: the focus goes to the menu, and to none of its items. Nothing on
+    // the screen would say an item had it, and Off is the first: a stray Enter or Space, or a
+    // push-to-talk on Space coming up, would turn the mode off. The control is the keyboard's
+    // open above, where "a new press of Enter does press Off".
+    await fresh();
+    const sel = await page.locator('[data-testid="mode-selector"]').boundingBox();
+    const clickSelector = async () => { await page.mouse.click(sel.x + sel.width / 2, sel.y + sel.height / 2); await frame(page); };
+    await clickSelector();
+    ck(await onTheMenu(page), 'mouse: the focus is on the menu, on no item', await focusOn(page));
+    await page.mouse.move(2, 2);
+    await page.waitForTimeout(150); // The row's fill has a 0.1 s transition.
+    const quiet = await ring(page);
+    ck(!quiet.visible && quiet.outline === 'none', 'mouse: which shows no ring', JSON.stringify(quiet));
+    const rowsWearing = await page.evaluate((m) => [...document.querySelectorAll(`${m} button`)].filter((b) => {
+        const c = getComputedStyle(b);
+        return c.outlineStyle !== 'none' || c.backgroundColor !== 'rgba(0, 0, 0, 0)';
+    }).map((b) => b.textContent), MM);
+    ck(rowsWearing.length === 0, 'mouse: and no item wears a ring or a fill', JSON.stringify(rowsWearing));
+    await key(page, 'Enter');
+    ck((await logged(page)).length === 0 && await menuOpen(page), 'mouse: a stray Enter presses nothing, and the menu stays', JSON.stringify(await logged(page)));
+    await key(page, 'Space');
+    ck((await logged(page)).length === 0 && await menuOpen(page), 'mouse: nor does a stray Space, or a push-to-talk on it', JSON.stringify(await logged(page)));
+    ck(await onTheMenu(page), 'mouse: and the focus is still on the menu', await focusOn(page));
+    await key(page, 'ArrowDown');
+    ck(await focusOn(page) === 'Off', 'mouse: Down goes in at the first item', await focusOn(page));
+    await page.waitForTimeout(150);
+    const lit = await ring(page);
+    ck(lit.visible && lit.outline !== 'none' && lit.background === 'rgb(88, 101, 242)', 'mouse: and there it shows, as a keyboard\'s does', JSON.stringify(lit));
+    await key(page, 'Escape');
+    ck(!await menuOpen(page) && await focusOn(page) === 'mode-selector', 'mouse: Escape gives the focus back to the selector', await focusOn(page));
+    await clickSelector();
+    await key(page, 'ArrowUp');
+    ck(await focusOn(page) === 'Manage modes', 'mouse: Up goes in at the last item', await focusOn(page));
+    await key(page, 'Escape');
+    await clickSelector();
+    await key(page, 'Tab');
+    ck(!await menuOpen(page) && await focusOn(page) === 'rig-after', 'mouse: Tab closes it and goes on from the selector', await focusOn(page));
+    ck((await logged(page)).length === 0, 'mouse: and all of that pressed nothing', JSON.stringify(await logged(page)));
+    await clickSelector();
+    for (const name of ROWS) {
+        const p = await probe(page, MM, name);
+        ck(reachable(p), `mouse: "${name}" is on screen and what a pointer hits`, desc(p));
+    }
+    await press(page, await probe(page, MM, 'Movie Night'), false);
+    ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), 'mouse: a click on an item presses it', JSON.stringify(await logged(page)));
+    await ctx.close();
+}
+
+{
+    // A window too short for the list: the focus takes the list with it.
+    const { ctx, page } = await open({ viewport: { width: 1100, height: 200 } });
+    await page.evaluate(() => window.__mountMode());
+    await frame(page);
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await key(page, 'Enter');
+    const first = await probe(page, MM, 'Off');
+    ck(reachable(first), 'short window: the first item with the focus is on screen', desc(first));
+    await key(page, 'End');
+    const last = await probe(page, MM, 'Manage modes');
+    ck(await focusOn(page) === 'Manage modes' && reachable(last), 'short window: End scrolls the last item into view', desc(last));
+    await ctx.close();
+}
+
+{
+    const { ctx, page } = await open(PHONE);
+    await page.evaluate(() => { window.__log.length = 0; window.__mountMode(); });
+    await frame(page);
+    const sel = await page.locator('[data-testid="mode-selector"]').boundingBox();
+    await page.touchscreen.tap(sel.x + sel.width / 2, sel.y + sel.height / 2);
+    await page.waitForTimeout(400); // It scales in from 95%: measured any sooner, 44 px reads 42.
+    ck(await onTheMenu(page), 'phone: the focus is on the menu, on no item', await focusOn(page));
+    const quiet = await ring(page);
+    ck(!quiet.visible && quiet.outline === 'none', 'phone: which shows no ring', JSON.stringify(quiet));
+    const box = await menuBox(page, MM);
+    ck(box.ok, 'phone: the menu is wholly inside the window', JSON.stringify(box));
+    const shape = await page.evaluate((m) => {
+        const menu = document.querySelector(m);
+        return {
+            heights: [...menu.querySelectorAll('button')].map((b) => Math.round(b.getBoundingClientRect().height)),
+            clippedDown: menu.scrollHeight > menu.clientHeight,
+            clippedAcross: menu.scrollWidth > menu.clientWidth,
+            page: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        };
+    }, MM);
+    ck(shape.heights.length === ROWS.length && shape.heights.every((h) => h >= 44), 'phone: every row is a 44 px target', JSON.stringify(shape.heights));
+    ck(!shape.clippedDown && !shape.clippedAcross && shape.page, 'phone: nothing is clipped and nothing scrolls sideways', JSON.stringify(shape));
+    for (const name of ROWS) {
+        const p = await probe(page, MM, name);
+        ck(reachable(p), `phone: "${name}" is on screen and what a finger lands on`, desc(p));
+    }
+    await press(page, await probe(page, MM, 'Movie Night'), true);
+    ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), 'phone: a tap on an item presses it, and closes the menu', JSON.stringify(await logged(page)));
     await ctx.close();
 }
 

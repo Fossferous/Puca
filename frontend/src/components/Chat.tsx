@@ -44,7 +44,7 @@ import { ForwardModal } from './ForwardModal';
 import { SupportReportModal } from './SupportReportModal';
 import { onPendingInviteAnnounced } from '../api/pendingInvite';
 import { SaveToNoteModal } from './SaveToNoteModal';
-import { getToken } from '../api/auth';
+import { currentUserIdFromToken, getToken } from '../api/auth';
 import { appIsForeground, isMobile as isNativeMobile, isTauri, RC_ENABLED } from '../api/platform';
 import {
     // getOrCreateDefaultServer removed - no auto-join default server
@@ -164,7 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnUnderCollection, keptByHideMuted, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -309,7 +309,13 @@ interface UnsentMessage {
     visit: number;
     /** How to name the conversation, if the person has left it by then. */
     where: string;
+    /** A DM, once it is on the socket: what its echo will carry, and when it went. */
+    wire?: string;
+    wentAt?: number;
 }
+
+/** How long after a DM goes its refusal may still be on the way. */
+const DM_REFUSAL_WINDOW_MS = 10_000;
 
 interface User {
     id: number;
@@ -741,8 +747,10 @@ export function Chat({ onLogout }: ChatProps) {
     /** Channel sends nothing has confirmed yet, by their bubble's id: not the answer
      *  to the request, not the socket's echo. */
     const unconfirmedSendsRef = useRef(new Set<string>());
-    /** What each DM still on screen as a bubble held, by the bubble's id. A DM's only
-     *  refusal is a frame that names no message (the Error handler). */
+    /** What each DM with no answer yet held, by its bubble's id, and it outlives the
+     *  bubble: a switch of conversation replaces the list, and the answer still comes.
+     *  A DM's only refusal is a frame that names no message (the Error handler). Its
+     *  echo is the only word that it landed (handleDirectMessage). */
     const unsentDmsRef = useRef(new Map<string, UnsentMessage>());
     const [showJumpLatest, setShowJumpLatest] = useState(false);
     const [missedCount, setMissedCount] = useState(0);
@@ -1657,13 +1665,16 @@ export function Chat({ onLogout }: ChatProps) {
                 return prev.filter(m => !String(m.id).startsWith('local_'));
             });
             // After the updater has run, as the channel send's give-up does. Their words
-            // go back like any send's. This frame may be about something else entirely,
-            // so one of them may have landed: its uploads are left alone.
+            // go back like any send's, for a bubble in this list, and for a DM that went
+            // moments ago from a list since replaced, with no echo yet. This frame may be
+            // about something else entirely, so one of them may have landed: its uploads
+            // are left alone.
             setTimeout(() => {
                 let notice = text;
-                for (const id of dropped) {
-                    const unsent = unsentDmsRef.current.get(id);
-                    if (unsent) notice = giveBackUnsent(unsent, notice, { mayHaveLanded: true });
+                const now = Date.now();
+                for (const [id, unsent] of unsentDmsRef.current) {
+                    const wentJustNow = unsent.wentAt !== undefined && now - unsent.wentAt < DM_REFUSAL_WINDOW_MS;
+                    if (dropped.includes(id) || wentJustNow) notice = giveBackUnsent(unsent, notice, { mayHaveLanded: true });
                 }
                 unsentDmsRef.current.clear();
                 leaveNotice(notice);
@@ -1922,7 +1933,10 @@ export function Chat({ onLogout }: ChatProps) {
             }
         } catch (error) {
             console.error('Failed to delete channel:', error);
-            tellUser('Could not delete the channel. You may not have permission.');
+            // A 409: a collection holding a channel this person cannot see. The server says what to do.
+            tellUser(error instanceof ApiError && error.status === 409 && error.message
+                ? error.message
+                : 'Could not delete the channel. You may not have permission.');
         }
     };
 
@@ -2406,10 +2420,16 @@ export function Chat({ onLogout }: ChatProps) {
                 setCurrentChannel(fresh);
             }
         }
-        if (currentCollection && !channels.some(c => c.id === currentCollection.id)) {
-            setCurrentCollection(null);
-            setMessages([]);
-            if (isMobile) setMobilePanel('channels');
+        if (currentCollection) {
+            const freshCollection = channels.find(c => c.id === currentCollection.id);
+            if (!freshCollection) {
+                setCurrentCollection(null);
+                setMessages([]);
+                if (isMobile) setMobilePanel('channels');
+            } else if (freshCollection !== currentCollection) {
+                // Same collection, refreshed row: the header and its page show its name and topic.
+                setCurrentCollection(freshCollection);
+            }
         }
         // A voice channel we can no longer see — but only if it belongs to THIS
         // server: voice persists while browsing other servers, and their
@@ -2436,6 +2456,19 @@ export function Chat({ onLogout }: ChatProps) {
             // fires for frames already in flight when the block landed — but a
             // blocked user must never ping you, so belt and braces.
             if (isBlocked(payload.sender.id)) return;
+
+            // One of ours landed, wherever the person has gone since: the list it may
+            // have left, so nothing below would ever notice, and a later Error must not
+            // print its words. By what it carries, because the echo of what the same
+            // account sent from another device comes here too.
+            if (payload.sender.id === currentUserId) {
+                for (const [id, unsent] of unsentDmsRef.current) {
+                    if (unsent.wire === payload.content) {
+                        unsentDmsRef.current.delete(id);
+                        break;
+                    }
+                }
+            }
 
             // Ping for an incoming DM from someone else that isn't the
             // conversation already on screen — the open one with Notes over
@@ -3328,7 +3361,6 @@ export function Chat({ onLogout }: ChatProps) {
         currentChannelIdRef.current = currentChannel?.id ?? null;
         currentDmIdRef.current = currentDM?.id ?? null;
         conversationVisitRef.current++;
-        unsentDmsRef.current.clear();
         setShowJumpLatest(false);
         setMissedCount(0);
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id]);
@@ -3585,6 +3617,12 @@ export function Chat({ onLogout }: ChatProps) {
         // The message took the ready uploads; failed chips stay for retry.
         takeSentAttachments();
 
+        // The answer to this send can outlive the session: a request or a ten second wait
+        // still running when they sign out. What is said then would stay on the screen
+        // for whoever signs in next, their words included. Asked of the token, not of
+        // Chat having gone: leaving it for an invite link is no reason to lose the words.
+        const stillSignedIn = () => currentUserIdFromToken() === currentUserId;
+
         // Handle DM messages
         if (currentDM) {
             const optimisticDMMessage = {
@@ -3619,11 +3657,14 @@ export function Chat({ onLogout }: ChatProps) {
                 if (!wsClient.isConnected) throw new OfflineSendError();
                 const wire = await encryptDMContent(content, currentDM.other_user_id);
                 if (!wsClient.isConnected) throw new OfflineSendError();
+                unsent.wire = wire;
+                unsent.wentAt = Date.now();
                 wsClient.sendDirectMessage(currentDM.other_user_id, wire);
             } catch (err) {
                 console.error('Failed to send DM:', err);
                 setDmMessages(prev => prev.filter(m => m.id !== optimisticDMMessage.id));
                 unsentDmsRef.current.delete(optimisticDMMessage.id);
+                if (!stillSignedIn()) return;
                 tellUser(giveBackUnsent(
                     unsent,
                     err instanceof OfflineSendError
@@ -3701,7 +3742,7 @@ export function Chat({ onLogout }: ChatProps) {
                         return prev.filter(m => m.id !== optimisticMessage.id);
                     });
                     setTimeout(() => {
-                        if (stillUnconfirmed) {
+                        if (stillUnconfirmed && stillSignedIn()) {
                             // Ten seconds on, the person may be anywhere, and this is the
                             // only copy of what they wrote: the composer gets it back, and
                             // the notice waits for them. Nothing confirmed it landed, and
@@ -3717,6 +3758,7 @@ export function Chat({ onLogout }: ChatProps) {
             // actionable reason — show it verbatim.
             unconfirmedSendsRef.current.delete(optimisticMessage.id);
             setMessages(prev => prev.filter(m => m.id !== optimisticMessage.id));
+            if (!stillSignedIn()) return;
             tellUser(giveBackUnsent(unsent, error instanceof SecureSendError ? error.message : 'Message failed to send. Check your connection and try again.'));
         }
     };
@@ -4087,6 +4129,15 @@ export function Chat({ onLogout }: ChatProps) {
     };
 
 
+    // Every way into the form starts clean: Cancel only hides it, and a parent left behind
+    // can be a collection on another server by now, which every create is then refused for.
+    const openCreateChannel = (type: 0 | 1, parent: number | null = null) => {
+        setNewChannelType(type);
+        setNewChannelHasChecklist(false);
+        setNewChannelParentId(parent);
+        setShowCreateModal(true);
+    };
+
     // --- Mouse-based Channel Drag and Drop (WebView2 compatible) ---
     // WebView2 doesn't fire dragover/drop events, so we use mouse events instead
 
@@ -4202,6 +4253,13 @@ export function Chat({ onLogout }: ChatProps) {
             ?? voiceServerChannels?.find(c => c.id === currentVoiceChannel.id)
             ?? currentVoiceChannel)
         : null;
+    // A call on another server whose channel was deleted: the deselect above only reads the
+    // viewed server's list, and this one is the list the delete's ChannelUpdated refetches.
+    useEffect(() => {
+        if (currentVoiceChannel && voiceServerChannels && !voiceServerChannels.some(c => c.id === currentVoiceChannel.id)) {
+            setCurrentVoiceChannel(null);
+        }
+    }, [currentVoiceChannel, voiceServerChannels]);
     const voiceGamesEnabled = currentVoiceChannel
         ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
         : undefined;
@@ -4307,6 +4365,16 @@ export function Chat({ onLogout }: ChatProps) {
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
         if (warning && !await askConfirm(warning)) return;
+        // All of the above is from the render that built the menu. The page goes on running behind
+        // a menu left open, on every platform, and behind a desktop question (api/appDialogs.ts),
+        // and a frame moves this row at once: the warning, or the empty rooms that asked for none,
+        // may have been about a mode that is no longer on, and this would end the calls of the one
+        // that is. With nothing moved, as behind a native dialog, which stops the page, it finds nothing.
+        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer.id);
+        if (row && (row.active_mode_id ?? null) !== activeModeId) {
+            showToast('The mode changed while you were deciding. Nothing was switched.');
+            return;
+        }
         try {
             await setActiveMode(currentServer.id, modeId);
         } catch {
@@ -4886,8 +4954,7 @@ export function Chat({ onLogout }: ChatProps) {
                                         }}
                                     >
                                         <option value="">(No Parent - Top Level)</option>
-                                        {channels
-                                            .filter(c => c.channel_type === 2) // Only show collections
+                                        {parentChoices(channels)
                                             .map(c => (
                                                 <option key={c.id} value={c.id}>
                                                     {c.name}
@@ -5411,14 +5478,14 @@ export function Chat({ onLogout }: ChatProps) {
                         data={modesData}
                         activeModeId={activeModeId}
                         homeName={activeHome?.name ?? null}
-                        onOpen={(at) => modesData && showContextMenuAt(at, modeMenuItems({
+                        onOpen={(at, opener, fromKeyboard) => modesData && showContextMenuAt(at, modeMenuItems({
                             data: modesData,
                             activeModeId,
                             homeName: activeHome?.name ?? null,
                             onSwitch: (id) => { void switchMode(id); },
                             onCallBack: () => { void callBackToHome(); },
                             onManage: () => { setSettingsInitialTab('modes'); setShowSettingsModal(true); },
-                        }))}
+                        }), opener, 'Mode', fromKeyboard)}
                     />
                 )}
 
@@ -5437,7 +5504,7 @@ export function Chat({ onLogout }: ChatProps) {
                         <h3>Text Channels</h3>
                         <button
                             className="add-channel-btn"
-                            onClick={() => { setNewChannelType(0); setShowCreateModal(true); }}
+                            onClick={() => openCreateChannel(0)}
                             title="Create Text Channel"
                         >
                             +
@@ -5472,14 +5539,14 @@ export function Chat({ onLogout }: ChatProps) {
                             ones out — except the channel currently open, which must
                             never vanish from under the reader. */}
                         {channels
-                            .filter(c => (c.channel_type === 0 || c.channel_type === 2) && !c.parent_id)
+                            .filter(c => (c.channel_type === 0 || c.channel_type === 2) && drawnAtTop(c, channels) && !hiddenWithCollection(c, channels))
                             // A hidden collection stays as the header of an open subchannel.
                             .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && openRowId === sub.id))
                             .filter(c => !hideMutedHere || keptByHideMuted(c, channels, isChannelMuted, openRowId))
                             .map(channel => {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
-                                const subchannels = channels.filter(sub => sub.parent_id === channel.id)
+                                const subchannels = channels.filter(sub => sub.parent_id === channel.id && !drawnAtTop(sub, channels))
                                     .filter(drawnUnderCollection)
                                     .filter(listed)
                                     .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || openRowId === sub.id);
@@ -5497,11 +5564,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                     // does NOT inherit the array's ContextMenuItem context,
                                                     // so a bare 'plus' widens to string and fails IconName.
                                                     icon: 'plus' as const,
-                                                    onClick: () => {
-                                                        setNewChannelParentId(channel.id);
-                                                        setNewChannelType(0);
-                                                        setShowCreateModal(true);
-                                                    }
+                                                    onClick: () => openCreateChannel(0, channel.id),
                                                 }] : []),
                                                 {
                                                     id: 'mute-channel',
@@ -5571,7 +5634,7 @@ export function Chat({ onLogout }: ChatProps) {
                         <h3>Voice Channels</h3>
                         <button
                             className="add-channel-btn"
-                            onClick={() => { setNewChannelType(1); setShowCreateModal(true); }}
+                            onClick={() => openCreateChannel(1)}
                             title="Create Voice Channel"
                         >
                             +
@@ -7053,6 +7116,9 @@ export function Chat({ onLogout }: ChatProps) {
                     items={contextMenu.items}
                     position={contextMenu.position}
                     onClose={hideContextMenu}
+                    opener={contextMenu.opener}
+                    label={contextMenu.label}
+                    fromKeyboard={contextMenu.fromKeyboard}
                 />
             )}
 
@@ -7117,7 +7183,7 @@ export function Chat({ onLogout }: ChatProps) {
                     isOpen={!!editingChannel}
                     onClose={() => setEditingChannel(null)}
                     channel={editingChannel}
-                    collections={channels.filter(c => c.channel_type === 2)}
+                    collections={parentChoices(channels, editingChannel.parent_id)}
                     onChannelUpdated={(updated) => {
                         // Optimistic update
                         queryClient.setQueryData(keys.channels(currentServer?.id || ''), (old: Channel[] | undefined) => {

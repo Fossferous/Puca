@@ -22,6 +22,10 @@ const h = vi.hoisted(() => ({
     pin: null as null | (() => Promise<unknown>),
     dms: [] as unknown[],
     discarded: [] as string[],
+    /** Whose session is in storage now. */
+    sessionOf: 1 as number | null,
+    /** Sealing a DM, when a test holds it. */
+    seal: null as null | (() => Promise<string>),
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
@@ -35,7 +39,7 @@ vi.mock('../api/servers', async importOriginal => ({
 }));
 vi.mock('../api/dms', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/dms')>()),
-    encryptDMContent: async () => 'sealed',
+    encryptDMContent: async () => (h.seal ? h.seal() : 'sealed'),
 }));
 vi.mock('../api/attachments', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/attachments')>()),
@@ -48,6 +52,7 @@ vi.mock('../api/uploads', async importOriginal => ({
 vi.mock('../api/auth', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/auth')>()),
     getToken: () => `h.${btoa(JSON.stringify({ sub: ME, username: 'me' })).replace(/=+$/, '')}.s`,
+    currentUserIdFromToken: () => h.sessionOf,
 }));
 vi.mock('../utils/audioFeedback', async importOriginal => ({
     ...(await importOriginal<typeof import('../utils/audioFeedback')>()),
@@ -92,6 +97,7 @@ let host: HTMLElement | null = null;
 let alertSpy: ReturnType<typeof vi.spyOn>;
 let confirmSpy: ReturnType<typeof vi.spyOn>;
 let frameListeners: ((m: Frame) => void)[] = [];
+let dmListeners: ((m: Frame) => void)[] = [];
 let dialogs: ReturnType<typeof mountAppDialogs>;
 
 beforeEach(() => {
@@ -101,6 +107,7 @@ beforeEach(() => {
     const on = wsClient.on.bind(wsClient);
     vi.spyOn(wsClient, 'on').mockImplementation((type, handler) => {
         if (type === 'Error') frameListeners.push(handler as unknown as (m: Frame) => void);
+        if (type === 'DirectMessage') dmListeners.push(handler as unknown as (m: Frame) => void);
         return on(type, handler);
     });
 });
@@ -112,7 +119,10 @@ afterEach(() => {
     h.pin = null;
     h.dms = [];
     h.discarded = [];
+    h.sessionOf = ME;
+    h.seal = null;
     frameListeners = [];
+    dmListeners = [];
     dialogs.unmount();
     vi.restoreAllMocks();
 });
@@ -126,6 +136,21 @@ function shortenTheGrace() {
     const realTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: []) =>
         realTimeout(fn, ms === 10_000 || ms === 5_000 ? 0 : ms, ...rest)) as typeof setTimeout);
+}
+
+/** The grace held until `fire`: what has happened by the time it runs. */
+function holdTheGrace() {
+    const realTimeout = globalThis.setTimeout;
+    const held: (() => void)[] = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: []) => {
+        if (ms !== 10_000) return realTimeout(fn, ms, ...rest);
+        held.push(fn);
+        return 0;
+    }) as typeof setTimeout);
+    return async () => {
+        await act(async () => { for (const fn of held.splice(0)) fn(); });
+        await settle(50);
+    };
 }
 
 async function mountChat() {
@@ -248,6 +273,109 @@ describe('the chat view, when nobody just pressed anything', () => {
         expect(said).toContain('hello there');
     });
 
+    describe('when Chat has gone by the time it gives up', () => {
+        async function leftWithASendUnconfirmed() {
+            const fire = holdTheGrace();
+            h.send = async () => { throw new TypeError('Failed to fetch'); };
+            await mountChat();
+            await pressSend('hello there');
+            await settle(50);
+            await moveToRandom();
+            return fire;
+        }
+        const chatGoes = () => { act(() => root?.unmount()); root = null; };
+
+        it('signed out, their words do not wait on the login screen for the next person', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            // logout(): the token goes, then the page does.
+            h.sessionOf = null;
+            chatGoes();
+            await fire();
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('nor do they reach another account that signed in meanwhile', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            h.sessionOf = ME + 1;
+            chatGoes();
+            await fire();
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('CONTROL: still signed in (an invite link replaced Chat), this is the only copy, and it is said', async () => {
+            const fire = await leftWithASendUnconfirmed();
+            chatGoes();
+            await fire();
+            const [said] = dialogs.notices();
+            expect(said).toContain('Message failed to send');
+            expect(said).toContain('hello there');
+        });
+
+        // The same words by the two other ways out. A press's answer is an alert off the desktop.
+        describe('a channel send refused', () => {
+            async function refusedAfter(signedOut: boolean) {
+                let release: (reason: unknown) => void = () => {};
+                h.send = () => new Promise((_, reject) => { release = reject; });
+                await mountChat();
+                await pressSend('hello there');
+                await moveToRandom();
+                if (signedOut) h.sessionOf = null;
+                chatGoes();
+                await act(async () => { release(new Error('the server refused it')); });
+                await settle(50);
+            }
+
+            it('says nothing after a sign-out', async () => {
+                await refusedAfter(true);
+                expect(alertSpy).not.toHaveBeenCalled();
+                expect(dialogs.notices()).toEqual([]);
+            });
+
+            it('CONTROL: still signed in, it is said, with the words', async () => {
+                await refusedAfter(false);
+                expect(String(alertSpy.mock.calls[0]?.[0])).toContain('hello there');
+            });
+        });
+
+        describe('a DM that could not be sealed or sent', () => {
+            async function failedAfter(signedOut: boolean) {
+                h.dms = [
+                    { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+                    { id: 'd2', other_user_id: 3, other_username: 'carol', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+                ];
+                vi.spyOn(wsClient, 'isConnected', 'get').mockReturnValue(true);
+                vi.spyOn(wsClient, 'sendDirectMessage').mockImplementation(() => {});
+                let release: (reason: unknown) => void = () => {};
+                h.seal = () => new Promise((_, reject) => { release = reject; });
+                await mountChat();
+                await act(async () => { document.querySelector<HTMLElement>('.server-icon.home-button')!.click(); });
+                await settle();
+                await act(async () => { [...document.querySelectorAll<HTMLElement>('.dm-item')].find(el => el.textContent?.includes('bob'))!.click(); });
+                await settle(50);
+                await pressSend('hi bob');
+                await act(async () => { document.querySelector<HTMLElement>('.back-to-server-btn')!.click(); });
+                await settle();
+                await act(async () => { [...document.querySelectorAll<HTMLElement>('.dm-item')].find(el => el.textContent?.includes('carol'))!.click(); });
+                await settle(50);
+                if (signedOut) h.sessionOf = null;
+                chatGoes();
+                await act(async () => { release(new Error('no key for them')); });
+                await settle(50);
+            }
+
+            it('says nothing after a sign-out', async () => {
+                await failedAfter(true);
+                expect(alertSpy).not.toHaveBeenCalled();
+                expect(dialogs.notices()).toEqual([]);
+            });
+
+            it('CONTROL: still signed in, it is said, with the words', async () => {
+                await failedAfter(false);
+                expect(String(alertSpy.mock.calls[0]?.[0])).toContain('hi bob');
+            });
+        });
+    });
+
     it('POSITIVE CONTROL: a refusal the moment the person pressed Send stays what it was, a dialog they answer', async () => {
         h.send = async () => { throw new Error('the server refused it'); };
         await mountChat();
@@ -321,6 +449,111 @@ describe('the chat view, when nobody just pressed anything', () => {
         await settle(50);
         expect(composer().value).toBe('hi bob');
         expect(dialogs.notices()).toEqual(['They only accept messages from friends']);
+    });
+
+    describe('a DM after the person has moved on', () => {
+        const REFUSED = 'This user only accepts direct messages from friends';
+        const TWO_DMS = [
+            { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+            { id: 'd2', other_user_id: 3, other_username: 'carol', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+        ];
+        const openDm = async (name: string) => {
+            const item = [...document.querySelectorAll<HTMLElement>('.friends-dashboard .dm-item, .dm-item')].find(el => el.textContent?.includes(name));
+            expect(item, `${name}'s conversation is listed`).toBeTruthy();
+            await act(async () => { item!.click(); });
+            await settle(50);
+            expect(document.querySelector('.chat-header')?.textContent, `${name}'s is open`).toContain(name);
+        };
+        const backToTheList = async () => {
+            await act(async () => { document.querySelector<HTMLElement>('.back-to-server-btn')!.click(); });
+            await settle();
+        };
+        /** "hi bob" sent and on the socket, and the person now in carol's conversation. */
+        async function sentThenMovedOn() {
+            h.dms = TWO_DMS;
+            vi.spyOn(wsClient, 'isConnected', 'get').mockReturnValue(true);
+            vi.spyOn(wsClient, 'sendDirectMessage').mockImplementation(() => {});
+            await mountChat();
+            await act(async () => { document.querySelector<HTMLElement>('.server-icon.home-button')!.click(); });
+            await settle();
+            await openDm('bob');
+            await pressSend('hi bob');
+            await settle(50);
+            await backToTheList();
+            await openDm('carol');
+        }
+        const refused = (message = REFUSED) => act(async () => { frameListeners[0]({ type: 'Error', payload: { message } }); });
+        const echo = (over: Record<string, unknown> = {}) => act(async () => {
+            for (const listen of dmListeners) {
+                listen({
+                    type: 'DirectMessage',
+                    payload: { message_id: 'm1', conversation_id: 'd1', sender: { id: ME, username: 'me' }, content: 'sealed', timestamp: 1, ...over },
+                });
+            }
+        });
+
+        it('refused, the notice carries the words and who they were for, as the changelog says', async () => {
+            await sentThenMovedOn();
+            await refused();
+            await settle(50);
+            const [said] = dialogs.notices();
+            expect(said).toContain(REFUSED);
+            expect(said).toContain('your conversation with bob');
+            expect(said).toContain('hi bob');
+            expect(composer().value, 'one Enter from going to carol').toBe('');
+        });
+
+        it('having come back, the words go back in the box instead', async () => {
+            await sentThenMovedOn();
+            await backToTheList();
+            await openDm('bob');
+            await refused();
+            await settle(50);
+            expect(composer().value).toBe('hi bob');
+            expect(dialogs.notices()).toEqual([REFUSED]);
+        });
+
+        it('its echo says it landed: a later Error, about anything, does not print its words', async () => {
+            await sentThenMovedOn();
+            await echo();
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()).toEqual(['Slow down']);
+        });
+
+        it('CONTROL: the echo of what this account sent from another device leaves this one alone', async () => {
+            await sentThenMovedOn();
+            await echo({ content: 'sealed on the phone' });
+            await refused();
+            await settle(50);
+            expect(dialogs.notices()[0]).toContain('hi bob');
+        });
+
+        it('CONTROL: nor does what someone else sent, with the same words on the wire', async () => {
+            await sentThenMovedOn();
+            await echo({ sender: { id: 2, username: 'bob' } });
+            await refused();
+            await settle(50);
+            expect(dialogs.notices()[0]).toContain('hi bob');
+        });
+
+        it('long after it went, an Error is about something else', async () => {
+            await sentThenMovedOn();
+            const later = Date.now() + 11_000;
+            vi.spyOn(Date, 'now').mockReturnValue(later);
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()).toEqual(['Slow down']);
+        });
+
+        it('given back once: the next Error has nothing left to print', async () => {
+            await sentThenMovedOn();
+            await refused();
+            await settle(50);
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()[1]).toBe('Slow down');
+        });
     });
 
     it('a later Error frame gives nothing back: that bubble was already gone', async () => {

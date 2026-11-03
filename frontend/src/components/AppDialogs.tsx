@@ -26,7 +26,9 @@ import './AppDialogs.css';
  * A press in the question goes no further than the question. The page behind it is
  * inert to the person, not to its own listeners, and a press here is a press outside
  * everything: Cancel on "Discard this note?" would make the note's composer save and
- * close (QuickAdd's outside press), and close the menu or popup that asked.
+ * close (QuickAdd's outside press), and close the menu or popup that asked. A notice
+ * landing on a half-written note is the same: dismissing it, or selecting its words,
+ * is no reason to save and close the note.
  */
 const staysInTheQuestion = (e: SyntheticEvent) => e.stopPropagation();
 const PRESS_STAYS_IN = {
@@ -40,12 +42,18 @@ const PRESS_STAYS_IN = {
     onContextMenu: staysInTheQuestion,
 };
 
+/** Tallest a field of several lines opens. A longer message scrolls inside it. */
+const MAX_FIELD_ROWS = 12;
+
 function Question({ question }: { question: AppQuestion }) {
     const dialogRef = useRef<HTMLDialogElement>(null);
     const firstControlRef = useRef<HTMLElement | null>(null);
     const [text, setText] = useState(question.initial);
     const messageId = useId();
     const { id, kind } = question;
+    // An <input> takes the line breaks out of its value, and nothing gets them back:
+    // an edited message would go back to the server with its lines run together.
+    const severalLines = kind === 'text' && /[\r\n]/.test(question.initial);
 
     /** Cancel, Escape: what window.confirm and window.prompt answer for them. */
     const refuse = useCallback(() => {
@@ -60,7 +68,7 @@ function Question({ question }: { question: AppQuestion }) {
         else dialog.setAttribute('open', '');
         const first = firstControlRef.current;
         first?.focus();
-        if (first instanceof HTMLInputElement) first.select();
+        if (first instanceof HTMLInputElement || first instanceof HTMLTextAreaElement) first.select();
         return () => {
             if (typeof dialog.close === 'function') dialog.close();
             before?.focus();
@@ -77,10 +85,29 @@ function Question({ question }: { question: AppQuestion }) {
         let keyWentDownHere = false;
         const onKeyDown = (e: KeyboardEvent) => {
             e.stopPropagation();
+            const lines = e.target instanceof HTMLTextAreaElement ? e.target : null;
+            // An IME's own Enter and Escape: they take or drop what is being composed.
+            // Not every engine says isComposing for the Enter that ends it (WebKit), and
+            // left alone the Escape still cancels a modal dialog (onCancel).
+            if (lines && (e.isComposing || e.keyCode === 229)) {
+                if (e.key === 'Escape') e.preventDefault();
+                // A key it passes on can come as a keypress with no keydown of its own (a space
+                // ending a Hangul syllable), and this one is typing, not the Enter that asked.
+                if (!e.repeat) keyWentDownHere = true;
+                return;
+            }
             if (e.key === 'Escape') {
                 e.preventDefault();
                 // Held from whatever this question was asked in answer to, it is no answer.
                 if (!e.repeat) refuse();
+                return;
+            }
+            // Enter answers here as it does in a one-line field, which a browser does by
+            // itself for an <input> only. Shift+Enter is the new line. A handler on the
+            // field would never hear either: this listener has just stopped them.
+            if (lines && e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!e.repeat) lines.form?.requestSubmit();
                 return;
             }
             if (!e.repeat) {
@@ -89,8 +116,8 @@ function Question({ question }: { question: AppQuestion }) {
             }
             // A key still held from what opened this question, the Enter that pressed
             // a focused Delete button, repeats onto the OK that now has the focus.
-            // That is not an answer.
-            if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
+            // That is not an answer. In a field of several lines the rest is typing.
+            if (!lines && (e.key === 'Enter' || e.key === ' ')) e.preventDefault();
         };
         // THE ENTER THAT ASKED. A key is a keydown and then a keypress, and the keypress
         // goes to whatever has the focus by then. Enter in a field whose keydown handler
@@ -124,11 +151,21 @@ function Question({ question }: { question: AppQuestion }) {
         >
             <form onSubmit={e => { e.preventDefault(); accept(); }}>
                 <p id={messageId} className="app-question-message">{question.message}</p>
-                {kind === 'text' && (
+                {kind === 'text' && !severalLines && (
                     <input
                         ref={el => { firstControlRef.current = el; }}
                         className="app-question-input"
                         type="text"
+                        aria-labelledby={messageId}
+                        value={text}
+                        onChange={e => setText(e.target.value)}
+                    />
+                )}
+                {severalLines && (
+                    <textarea
+                        ref={el => { firstControlRef.current = el; }}
+                        className="app-question-input app-question-lines"
+                        rows={Math.min(question.initial.split('\n').length + 1, MAX_FIELD_ROWS)}
                         aria-labelledby={messageId}
                         value={text}
                         onChange={e => setText(e.target.value)}
@@ -164,12 +201,16 @@ export function AppDialogs() {
             {notices.length > 0 && createPortal(
                 <div className="app-notices">
                     {notices.map(notice => (
-                        <div key={notice.id} className="app-notice" role="alert">
+                        <div key={notice.id} className="app-notice" role="alert" {...PRESS_STAYS_IN}>
                             <span className="app-notice-text">{notice.message}</span>
                             <button
                                 type="button"
                                 className="app-notice-close"
                                 aria-label="Dismiss"
+                                // The focus stays where they were typing. It would go with the
+                                // button, to nowhere. A press on the words does move it, or
+                                // they could not be selected.
+                                onMouseDown={e => e.preventDefault()}
                                 onClick={() => dismissAppNotice(notice.id)}
                             >
                                 <CloseIcon />

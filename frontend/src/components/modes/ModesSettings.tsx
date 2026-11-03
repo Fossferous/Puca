@@ -3,13 +3,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import { keys, useChannels, useServerModes } from '../../hooks/queries';
 import { BackgroundRefused, prepareBackground } from '../../api/modeLook';
 import { accentTokens, createMode, deleteMode, neverListed, shownWithParent, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
-import type { Channel } from '../../api/servers';
+import type { Channel, Server } from '../../api/servers';
 import { uploadFile } from '../../api/uploads';
 import { statusOf } from '../../api/client';
 import { AuthedImg } from '../AuthedImg';
 import { FolderIcon, HashIcon, MoonIcon, SpeakerIcon, TrashIcon, UploadIcon } from '../Icons';
 import './ModesSettings.css';
 import { askConfirm } from '../../api/appDialogs';
+import { drawnAtTop } from '../sidebarChannels';
 
 /** What the color input starts from when a mode has no accent yet. */
 const DEFAULT_ACCENT = '#7a1f3d';
@@ -95,6 +96,13 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
             ? `Delete ${mode.name}? It is on right now: anyone in its voice channels will be disconnected. Its channels and their messages are kept.`
             : `Delete ${mode.name}? Its channels and their messages are kept, and show all the time from now on.`;
         if (!await askConfirm(warning)) return;
+        // As in Chat's switchMode: what was said may be out of date by the answer. The server row,
+        // which a frame moves at once: this card's isActive comes from a list that is only refetched.
+        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === serverId);
+        if (row && (row.active_mode_id === mode.id) !== isActive) {
+            setError('The mode changed while you were deciding. Nothing was deleted.');
+            return;
+        }
         setBusy(true);
         setError('');
         try {
@@ -145,8 +153,8 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
     const parentOf = (c: Channel) => (c.parent_id == null ? undefined : channels.find(p => p.id === c.parent_id));
     // Each collection followed by what is under it, so a row reads as part of it.
     const inTreeOrder = (rows: Channel[]) => rows.flatMap(c => {
-        if (c.parent_id != null && rows.some(p => p.id === c.parent_id)) return [];
-        return [c, ...rows.filter(sub => sub.parent_id === c.id)];
+        if (!drawnAtTop(c, rows)) return [];
+        return [c, ...rows.filter(sub => sub.parent_id === c.id && !drawnAtTop(sub, rows))];
     });
     const text = inTreeOrder(pickable.filter(c => c.channel_type !== 1));
     const voice = inTreeOrder(pickable.filter(c => c.channel_type === 1));

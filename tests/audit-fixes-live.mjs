@@ -93,9 +93,13 @@ console.log(`\n=== create_channel must not graft into another server (body paren
     // The legitimate case must still work, including a same-server parent.
     const ok = await api('POST', `/servers/${srvA.id}/channels`, { name: 'legit', channel_type: 0 }, A.t);
     check('create_channel still allows a plain channel', ok.status < 300, `status=${ok.status}`);
+    const notACollection = await api('POST', `/servers/${srvA.id}/channels`,
+        { name: 'under-text', channel_type: 0, parent_id: srvA.channelId }, A.t);
+    check('create_channel refuses a parent that is no collection', notACollection.status === 400, `status=${notACollection.status}`);
+    const collection = await api('POST', `/servers/${srvA.id}/channels`, { name: 'legit-collection', channel_type: 2 }, A.t);
     const okParent = await api('POST', `/servers/${srvA.id}/channels`,
-        { name: 'legit-child', channel_type: 0, parent_id: srvA.channelId }, A.t);
-    check('create_channel still allows a same-server parent', okParent.status < 300, `status=${okParent.status}`);
+        { name: 'legit-child', channel_type: 0, parent_id: collection.body?.id }, A.t);
+    check('create_channel still allows a collection of this server as the parent', okParent.status < 300, `status=${okParent.status}`);
 }
 
 console.log(`\n=== pin_message must bind the message to the authorized channel ===`);

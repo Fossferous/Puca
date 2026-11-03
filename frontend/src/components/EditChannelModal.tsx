@@ -132,16 +132,19 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
             const nextAfk = channel.channel_type === 1 ? isAfk : false;
             const nextChecklist = channel.channel_type === 0 ? isChecklist : false;
             const nextSfu = channel.channel_type === 1 ? isSfu : false;
+            const topic = description.trim();
             await updateChannel(channel.id, {
                 name: name.trim(),
-                description: description.trim() || undefined,
-                parent_id: parentId,
+                // Only real changes: this row can be older than another manager's topic or move.
+                // Empty is how a topic is cleared: left out, the server keeps it.
+                ...(topic !== (channel.description ?? '') ? { description: topic } : {}),
+                ...(parentId !== (channel.parent_id ?? null) ? { parent_id: parentId } : {}),
                 slowmode_seconds: slowmode,
                 is_afk: nextAfk,
                 has_checklist: nextChecklist,
                 sfu_mode: nextSfu,
             });
-            onChannelUpdated({ ...channel, name: name.trim(), description: description.trim() || null, parent_id: parentId, slowmode_seconds: slowmode, is_afk: nextAfk, has_checklist: nextChecklist, sfu_mode: nextSfu });
+            onChannelUpdated({ ...channel, name: name.trim(), description: topic || null, parent_id: parentId, slowmode_seconds: slowmode, is_afk: nextAfk, has_checklist: nextChecklist, sfu_mode: nextSfu });
             onClose();
         } catch (err) {
             console.error('Failed to update channel:', err);

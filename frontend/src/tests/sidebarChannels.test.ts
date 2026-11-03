@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
     deleteChannelQuestion,
+    drawnAtTop,
     drawnUnderCollection,
+    hiddenWithCollection,
     keptByHideMuted,
+    parentChoices,
     reorderedChannelIds,
     withoutDeletedChannel,
 } from '../components/sidebarChannels';
@@ -34,6 +37,95 @@ describe('what a collection draws', () => {
 
     it('draws nothing for a collection of voice rooms', () => {
         expect(channels.filter(c => c.parent_id === 3).filter(drawnUnderCollection)).toEqual([]);
+    });
+});
+
+describe('the row every text channel and collection gets', () => {
+    type Row = { id: number; name: string; channel_type: number; parent_id: number | null };
+    const row = (id: number, channel_type: number, parent_id: number | null = null): Row => ({ id, name: `r${id}`, channel_type, parent_id });
+
+    // As Chat.tsx's list draws them: each top-level row, then a collection's children.
+    const drawnRows = (rows: Row[]) => rows
+        .filter(c => c.channel_type !== VOICE && drawnAtTop(c, rows) && !hiddenWithCollection(c, rows))
+        .flatMap(c => [c.id, ...(c.channel_type === COLLECTION
+            ? rows.filter(sub => sub.parent_id === c.id && !drawnAtTop(sub, rows)).filter(drawnUnderCollection).map(sub => sub.id)
+            : [])]);
+    const everyRowOnce = (rows: Row[]) => {
+        const expected = rows.filter(c => c.channel_type !== VOICE).map(c => c.id).sort((a, b) => a - b);
+        expect(drawnRows(rows).sort((a, b) => a - b)).toEqual(expected);
+    };
+
+    it('draws a top-level row at the top, and a collection\'s child under it', () => {
+        const rows = [row(1, TEXT), row(2, COLLECTION), row(3, TEXT, 2), row(4, VOICE, 2)];
+        expect(drawnAtTop(rows[0], rows)).toBe(true);
+        expect(drawnAtTop(rows[1], rows)).toBe(true);
+        expect(drawnAtTop(rows[2], rows)).toBe(false);
+        expect(drawnRows(rows)).toEqual([1, 2, 3]);
+    });
+
+    it('draws a channel under a collection inside a collection at the top: it has no other row', () => {
+        const rows = [row(1, COLLECTION), row(2, COLLECTION, 1), row(3, TEXT, 2)];
+        expect(drawnAtTop(rows[1], rows), 'the nested one keeps its row under its parent').toBe(false);
+        expect(drawnAtTop(rows[2], rows)).toBe(true);
+        expect(drawnRows(rows)).toEqual([1, 2, 3]);
+    });
+
+    it('draws nothing under a collection this reader cannot see: denying it is how it looks private', () => {
+        expect(drawnRows([row(3, TEXT, 99)])).toEqual([]);
+        expect(drawnRows([row(1, TEXT), row(3, TEXT, 99)])).toEqual([1]);
+    });
+
+    it('nor anything under a collection inside one, the row that has none other otherwise', () => {
+        expect(drawnRows([row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([]);
+    });
+
+    it('CONTROL: the same rows, with that collection in the reader\'s list, are drawn', () => {
+        expect(drawnRows([row(99, COLLECTION), row(3, TEXT, 99)])).toEqual([99, 3]);
+        expect(drawnRows([row(99, COLLECTION), row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([99, 2, 3]);
+    });
+
+    it('leaves the Modes tab its voice rooms: it asks of one kind of row at a time, and their collection is not one', () => {
+        const rooms = [row(3, VOICE, 99)];
+        expect(drawnAtTop(rooms[0], rooms)).toBe(true);
+    });
+
+    it('draws a channel the raw API put under something that is no collection', () => {
+        everyRowOnce([row(1, TEXT), row(2, TEXT, 1)]);
+        everyRowOnce([row(1, VOICE), row(2, TEXT, 1)]);
+    });
+
+    it('draws a collection nested two levels down, and what is in it, once each', () => {
+        everyRowOnce([row(1, COLLECTION), row(2, COLLECTION, 1), row(3, COLLECTION, 2), row(4, TEXT, 3)]);
+    });
+
+    it('draws every row of a loop once: it is no way out of the list, and no way into it twice', () => {
+        everyRowOnce([row(1, COLLECTION, 1)]);
+        everyRowOnce([row(1, TEXT, 1)]);
+        everyRowOnce([row(1, COLLECTION, 2), row(2, COLLECTION, 1), row(3, TEXT, 2)]);
+    });
+
+    it('stops at a row with no parent, whatever spelling of none the server sent', () => {
+        expect(drawnAtTop({ id: 1, name: 'a', channel_type: TEXT }, [])).toBe(true);
+    });
+});
+
+describe('what Nest Under and Parent Collection offer', () => {
+    const rows = [
+        { id: 1, name: 'lobby', channel_type: TEXT, parent_id: null },
+        { id: 2, name: 'Top', channel_type: COLLECTION, parent_id: null },
+        { id: 3, name: 'Deeper', channel_type: COLLECTION, parent_id: 2 },
+        { id: 4, name: 'Town', channel_type: VOICE, parent_id: null },
+    ];
+    const ids = (current?: number | null) => parentChoices(rows, current).map(c => c.id);
+
+    it('offers a top-level collection, never a nested one: nothing would draw what went in it', () => {
+        expect(ids()).toEqual([2]);
+        expect(ids(null)).toEqual([2]);
+    });
+
+    it('keeps what the channel is under on offer, so the field shows it and leaving it is a change', () => {
+        expect(ids(3)).toEqual([2, 3]);
+        expect(ids(1), 'a parent the raw API set').toEqual([1, 2]);
     });
 });
 

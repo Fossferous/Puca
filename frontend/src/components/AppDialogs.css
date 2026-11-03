@@ -43,6 +43,12 @@
     font: inherit;
 }
 
+/* The same field, for a message of several lines. */
+.app-question-lines {
+    max-height: 60dvh;
+    resize: vertical;
+}
+
 .app-question-actions {
     display: flex;
     justify-content: flex-end;

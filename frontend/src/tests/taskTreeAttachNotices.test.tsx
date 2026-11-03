@@ -13,6 +13,12 @@ import { createRoot, type Root } from 'react-dom/client';
 
 const h = vi.hoisted(() => ({
     upload: null as null | ((file: File) => Promise<{ href: string; name: string }>),
+    /** Whose session is in storage now. */
+    sessionOf: 1 as number | null,
+}));
+vi.mock('../api/auth', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/auth')>()),
+    currentUserIdFromToken: () => h.sessionOf,
 }));
 vi.mock('../api/attachments', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/attachments')>()),
@@ -70,6 +76,7 @@ async function choose(row: string, files: File[]) {
 const file = (name: string) => new File(['x'], name, { type: 'image/png' });
 
 beforeEach(() => {
+    h.sessionOf = 1;
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -118,6 +125,33 @@ describe('the end of an attachment upload', () => {
         expect(dialogs.notices()[0]).toMatch(/can't be read yet/);
         expect(alertSpy).not.toHaveBeenCalled();
         expect(onSetAttachments).not.toHaveBeenCalled();
+    });
+
+    describe('when the session ends while it uploads', () => {
+        /** A file that fails only after whatever `meanwhile` does: the loop runs on past a sign-out. */
+        async function failsAfter(meanwhile: () => void) {
+            let fail: (err: Error) => void = () => {};
+            h.upload = () => new Promise((_, reject) => { fail = reject; });
+            render([task(1, 'Buy milk')]);
+            await choose('Buy milk', [file('payslip.pdf')]);
+            meanwhile();
+            await act(async () => { fail(new Error('no token')); await new Promise(r => setTimeout(r, 0)); });
+        }
+
+        it('signed out, the names of their files do not wait on the login screen', async () => {
+            await failsAfter(() => { h.sessionOf = null; });
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('nor do they reach another account that signed in meanwhile', async () => {
+            await failsAfter(() => { h.sessionOf = 2; });
+            expect(dialogs.notices()).toEqual([]);
+        });
+
+        it('CONTROL: still signed in, the file that failed is named', async () => {
+            await failsAfter(() => {});
+            expect(dialogs.notices()).toEqual(['Failed to attach: payslip.pdf. Files must be under 10 MB.']);
+        });
     });
 
     it('POSITIVE CONTROL: too many files, refused the moment they were chosen, is still the alert they answer', async () => {

@@ -11,6 +11,8 @@ import { createRoot } from 'react-dom/client';
 import { mountAppDialogs } from './appDialogsHost';
 import { askConfirm, askText, closeAppDialogs, leaveNotice, tellUser, tellUserAndWait } from '../api/appDialogs';
 import { NotesDialog } from '../components/NotesDialog';
+import { ImageLightbox } from '../components/ImageLightbox';
+import { Calendar } from '../components/calendar/Calendar';
 
 let dialogs: ReturnType<typeof mountAppDialogs> | null;
 let confirmSpy: ReturnType<typeof vi.spyOn>;
@@ -222,6 +224,137 @@ describe('on the desktop a question is in the page', () => {
         await expect(pending).resolves.toBe('new words');
     });
 
+    describe('a text of several lines', () => {
+        const LINES = 'first line\nsecond line\n```\nfn main() {}\n```';
+        const lines = () => question()!.querySelector('textarea')!;
+        const type = (value: string) => act(() => {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(lines(), value);
+            lines().dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        /** The key on the field. Was it left for the browser, or stopped from typing? */
+        const key = async (init: KeyboardEventInit) => {
+            const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init });
+            await act(async () => { lines().dispatchEvent(event); });
+            return { typedByTheBrowser: !event.defaultPrevented };
+        };
+
+        it('keeps them, in a field that can hold them, with the focus and all of it selected', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            expect(question()!.querySelector('input'), 'an <input> takes the line breaks out').toBeNull();
+            expect(lines().value).toBe(LINES);
+            expect(document.activeElement).toBe(lines());
+            expect([lines().selectionStart, lines().selectionEnd]).toEqual([0, LINES.length]);
+            await click(ok());
+            await expect(pending).resolves.toBe(LINES);
+        });
+
+        it('an edit keeps every line, and Enter is the answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            type('first line, fixed\nsecond line');
+            expect(await key({}), 'or it would be a new line as well').toEqual({ typedByTheBrowser: false });
+            await expect(pending).resolves.toBe('first line, fixed\nsecond line');
+            expect(question()).toBeNull();
+        });
+
+        it('Shift+Enter is a new line and no answer, held or not', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ shiftKey: true })).toEqual({ typedByTheBrowser: true });
+            expect(await key({ shiftKey: true, repeat: true })).toEqual({ typedByTheBrowser: true });
+            expect(done).not.toHaveBeenCalled();
+            await click(cancel());
+        });
+
+        it('a held Enter is no answer, and no new line either', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ repeat: true })).toEqual({ typedByTheBrowser: false });
+            expect(done).not.toHaveBeenCalled();
+            // CONTROL: a fresh one is.
+            await key({});
+            expect(done).toHaveBeenCalledWith(LINES);
+        });
+
+        it('a held Space is only spaces, in here', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            expect(await key({ key: ' ', repeat: true })).toEqual({ typedByTheBrowser: true });
+            await click(cancel());
+            await pending;
+        });
+
+        it('an Enter or an Escape an IME is using is no answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            const done = vi.fn();
+            void pending.then(done);
+            expect(await key({ isComposing: true })).toEqual({ typedByTheBrowser: true });
+            // WebKit says it only this way, for the Enter that ends a composition.
+            expect(await key({ keyCode: 229 })).toEqual({ typedByTheBrowser: true });
+            // Stopped, or the browser cancels the modal <dialog> with it (the real browser script).
+            expect(await key({ key: 'Escape', isComposing: true })).toEqual({ typedByTheBrowser: false });
+            expect(done).not.toHaveBeenCalled();
+            expect(question()).not.toBeNull();
+            // CONTROL: with none composing, the same Escape is Cancel.
+            await key({ key: 'Escape' });
+            expect(done).toHaveBeenCalledWith(null);
+        });
+
+        describe('a character an IME passes on, as a keypress with no keydown of its own', () => {
+            const IME_KEY = { key: 'Process', keyCode: 229 };
+            const keyPress = async () => {
+                const event = new KeyboardEvent('keypress', { key: ' ', bubbles: true, cancelable: true });
+                await act(async () => { lines().dispatchEvent(event); });
+                return { typedByTheBrowser: !event.defaultPrevented };
+            };
+
+            it('is typed, with no other key pressed since the question opened', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await key(IME_KEY)).toEqual({ typedByTheBrowser: true });
+                expect(await keyPress()).toEqual({ typedByTheBrowser: true });
+                await click(cancel());
+                await pending;
+            });
+
+            it('CONTROL: a keypress nothing went down for here is the Enter that asked, and types nothing', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await keyPress()).toEqual({ typedByTheBrowser: false });
+                await click(cancel());
+                await pending;
+            });
+
+            it('nor does a key held from before the question count as one that went down here', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await key({ ...IME_KEY, repeat: true })).toEqual({ typedByTheBrowser: true });
+                expect(await keyPress()).toEqual({ typedByTheBrowser: false });
+                await click(cancel());
+                await pending;
+            });
+        });
+
+        it('Tab to OK and a held Enter there is still no answer', async () => {
+            const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+            act(() => { ok().focus(); });
+            const repeat = new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true });
+            await act(async () => { ok().dispatchEvent(repeat); });
+            expect(repeat.defaultPrevented, 'the browser would have pressed OK with it').toBe(true);
+            await click(cancel());
+            await pending;
+        });
+
+        it('CONTROL: a question of one line stays the field it was, and leaves Enter to the browser', async () => {
+            const { answer: pending } = await asked(() => askText('Name?', 'one line'));
+            const input = question()!.querySelector('input')!;
+            expect(question()!.querySelector('textarea')).toBeNull();
+            const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+            await act(async () => { input.dispatchEvent(enter); });
+            expect(enter.defaultPrevented).toBe(false);
+            expect(question(), 'jsdom turns no key into an answer; the real browser script does').not.toBeNull();
+            await click(cancel());
+            await pending;
+        });
+    });
+
     it('Cancel on a text question is null, not the text', async () => {
         const { answer: pending } = await asked(() => askText('Ban Bob? Enter reason (optional):'));
         await click(cancel());
@@ -250,6 +383,77 @@ describe('on the desktop a question is in the page', () => {
         expect(closed).toHaveBeenCalledTimes(1);
         act(() => { belowRoot.unmount(); });
         below.remove();
+    });
+
+    // A question listens on the window too, and stopping a key takes nothing from the
+    // listeners beside it there. These two listen there, and got in first.
+    describe('what also listens on the window', () => {
+        let below: HTMLDivElement;
+        let belowRoot: ReturnType<typeof createRoot>;
+        beforeEach(() => {
+            below = document.createElement('div');
+            document.body.appendChild(below);
+            belowRoot = createRoot(below);
+        });
+        afterEach(() => {
+            act(() => { belowRoot.unmount(); });
+            below.remove();
+        });
+
+        it('Escape over the picture viewer closes the question and leaves the picture', async () => {
+            const closed = vi.fn();
+            act(() => { belowRoot.render(<ImageLightbox url="blob:picture" name="p.png" onClose={closed} />); });
+            const { answer: pending } = await asked(() => askConfirm('Update now?'));
+            await press({ key: 'Escape' });
+            await expect(pending).resolves.toBe(false);
+            expect(closed).not.toHaveBeenCalled();
+            // CONTROL: with no question, that Escape is the viewer's.
+            await press({ key: 'Escape' });
+            expect(closed).toHaveBeenCalledTimes(1);
+        });
+
+        it('and when the viewer has bound again since, so it hears the key after the question', async () => {
+            const closed = vi.fn();
+            const viewer = () => <ImageLightbox url="blob:picture" name="p.png" onClose={() => closed()} />;
+            act(() => { belowRoot.render(viewer()); });
+            const { answer: pending } = await asked(() => askConfirm('Update now?'));
+            // The page goes on running: what holds the viewer drew again, with a new onClose.
+            act(() => { belowRoot.render(viewer()); });
+            await press({ key: 'Escape' });
+            await expect(pending).resolves.toBe(false);
+            expect(closed, 'the question was gone by the time it looked').not.toHaveBeenCalled();
+            await press({ key: 'Escape' });
+            expect(closed).toHaveBeenCalledTimes(1);
+        });
+
+        it('nothing typed at a question moves the calendar behind it', async () => {
+            const onNavigate = vi.fn();
+            const onAdd = vi.fn();
+            act(() => {
+                belowRoot.render(
+                    <Calendar
+                        sources={[]} view="month" date="2030-10-07" onNavigate={onNavigate} showCompleted={false} showPlain
+                        onToggleCompleted={() => {}} onTogglePlain={() => {}} weekStart={1} now={Date.parse('2030-10-01T12:00:00Z')} coarse={false}
+                        onOpen={() => {}} onMove={() => {}} onAdd={onAdd} onToggleDone={() => {}} shortcutsEnabled
+                    />,
+                );
+            });
+            const { answer: pending } = await asked(() => askConfirm('Delete it?'));
+            for (const key of ['j', 'k', 'n', 'p', 't', 'm', 'd', 'a', 'c']) {
+                const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+                await act(async () => { document.activeElement!.dispatchEvent(event); });
+                expect(event.defaultPrevented, `${key} took nothing`).toBe(false);
+            }
+            expect(onNavigate).not.toHaveBeenCalled();
+            expect(onAdd).not.toHaveBeenCalled();
+            await click(ok());
+            await pending;
+            // CONTROL: with no question, the same keys are the calendar's.
+            await press({ key: 'j' });
+            expect(onNavigate).toHaveBeenCalledTimes(1);
+            await press({ key: 'c' });
+            expect(onAdd).toHaveBeenCalledTimes(1);
+        });
     });
 
     it('sign-out answers what is open with a no', async () => {
@@ -310,6 +514,44 @@ describe('on the desktop a notice stays until it is dismissed', () => {
         const closeFirst = document.querySelector<HTMLButtonElement>('.app-notice-close')!;
         act(() => { closeFirst.click(); });
         expect(dialogs!.notices()).toEqual(['Two']);
+    });
+
+    describe('a press on it is no press on what they were doing', () => {
+        const press = (el: Element, type: string) => {
+            const event = new MouseEvent(type, { bubbles: true, cancelable: true });
+            act(() => { el.dispatchEvent(event); });
+            return event;
+        };
+        const PRESSES = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'contextmenu'];
+        let heard: string[];
+        const listen = (e: Event) => { heard.push(e.type); };
+        beforeEach(() => {
+            heard = [];
+            for (const type of PRESSES) document.addEventListener(type, listen);
+            act(() => leaveNotice('Message failed to send.'));
+        });
+        afterEach(() => { for (const type of PRESSES) document.removeEventListener(type, listen); });
+
+        // What QuickAdd's outside press listens on, and a menu's outside click.
+        it.each(['.app-notice-close', '.app-notice-text'])('%s: it goes no further than the notice', selector => {
+            const el = document.querySelector(selector)!;
+            for (const type of PRESSES.filter(t => t !== 'click')) press(el, type);
+            expect(heard).toEqual([]);
+            // CONTROL: what is not the notice is heard, each of them.
+            for (const type of PRESSES) press(document.body, type);
+            expect(heard).toEqual(PRESSES);
+        });
+
+        it('the X leaves the focus where it is, and the words do not', () => {
+            expect(press(document.querySelector('.app-notice-close')!, 'mousedown').defaultPrevented).toBe(true);
+            expect(press(document.querySelector('.app-notice-text')!, 'mousedown').defaultPrevented, 'selecting needs it').toBe(false);
+        });
+
+        it('and the X still dismisses it', () => {
+            act(() => { document.querySelector<HTMLButtonElement>('.app-notice-close')!.click(); });
+            expect(dialogs!.notices()).toEqual([]);
+            expect(heard, 'nor is that click heard').toEqual([]);
+        });
     });
 
     it('the same words twice are one notice, and a burst keeps the newest', () => {

@@ -21,6 +21,52 @@ export function drawnUnderCollection(channel: { channel_type: number }): boolean
 }
 
 /**
+ * Whether the text list draws this row at the top level. A collection draws its children one
+ * level down, and only as a top-level row itself, so anything else with a parent would have no
+ * row at all, and no Edit, Delete or Mute: a channel under a collection inside a collection
+ * (made before the form stopped sending a parent for one, or by the API), or under something
+ * the raw API named that is no collection. Whoever draws a collection's children leaves these
+ * out, which is what stops a loop being drawn twice. A parent not among `channels` draws nothing
+ * either: the Modes tab asks this of one kind of row at a time, so a voice room's collection is
+ * never among them. The sidebar's own list also asks hiddenWithCollection.
+ */
+export function drawnAtTop<C extends SidebarRow>(row: C, channels: readonly C[]): boolean {
+    if (!row.parent_id) return true;
+    const parent = channels.find(c => c.id === row.parent_id);
+    return !parent || parent.channel_type !== 2 || !!parent.parent_id;
+}
+
+/**
+ * Whether this row sits under a collection the reader cannot see, at any depth, and so stays out
+ * of the sidebar's text list. The server lists a channel by its own permissions and carries no
+ * deny down from its collection, so the row is there to draw, but denying a collection is how an
+ * owner makes it look private, and it would put what is in it in front of every member denied it.
+ * (A voice room is drawn in its own section, under this or not.)
+ */
+export function hiddenWithCollection<C extends SidebarRow>(row: C, channels: readonly C[]): boolean {
+    const walked = new Set([row.id]);
+    let parentId = row.parent_id;
+    while (parentId) {
+        const parent = channels.find(c => c.id === parentId);
+        if (!parent) return true;
+        // A loop the raw API made: every row of it is here to see.
+        if (walked.has(parent.id)) return false;
+        walked.add(parent.id);
+        parentId = parent.parent_id;
+    }
+    return false;
+}
+
+/**
+ * The parents Nest Under and Parent Collection offer: a collection drawn at the top level,
+ * since nothing else draws what is put in it. What a channel is already under stays on offer
+ * whatever it is, so the field can show it and leaving it is a real change.
+ */
+export function parentChoices<C extends SidebarRow>(channels: readonly C[], currentParent?: number | null): C[] {
+    return channels.filter(c => (c.channel_type === 2 && !c.parent_id) || c.id === currentParent);
+}
+
+/**
  * Whether Hide Muted Channels keeps a top-level row. What is open never vanishes from
  * under the reader, a collection as much as a channel. Nor must a muted collection drag
  * its children out of the sidebar with it: the row and its subchannels render as one
