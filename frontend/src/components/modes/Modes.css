@@ -78,8 +78,6 @@ button.mode-selector:focus-visible {
     padding: 8px 12px;
     border-radius: 8px;
     border: 1px solid var(--brand-primary);
-    /* Not --bg-floating: the light theme leaves that dark while its text goes
-       dark too, which put black ink on black here. */
     background: var(--bg-secondary);
     color: var(--text-normal);
 }

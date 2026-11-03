@@ -1,8 +1,7 @@
 /* The questions and notices of api/appDialogs.ts. See AppDialogs.tsx. */
 
 /* A modal <dialog> sits in the top layer, so it needs no z-index. The surface is
-   --bg-secondary, as Modal.css has it: --bg-floating stays near black on the Light theme,
-   under Light's dark text. */
+   --bg-secondary, as Modal.css has it. */
 .app-question {
     box-sizing: border-box;
     width: min(440px, calc(100vw - 32px));

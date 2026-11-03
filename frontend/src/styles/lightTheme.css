@@ -1,0 +1,75 @@
+/* Light's answers for colours other files fix for a dark surface.
+ *
+ * theme.css gives Light its tokens. What is here is what a token cannot reach: a rule that names a
+ * pale colour outright, on a surface that is white on this theme. Each selector starts at
+ * [data-theme="light"], so it beats the rule it answers wherever that loads, and no other theme
+ * ever sees it. e2e/light-surfaces-real-browser.mjs reads these back.
+ */
+
+/* Login.css, Chat.css and Modal.css style the same .form-group selectors, and the sign-in page's
+   white words reached every form in the app: labels and typed text at 1.00 to 1.18:1 in Server
+   Settings, Edit Channel and Modes. The sign-in page stays as it is, on its dark gradient. */
+[data-theme="light"] .form-group:not(.login-card .form-group) label { color: var(--text-muted); }
+[data-theme="light"] .form-group:not(.login-card .form-group) input {
+    color: var(--text-normal);
+    background: var(--input-bg);
+    border-color: var(--border-faint);
+}
+[data-theme="light"] .form-group:not(.login-card .form-group) input::placeholder { color: var(--text-faint); }
+[data-theme="light"] .error-message:not(.login-card .error-message) { color: var(--text-danger); }
+
+/* The call's header bars: a black scrim made for a dark page, over white here, is mid grey that no
+   word colour holds on. The stream's sits on the picture and stays dark (theme.css's list). */
+[data-theme="light"] .stream-stage-header { background: #0d0e10; }
+[data-theme="light"] .voice-stage-header { background: var(--bg-secondary); }
+
+/* Pale words chosen for a dark surface. */
+[data-theme="light"] .emoji-name,
+[data-theme="light"] .emoji-close-btn,
+[data-theme="light"] .emoji-list-section h3 { color: var(--text-muted); }
+[data-theme="light"] .recovery-copy-btn { color: var(--text-normal); }
+[data-theme="light"] .permission-help-modal h3,
+[data-theme="light"] .permission-help-modal > p,
+[data-theme="light"] .permission-instructions p,
+[data-theme="light"] .permission-instructions li,
+[data-theme="light"] .recovery-modal h2 { color: var(--text-normal); }
+[data-theme="light"] .permission-instructions { background: var(--bg-tertiary); }
+[data-theme="light"] .permission-dismiss-btn { color: var(--text-normal); }
+
+/* Danger, warning and success as words. --color-danger and its like are fills too, where the
+   dark palette's own colour is right, so these go on the words and not on the token. */
+[data-theme="light"] .context-item.danger,
+[data-theme="light"] .emoji-delete-btn,
+[data-theme="light"] .emoji-error,
+[data-theme="light"] .composer-chip-error,
+[data-theme="light"] .password-change-error,
+[data-theme="light"] .notice.error,
+[data-theme="light"] .invite-error,
+[data-theme="light"] .clip-composer-error,
+[data-theme="light"] .add-status.error,
+[data-theme="light"] .mod-item .danger-btn,
+[data-theme="light"] .inline-code { color: var(--text-danger); }
+[data-theme="light"] .context-item.success,
+[data-theme="light"] .notice.success,
+[data-theme="light"] .voice-connected-label,
+[data-theme="light"] .user-profile-bar .user-status,
+[data-theme="light"] .active-status,
+[data-theme="light"] .server-icon.add-server .server-icon-inner.add { color: var(--text-positive); }
+[data-theme="light"] .voice-e2ee-warning,
+[data-theme="light"] .recovery-intro strong,
+[data-theme="light"] .keybind-inert,
+[data-theme="light"] .search-jump-notice,
+[data-theme="light"] .user-profile-popup .owner-notice p { color: var(--text-warning); }
+
+/* Dark words on a pale fill: --bg-primary is white on this theme. */
+[data-theme="light"] .emoji-save-btn,
+[data-theme="light"] .tab-badge,
+[data-theme="light"] .nav-badge,
+[data-theme="light"] .user-profile-popup .kick-btn { color: #11111b; }
+
+/* Fields and strips drawn in a fixed near black, under the theme's words. */
+[data-theme="light"] .emoji-search input,
+[data-theme="light"] .sidebar-search input,
+[data-theme="light"] .search-bar input,
+[data-theme="light"] .add-friend-form { background: var(--input-bg); }
+[data-theme="light"] .emoji-categories { background: var(--bg-secondary); }

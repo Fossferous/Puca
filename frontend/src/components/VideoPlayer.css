@@ -380,9 +380,6 @@
     overflow: visible;
     border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
     border-radius: 8px;
-    /* --bg-secondary, not --bg-floating: every theme defines it (the light
-       theme has no floating surface of its own, and dark text on the dark
-       default measured 1.5:1). */
     background: var(--bg-secondary, #111214);
     color: var(--text-normal, #dbdee1);
     box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.4));

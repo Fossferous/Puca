@@ -3,7 +3,11 @@
  * Centralized CSS custom properties for consistent theming
  */
 
-:root {
+/* These same tokens also apply inside the surfaces drawn dark on every theme, Light included.
+   Their own colours are fixed, so the words on them need the palette they were made for, which
+   Light would otherwise reach through and turn dark on dark. */
+:root,
+:where([data-theme="light"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate) {
     /* ==================== Familiar Dark Chat-App Theme Colors ==================== */
 
     /* 
@@ -14,6 +18,21 @@
      * Primary text:                       #DBDEE1
      * Metadata text:                      #949BA4
      */
+
+    /* Only Light defines these (see there). initial keeps it out of the surfaces above. */
+    --background-primary: initial;
+    --background-secondary: initial;
+    --background-tertiary: initial;
+    --background-floating: initial;
+    --background-modifier-accent: initial;
+    --background-modifier-hover: initial;
+    --background-modifier-selected: initial;
+    --text-primary: initial;
+    --text-secondary: initial;
+    --danger-color: initial;
+    --warning: initial;
+    --danger: initial;
+    color: var(--text-normal);
 
     /* Background layers - TWO distinct shades */
     --bg-primary: #18191c;
@@ -231,15 +250,43 @@
     --bg-secondary: #f2f3f5;
     --bg-tertiary: #e3e5e8;
     --bg-quaternary: #d4d7dc;
+    /* :root is the dark palette: what Light gives no answer for stays dark under Light's dark
+       words, at 1.53:1 on these (e2e/light-surfaces-real-browser.mjs). */
+    --bg-floating: var(--bg-secondary);
+    --bg-nested: var(--bg-tertiary);
+    --bg-hover: var(--bg-tertiary);
+
+    /* No theme defines these. Older components name them with a dark fallback, which on the
+       other themes is the look they have and on this one is dark words on dark, at 1.00:1. */
+    --background-primary: var(--bg-primary);
+    --background-secondary: var(--bg-secondary);
+    --background-tertiary: var(--bg-tertiary);
+    --background-floating: var(--bg-secondary);
+    --background-modifier-accent: var(--border-faint);
+    --background-modifier-hover: var(--bg-modifier-hover);
+    --background-modifier-selected: var(--bg-modifier-selected);
+    --text-primary: var(--text-normal);
+    --text-secondary: var(--text-muted);
+    --danger-color: var(--text-danger);
+    --warning: var(--text-warning);
+    --danger: var(--text-danger);
 
     --bg-modifier-hover: rgba(116, 127, 141, 0.16);
     --bg-modifier-active: rgba(116, 127, 141, 0.24);
     --bg-modifier-selected: rgba(116, 127, 141, 0.24);
+    --bg-modifier-accent: rgba(116, 127, 141, 0.14);
     --bg-overlay: rgba(0, 0, 0, 0.7);
 
     --text-normal: #313338;
-    --text-muted: #5c5e66;
-    --text-faint: #80848e;
+    --text-muted: #5a5c64;
+    /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
+    --text-faint: #62656e;
+    /* The dark palette's are 1.7 to 3.4:1 on Light's surfaces. These hold 4.5:1 on all of them,
+       --bg-tertiary included. */
+    --text-link: #0060ac;
+    --text-warning: #8a5a00;
+    --text-danger: #b42318;
+    --text-positive: #1a6f2f;
 
     --header-primary: #060607;
     --header-secondary: #4e5058;
@@ -366,7 +413,8 @@
 /* ==================== High Contrast (Accessibility) ==================== */
 /* Boosts text and border contrast ON TOP of whichever theme is active —
    the lightness ladder of the surfaces stays, text stops being grey. */
-[data-contrast="high"] {
+[data-contrast="high"],
+:where([data-theme="light"][data-contrast="high"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate) {
     --text-normal: #ffffff;
     --text-muted: #d7dbe2;
     --text-faint: #b9bdc9;
