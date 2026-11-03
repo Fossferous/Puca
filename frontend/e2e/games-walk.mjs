@@ -728,10 +728,24 @@ try {
     await shot(B, '11-phone-blackjack-bet');
     const gb = await phoneGeometry(B);
     check('phone: the Blackjack bet bar fits, 44 px targets, two rows', geometryOk(gb) && gb.barRows === 2, gb);
-    await A.getByRole('button', { name: /^Bet / }).click();
-    await B.locator('.games-footer .games-actions-row').first().locator('button').first().tap();
-    check('the round is dealt: the dealer shows one card up, one down', !!await until(async () =>
-        (await B.locator('.bj-dealer .pcard-back').count()) === 1 && (await B.locator('.bj-dealer [data-card]').count()) === 1, 20000));
+    // A dealer blackjack ends the round as it is dealt (docs/GAMES.md), about one round in
+    // twenty: no hole card, nobody gets a turn, nothing below to measure. So deal again.
+    const dealerCards = () => B.locator('.bj-dealer [data-card]').evaluateAll(els => els.map(el => el.getAttribute('data-card')).join());
+    let dealt = null;
+    for (let round = 0; round < 4 && dealt !== 'hole card'; round++) {
+        const before = await dealerCards();
+        await A.getByRole('button', { name: /^Bet / }).click();
+        await B.locator('.games-footer .games-actions-row').first().locator('button').first().tap();
+        dealt = await until(async () => {
+            if ((await B.locator('.bj-dealer .pcard-back').count()) === 1 && (await B.locator('.bj-dealer [data-card]').count()) === 1) return 'hole card';
+            const cards = await dealerCards();
+            return cards !== before && cards.split(',').length === 2 && (await B.locator('.bj-hand-outcome').count()) > 0 ? 'dealer blackjack' : null;
+        }, 20000);
+        if (dealt === 'dealer blackjack') {
+            await until(async () => (await A.getByRole('button', { name: /^Bet / }).count()) > 0 && (await B.locator('.games-footer .games-actions-row').count()) > 0, 20000);
+        }
+    }
+    check('the round is dealt: the dealer shows one card up, one down', dealt === 'hole card', dealt);
     let bjTurns = 0;
     for (let i = 0; i < 10; i++) {
         const who = await until(async () => {
