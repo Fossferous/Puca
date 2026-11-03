@@ -134,8 +134,10 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
             const nextSfu = channel.channel_type === 1 ? isSfu : false;
             await updateChannel(channel.id, {
                 name: name.trim(),
-                description: description.trim() || undefined,
-                parent_id: parentId,
+                // Empty is how a topic is cleared: left out, the server keeps it.
+                description: description.trim(),
+                // Only a real change: this row can be older than another manager's move.
+                ...(parentId !== (channel.parent_id ?? null) ? { parent_id: parentId } : {}),
                 slowmode_seconds: slowmode,
                 is_afk: nextAfk,
                 has_checklist: nextChecklist,

@@ -1602,6 +1602,39 @@ mod db {
         assert_eq!(new_collection_foreign.0, StatusCode::OK, "dropped before it is judged");
     }
 
+    /// Edit Channel sends "" for an emptied Channel Topic, and that is what clears one.
+    #[tokio::test]
+    async fn an_empty_topic_clears_it_and_a_left_out_one_leaves_it() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let edit = |body: Value| {
+            crate::channel_handlers::update_channel(
+                State(Arc::clone(&state)),
+                Path(f.text as i64),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let topic = || async {
+            let resp = crate::channel_handlers::list_channels(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.plain)))
+                .await
+                .into_response();
+            let (_, rows) = read(resp).await;
+            rows.as_array().expect("a list").iter().find(|c| c["id"] == f.text).expect("listed")["description"].clone()
+        };
+        let set = edit(json!({ "description": "the town square" })).await.into_response().status();
+        let renamed = edit(json!({ "name": "renamed" })).await.into_response().status();
+        let kept = topic().await;
+        let emptied = edit(json!({ "description": "" })).await.into_response().status();
+        let cleared = topic().await;
+        teardown(&pool, &f).await;
+
+        assert_eq!((set, renamed, emptied), (StatusCode::OK, StatusCode::OK, StatusCode::OK));
+        assert_eq!(kept, json!("the town square"), "control: left out, it stays");
+        assert_eq!(cleared, json!(""), "empty is stored, and every reader treats it as no topic");
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
