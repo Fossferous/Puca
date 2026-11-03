@@ -225,8 +225,22 @@ describe('a switch answered after the mode moved', () => {
         await settle();
         expect(h.sent).toEqual([]);
         expect(said(NOTHING_SWITCHED)).toBe(false);
-        // The menu's item was the last to have it, and it went with the menu.
+        // Opened by a click no pointer counted, so as a key's: the menu's item was the last to have
+        // the focus and it went with the menu, so the selector took it first, for a keyboard to go on.
         expect(document.activeElement, 'the focus is back on the selector').toBe(document.querySelector('[data-testid="mode-selector"]'));
+    });
+
+    it("a pointer's menu: Cancel leaves the focus on nothing, where a stray Space or Enter opens nothing", async () => {
+        await mountChat();
+        const selector = document.querySelector<HTMLElement>('[data-testid="mode-selector"]')!;
+        selector.focus();
+        await act(async () => { selector.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); });
+        await pressOffInMenu();
+        expect(question(), 'Off asks').not.toBeNull();
+        await act(async () => { [...question()!.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.click(); });
+        await settle();
+        expect(h.sent).toEqual([]);
+        expect(document.activeElement, 'the focus is on nothing').toBe(document.body);
     });
 
     it('on the web a native confirm stops the page, so this path finds nothing and OK switches', async () => {

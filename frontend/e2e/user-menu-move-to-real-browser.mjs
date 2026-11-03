@@ -27,10 +27,14 @@
 // items opened by a right click take no focus and no role, and arrows there move nothing. Opened
 // with a mouse or a finger the focus is on the menu and on none of its items, no row wears anything
 // and Enter and Space press nothing, or a stray key would turn the mode off with nothing on screen
-// to say so; the arrows still go in. At 390x844: 44 px rows, nothing clipped, inside the window,
-// and a tap lands.
+// to say so; the arrows still go in. And when that menu closes, by a pick, by Escape or by a press
+// elsewhere, the focus goes to nothing: back on the selector a stray Space or Enter opens the menu
+// again as a key's, with Off under the focus for the next one, and a third answers the question Off
+// asks. So every way out is followed by the stray keys, the real question's Cancel too (under a fake
+// desktop shell). The control is a key's menu, which does give the focus back. At 390x844: 44 px
+// rows, nothing clipped, inside the window, and a tap lands.
 //
-// It bundles the REAL UserContextMenu and ServerList plus the app's global CSS
+// It bundles the REAL UserContextMenu, ServerList and AppDialogs plus the app's global CSS
 // (index.css, mobile.css) with esbuild. SILENT and headless: no media at all.
 //
 //   cd frontend && node e2e/user-menu-move-to-real-browser.mjs
@@ -56,6 +60,8 @@ import { ContextMenu } from './components/ContextMenu';
 import { useContextMenu } from './components/contextMenuUtils';
 import { ModeSelector } from './components/modes/ModeSelector';
 import { modeMenuItems } from './components/modes/modeMenu';
+import { AppDialogs } from './components/AppDialogs';
+import { askConfirm } from './api/appDialogs';
 
 const log = [];
 window.__log = log;
@@ -68,12 +74,17 @@ const MODES = {
     modes: [mode(3, 'Game Night'), mode(4, 'Movie Night'), mode(5, ${JSON.stringify(LONG_NAME)})],
 };
 /** Chat's wiring of the selector: the same hook, menu, items and calls. */
-function ModeRig({ disabledFirst }) {
+function ModeRig({ disabledFirst, people }) {
     const { contextMenu, showContextMenu, showContextMenuAt, hideContextMenu } = useContextMenu();
+    // Chat's switchMode, the part that matters here: people in the rooms get a question.
+    const switchMode = async (id) => {
+        if (people && !await askConfirm(people + ' people are in the voice channels of Game Night.')) { log.push('refused'); return; }
+        log.push('switch:' + id);
+    };
     const items = () => {
         const list = modeMenuItems({
             data: MODES, activeModeId: 3, homeName: 'Town Square',
-            onSwitch: (id) => log.push('switch:' + id), onCallBack: () => log.push('callback'), onManage: () => log.push('manage'),
+            onSwitch: (id) => { void switchMode(id); }, onCallBack: () => log.push('callback'), onManage: () => log.push('manage'),
         });
         if (disabledFirst) list[0] = { ...list[0], disabled: true };
         return list;
@@ -85,6 +96,7 @@ function ModeRig({ disabledFirst }) {
                 <ModeSelector data={MODES} activeModeId={3} homeName="Town Square" onOpen={(at, opener, fromKeyboard) => showContextMenuAt(at, items(), opener, 'Mode', fromKeyboard)} />
                 <button id="rig-after">after</button>
                 <div id="rig-row" onContextMenu={(e) => showContextMenu(e, items())}>A row to right-click</div>
+                <div id="rig-nofocus" onMouseDown={(e) => e.preventDefault()}>A press here moves no focus</div>
             </div>
             {contextMenu && (
                 <ContextMenu
@@ -105,7 +117,7 @@ function App() {
     const [mount, set] = useState(null);
     setMount = set;
     if (!mount) return null;
-    if (mount.kind === 'mode') return <ModeRig key={mount.n} disabledFirst={mount.disabledFirst} />;
+    if (mount.kind === 'mode') return <ModeRig key={mount.n} disabledFirst={mount.disabledFirst} people={mount.people} />;
     if (mount.kind === 'user') {
         return (
             <div className="chat-container">
@@ -158,9 +170,9 @@ window.__mountUser = (position, opts = {}) => setMount({
     listener: opts.listener ?? true, canMove: opts.canMove ?? true, roles: !!opts.roles,
 });
 window.__mountServer = () => setMount({ kind: 'server', n: ++n });
-window.__mountMode = (opts = {}) => setMount({ kind: 'mode', n: ++n, disabledFirst: !!opts.disabledFirst });
+window.__mountMode = (opts = {}) => setMount({ kind: 'mode', n: ++n, disabledFirst: !!opts.disabledFirst, people: opts.people ?? 0 });
 createRoot(document.getElementById('root')).render(
-    <QueryClientProvider client={qc}><App /></QueryClientProvider>
+    <QueryClientProvider client={qc}><App /><AppDialogs /></QueryClientProvider>
 );
 `;
 const bundle = await build({
@@ -213,9 +225,11 @@ const browser = await chromium.launch({
 });
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 30)))));
 
-async function open(ctxOpts) {
+async function open(ctxOpts, { desktopShell = false } = {}) {
     const ctx = await browser.newContext(ctxOpts);
     const page = await ctx.newPage();
+    // api/appDialogs.ts asks in the page only in the desktop shell: all it asks is that this exists.
+    if (desktopShell) await page.addInitScript(() => { window.__TAURI_INTERNALS__ = {}; });
     page.on('pageerror', (e) => { fail++; console.log('FAIL page error', e.message); });
     // A real origin (not about:blank) so the stores' localStorage reads work.
     // Nothing leaves the browser: this route answers the page and the rig's
@@ -619,6 +633,13 @@ const ring = (page) => page.evaluate(() => {
     await fresh();
     const sel = await page.locator('[data-testid="mode-selector"]').boundingBox();
     const clickSelector = async () => { await page.mouse.click(sel.x + sel.width / 2, sel.y + sel.height / 2); await frame(page); };
+    // The chain a mouse's menu must not start: Space or Enter on the selector opens it as a key's, and
+    // the next one presses Off. Here with no hold bound at all: this half is about the focus alone.
+    const strayKeys = async (after) => {
+        const before = (await logged(page)).length;
+        for (const name of ['Space', 'Enter', 'Space', 'Enter']) await key(page, name);
+        ck(!await menuOpen(page) && (await logged(page)).length === before, `mouse: after ${after}, stray Space and Enter open nothing and press nothing`, JSON.stringify(await logged(page)));
+    };
     await clickSelector();
     ck(await onTheMenu(page), 'mouse: the focus is on the menu, on no item', await focusOn(page));
     await page.mouse.move(2, 2);
@@ -641,7 +662,8 @@ const ring = (page) => page.evaluate(() => {
     const lit = await ring(page);
     ck(lit.visible && lit.outline !== 'none' && lit.background === 'rgb(88, 101, 242)', 'mouse: and there it shows, as a keyboard\'s does', JSON.stringify(lit));
     await key(page, 'Escape');
-    ck(!await menuOpen(page) && await focusOn(page) === 'mode-selector', 'mouse: Escape gives the focus back to the selector', await focusOn(page));
+    ck(!await menuOpen(page) && await focusOn(page) === 'body', 'mouse: Escape leaves the focus on nothing, not on the selector', await focusOn(page));
+    await strayKeys('Escape');
     await clickSelector();
     await key(page, 'ArrowUp');
     ck(await focusOn(page) === 'Manage modes', 'mouse: Up goes in at the last item', await focusOn(page));
@@ -657,6 +679,71 @@ const ring = (page) => page.evaluate(() => {
     }
     await press(page, await probe(page, MM, 'Movie Night'), false);
     ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), 'mouse: a click on an item presses it', JSON.stringify(await logged(page)));
+    ck(await focusOn(page) === 'body', 'mouse: and the focus is on nothing, not on the selector', await focusOn(page));
+    await page.evaluate(() => { window.__log.length = 0; });
+    await strayKeys('a pick');
+
+    // A press elsewhere. The press moves the focus by itself, unless what it lands on stops that
+    // (a notice's close button does): the selector is still not left holding it, however it got it.
+    const pressOn = async (selector) => { const b = await page.locator(selector).boundingBox(); await page.mouse.click(b.x + 5, b.y + 5); await frame(page); };
+    await clickSelector();
+    await pressOn('#rig-row');
+    ck(!await menuOpen(page) && await focusOn(page) === 'body', 'mouse: a press elsewhere closes it, the focus on nothing', await focusOn(page));
+    await strayKeys('a press elsewhere');
+    await clickSelector();
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await pressOn('#rig-nofocus');
+    ck(!await menuOpen(page) && await focusOn(page) === 'body', 'mouse: a press that moves no focus still does not leave the selector holding it', await focusOn(page));
+
+    // CONTROL: nothing has stopped these keys. From the selector, a key's menu, as above.
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await key(page, 'Space');
+    ck(await menuOpen(page) && await focusOn(page) === 'Off', 'CONTROL: with the focus put on the selector, Space does open it as a key\'s', await focusOn(page));
+    await key(page, 'Space');
+    ck(JSON.stringify(await logged(page)) === '["switch:null"]', 'CONTROL: and the next Space does press Off', JSON.stringify(await logged(page)));
+    await ctx.close();
+}
+
+{
+    // The desktop's question, which is in the page (components/AppDialogs.tsx). It gives the focus
+    // back to what had it, so the menu's item decides where a Cancel lands.
+    const { ctx, page } = await open({ viewport: { width: 1280, height: 800 } }, { desktopShell: true });
+    const fresh = async () => { await page.evaluate(() => { window.__log.length = 0; window.__mountMode({ people: 2 }); }); await frame(page); };
+    const QB = (name) => page.locator('.app-question button', { hasText: name });
+    const questionOpen = () => page.evaluate(() => !!document.querySelector('.app-question'));
+    const clickOn = async (locator) => { const b = await locator.boundingBox(); await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); await frame(page); };
+    await fresh();
+    await clickOn(page.locator('[data-testid="mode-selector"]'));
+    await press(page, await probe(page, MM, 'Movie Night'), false);
+    ck(await questionOpen() && await focusOn(page) === 'OK', 'question, mouse: a pick that asks puts the focus on OK', await focusOn(page));
+    await clickOn(QB('Cancel'));
+    ck(!await questionOpen() && JSON.stringify(await logged(page)) === '["refused"]', 'question, mouse: Cancel refuses', JSON.stringify(await logged(page)));
+    ck(await focusOn(page) === 'body', 'question, mouse: and the focus lands on nothing', await focusOn(page));
+    await page.evaluate(() => { window.__log.length = 0; });
+    for (const name of ['Space', 'Enter', 'Space', 'Enter']) await key(page, name);
+    ck(!await menuOpen(page) && !await questionOpen() && (await logged(page)).length === 0, 'question, mouse: and stray keys open nothing and press nothing', JSON.stringify(await logged(page)));
+
+    await fresh();
+    await clickOn(page.locator('[data-testid="mode-selector"]'));
+    await press(page, await probe(page, MM, 'Movie Night'), false);
+    await key(page, 'Escape');
+    ck(!await questionOpen() && await focusOn(page) === 'body', 'question, mouse: Escape refuses, the focus on nothing', await focusOn(page));
+
+    await fresh();
+    await page.locator('[data-testid="mode-selector"]').focus();
+    await key(page, 'Enter');
+    await key(page, 'ArrowDown');
+    await key(page, 'ArrowDown');
+    await key(page, 'Enter');
+    ck(await questionOpen() && await focusOn(page) === 'OK', 'question, keyboard: a pick that asks puts the focus on OK', await focusOn(page));
+    await clickOn(QB('Cancel'));
+    ck(!await questionOpen() && await focusOn(page) === 'mode-selector', 'question, keyboard: Cancel gives it back to the selector, where a keyboard carries on', await focusOn(page));
+    await key(page, 'Enter');
+    await key(page, 'ArrowDown');
+    await key(page, 'ArrowDown');
+    await key(page, 'Enter');
+    await key(page, 'Escape');
+    ck(!await questionOpen() && await focusOn(page) === 'mode-selector', 'question, keyboard: Escape does too', await focusOn(page));
     await ctx.close();
 }
 
@@ -704,6 +791,7 @@ const ring = (page) => page.evaluate(() => {
     }
     await press(page, await probe(page, MM, 'Movie Night'), true);
     ck(JSON.stringify(await logged(page)) === '["switch:4"]' && !await menuOpen(page), 'phone: a tap on an item presses it, and closes the menu', JSON.stringify(await logged(page)));
+    ck(await focusOn(page) === 'body', 'phone: and the focus is on nothing, not on the selector', await focusOn(page));
     await ctx.close();
 }
 

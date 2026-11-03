@@ -134,7 +134,9 @@ The selector is the only control that switches a mode, so its menu is a real one
 keyboard: the focus goes to its first item, the arrow keys, Home and End walk it, Escape gives
 the focus back to the selector and Tab closes it and goes on from there. Opened with a mouse or
 a finger the focus goes to the menu and to none of its items, since nothing would show it there
-and a stray Enter or Space could turn the mode off. The arrow keys still go in from there.
+and a stray Enter or Space could turn the mode off. The arrow keys still go in from there. When
+that menu closes the focus goes to nothing, not back to the selector, where the same stray keys
+would open it again with Off under the focus.
 
 **It is bit 31, the last one JavaScript's 32-bit operators reach,** and they read it
 as the sign. `mask | bit` on a role holding it comes out negative, in this client

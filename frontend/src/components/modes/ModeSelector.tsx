@@ -9,7 +9,7 @@ interface ModeSelectorProps {
     activeModeId: number | null;
     /** The active mode's main voice channel when Call everyone back can reach it. */
     homeName: string | null;
-    /** Open the menu at this place, just under the selector, which it gives the focus back to. */
+    /** Open the menu at this place, just under the selector. A key's menu gives the focus back to it. */
     onOpen: (at: { x: number; y: number }, opener: HTMLElement, fromKeyboard: boolean) => void;
 }
 

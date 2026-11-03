@@ -24,19 +24,32 @@ interface ContextMenuProps {
     /**
      * The control that opened this, when one did (showContextMenuAt), however it was pressed.
      * This renders last in the page, so with the focus left on that control everything between
-     * them is in the way of a keyboard. So such a menu is a real menu: the focus goes in and comes
-     * back, and the arrow keys walk it. A menu at the pointer (a right click) has none of that.
+     * them is in the way of a keyboard. So such a menu is a real menu: the focus goes in, and the
+     * arrow keys walk it. A menu at the pointer (a right click) has none of that.
      */
     opener?: HTMLElement;
     /** What a screen reader calls it: a menu a control opened has a role to name. */
     label?: string;
     /**
-     * Whether a key pressed the opener, so the first item takes the focus. From a mouse or a finger
-     * the menu itself does: nothing would show the focus on an item, and a stray Enter or Space, or
-     * a push-to-talk bound to Space coming up (hotkeys.ts never prevents a hold), would press it.
+     * Whether a key pressed the opener, so the first item takes the focus and the opener gets it back
+     * as this closes. From a mouse or a finger the menu itself takes it, because nothing would show
+     * the focus on an item and a stray Enter or Space would press it, and it goes back to nothing
+     * (settleFocus).
      */
     fromKeyboard?: boolean;
 }
+
+/**
+ * Where the focus goes as a menu with an opener closes. A key's menu gives it back to the opener: a
+ * keyboard has to carry on from somewhere. A pointer's leaves it on nothing, and the opener does not
+ * keep it: from there a stray Space or Enter opens this again as a key's (ModeSelector: a click no
+ * pointer counted), with the first item under the focus for the next stray one to press, and on
+ * the mode selector that item is Off.
+ */
+const settleFocus = (opener: HTMLElement | undefined, fromKeyboard: boolean | undefined) => {
+    if (fromKeyboard) opener?.focus({ preventScroll: true });
+    else opener?.blur();
+};
 
 const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<HTMLButtonElement>('.context-menu-item:not(:disabled)') ?? [])];
 
@@ -72,13 +85,16 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+                // From a key's menu too the press says where the focus goes: this only takes care
+                // that a pointer's opener is not left holding it.
+                if (!fromKeyboard) opener?.blur();
                 onClose();
             }
         };
 
         const handleEscape = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
-                opener?.focus({ preventScroll: true });
+                settleFocus(opener, fromKeyboard);
                 onClose();
             }
         };
@@ -90,7 +106,7 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
             document.removeEventListener('mousedown', handleClickOutside);
             document.removeEventListener('keydown', handleEscape);
         };
-    }, [onClose, opener]);
+    }, [onClose, opener, fromKeyboard]);
 
     useEffect(() => {
         // preventScroll: it is scaling in, and it is already where it should be.
@@ -149,7 +165,7 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
                         onClick={() => {
                             if (!item.disabled && item.onClick) {
                                 // First: a question this opens gives the focus back to what had it.
-                                opener?.focus({ preventScroll: true });
+                                settleFocus(opener, fromKeyboard);
                                 item.onClick();
                                 onClose();
                             }
