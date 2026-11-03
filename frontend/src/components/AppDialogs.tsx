@@ -91,6 +91,9 @@ function Question({ question }: { question: AppQuestion }) {
             // left alone the Escape still cancels a modal dialog (onCancel).
             if (lines && (e.isComposing || e.keyCode === 229)) {
                 if (e.key === 'Escape') e.preventDefault();
+                // A key it passes on can come as a keypress with no keydown of its own (a space
+                // ending a Hangul syllable), and this one is typing, not the Enter that asked.
+                if (!e.repeat) keyWentDownHere = true;
                 return;
             }
             if (e.key === 'Escape') {

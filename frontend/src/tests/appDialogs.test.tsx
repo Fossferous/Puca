@@ -300,6 +300,38 @@ describe('on the desktop a question is in the page', () => {
             expect(done).toHaveBeenCalledWith(null);
         });
 
+        describe('a character an IME passes on, as a keypress with no keydown of its own', () => {
+            const IME_KEY = { key: 'Process', keyCode: 229 };
+            const keyPress = async () => {
+                const event = new KeyboardEvent('keypress', { key: ' ', bubbles: true, cancelable: true });
+                await act(async () => { lines().dispatchEvent(event); });
+                return { typedByTheBrowser: !event.defaultPrevented };
+            };
+
+            it('is typed, with no other key pressed since the question opened', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await key(IME_KEY)).toEqual({ typedByTheBrowser: true });
+                expect(await keyPress()).toEqual({ typedByTheBrowser: true });
+                await click(cancel());
+                await pending;
+            });
+
+            it('CONTROL: a keypress nothing went down for here is the Enter that asked, and types nothing', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await keyPress()).toEqual({ typedByTheBrowser: false });
+                await click(cancel());
+                await pending;
+            });
+
+            it('nor does a key held from before the question count as one that went down here', async () => {
+                const { answer: pending } = await asked(() => askText('Edit message:', LINES));
+                expect(await key({ ...IME_KEY, repeat: true })).toEqual({ typedByTheBrowser: true });
+                expect(await keyPress()).toEqual({ typedByTheBrowser: false });
+                await click(cancel());
+                await pending;
+            });
+        });
+
         it('Tab to OK and a held Enter there is still no answer', async () => {
             const { answer: pending } = await asked(() => askText('Edit message:', LINES));
             act(() => { ok().focus(); });

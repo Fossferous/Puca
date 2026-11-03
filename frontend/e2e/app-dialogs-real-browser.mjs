@@ -520,6 +520,25 @@ async function holdsUntilAnswered(page, site) {
     await page.keyboard.press('Enter');
     await settle(page);
     check('and Enter answers it as a browser does', (await answers()).at(-1) === 'one line', JSON.stringify((await answers()).at(-1)));
+
+    // A key an IME passes on: a keydown saying 229, then the character with no keydown of its own
+    // (a space ending a Hangul syllable, by what is written about the Korean IME; only a real one
+    // can say it does this on WebView2). With no other key pressed since the question opened: the
+    // sections above all press Control+End first, which would hide it.
+    const typeThrough = { type: 'char', text: ' ', unmodifiedText: ' ', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 };
+    await page.evaluate(v => window.__askText('Edit message:', v), LINES);
+    await page.waitForSelector(FIELD);
+    await cdp.send('Input.dispatchKeyEvent', typeThrough);
+    await settle(page);
+    check('CONTROL: the character with nothing gone down here types nothing, as the Enter that asked does not', await page.inputValue(FIELD) === LINES, JSON.stringify(await page.inputValue(FIELD)));
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Process', code: 'Space', windowsVirtualKeyCode: 229 });
+    await cdp.send('Input.dispatchKeyEvent', typeThrough);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Process', code: 'Space', windowsVirtualKeyCode: 229 });
+    await settle(page);
+    check('CONTROL: that keydown said 229', (await log(page)).lastKey.keyCode === 229, JSON.stringify((await log(page)).lastKey));
+    check('the same character after its 229 is typed, over the selected text', await page.inputValue(FIELD) === ' ', JSON.stringify(await page.inputValue(FIELD)));
+    await page.keyboard.press('Escape');
+    await settle(page);
     await close();
 }
 
