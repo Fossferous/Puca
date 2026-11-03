@@ -102,8 +102,11 @@ asks nothing at all if that mode's rooms were empty. Frames keep arriving behind
 every platform, and on the desktop behind the question, which is in the page, so if the mode has
 moved by the press or the answer, nothing is switched and the app says so; deleting a mode does
 the same. The request names only what to turn on, so the server would otherwise end whichever
-mode is on by then. A native dialog stops the page, so on the web and Android the gap while one
-is being answered is the server's alone and is left open.
+mode is on by then. **Call everyone to** a main channel, pressed in a menu left open, is refused
+the same way, since its request names only the server: it would move people to the main channel
+of the mode that is on by then, under a message naming the old one. A native dialog stops the
+page, so on the web and Android the gap while one is being answered is the server's alone and
+is left open.
 
 **Someone the room has lost track of goes too.** A LiveKit session whose socket is not
 in `voice_<id>` (it died, or the backend has just restarted) has no room entry to find,

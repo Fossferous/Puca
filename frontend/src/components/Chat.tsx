@@ -4359,22 +4359,26 @@ export function Chat({ onLogout }: ChatProps) {
     const noticeHome = modeNotice?.serverId === currentServer?.id ? usableHome(noticeMode, channels) : null;
     const [settingsInitialTab, setSettingsInitialTab] = useState<'overview' | 'modes'>('overview');
 
+    // A press in the mode menu knows only the render that built the menu. The page goes on running
+    // behind a menu left open, on every platform, and behind a desktop question (api/appDialogs.ts),
+    // and a frame moves this row at once. Each request names only the server and what it wants, and
+    // the server acts on whichever mode is on when it arrives. With nothing moved, as behind a native
+    // dialog, which stops the page, this finds nothing.
+    const modeMovedBehindMenu = () => {
+        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer?.id);
+        if (!row || (row.active_mode_id ?? null) === activeModeId) return false;
+        showToast('The mode changed while you were deciding. Nothing was switched.');
+        return true;
+    };
     const switchMode = async (modeId: number | null) => {
         if (!currentServer || !modesData || modeId === activeModeId) return;
         const people = channelsEndedBySwitch(channels, activeModeId, modeId)
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
         if (warning && !await askConfirm(warning)) return;
-        // All of the above is from the render that built the menu. The page goes on running behind
-        // a menu left open, on every platform, and behind a desktop question (api/appDialogs.ts),
-        // and a frame moves this row at once: the warning, or the empty rooms that asked for none,
-        // may have been about a mode that is no longer on, and this would end the calls of the one
-        // that is. With nothing moved, as behind a native dialog, which stops the page, it finds nothing.
-        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer.id);
-        if (row && (row.active_mode_id ?? null) !== activeModeId) {
-            showToast('The mode changed while you were deciding. Nothing was switched.');
-            return;
-        }
+        // The warning, or the empty rooms that asked for none, may have been about a mode that is
+        // no longer on, and this would end the calls of the one that is.
+        if (modeMovedBehindMenu()) return;
         try {
             await setActiveMode(currentServer.id, modeId);
         } catch {
@@ -4383,6 +4387,9 @@ export function Chat({ onLogout }: ChatProps) {
     };
     const callBackToHome = async () => {
         if (!currentServer || !activeHome) return;
+        // It would move everyone in the rooms of the mode that is on to that mode's main channel, say
+        // they went to this one, and walk the presser here, away from them.
+        if (modeMovedBehindMenu()) return;
         try {
             const { moved, skipped } = await callEveryoneBack(currentServer.id);
             // The server moves everyone but the person asking: walk over like them.
