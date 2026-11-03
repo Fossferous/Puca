@@ -27,6 +27,8 @@ const MAX_CHANNEL_NAME_LEN: usize = 100;
 const MAX_CHANNEL_DESC_LEN: usize = 1024;
 /// Bound the N+1 feed fan-out (one query per child channel).
 const MAX_FEED_CHILDREN: usize = 50;
+/// The channel type that holds other channels.
+const COLLECTION: i32 = 2;
 
 // --- DTOs ---
 
@@ -300,6 +302,11 @@ pub async fn create_channel(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Channel name too long").into_response();
     }
 
+    // A collection has no parent. Dropped, not refused: an installed client's Create
+    // Subchannel keeps the parent when Collection is chosen after it, and means a
+    // collection of its own (its form hides the field for one).
+    let parent_id = if payload.channel_type == COLLECTION { None } else { payload.parent_id };
+
     // The parent and category come from the BODY, so they must be re-checked
     // against the PATH server — the permission check above only covers the
     // path. update_channel has carried this guard for reparenting since the
@@ -307,25 +314,9 @@ pub async fn create_channel(
     // with MANAGE_CHANNELS on their own server could create a channel already
     // grafted under another server's collection channel (the FK enforces
     // existence, not same-server) and inject content into that server's feed.
-    if let Some(parent_id) = payload.parent_id {
-        // Width matched to this text's siblings (channels.id is INT4; a
-        // no-op cast at the create site, the fix at the update site — see
-        // the 22P03 note in device_token.rs).
-        let parent_server: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-                .bind(parent_id as i32)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-        match parent_server {
-            Some((Some(ref psid),)) if *psid == server_id => {}
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Parent channel must be in the same server",
-                )
-                    .into_response()
-            }
+    if let Some(parent_id) = parent_id {
+        if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await {
+            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
     }
     if let Some(category_id) = payload.category_id {
@@ -369,7 +360,7 @@ pub async fn create_channel(
     .bind(position)
     .bind(&server_id)
     .bind(payload.category_id)  // category_id for $5
-    .bind(payload.parent_id)    // parent_id for $6
+    .bind(parent_id)            // parent_id for $6
     .bind(is_afk)               // is_afk for $7
     .bind(has_checklist)        // has_checklist for $8
     .fetch_one(&state.pool)
@@ -428,7 +419,7 @@ pub async fn create_channel(
                 name: payload.name.clone(),
                 channel_type: payload.channel_type,
                 server_id: Some(server_id.clone()),
-                parent_id: payload.parent_id.map(|p| p as i64),
+                parent_id: parent_id.map(|p| p as i64),
                 is_afk,
                 has_checklist,
             };
@@ -455,7 +446,7 @@ pub async fn create_channel(
                 channel_type: payload.channel_type,
                 server_id: Some(server_id),
                 description: None,
-                parent_id: payload.parent_id.map(|p| p as i64),
+                parent_id: parent_id.map(|p| p as i64),
                 slowmode_seconds: 0,
                 is_afk,
                 has_checklist,
@@ -519,8 +510,8 @@ pub async fn update_channel(
     // detected afterwards. Read here rather than compared to the payload alone:
     // `sfu_mode: Some(true)` on a channel already true is not a change, and
     // putting a live call out for a no-op edit would be its own bug.
-    let before: Option<(i32, bool)> =
-        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
+    let before: Option<(i32, bool, Option<i32>)> =
+        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false), parent_id FROM channels WHERE id = $1")
             .bind(channel_id as i32)
             .fetch_optional(&state.pool)
             .await
@@ -530,25 +521,20 @@ pub async fn update_channel(
     // enforces existence, not same-server — without this a caller with
     // MANAGE_CHANNELS on their own server could graft their channel under another
     // server's collection channel and inject content into that server's feed.
+    //
+    // It must be a collection too, and not the channel itself: nothing else draws a
+    // child, so anything else takes the row off the sidebar with no way back in the UI.
+    //
+    // Only a parent that CHANGES is judged. An installed client sends the whole form on
+    // every save, so a rename of a row already under something else names that parent
+    // again, and has to keep working.
     if let Some(Some(parent_id)) = payload.parent_id {
-        // Width matched to this text's siblings (channels.id is INT4; a
-        // no-op cast at the create site, the fix at the update site — see
-        // the 22P03 note in device_token.rs).
-        let parent_server: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-                .bind(parent_id as i32)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-        match parent_server {
-            Some((Some(psid),)) if psid == server_id => {}
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "Parent channel must be in the same server",
-                )
-                    .into_response()
-            }
+        let unchanged = before.is_some_and(|(_, _, parent)| parent == Some(parent_id));
+        if !unchanged
+            && (parent_id as i64 == channel_id
+                || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await)
+        {
+            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
     }
 
@@ -631,7 +617,7 @@ pub async fn update_channel(
             // rejoin on the transport the channel now has. AFTER the broadcast
             // above, so a client that reconnects immediately reads the new mode
             // rather than the one it just failed with.
-            if let Some((channel_type, was_sfu)) = before {
+            if let Some((channel_type, was_sfu, _)) = before {
                 if voice_transport_changed(channel_type, was_sfu, payload.sfu_mode) {
                     let room_id = format!("voice_{channel_id}");
                     // COLLECTED FIRST, deliberately: `rooms` is a DashMap and
@@ -710,6 +696,20 @@ pub async fn update_channel(
 pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Option<bool>) -> bool {
     const VOICE: i32 = 1;
     channel_type == VOICE && matches!(requested, Some(after) if after != before)
+}
+
+/// What a client is told when a channel it names cannot be a parent.
+const PARENT_REFUSED: &str = "Parent channel must be a collection in the same server";
+
+/// Is this channel a collection of this server? A failed read says no.
+async fn parent_is_a_collection_here(pool: &sqlx::PgPool, parent_id: i32, server_id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = $3)")
+        .bind(parent_id)
+        .bind(server_id)
+        .bind(COLLECTION)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
 }
 
 /// May a delete take these channels along? The foreign key cascades through everything

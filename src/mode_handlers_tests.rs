@@ -1505,6 +1505,103 @@ mod db {
         assert_eq!(&order[..4], &[f.text, f.lobby, f.town, f.cottage], "and their refetch is in the new order");
     }
 
+    /// Nothing but a collection draws a child: any other parent takes the row off the sidebar
+    /// with no way back. An unchanged value still passes, because an installed client sends
+    /// the whole form on every save, whatever state a row is already in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parent_that_changes_must_be_another_collection_of_this_server() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let elsewhere = setup(&pool).await;
+        let state = state_of(&pool);
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        let foreign_shelf = channel(&pool, &elsewhere.sid, "foreign-shelf", 2).await;
+        let notes = channel(&pool, &f.sid, "notes", 0).await;
+        let edit = |channel: i32, body: Value| {
+            crate::channel_handlers::update_channel(
+                State(Arc::clone(&state)),
+                Path(channel as i64),
+                Extension(claims(f.owner)),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let parent_of = |channel: i32| {
+            let pool = pool.clone();
+            async move {
+                let (parent,): (Option<i32>,) = sqlx::query_as("SELECT parent_id FROM channels WHERE id = $1").bind(channel).fetch_one(&pool).await.unwrap();
+                parent
+            }
+        };
+
+        let under_text = edit(notes, json!({ "parent_id": f.text })).await.into_response().status();
+        let under_voice = edit(notes, json!({ "parent_id": f.town })).await.into_response().status();
+        let under_foreign = edit(notes, json!({ "parent_id": foreign_shelf })).await.into_response().status();
+        let under_nothing = edit(notes, json!({ "parent_id": 2_000_000_000 })).await.into_response().status();
+        let under_itself = edit(shelf, json!({ "parent_id": shelf })).await.into_response().status();
+        let refused_left = (parent_of(notes).await, parent_of(shelf).await);
+        let under_shelf = edit(notes, json!({ "parent_id": shelf })).await.into_response().status();
+        let moved = parent_of(notes).await;
+
+        // Rows raw API calls left in these states: a save that resends them is no change.
+        move_under(&pool, f.cottage, f.text).await;
+        let old_row = edit(f.cottage, json!({ "name": "cottage-2", "parent_id": f.text })).await.into_response().status();
+        let old_row_left = parent_of(f.cottage).await;
+        move_under(&pool, f.lobby, f.lobby).await;
+        let looped = edit(f.lobby, json!({ "name": "lobby-2", "parent_id": f.lobby })).await.into_response().status();
+        let out_of_it = edit(f.lobby, json!({ "parent_id": null })).await.into_response().status();
+        let looped_left = parent_of(f.lobby).await;
+
+        let create = |body: Value| {
+            let state = Arc::clone(&state);
+            let sid = f.sid.clone();
+            async move {
+                read(crate::channel_handlers::create_channel(State(state), Path(sid), Extension(claims(f.owner)), Json(serde_json::from_value(body).unwrap()))
+                    .await
+                    .into_response())
+                .await
+            }
+        };
+        let new_under_text = create(json!({ "name": "c1", "channel_type": 0, "parent_id": f.text })).await.0;
+        let new_under_foreign = create(json!({ "name": "c2", "channel_type": 1, "parent_id": foreign_shelf })).await.0;
+        let new_under_shelf = create(json!({ "name": "c3", "channel_type": 1, "parent_id": shelf })).await;
+        let mut member = Sock::open(&state, f.plain);
+        member.drain();
+        let new_collection = create(json!({ "name": "c4", "channel_type": 2, "parent_id": shelf })).await;
+        let told = member.drain();
+        let stored = parent_of(new_collection.1["id"].as_i64().unwrap() as i32).await;
+        let new_collection_foreign = create(json!({ "name": "c5", "channel_type": 2, "parent_id": foreign_shelf })).await;
+        teardown(&pool, &f).await;
+        teardown(&pool, &elsewhere).await;
+
+        assert_eq!(under_text, StatusCode::BAD_REQUEST, "a text channel draws no child");
+        assert_eq!(under_voice, StatusCode::BAD_REQUEST, "nor does a voice channel");
+        assert_eq!(under_foreign, StatusCode::BAD_REQUEST, "another server's collection");
+        assert_eq!(under_nothing, StatusCode::BAD_REQUEST, "no such channel");
+        assert_eq!(under_itself, StatusCode::BAD_REQUEST, "a collection cannot hold itself");
+        assert_eq!(refused_left, (None, None), "and each refusal changes nothing");
+        assert_eq!(under_shelf, StatusCode::OK);
+        assert_eq!(moved, Some(shelf), "control: a collection of this server");
+
+        assert_eq!(old_row, StatusCode::OK, "a whole-form save of an old row still saves");
+        assert_eq!(old_row_left, Some(f.text), "and leaves it where it was");
+        assert_eq!(looped, StatusCode::OK, "even one that names itself");
+        assert_eq!(out_of_it, StatusCode::OK);
+        assert_eq!(looped_left, None, "and null is the way out");
+
+        assert_eq!(new_under_text, StatusCode::BAD_REQUEST);
+        assert_eq!(new_under_foreign, StatusCode::BAD_REQUEST);
+        assert_eq!(new_under_shelf.0, StatusCode::OK, "control: {:?}", new_under_shelf.1);
+        assert_eq!(new_under_shelf.1["parent_id"], json!(shelf));
+        assert_eq!(new_collection.0, StatusCode::OK, "an old client's Collection after Create Subchannel still creates");
+        assert_eq!(new_collection.1["parent_id"], Value::Null, "with no parent, in the answer");
+        assert_eq!(stored, None, "in the row");
+        assert!(
+            told.iter().any(|m| matches!(m, M::ChannelCreated { channel, .. } if channel.name == "c4" && channel.parent_id.is_none())),
+            "and in what every member is told: {told:?}"
+        );
+        assert_eq!(new_collection_foreign.0, StatusCode::OK, "dropped before it is judged");
+    }
+
     /// Deleting a mode can finish no matter what the request does: its picture is
     /// reclaimed and everyone is told, even when the client gave up after the commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
