@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { keys, useChannels, useServerModes } from '../../hooks/queries';
 import { BackgroundRefused, prepareBackground } from '../../api/modeLook';
 import { accentTokens, createMode, deleteMode, neverListed, shownWithParent, updateMode, type ModeEdit, type ServerMode } from '../../api/serverModes';
-import type { Channel } from '../../api/servers';
+import type { Channel, Server } from '../../api/servers';
 import { uploadFile } from '../../api/uploads';
 import { statusOf } from '../../api/client';
 import { AuthedImg } from '../AuthedImg';
@@ -95,6 +95,13 @@ function ModeCard({ serverId, mode, channels, isActive, canSwitch }: ModeCardPro
             ? `Delete ${mode.name}? It is on right now: anyone in its voice channels will be disconnected. Its channels and their messages are kept.`
             : `Delete ${mode.name}? Its channels and their messages are kept, and show all the time from now on.`;
         if (!await askConfirm(warning)) return;
+        // As in Chat's switchMode: what was said may be out of date by the answer. The server row,
+        // which a frame moves at once: this card's isActive comes from a list that is only refetched.
+        const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === serverId);
+        if (row && (row.active_mode_id === mode.id) !== isActive) {
+            setError('The mode changed while you were deciding. Nothing was deleted.');
+            return;
+        }
         setBusy(true);
         setError('');
         try {

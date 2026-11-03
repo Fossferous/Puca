@@ -4339,7 +4339,18 @@ export function Chat({ onLogout }: ChatProps) {
         const people = channelsEndedBySwitch(channels, activeModeId, modeId)
             .reduce((sum, id) => sum + getVoiceUsersInRoom(`voice_${id}`).length, 0);
         const warning = endedCallsWarning(activeMode, people);
-        if (warning && !await askConfirm(warning)) return;
+        if (warning) {
+            if (!await askConfirm(warning)) return;
+            // A desktop question leaves the page running (api/appDialogs.ts), and a frame moves
+            // this row at once: the warning may have been about a mode that is no longer on, and
+            // the answer would end the calls of the one that is. Native dialogs stop the page, so
+            // no frame can get in there and this finds nothing.
+            const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === currentServer.id);
+            if (row && (row.active_mode_id ?? null) !== activeModeId) {
+                showToast('The mode changed while you were deciding. Nothing was switched.');
+                return;
+            }
+        }
         try {
             await setActiveMode(currentServer.id, modeId);
         } catch {
