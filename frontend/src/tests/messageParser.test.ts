@@ -833,12 +833,17 @@ describe('what a message costs to read', () => {
         ['words of a shortcode with an address in them', `**${'~~)"~~@:Hbhttp://****b__H)('.repeat(295)}_ ||s||`],
         ['a delimiter only the end of a link opens', `${'[x](http://a)**b '.repeat(470)}`],
         ['every delimiter, and an address that takes them in', `\`${'_***http://:**b~~~~____'.repeat(347)} ||s||`],
-        ['a run of one delimiter in an address', `*https://example.org/${'*'.repeat(7900)}a ||s||`],
         ['a list of addresses with a spoiler', `my_list:\n${'https://example.org/some_long_path_name\n'.repeat(199)}||s|| *`],
     ])('%s', (_, content) => {
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content)).toBeLessThan(30);
+    });
+
+    it('a run of one delimiter in an address: 1 ms, or 25 with no bound on what stands between a closer and an opener', () => {
+        const content = `*https://example.org/${'*'.repeat(7900)}a ||s||`;
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content)).toBeLessThan(10);
     });
 
     it('CONTROL: what is cheap is still read in full: a list of addresses, all whole, and every name', () => {
