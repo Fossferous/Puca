@@ -50,6 +50,36 @@ describe('what becomes a link', () => {
         expect(hrefs('https://en.wikipedia.org/wiki/Foo_(bar)')).toEqual(['https://en.wikipedia.org/wiki/Foo_(bar)']);
     });
 
+    it('a bracket the address opened, as the chat reads it: the one implementation', () => {
+        expect(hrefs('(see https://a.example/Rust_(language))')).toEqual(['https://a.example/Rust_(language)']);
+        expect(hrefs('read https://a.example/ms123(v=vs.85).')).toEqual(['https://a.example/ms123(v=vs.85)']);
+        // Each of these was the chat's alone until the two shared it.
+        expect(hrefs('https://a.example/Speaker_(U.S.)')).toEqual(['https://a.example/Speaker_(U.S.)']);
+        expect(hrefs('https://a.example/a_(b_(c))')).toEqual(['https://a.example/a_(b_(c))']);
+        expect(rebuilt('(see https://a.example/Rust_(language)).')).toBe('(see https://a.example/Rust_(language)).');
+    });
+
+    it('a raw > or " is not part of an address, as the chat reads it', () => {
+        expect(linkSegments('<https://a.example>')).toEqual([
+            { kind: 'text', value: '<' },
+            { kind: 'link', href: 'https://a.example', text: 'https://a.example' },
+            { kind: 'text', value: '>' },
+        ]);
+        expect(hrefs('<https://a.example/page>')).toEqual(['https://a.example/page']);
+        expect(hrefs('{"url":"https://a.example/x"}')).toEqual(['https://a.example/x']);
+        expect(hrefs('<a href="https://a.example/x">link</a>')).toEqual(['https://a.example/x']);
+        expect(hrefs('https://a.example/x"y and https://b.example/y>z')).toEqual(['https://a.example/x', 'https://b.example/y']);
+        // What a note holds is what was typed: nothing lost or added around them.
+        for (const s of ['<https://a.example>', '{"url":"https://a.example/x"}', '<a href="https://a.example/x">link</a>']) {
+            expect(rebuilt(s)).toBe(s);
+        }
+    });
+
+    it('a capital scheme is one, as typed', () => {
+        expect(hrefs('Https://a.example/Foo_Bar_Baz')).toEqual(['Https://a.example/Foo_Bar_Baz']);
+        expect(hrefs('see HTTP://a.example/a_b now')).toEqual(['HTTP://a.example/a_b']);
+    });
+
     it('a scheme glued to a word is not a link', () => {
         expect(links('xhttps://evil.example')).toHaveLength(0);
         expect(rebuilt('xhttps://evil.example')).toBe('xhttps://evil.example');
@@ -75,6 +105,10 @@ describe('what stays plain text', () => {
             expect(linkSegments(s)).toEqual([{ kind: 'text', value: s }]);
         });
     }
+
+    it('an address straight after a colon is plain here: that word is refused whole, as javascript:x is', () => {
+        expect(linkSegments('Link:https://a.example/x')).toEqual([{ kind: 'text', value: 'Link:https://a.example/x' }]);
+    });
 
     it('a string with no address is exactly one text segment (the cheap path)', () => {
         expect(linkSegments('Buy milk before Friday')).toEqual([{ kind: 'text', value: 'Buy milk before Friday' }]);

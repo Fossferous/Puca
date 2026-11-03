@@ -1714,6 +1714,12 @@ export function Chat({ onLogout }: ChatProps) {
         clearComposerAttachments({ discardUploads: true });
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id, clearComposerAttachments]);
 
+    // The box grew with what was written. Emptied, by whatever emptied it, it goes back;
+    // an Enter that sent nothing leaves it the size of the words still in it.
+    useEffect(() => {
+        if (!input && inputRef.current) inputRef.current.style.height = 'auto';
+    }, [input]);
+
     // The open conversation is going and they did not ask to go anywhere else: a channel
     // deleted or its View taken away, a collection deleted, the server gone. The composer
     // belongs to no conversation, so what it holds would be there in whichever one opens
@@ -1731,8 +1737,6 @@ export function Chat({ onLogout }: ChatProps) {
         }
         setInput('');
         setAutocomplete(null);
-        // It grew with what was written; only a send puts it back.
-        if (inputRef.current) inputRef.current.style.height = 'auto';
     };
 
     // Forward state — the decrypted content being forwarded (null = closed).
@@ -3654,6 +3658,14 @@ export function Chat({ onLogout }: ChatProps) {
             return;
         }
 
+        // Nowhere to send it, as while a new server's list is on its way and the
+        // header says "No channel selected". Everything below empties the box, so
+        // this comes first. SAY SO, like the upload above.
+        if (!currentDM && !currentChannel) {
+            showToast('No channel is open yet. Your message is still in the box.');
+            return;
+        }
+
         // Typed text + the ready chips' markdown, built ONLY now — the
         // sovereign-enc hrefs (which carry file keys) never touch the textarea.
         const content = buildOutgoingContent(input, pendingAttachments);
@@ -3732,7 +3744,7 @@ export function Chat({ onLogout }: ChatProps) {
             return;
         }
 
-        // Handle server channel messages
+        // Handle server channel messages (one is open, by the check above: this is for the compiler)
         if (!currentChannel) return;
 
         // Optimistic update - add message to local state immediately
@@ -4172,6 +4184,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (newChannelType === 0) {
                 setCurrentChannel(newChannel);
                 setCurrentCollection(null); // Made from a collection's page: its page would stay on top
+                setMessages([]); // What is on screen is not the new channel's, and would stay if its history fails
                 setShowFriendsPanel(false);
                 setShowDevicesView(false);
                 setShowNotesView(false);
@@ -6848,13 +6861,13 @@ export function Chat({ onLogout }: ChatProps) {
                         onToggleSpoiler={(id) => setPendingAttachments(prev => toggleChipSpoiler(prev, id))}
                         onRetry={retryUpload}
                     />
-                    <form className={`message-form ${canSendHere ? '' : 'composer-disabled'}`} onSubmit={handleSend}>
+                    <form className={`message-form ${acceptsFileDrop ? '' : 'composer-disabled'}`} onSubmit={handleSend}>
                         <label className="file-upload-btn" title="Attach file">
                             <PaperclipIcon />
                             <input
                                 type="file"
                                 style={{ display: 'none' }}
-                                disabled={!canSendHere}
+                                disabled={!acceptsFileDrop}
                                 onChange={async (e) => {
                                     const file = e.target.files?.[0];
                                     if (!file) return;
@@ -6929,9 +6942,6 @@ export function Chat({ onLogout }: ChatProps) {
                                     if (e.key === 'Enter' && !e.shiftKey) {
                                         e.preventDefault();
                                         handleSend(e as unknown as FormEvent);
-                                        // reset height after send
-                                        const el = e.currentTarget;
-                                        requestAnimationFrame(() => { el.style.height = 'auto'; });
                                     }
                                 }}
                                 placeholder={!canSendHere
@@ -6946,6 +6956,12 @@ export function Chat({ onLogout }: ChatProps) {
                                 onPaste={(e) => {
                                     const items = e.clipboardData?.items;
                                     if (!items) return;
+                                    // A file goes up for the conversation it is added in, as a drop does
+                                    // (acceptsFileDrop), and here there is none. Any words paste as usual.
+                                    if (!acceptsFileDrop) {
+                                        if (Array.from(items).some(item => item.kind === 'file')) showToast('No channel is open yet, so that file was not added.');
+                                        return;
+                                    }
                                     // A pasted image becomes a chip directly —
                                     // its thumbnail IS the preview, and the
                                     // spoiler toggle lives on the chip. (This

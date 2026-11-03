@@ -27,15 +27,21 @@ const h = vi.hoisted(() => ({
     deleted: [] as string[],
     /** What the open channel's history holds. */
     rows: [] as Record<string, unknown>[],
+    /** A channel's history apart from `rows`: on its way, say, or failing. */
+    history: null as null | ((channel: number) => Promise<Record<string, unknown>[]>),
     /** A leave or a delete still on its way, until this settles. */
     hold: null as null | Promise<void>,
+    /** A server's list still on its way, until this settles. */
+    holdList: null as null | { server: string; until: Promise<void> },
+    /** The server refuses to make a channel. */
+    createFails: false,
     nav: null as string | null,
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/servers')>()),
     markChannelRead: async () => {},
-    getMessages: async (_ch: number, _limit: number, before?: string) => (before ? [] : h.rows),
+    getMessages: async (ch: number, _limit: number, before?: string) => (before ? [] : h.history ? h.history(ch) : h.rows),
     decryptChannelMessages: async (_ch: number, raw: unknown[]) => raw,
     listPinnedMessages: async () => [],
     sendChannelMessageEncrypted: async (...args: unknown[]) => { h.sent.push(args); return { id: 'm1' }; },
@@ -86,6 +92,7 @@ const reply = (status: number, body: unknown) => {
 vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     if (init?.method === 'POST' && /\/servers\/[^/]+\/channels$/.test(u)) {
+        if (h.createFails) return reply(403, { error: 'no' });
         const asked = JSON.parse(String(init.body));
         const made = row(77, asked.name, { channel_type: asked.channel_type, parent_id: asked.parent_id ?? null });
         h.channels = [...h.channels, made];
@@ -103,6 +110,7 @@ vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (/\/config$/.test(u)) return reply(200, { app_url: 'https://app.example.com', registration_invite_required: false, srp_version: 2 });
     if (/\/servers$/.test(u)) return reply(200, h.servers);
     const list = /\/servers\/([^/]+)\/channels$/.exec(u);
+    if (list && h.holdList?.server === list[1]) await h.holdList.until;
     if (list) return reply(200, h.channels.filter(c => c.server_id === list[1]));
     if (/\/servers\/s1\/modes$/.test(u)) return reply(200, {
         active_mode_id: h.servers[0]?.active_mode_id ?? null, can_switch: true, can_edit: true, can_call_back: true,
@@ -134,7 +142,10 @@ beforeEach(() => {
     h.discarded = [];
     h.deleted = [];
     h.rows = [];
+    h.history = null;
     h.hold = null;
+    h.holdList = null;
+    h.createFails = false;
     h.nav = null;
     feedLoads = 0;
     vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
@@ -688,25 +699,30 @@ describe('a leave or a disband still on its way while they go somewhere else', (
     });
 });
 
-describe('a channel made from a collection\'s page', () => {
-    /** Create Subchannel on the open collection's row, through the real form. */
-    const createInside = async (name: string) => {
-        await act(async () => {
-            rowNamed('Private')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
-        });
-        const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(el => /create subchannel/i.test(el.textContent ?? ''));
-        expect(item, 'the row\'s menu has Create Subchannel').toBeTruthy();
-        await act(async () => { item!.click(); });
-        await settled(3);
-        const field = [...document.querySelectorAll<HTMLInputElement>('input[type="text"]')].find(i => i.closest('.form-group')?.textContent?.includes('Channel Name'))!;
-        expect(field, 'the form is up').toBeTruthy();
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, name);
-        await act(async () => { field.dispatchEvent(new Event('input', { bubbles: true })); });
-        await settle();
-        await act(async () => { field.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
-        await settled();
-    };
+/** The real Create Channel form, up: its name filled in and sent. */
+const submitCreateForm = async (name: string) => {
+    await settled(3);
+    const field = [...document.querySelectorAll<HTMLInputElement>('input[type="text"]')].find(i => i.closest('.form-group')?.textContent?.includes('Channel Name'))!;
+    expect(field, 'the form is up').toBeTruthy();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, name);
+    await act(async () => { field.dispatchEvent(new Event('input', { bubbles: true })); });
+    await settle();
+    await act(async () => { field.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    await settled();
+};
 
+/** Create Subchannel on the open collection's row, through the real form. */
+const createInside = async (name: string) => {
+    await act(async () => {
+        rowNamed('Private')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+    });
+    const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(el => /create subchannel/i.test(el.textContent ?? ''));
+    expect(item, 'the row\'s menu has Create Subchannel').toBeTruthy();
+    await act(async () => { item!.click(); });
+    await submitCreateForm(name);
+};
+
+describe('a channel made from a collection\'s page', () => {
     it('opens that channel, and a delete of both says the words once', async () => {
         h.servers = [{ ...SRV, owner_id: ME }];
         h.channels = [GENERAL, PRIVATE];
@@ -723,6 +739,260 @@ describe('a channel made from a collection\'s page', () => {
         expect(dialogs.notices()).toHaveLength(1);
         expect(dialogs.notices()[0]).toContain('#made-inside is no longer available');
         expect(dialogs.notices()[0]).toContain('from general');
+    });
+});
+
+describe('Enter with no channel open, a new server\'s list still on its way', () => {
+    /** On to Far with its list held back; the function returned lets the list come. */
+    const onToFar = async () => {
+        let come!: () => void;
+        h.holdList = { server: 's2', until: new Promise<void>(r => { come = r; }) };
+        await clickServer('Far');
+        await settled(5);
+        expect(headerText(), 'the state this is about').toContain('No channel selected');
+        return async () => {
+            h.holdList = null;
+            await act(async () => { come(); });
+            await landedOn('far-general');
+        };
+    };
+    const submitForm = async () => {
+        await act(async () => { composer()!.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settled(10);
+    };
+
+    it('the words stay in the box, it says why, and they can go once a channel opens', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        const listCame = await onToFar();
+        await type('hello far');
+        await pressEnter();
+        expect(composer()!.value).toBe('hello far');
+        expect(h.sent).toEqual([]);
+        expect(document.querySelector('.app-toast-text')?.textContent).toContain('still');
+        await listCame();
+        expect(composer()!.value, 'still there on the channel that opened').toBe('hello far');
+        await pressEnter();
+        expect(h.sent[0]?.[0], 'and they go there').toBe(30);
+        expect(composer()!.value).toBe('');
+    });
+
+    it('so does the Send button', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        await type('hello far');
+        await submitForm();
+        expect(composer()!.value).toBe('hello far');
+        expect(h.sent).toEqual([]);
+    });
+
+    it('so do words kept behind a collection\'s page', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, PRIVATE, FAR_GENERAL];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        const listCame = await onToFar();
+        expect(composer()!.value, 'the box is back, with them in it').toBe('from general');
+        await pressEnter();
+        expect(composer()!.value).toBe('from general');
+        expect(h.sent).toEqual([]);
+        expect(dialogs.notices()).toEqual([]);
+        await listCame();
+        expect(composer()!.value).toBe('from general');
+    });
+
+    it('the box stays the size of the words in it, and goes back once they are sent', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        const listCame = await onToFar();
+        await type('line one\nline two\nline three');
+        composer()!.style.height = '120px'; // it grew with what was written
+        await pressEnter();
+        await settled(3);
+        expect(composer()!.value).toContain('line three');
+        expect(composer()!.style.height).toBe('120px');
+        await listCame();
+        await pressEnter();
+        expect(h.sent[0]?.[0]).toBe(30);
+        await settled(3);
+        expect(composer()!.style.height).toBe('auto');
+    });
+
+    /** A real paste on the box: returns whether it took the paste over. */
+    const paste = async (items: { kind: string; type: string; getAsFile: () => File | null }[]) => {
+        const event = new Event('paste', { bubbles: true, cancelable: true });
+        const files = items.map(i => i.getAsFile()).filter(f => f !== null);
+        Object.defineProperty(event, 'clipboardData', { value: { items, files } });
+        await act(async () => { composer()!.dispatchEvent(event); });
+        await settled(3);
+        return event.defaultPrevented;
+    };
+    const aFile = (name: string, type: string) => {
+        const file = new File(['hello'], name, { type });
+        return { kind: 'file', type, getAsFile: () => file };
+    };
+    const paperclip = () => document.querySelector<HTMLInputElement>('form.message-form input[type="file"]')!;
+    const toast = () => document.querySelector('.app-toast-text')?.textContent ?? '';
+
+    it('a file has nowhere to go either: the paperclip is off, and a paste says so and adds nothing', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        expect(paperclip().disabled, 'on, in a channel').toBe(false);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(false);
+        const listCame = await onToFar();
+        expect(paperclip().disabled).toBe(true);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(true);
+        expect(composer()!.disabled, 'the words can still be typed').toBe(false);
+        await type('here you go');
+
+        await paste([aFile('p.png', 'image/png')]);
+        expect(document.querySelector('[class*="composer-chip"]')).toBeNull();
+        expect(toast()).toContain('that file was not added');
+        await paste([aFile('n.txt', 'text/plain')]);
+        expect(document.querySelector('[class*="composer-chip"]')).toBeNull();
+        expect(composer()!.value).toBe('here you go');
+
+        await listCame();
+        expect(paperclip().disabled).toBe(false);
+        expect(document.querySelector('form.message-form')!.classList.contains('composer-disabled')).toBe(false);
+        await pressEnter();
+        expect(h.sent[0]?.[1], 'nothing was promised that is not there').toBe('here you go');
+    });
+
+    it('CONTROL: words paste as usual, and say nothing', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        expect(await paste([{ kind: 'string', type: 'text/plain', getAsFile: () => null }])).toBe(false);
+        expect(toast()).toBe('');
+    });
+
+    it('CONTROL: in a channel a pasted file is a chip, and goes with the message', async () => {
+        await mountChat();
+        await paste([aFile('p.png', 'image/png')]);
+        await paste([aFile('n.txt', 'text/plain')]);
+        for (let i = 0; i < 40 && document.querySelectorAll('.composer-chip-ready').length < 2; i++) await settle();
+        expect(document.querySelectorAll('.composer-chip-ready')).toHaveLength(2);
+        expect(toast()).toBe('');
+    });
+
+    it('CONTROL: a name for yourself on the server needs no channel, and clears the box as it did', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        await type('/nick me');
+        await pressEnter();
+        expect(composer()!.value).toBe('');
+        expect(vi.mocked(fetch).mock.calls.some(([url, init]) => /\/servers\/s2\/nickname$/.test(String(url)) && String(init?.body).includes('"me"')), 'the name went').toBe(true);
+        expect(h.sent).toEqual([]);
+    });
+});
+
+describe('a text channel made with something else on screen', () => {
+    const said = (id: string, channel: number, words: string) => ({ id, channel_id: channel, user_id: ME + 1, username: 'bob', content: words, created_at: '2026-10-01T00:00:00Z' });
+    const onScreen = () => document.querySelector('.messages-container')?.textContent ?? '';
+    const press = async (title: string) => {
+        await act(async () => { document.querySelector<HTMLElement>(`.add-channel-btn[title="${title}"]`)!.click(); });
+    };
+    const shows = async (words: string) => {
+        for (let i = 0; i < 40 && !onScreen().includes(words); i++) await settle();
+        expect(onScreen()).toContain(words);
+    };
+
+    it('what the channel before it said goes at once, and its own history takes the place', async () => {
+        let come!: (rows: Record<string, unknown>[]) => void;
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : new Promise(r => { come = r; }));
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        expect(headerText()).toContain('made-here');
+        expect(onScreen(), 'not under the new name while its history is on its way').not.toContain('what general said');
+        await act(async () => { come([said('m2', 77, 'its first words')]); });
+        await shows('its first words');
+        expect(onScreen()).not.toContain('what general said');
+    });
+
+    it('and stays gone when that history fails', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        h.history = async ch => {
+            if (ch === 10) return [said('m1', 10, 'what general said')];
+            throw new Error('the network went');
+        };
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        await settled();
+        expect(headerText()).toContain('made-here');
+        expect(onScreen()).not.toContain('what general said');
+    });
+
+    it('so does a collection\'s feed, made from its page', async () => {
+        h.history = async ch => (ch === 21 ? [said('m1', 21, 'what inside said')] : new Promise(() => {}));
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL, PRIVATE, row(21, 'inside', { parent_id: 20 })];
+        await mountChat();
+        await open('Private');
+        await shows('what inside said');
+        await createInside('made-inside');
+        expect(headerText()).toContain('made-inside');
+        expect(onScreen()).not.toContain('what inside said');
+    });
+
+    it('CONTROL: one the server refuses opens nothing, and takes nothing off the screen', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        h.createFails = true;
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
+    });
+
+    it('CONTROL: a collection opens nothing, and takes nothing off the screen', async () => {
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await act(async () => { document.querySelector<HTMLElement>('.add-channel-btn')!.click(); });
+        await settled(3);
+        const collection = [...document.querySelectorAll<HTMLElement>('.type-btn')].find(b => /collection/i.test(b.textContent ?? ''));
+        expect(collection, 'the form offers one').toBeTruthy();
+        await act(async () => { collection!.click(); });
+        await submitCreateForm('a-collection');
+        expect(vi.mocked(fetch).mock.calls.some(([url, init]) => init?.method === 'POST' && /channels$/.test(String(url)) && JSON.parse(String(init?.body)).channel_type === 2), 'a collection went').toBe(true);
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
+    });
+
+    it('CONTROL: a voice channel opens nothing, and takes nothing off the screen', async () => {
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Voice Channel');
+        await submitCreateForm('a-room');
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
     });
 });
 

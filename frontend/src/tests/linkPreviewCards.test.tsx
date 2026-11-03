@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { MessageContent } from '../components/MessageContent';
 import { LinkPreview } from '../components/LinkPreview';
 import { extractUrls } from '../api/linkPreview';
+import { isExternalHref } from '../api/openExternal';
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -42,6 +43,12 @@ describe('a link in a spoiler has no card', () => {
         ['it in bold', '**||https://example.invalid/the-butler-did-it||**'],
         ['it in a quote', '> ||https://example.invalid/the-butler-did-it||'],
         ['in code in it', '||`https://example.invalid/the-butler-did-it`||'],
+        ['a word glued on after it', '||https://example.invalid/the-butler-did-it||!'],
+        ['more words glued on', '||https://example.invalid/the-butler-did-it||-- more'],
+        ['a letter glued on', '||https://example.invalid/the-butler-did-it||b'],
+        ['it in bold, and more glued on', '**||https://example.invalid/the-butler-did-it||**!'],
+        ['in lean with a `_` in the address', '_||https://example.invalid/the-butler-did-it_too||_'],
+        ['in a quote, and more glued on', '> ||https://example.invalid/the-butler-did-it||!'],
     ])('%s', async (_, content) => {
         expect(await said(content)).toEqual([]);
         expect(host!.textContent, 'the message itself still holds it').toContain(content.includes('who did it') ? 'who did it' : 'the-butler-did-it');
@@ -85,6 +92,83 @@ describe('the card has the address the link has', () => {
     it('CONTROL: an address in code has one, as it always did', async () => {
         expect(await said('`https://example.invalid/in-code`')).toEqual(['https://example.invalid/in-code']);
         expect(await said('```\nhttps://example.invalid/in-block\n```')).toEqual(['https://example.invalid/in-block']);
+    });
+});
+
+/** The addresses of the links in the message itself, as rendered. */
+const inTheMessage = () => [...host!.querySelectorAll<HTMLAnchorElement>('a.message-link')].map(a => a.getAttribute('href'));
+
+/** A message's link and its card are one address, and it is this one. */
+async function bothGoTo(content: string, href: string) {
+    const cards = await said(content);
+    expect(inTheMessage(), 'the link in the message').toEqual([href]);
+    expect(cards, 'the card under it').toEqual([href]);
+}
+
+describe('the link and the card go to the whole address', () => {
+    const RUST = 'https://example.org/wiki/Rust_(programming_language)';
+
+    it.each([
+        ['alone', RUST, RUST],
+        ['in a sentence', `read ${RUST} today`, RUST],
+        ['in brackets', `(see ${RUST})`, RUST],
+        ['ending in (v=vs.85)', 'https://example.org/library/ms123(v=vs.85)', 'https://example.org/library/ms123(v=vs.85)'],
+    ])('a bracket it opened: %s', async (_, content, href) => {
+        await bothGoTo(content, href);
+    });
+
+    it.each([
+        ['my_file is at ', 'https://example.org/my_file.txt'],
+        ['API_URL=', 'https://example.org/v1_beta'],
+        ['my_repo: ', 'https://example.org/me/my_repo'],
+        ['a__b at ', 'https://example.org/a__b'],
+    ])('words with a delimiter before it: %s', async (words, href) => {
+        await bothGoTo(words + href, href);
+        expect(host!.textContent?.startsWith(words)).toBe(true);
+    });
+
+    it('bold around an address that holds a `*`, and something after the bold', async () => {
+        await bothGoTo('**https://example.org/a*b**!', 'https://example.org/a*b');
+    });
+
+    it.each([
+        ['Link:', 'https://example.org/page'],
+        ['Download here:', 'https://example.org/file'],
+    ])('straight after a colon: %s', async (words, href) => {
+        await bothGoTo(words + href, href);
+        expect(host!.textContent?.startsWith(words)).toBe(true);
+    });
+
+    it.each([
+        ['<https://example.org>', 'https://example.org'],
+        ['<https://example.org/page>', 'https://example.org/page'],
+        ['{"url":"https://example.org/x"}', 'https://example.org/x'],
+        ['<a href="https://example.org/x">link</a>', 'https://example.org/x'],
+    ])('in < > or quotes: %s', async (content, href) => {
+        await bothGoTo(content, href);
+        expect(host!.querySelector('a.message-link')!.textContent).toBe(href);
+    });
+
+    it.each([
+        ['Https://example.org/wiki/Foo_Bar_Baz'],
+        ['Https://example.org/page#top'],
+        ['Https://mastodon.example.org/@alice/123'],
+        ['HTTP://example.org/a_b'],
+    ])('with a capital scheme: %s', async (href) => {
+        await bothGoTo(href, href);
+        // Taken as a lower-case one is, by what opens it in the two shells too.
+        expect(isExternalHref(href)).toBe(true);
+    });
+
+    it('with words of its own and a bracket in its target', async () => {
+        await bothGoTo('[w](https://example.org/wiki/Foo_(bar))', 'https://example.org/wiki/Foo_(bar)');
+        expect(host!.querySelector('a.message-link')!.textContent).toBe('w');
+        expect(host!.textContent, 'no stray bracket after it').not.toContain('w)');
+    });
+
+    it('a picture with a capital scheme is drawn as one, with no card', async () => {
+        expect(await said('Https://example.invalid/pic.png')).toEqual([]);
+        expect(host!.querySelector('button.message-image-blocked')).not.toBeNull();
     });
 });
 

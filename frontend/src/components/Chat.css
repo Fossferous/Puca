@@ -1903,7 +1903,8 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* Composer with SEND_MESSAGES denied on this channel: every control is
    disabled; the attach <label> needs the treatment explicitly (labels have no
-   :disabled state of their own). */
+   :disabled state of their own). With no conversation open yet only attaching
+   is off, and this dims only that. */
 .message-form.composer-disabled .file-upload-btn,
 .message-form.composer-disabled button:disabled {
     opacity: 0.45;

@@ -20,7 +20,7 @@
  * Pure: no React, no DOM, no network. Unit-tested in
  * src/tests/linkSegments.test.ts.
  */
-import { URL_RE } from './messageParser';
+import { urlAt } from './messageParser';
 
 export type Segment =
     | { kind: 'text'; value: string }
@@ -39,30 +39,18 @@ const CANDIDATE_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)\S*/i;
 /**
  * The link `rest` starts with, or null.
  *
- * `URL_RE` (utils/messageParser.ts, shared with chat so the two cannot drift)
- * matches http(s) only and trims trailing punctuation out of the href. That
- * is strictly stronger than the repo's `isSafeUrl`, which also passes
- * `mailto:`, `sovereign-enc:`, `sovereign-clip:` and any relative path — none
- * of which belongs in a note link, and the reason a `javascript:` href here
- * would be a seed-exfiltration bug rather than a cosmetic one (the Tauri
- * webview holds the JWT and the E2EE seed in localStorage on the app origin).
- * `linkSegments.test.ts` asserts the containment as a property, rather than
- * restating it here as a call that could never fire.
+ * `urlAt` (utils/messageParser.ts, shared with chat so the two cannot drift)
+ * matches http(s) only and trims trailing punctuation out of the href, keeping
+ * a `)` the address opened itself. That is strictly stronger than the repo's
+ * `isSafeUrl`, which also passes `mailto:`, `sovereign-enc:`, `sovereign-clip:`
+ * and any relative path — none of which belongs in a note link, and the reason
+ * a `javascript:` href here would be a seed-exfiltration bug rather than a
+ * cosmetic one (the Tauri webview holds the JWT and the E2EE seed in
+ * localStorage on the app origin). `linkSegments.test.ts` asserts the
+ * containment as a property, rather than restating it here as a call that
+ * could never fire.
  */
-function linkableHref(rest: string): string | null {
-    const m = URL_RE.exec(rest);
-    if (!m) return null;
-    return withBalancedTail(m[0], rest.slice(m[0].length));
-}
-
-/** Wikipedia-shaped URLs end in `)`. URL_RE's tail class already dropped it,
- *  so put it back only when the URL has an unmatched `(` that wants it. */
-function withBalancedTail(url: string, rest: string): string {
-    if (!rest.startsWith(')')) return url;
-    const opens = (url.match(/\(/g) ?? []).length;
-    const closes = (url.match(/\)/g) ?? []).length;
-    return opens > closes ? `${url})` : url;
-}
+const linkableHref = urlAt;
 
 /**
  * `input` as alternating text and link pieces. A string with no linkable
