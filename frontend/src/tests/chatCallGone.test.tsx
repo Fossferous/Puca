@@ -323,11 +323,11 @@ describe('a call that ends with nobody hanging up takes what it was watching wit
     });
 
     it('CONTROL: another server\'s channel deleted, same', async () => {
+        h.channels.push(row(32, 'Far annex', 's2', 1));
         await mountChat();
         await goToServer('Far', 'far-general');
         await joinRoom(31);
         await goToServer('Near', 'general');
-        h.channels.push(row(32, 'Far annex', 's2', 1));
         await watchBob();
         await goneFromTheList(32, 's2');
         expect(roomUp()).toBe('voice_31');
