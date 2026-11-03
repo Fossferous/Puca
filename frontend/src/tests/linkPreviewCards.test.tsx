@@ -138,6 +138,16 @@ describe('the link and the card go to the whole address', () => {
         await bothGoTo(words + href, href);
         expect(host!.textContent?.startsWith(words)).toBe(true);
     });
+
+    it.each([
+        ['<https://example.org>', 'https://example.org'],
+        ['<https://example.org/page>', 'https://example.org/page'],
+        ['{"url":"https://example.org/x"}', 'https://example.org/x'],
+        ['<a href="https://example.org/x">link</a>', 'https://example.org/x'],
+    ])('in < > or quotes: %s', async (content, href) => {
+        await bothGoTo(content, href);
+        expect(host!.querySelector('a.message-link')!.textContent).toBe(href);
+    });
 });
 
 describe('what has no card', () => {

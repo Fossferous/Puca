@@ -365,6 +365,44 @@ describe('an address straight after a colon', () => {
     });
 });
 
+describe('a raw > or " is never part of an address', () => {
+    it.each([
+        ['<https://example.org>', '<', 'https://example.org', '>'],
+        ['<https://example.org/page>', '<', 'https://example.org/page', '>'],
+        ['{"url":"https://example.org/x"}', '{"url":"', 'https://example.org/x', '"}'],
+        ['<a href="https://example.org/x">link</a>', '<a href="', 'https://example.org/x', '">link</a>'],
+        ['"https://example.org/x"', '"', 'https://example.org/x', '"'],
+        ['https://example.org/x"y', '', 'https://example.org/x', '"y'],
+        ['https://example.org/x>y', '', 'https://example.org/x', '>y'],
+    ])('%s', (content, before, href, after) => {
+        const expected: Node[] = [{ type: 'url', href }, { type: 'text', value: after }];
+        if (before) expected.unshift({ type: 'text', value: before });
+        expect(parseMessage(content)).toEqual(expected);
+    });
+
+    it('two in one word, and markup around them', () => {
+        expect(hrefs('{"a":"https://example.org/a","b":"https://example.org/b"}')).toEqual(['https://example.org/a', 'https://example.org/b']);
+        expect(parseMessage('**<https://example.org/a>**')).toEqual([
+            { type: 'strong', children: [{ type: 'text', value: '<' }, { type: 'url', href: 'https://example.org/a' }, { type: 'text', value: '>' }] },
+        ]);
+        // It stops the delimiter's reading of the address too.
+        expect(hrefs('my_file <https://example.org/my_file>')).toEqual(['https://example.org/my_file']);
+    });
+
+    it('a real mention right after one is a mention, and an @ in one is not', () => {
+        expect(extractMentions('<https://example.org/@alice> @bob')).toEqual({ users: ['bob'], everyone: false });
+    });
+
+    it('what comes after one opens nothing that would take a spoiler apart', () => {
+        expect(parseMessage('<https://example.org/a>_b ||c_d||')).toEqual([
+            { type: 'text', value: '<' },
+            { type: 'url', href: 'https://example.org/a' },
+            { type: 'text', value: '>_b ' },
+            { type: 'spoiler', children: [{ type: 'text', value: 'c_d' }] },
+        ]);
+    });
+});
+
 describe('mentions & channels', () => {
     it('parses user, everyone, here mentions and channels', () => {
         const nodes = parseMessage('hey @alice and @everyone in #general');

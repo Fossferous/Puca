@@ -59,6 +59,22 @@ describe('what becomes a link', () => {
         expect(rebuilt('(see https://a.example/Rust_(language)).')).toBe('(see https://a.example/Rust_(language)).');
     });
 
+    it('a raw > or " is not part of an address, as the chat reads it', () => {
+        expect(linkSegments('<https://a.example>')).toEqual([
+            { kind: 'text', value: '<' },
+            { kind: 'link', href: 'https://a.example', text: 'https://a.example' },
+            { kind: 'text', value: '>' },
+        ]);
+        expect(hrefs('<https://a.example/page>')).toEqual(['https://a.example/page']);
+        expect(hrefs('{"url":"https://a.example/x"}')).toEqual(['https://a.example/x']);
+        expect(hrefs('<a href="https://a.example/x">link</a>')).toEqual(['https://a.example/x']);
+        expect(hrefs('https://a.example/x"y and https://b.example/y>z')).toEqual(['https://a.example/x', 'https://b.example/y']);
+        // What a note holds is what was typed: nothing lost or added around them.
+        for (const s of ['<https://a.example>', '{"url":"https://a.example/x"}', '<a href="https://a.example/x">link</a>']) {
+            expect(rebuilt(s)).toBe(s);
+        }
+    });
+
     it('a scheme glued to a word is not a link', () => {
         expect(links('xhttps://evil.example')).toHaveLength(0);
         expect(rebuilt('xhttps://evil.example')).toBe('xhttps://evil.example');

@@ -43,8 +43,10 @@ const INLINE_DELIMS: { open: string; type: 'strong' | 'em' | 'underline' | 'stri
 ];
 
 /** A bare URL at the START of the input: http(s) only, and the tail class
- *  keeps trailing punctuation out of the href. */
-const URL_RE = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
+ *  keeps trailing punctuation out of the href. A raw `>` or `"` is in neither:
+ *  they are only ever what is put around an address (`<https://…>`,
+ *  `{"url":"https://…"}`). */
+const URL_RE = /^https?:\/\/[^\s<>"]+[^\s<>".,:;')\]]/i;
 
 /** Wikipedia-shaped URLs end in `)`. URL_RE's tail class already dropped it,
  *  so put it back only when the URL has an unmatched `(` that wants it, along
@@ -320,6 +322,13 @@ function parseInline(input: string, depth: number): Node[] {
                 flush();
                 nodes.push({ type: 'url', href });
                 i += href.length;
+                // What is after a `>` or `"` in its word used to be in the address. With
+                // a spoiler ahead it is only words, so nothing in it opens (see `spoilerAhead`).
+                const more = wordAt(input, i);
+                if (/[*_~`[|]/.test(more) && spoilerAhead(input, i)) {
+                    buf += more;
+                    i += more.length;
+                }
                 continue;
             }
         }
