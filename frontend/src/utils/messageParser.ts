@@ -474,13 +474,30 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
     return nodes;
 }
 
-/** Where the delimiter `open` closes inside the address `href`: at the last one,
- *  if the address ends with it (`**https://x/a**`), give or take what a sentence
- *  puts after it (`**https://x/a**!`, where URL_RE takes the `!` in). Otherwise
- *  -1, and every one in there is the address's own. */
-function closeInAddress(href: string, open: string): number {
+/** For a delimiter, the closer of one address and the opener of the next, with
+ *  no space between them: `**https://x/a**,**https://x/b**`. Bounded, so a run of
+ *  them in one address costs no more than its length. */
+const NEXT_IN_A_LIST = new Map(INLINE_DELIMS.map(({ open }): [string, RegExp] => {
+    const d = open.replace(/[*|]/g, '\\$&');
+    return [open, new RegExp(`${d}[^\\p{L}\\p{N}]{0,3}?${d}https?://`, 'iu')];
+}));
+
+/**
+ * Where the delimiter `open` closes inside the address `href`, or -1 if every one
+ * in there is the address's own. It closes before the next address of a list. It
+ * closes at the last one if the address ends with it (`**https://x/a**`), give or
+ * take what a sentence puts after it (`**https://x/a**!`, where URL_RE takes the
+ * `!` in). And `against` says the opener is right up against the address, which
+ * settles it for all but the `_` family: `*` and `~` are next to never in a real
+ * address, and in `**https://x/a**'s page` or `**https://x/a**を見て` the rest is
+ * words. `_` is in real addresses all the time, so `_https://x/a_b` stays one.
+ */
+function closeInAddress(href: string, open: string, against: boolean): number {
+    const listed = NEXT_IN_A_LIST.get(open)!.exec(href);
+    if (listed) return listed.index;
     const last = href.lastIndexOf(open);
-    return last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length)) ? last : -1;
+    if (last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length))) return last;
+    return against && !open.includes('_') ? href.indexOf(open) : -1;
 }
 
 /** How long the @name, #name or :name: at `at` is, or 0. */
@@ -524,7 +541,7 @@ function findClosing(input: string, from: number, open: string, reading: Reading
         if (stepsOver && (input[i] === 'h' || input[i] === 'H')) {
             const href = urlAt(input.slice(i));
             if (href) {
-                const inside = closeInAddress(href, open);
+                const inside = closeInAddress(href, open, i === from);
                 if (inside !== -1) return i + inside;
                 i += href.length;
                 pastAddress = true;

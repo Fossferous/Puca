@@ -186,8 +186,18 @@ describe('a delimiter in the words before an address does not close inside it', 
         ]);
     });
 
-    it('CONTROL: one with more of the address after it is the address\'s', () => {
-        expect(hrefs('**https://example.org/a**b')).toEqual(['https://example.org/a**b']);
+    it.each([
+        ['**', 'strong'],
+        ['*', 'em'],
+        ['~~', 'strike'],
+    ])('an opener right up against the address closes at the first one, whatever is glued on: %s', (d, type) => {
+        const href = 'https://example.org/a';
+        const wrapped = { type, children: [{ type: 'url', href }] };
+        for (const after of ['\'s page', '-based', '2', '/b', 's', '\u3092\u898b\u3066']) {
+            expect(parseMessage(`${d}${href}${d}${after}`)).toEqual([wrapped, { type: 'text', value: after }]);
+        }
+        expect(extractMentions(`${d}${href}${d}@bob`).users).toEqual(['bob']);
+        expect(extractMentions(`${d}${href}${d}/@everyone`).everyone).toBe(true);
     });
 
     it('CONTROL: `_` and `__` are in real addresses, so more of the address after one is the address\'s', () => {
@@ -198,6 +208,34 @@ describe('a delimiter in the words before an address does not close inside it', 
         expect(hrefs('_https://example.org/a_/b')).toEqual(['https://example.org/a_/b']);
         // A word in any script: this address is the bug this fix is for, not bold around one.
         expect(hrefs('my_file https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc')).toEqual(['https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc']);
+    });
+
+    it('CONTROL: with words between the opener and the address, one in the address stays the address\'s', () => {
+        expect(hrefs('**see https://example.org/a**b')).toEqual(['https://example.org/a**b']);
+        expect(hrefs('~~see https://example.org/a~~b')).toEqual(['https://example.org/a~~b']);
+    });
+
+    it.each([
+        ['**', 'strong', ','],
+        ['**', 'strong', '/'],
+        ['**', 'strong', '|'],
+        ['*', 'em', ','],
+        ['_', 'em', ','],
+        ['__', 'underline', ','],
+        ['~~', 'strike', ','],
+    ])('two in one word, with only a mark between them, are two: %s%s%s', (d, type, mark) => {
+        const a = 'https://example.org/a';
+        const b = 'https://example.org/b';
+        expect(parseMessage(`${d}${a}${d}${mark}${d}${b}${d}`)).toEqual([
+            { type, children: [{ type: 'url', href: a }] },
+            { type: 'text', value: mark },
+            { type, children: [{ type: 'url', href: b }] },
+        ]);
+    });
+
+    it('CONTROL: an address in an address is one, with no closer and opener in it', () => {
+        const href = 'https://example.org/web/2020/https://example.org/a_b';
+        expect(parseMessage(`_${href}_`)).toEqual([{ type: 'em', children: [{ type: 'url', href }] }]);
     });
 });
 
