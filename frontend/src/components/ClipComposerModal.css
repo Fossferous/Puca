@@ -68,7 +68,8 @@
 .clip-composer-hint { margin: 8px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--text-muted, #b9bbbe); }
 .clip-composer-hint svg { vertical-align: -2px; margin-right: 4px; }
 .clip-composer-busy { padding: 24px 0; text-align: center; color: var(--text-muted, #b9bbbe); }
-.clip-composer-error { display: flex; align-items: center; gap: 8px; color: var(--color-danger, #f04747); }
+/* The danger red is 3.35:1 on this surface. */
+.clip-composer-error { display: flex; align-items: center; gap: 8px; color: #ff8f91; }
 
 .clip-duration-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .clip-duration-chip {

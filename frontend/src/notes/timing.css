@@ -11,7 +11,6 @@
 .cal-weekstart select { background: var(--bg-tertiary); color: var(--text-normal); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 2px 6px; font: inherit; }
 /* The .ics import dialog's own rules moved to
    components/calendar/IcsImport.css with the component. */
-.notes-textbtn.primary { color: var(--brand-primary); font-weight: 600; }
 
 @media (pointer: coarse) and (max-width: 1024px) {
     .cal-weekstart select { font-size: 16px; min-height: 44px; }

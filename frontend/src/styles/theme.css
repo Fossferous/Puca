@@ -88,6 +88,8 @@
     --brand-primary: #5865f2;
     --brand-hover: #4752c4;
     --brand-active: #3c45a5;
+    /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
+    --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
 
     /* Status colors */
     --status-online: #23a55a;
@@ -279,6 +281,7 @@
 
     --text-normal: #313338;
     --text-muted: #5a5c64;
+    --brand-text: color-mix(in srgb, var(--brand-hover) 90%, #000);
     /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
     --text-faint: #62656e;
     /* The dark palette's are 1.7 to 3.4:1 on Light's surfaces. These hold 4.5:1 on all of them,

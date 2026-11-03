@@ -893,6 +893,9 @@
     gap: 8px;
 }
 
+.nick-edit-actions .save-btn { background: var(--brand-active); color: #fff; }
+.nick-edit-modal .settings-hint { color: var(--text-muted); }
+
 /* Appearance → Compact Mode: tighter vertical rhythm, same layout. Inside a
    same-author run the rows touch (no gap, never an overlap). */
 [data-compact="true"] .message {

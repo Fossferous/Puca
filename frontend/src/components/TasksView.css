@@ -480,7 +480,7 @@
     cursor: pointer;
 }
 .tasks-filter-item:hover { background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.06)); }
-.tasks-filter-item.active { color: var(--accent-color, #5865f2); }
+.tasks-filter-item.active { color: var(--brand-text); }
 .tasks-filter-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tasks-filter-count { font-size: 11px; color: var(--text-muted, #949ba4); font-variant-numeric: tabular-nums; }
 

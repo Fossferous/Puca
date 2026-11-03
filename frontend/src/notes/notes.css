@@ -340,8 +340,8 @@
     cursor: pointer;
 }
 .notes-textbtn:hover { background: var(--bg-modifier-hover); }
-.notes-textbtn.primary { background: var(--brand-primary); color: #fff; }
-.notes-textbtn.primary:hover { background: var(--brand-hover); }
+.notes-textbtn.primary { background: var(--brand-active); color: #fff; }
+.notes-textbtn.primary:hover { background: var(--brand-active); filter: brightness(0.9); }
 .notes-textbtn.danger { color: var(--text-danger); }
 .notes-textbtn:disabled { opacity: 0.5; cursor: default; }
 
@@ -627,7 +627,7 @@
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--text-faint);
+    color: var(--text-muted);
 }
 
 .notes-swatches {
@@ -692,7 +692,7 @@
     color: var(--text-normal);
     font-size: 13px;
 }
-.notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
+.notes-labels-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
 
 /* ---------- Label manager (Edit labels) ------------------------------------
    Rows are 44px even on a mouse: they carry two destructive-adjacent buttons
@@ -1225,7 +1225,7 @@
     font-size: 14px;
 }
 .notes-undo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.notes-undo .notes-textbtn { color: var(--brand-primary); }
+.notes-undo .notes-textbtn { color: var(--brand-text); }
 
 /* ---------- Dialog ----------------------------------------------------------------
    The dialog shell moved to components/NotesDialog.css with its component. */
