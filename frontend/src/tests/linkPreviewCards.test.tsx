@@ -21,6 +21,8 @@ afterEach(() => {
 });
 
 async function said(content: string) {
+    if (root) act(() => root!.unmount());
+    host?.remove();
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -57,7 +59,6 @@ describe('a link in a spoiler has no card', () => {
 describe('the card has the address the link has', () => {
     it('CONTROL: a bare address, in a quote too', async () => {
         expect(await said('https://example.invalid/a')).toEqual(['https://example.invalid/a']);
-        act(() => root?.unmount());
         expect(await said('> https://example.invalid/b')).toEqual(['https://example.invalid/b']);
     });
 
@@ -83,7 +84,6 @@ describe('the card has the address the link has', () => {
 
     it('CONTROL: an address in code has one, as it always did', async () => {
         expect(await said('`https://example.invalid/in-code`')).toEqual(['https://example.invalid/in-code']);
-        act(() => root?.unmount());
         expect(await said('```\nhttps://example.invalid/in-block\n```')).toEqual(['https://example.invalid/in-block']);
     });
 });
@@ -91,7 +91,6 @@ describe('the card has the address the link has', () => {
 describe('what has no card', () => {
     it('a picture, which the message draws', async () => {
         expect(await said('https://example.invalid/pic.png')).toEqual([]);
-        act(() => root?.unmount());
         expect(await said('![a picture](https://example.invalid/pic)')).toEqual([]);
     });
 

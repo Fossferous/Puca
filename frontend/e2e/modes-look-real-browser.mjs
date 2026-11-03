@@ -704,7 +704,8 @@ try {
         }));
         const cardsAtRest = await cards();
         check(`spoiler holding a link on ${theme}: no card under the message gives it away`, cardsAtRest.hidden.length === 0, cardsAtRest);
-        check(`CONTROL: a link outside a spoiler on ${theme}: its card, with the link's own address`, JSON.stringify(cardsAtRest.open) === JSON.stringify(['https://example.invalid/open']), cardsAtRest);
+        check(`CONTROL: a link outside a spoiler on ${theme}: it has its card`, cardsAtRest.open.length === 1, cardsAtRest);
+        check(`a link outside a spoiler on ${theme}: its card has the link's own address`, cardsAtRest.open[0] === 'https://example.invalid/open', cardsAtRest);
         const underPointer = {};
         for (const kind of KINDS) {
             await chat.mouse.move(...await centreOf(inKind(kind)));
