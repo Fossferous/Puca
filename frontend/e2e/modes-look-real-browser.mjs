@@ -102,6 +102,7 @@ const LINKS = [
     ['my_repo: https://example.org/me/my_repo', 'https://example.org/me/my_repo'],
     ['5*3 is at https://example.org/a*b', 'https://example.org/a*b'],
     ['old~~name: https://example.org/old~~name', 'https://example.org/old~~name'],
+    ['my_file at Https://example.org/my_file', 'Https://example.org/my_file'],
     ['Link:https://example.org/page', 'https://example.org/page'],
     ['Download here:https://example.org/file', 'https://example.org/file'],
     ['<https://example.org>', 'https://example.org'],
@@ -115,6 +116,7 @@ const LINKS = [
     ['[w](https://example.org/wiki/Foo_(bar))', 'https://example.org/wiki/Foo_(bar)'],
     ['https://example.org/plain', 'https://example.org/plain', 'same'],
     ['**https://example.org/bold**', 'https://example.org/bold', 'same'],
+    ['**https://example.org/a*b**!', 'https://example.org/a*b', 'same'],
     ['see [the plot](https://example.org/plot).', 'https://example.org/plot', 'same'],
 ];
 

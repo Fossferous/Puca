@@ -1,8 +1,9 @@
 /**
- * The message parser as it was at d40abf43, frozen, for one test: "a spoiler never stops being one"
- * in messageParser.test.ts holds the parser to everything THIS one hid. Reading addresses better
- * came after it, and every rule of that has a way to cost a spoiler if it is careless. Not to be
- * imported by anything else, and not to be kept up to date: its being out of date is the point.
+ * The message parser as it was at d40abf43, frozen, for two controls. "a spoiler never stops being
+ * one" in messageParser.test.ts holds the parser to everything THIS one hid: reading addresses
+ * better came after it, and every rule of that has a way to cost a spoiler if it is careless. And
+ * e2e/modes-look-real-browser.mjs presses its links as the negative control for where a link opens.
+ * Not for anything else, and not to be kept up to date: its being out of date is the point.
  */
 export type Node =
     | { type: 'text'; value: string }

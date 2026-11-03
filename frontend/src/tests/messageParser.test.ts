@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseMessage, extractMentions, isSafeUrl, type Node } from '../utils/messageParser';
+import { messageMentionsUser } from '../utils/messageMentions';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
@@ -549,6 +550,41 @@ describe('mentions & channels', () => {
 
     it('parses shortcode emoji', () => {
         expect(parseMessage(':smile:')[0]).toMatchObject({ type: 'emoji', name: 'smile' });
+    });
+});
+
+// messageMentionsUser is what decides who gets highlighted and hears the mention sound.
+describe('who an address mentions: nobody', () => {
+    const alice = { username: 'alice' };
+
+    it.each([
+        ['https://example.org/@alice/1'],
+        ['Https://example.org/@alice/1'],
+        ['HTTP://example.org/@alice/1'],
+        ['Link:https://example.org/@alice/1'],
+        ['<https://example.org/@alice>'],
+        ['{"url":"https://example.org/@alice"}'],
+        ['https://example.org/(@alice)'],
+        ['[the post](https://example.org/@alice/1)'],
+        ['[the post](https://example.org/(@alice))'],
+        ['my_file https://example.org/@alice_file'],
+    ])('%s', (content) => {
+        expect(messageMentionsUser(content, alice)).toBe(false);
+        expect(extractMentions(content).users).toEqual([]);
+    });
+
+    it.each([
+        ['@alice https://example.org/@bob/1'],
+        ['https://example.org/@bob/1 @alice'],
+        ['Https://example.org/@bob/1 @alice'],
+        ['Link:https://example.org/@bob/1 @alice'],
+        ['<https://example.org/@bob> @alice'],
+        ['(https://example.org/Foo_(bar)) @alice'],
+        ['[the post](https://example.org/Foo_(bar)) @alice'],
+        ['**@alice** https://example.org/a_b'],
+    ])('CONTROL: a real mention beside one still is: %s', (content) => {
+        expect(messageMentionsUser(content, alice)).toBe(true);
+        expect(extractMentions(content).users).toEqual(['alice']);
     });
 });
 
