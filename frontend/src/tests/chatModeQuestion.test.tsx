@@ -3,8 +3,9 @@
  * page and the page goes on running behind it (api/appDialogs.ts), so a ServerModeChanged frame
  * can land while it is open. PUT /modes/active names only what to turn on, and the server ends
  * whatever is on by then: the answer to "3 people are in Game Night" would disconnect everyone in
- * Movie Night, whom nobody warned about. Through the real Chat, its real menu, the real question
- * and the real frame handler; and the real Modes tab for the sibling, deleting a mode.
+ * Movie Night, whom nobody warned about. A menu left open is the same on every platform, with no
+ * question at all when the rooms it knows of are empty. Through the real Chat, its real menu, the
+ * real question and the real frame handler; and the real Modes tab for the sibling, deleting a mode.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act } from 'react';
@@ -145,13 +146,17 @@ describe('a switch answered after the mode moved', () => {
         // Three people in Game Night's room, so that turning it off has something to warn about.
         for (const id of [7, 8, 9]) upsertVoiceUser('voice_21', { id, username: `u${id}` });
     }
-    /** The real selector, the real menu, the real item: what a person presses to get the question. */
-    async function pressOff() {
-        await act(async () => { document.querySelector<HTMLElement>('[data-testid="mode-selector"]')!.click(); });
+    const openMenu = () => act(async () => { document.querySelector<HTMLElement>('[data-testid="mode-selector"]')!.click(); });
+    async function pressOffInMenu() {
         const off = [...document.querySelectorAll<HTMLElement>('.context-menu .context-menu-item')].find(b => b.textContent === 'Off');
         expect(off, 'the menu offers Off').toBeTruthy();
         await act(async () => { off!.click(); });
         await settle();
+    }
+    /** The real selector, the real menu, the real item: what a person presses to get the question. */
+    async function pressOff() {
+        await openMenu();
+        await pressOffInMenu();
     }
     const frame = async (active: number | null, previous: number | null) => {
         expect(modeFrames.length, 'Chat listens for the frame').toBeGreaterThan(0);
@@ -221,6 +226,53 @@ describe('a switch answered after the mode moved', () => {
         expect(confirm).toHaveBeenCalledTimes(1);
         expect(h.sent).toEqual([{ method: 'PUT', path: '/servers/s1/modes/active', body: { mode_id: null } }]);
         expect(said(NOTHING_SWITCHED)).toBe(false);
+    });
+
+    describe('with no question at all: a menu left open, and the rooms it knows of empty', () => {
+        /** Game Night's rooms empty, so that turning it off asks nothing; Movie Night's are not. */
+        async function mountWithPeopleInMovieNight() {
+            await mountChat();
+            globalVoiceUsers.clear();
+            for (const id of [7, 8, 9]) upsertVoiceUser('voice_22', { id, username: `u${id}` });
+        }
+
+        for (const [platform, tauri] of [['the desktop', true], ['the web and Android', false]] as const) {
+            it(`on ${platform}, another mode came on behind the menu: Off ends nothing, and says so`, async () => {
+                h.tauri = tauri;
+                const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+                await mountWithPeopleInMovieNight();
+                await openMenu();
+                await frame(MOVIE_NIGHT, GAME_NIGHT);
+                expect(document.querySelector('.context-menu'), 'the frame leaves the menu open').not.toBeNull();
+                expect(document.querySelector('[data-testid="mode-selector"]')?.textContent, 'the selector has moved on').toContain('Movie Night');
+                await pressOffInMenu();
+                expect(question(), 'it knows of no one to warn about').toBeNull();
+                expect(confirm).not.toHaveBeenCalled();
+                expect(h.sent, 'turning "off" now would end Movie Night, which nobody warned about').toEqual([]);
+                expect(said(NOTHING_SWITCHED)).toBe(true);
+            });
+
+            it(`CONTROL: on ${platform}, nothing moved behind it: Off asks nothing and switches`, async () => {
+                h.tauri = tauri;
+                await mountWithPeopleInMovieNight();
+                await openMenu();
+                await settle();
+                await pressOffInMenu();
+                expect(question()).toBeNull();
+                expect(h.sent).toEqual([{ method: 'PUT', path: '/servers/s1/modes/active', body: { mode_id: null } }]);
+                expect(said(NOTHING_SWITCHED)).toBe(false);
+            });
+        }
+
+        it('a menu built after the frame knows the mode has moved, and warns about the mode that is on', async () => {
+            await mountWithPeopleInMovieNight();
+            await frame(MOVIE_NIGHT, GAME_NIGHT);
+            await pressOff();
+            expect(question()?.textContent).toContain('3 people are in the voice channels of Movie Night');
+            await answerOk();
+            expect(h.sent).toEqual([{ method: 'PUT', path: '/servers/s1/modes/active', body: { mode_id: null } }]);
+            expect(said(NOTHING_SWITCHED)).toBe(false);
+        });
     });
 });
 

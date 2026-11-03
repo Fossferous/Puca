@@ -97,11 +97,13 @@ and no others, so what they are told follows from what actually happened to them
 rather than from a guess at their channel's modes. `ServerModeChanged` goes out first,
 which is how the client knows what the mode was called.
 
-A warning is about the mode that was on when it was asked. On the desktop the question is in
-the page and frames keep arriving behind it, so if the mode has moved by the answer, nothing is
-switched and the app says so; deleting a mode does the same. The request names only what to turn
-on, so the server would otherwise end whichever mode is on by then. A native dialog stops the
-page, so on the web and Android the same gap is the server's alone and is left open.
+A warning is about the mode that was on when it was asked, and so is a menu left open, which
+asks nothing at all if that mode's rooms were empty. Frames keep arriving behind an open menu on
+every platform, and on the desktop behind the question, which is in the page, so if the mode has
+moved by the press or the answer, nothing is switched and the app says so; deleting a mode does
+the same. The request names only what to turn on, so the server would otherwise end whichever
+mode is on by then. A native dialog stops the page, so on the web and Android the gap while one
+is being answered is the server's alone and is left open.
 
 **Someone the room has lost track of goes too.** A LiveKit session whose socket is not
 in `voice_<id>` (it died, or the backend has just restarted) has no room entry to find,
