@@ -33,7 +33,9 @@
 //      and a hidden link takes no focus. Revealed, each looks as it does outside a spoiler, and a
 //      press on a link or a channel is for that and leaves it revealed (a press on the words hides
 //      it again). NEGATIVE CONTROL: with the hiding rule taken out of the stylesheet, the same count
-//      finds every kind.
+//      finds every kind. Each is rendered as Chat renders a message, beside the REAL LinkPreview: no
+//      card under the message gives a spoilered link away, hidden or revealed, and a link outside a
+//      spoiler has its card, with the link's own address (the control).
 //
 // No server, no build, nothing leaves the machine (one page served on 127.0.0.1), silent.
 //
@@ -90,6 +92,7 @@ const chatBuild = await build({
             import { useState } from 'react';
             import { createRoot } from 'react-dom/client';
             import { MessageContent } from './components/MessageContent';
+            import { LinkPreview } from './components/LinkPreview';
             import { mapPicture, pictureStyle, readPictureTheme } from './api/modeLook';
             window.__chat = { mapPicture, pictureStyle, readPictureTheme };
             // What a press did, with nothing really opened.
@@ -111,12 +114,13 @@ const chatBuild = await build({
                 mixed: '||words \`the code\` [the link](https://example.invalid/mixed) @alice||',
                 formats: '||**bold** *lean* __under__ ~~struck~~ :fire:||',
             };
+            const OPEN = '\`the code\` [the link](https://example.invalid/open) @alice @everyone #general';
             function Kinds() {
                 const [n, set] = useState(0);
                 window.__resetKinds = () => set((x) => x + 1);
                 return (
                     <div className="message-content" id="kinds" key={n}>
-                        {Object.entries(KINDS).map(([kind, content]) => <div key={kind} data-kind={kind}>{said(content)}</div>)}
+                        {Object.entries(KINDS).map(([kind, content]) => <div key={kind} data-kind={kind}>{said(content)}<LinkPreview content={content} /></div>)}
                     </div>
                 );
             }
@@ -126,7 +130,7 @@ const chatBuild = await build({
                         <MessageContent content="Plain words. ||the demon is **Alice**||" members={[]} />
                     </div>
                     <Kinds />
-                    <div className="message-content" id="open">{said('\`the code\` [the link](https://example.invalid/open) @alice @everyone #general')}</div>
+                    <div className="message-content" id="open">{said(OPEN)}<LinkPreview content={OPEN} /></div>
                     <form className="message-form" style={{ marginTop: 'auto' }} onSubmit={(e) => e.preventDefault()}>
                         <div className="input-wrapper">
                             <div className="composer-autocomplete">
@@ -668,6 +672,13 @@ try {
         };
         const atRest = await counted();
         check(`spoiler holding each kind on ${theme}: nothing is painted at rest, chips included`, Object.values(atRest).every((n) => n === 0), atRest);
+        const cards = () => chat.evaluate(() => ({
+            hidden: [...document.querySelectorAll('#kinds .link-preview-card')].map((a) => a.getAttribute('href')),
+            open: [...document.querySelectorAll('#open .link-preview-card')].map((a) => a.getAttribute('href')),
+        }));
+        const cardsAtRest = await cards();
+        check(`spoiler holding a link on ${theme}: no card under the message gives it away`, cardsAtRest.hidden.length === 0, cardsAtRest);
+        check(`CONTROL: a link outside a spoiler on ${theme}: its card, with the link's own address`, JSON.stringify(cardsAtRest.open) === JSON.stringify(['https://example.invalid/open']), cardsAtRest);
         const underPointer = {};
         for (const kind of KINDS) {
             await chat.mouse.move(...await centreOf(inKind(kind)));
@@ -697,6 +708,8 @@ try {
         await settled();
         const afterPress = await chat.evaluate(() => ({ pressed: window.__pressed.slice(), revealed: document.querySelectorAll('#kinds .spoiler.revealed').length }));
         check(`spoiler holding each kind on ${theme}: the first press only reveals: nothing opened, no channel entered`, afterPress.pressed.length === 0 && afterPress.revealed === KINDS.length, afterPress);
+        const cardsRevealed = await cards();
+        check(`spoiler holding a link on ${theme}: revealed, it is in the message, and still no card`, cardsRevealed.hidden.length === 0, cardsRevealed);
 
         const looks = await chat.evaluate(() => {
             const read = (el) => { const c = getComputedStyle(el); return { colour: c.color, background: c.backgroundColor, visibility: c.visibility }; };
