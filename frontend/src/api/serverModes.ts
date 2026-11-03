@@ -539,8 +539,11 @@ export function measureDetail(rgba: Uint8ClampedArray, width: number, height: nu
     const edge = Math.max(width, height);
     const patchWidth = Math.max(2, Math.round(edge / PATCH_ACROSS));
     const patchHeight = Math.max(2, Math.round(edge / PATCH_DOWN));
-    const cols = Math.ceil(width / patchWidth);
-    const rows = Math.ceil(height / patchHeight);
+    // Only the patches a sample lands in. A last row one odd pixel tall (1024x768) would keep a
+    // mean of 0, and softening would lean the picture's bottom edge towards black.
+    const lastSampled = (size: number) => size - 1 - (size - 1) % 2;
+    const cols = Math.floor(lastSampled(width) / patchWidth) + 1;
+    const rows = Math.floor(lastSampled(height) / patchHeight) + 1;
     const sums = new Float64Array(cols * rows);
     const squares = new Float64Array(cols * rows);
     const counts = new Uint32Array(cols * rows);
