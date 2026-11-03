@@ -3654,6 +3654,14 @@ export function Chat({ onLogout }: ChatProps) {
             return;
         }
 
+        // Nowhere to send it, as while a new server's list is on its way and the
+        // header says "No channel selected". Everything below empties the box, so
+        // this comes first. SAY SO, like the upload above.
+        if (!currentDM && !currentChannel) {
+            showToast('No channel is open yet. Your message is still in the box.');
+            return;
+        }
+
         // Typed text + the ready chips' markdown, built ONLY now — the
         // sovereign-enc hrefs (which carry file keys) never touch the textarea.
         const content = buildOutgoingContent(input, pendingAttachments);
@@ -3732,7 +3740,7 @@ export function Chat({ onLogout }: ChatProps) {
             return;
         }
 
-        // Handle server channel messages
+        // Handle server channel messages (one is open, by the check above: this is for the compiler)
         if (!currentChannel) return;
 
         // Optimistic update - add message to local state immediately

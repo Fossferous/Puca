@@ -27,15 +27,19 @@ const h = vi.hoisted(() => ({
     deleted: [] as string[],
     /** What the open channel's history holds. */
     rows: [] as Record<string, unknown>[],
+    /** A channel's history apart from `rows`: on its way, say, or failing. */
+    history: null as null | ((channel: number) => Promise<Record<string, unknown>[]>),
     /** A leave or a delete still on its way, until this settles. */
     hold: null as null | Promise<void>,
+    /** A server's list still on its way, until this settles. */
+    holdList: null as null | { server: string; until: Promise<void> },
     nav: null as string | null,
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/servers')>()),
     markChannelRead: async () => {},
-    getMessages: async (_ch: number, _limit: number, before?: string) => (before ? [] : h.rows),
+    getMessages: async (ch: number, _limit: number, before?: string) => (before ? [] : h.history ? h.history(ch) : h.rows),
     decryptChannelMessages: async (_ch: number, raw: unknown[]) => raw,
     listPinnedMessages: async () => [],
     sendChannelMessageEncrypted: async (...args: unknown[]) => { h.sent.push(args); return { id: 'm1' }; },
@@ -103,6 +107,7 @@ vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (/\/config$/.test(u)) return reply(200, { app_url: 'https://app.example.com', registration_invite_required: false, srp_version: 2 });
     if (/\/servers$/.test(u)) return reply(200, h.servers);
     const list = /\/servers\/([^/]+)\/channels$/.exec(u);
+    if (list && h.holdList?.server === list[1]) await h.holdList.until;
     if (list) return reply(200, h.channels.filter(c => c.server_id === list[1]));
     if (/\/servers\/s1\/modes$/.test(u)) return reply(200, {
         active_mode_id: h.servers[0]?.active_mode_id ?? null, can_switch: true, can_edit: true, can_call_back: true,
@@ -134,7 +139,9 @@ beforeEach(() => {
     h.discarded = [];
     h.deleted = [];
     h.rows = [];
+    h.history = null;
     h.hold = null;
+    h.holdList = null;
     h.nav = null;
     feedLoads = 0;
     vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
@@ -688,25 +695,30 @@ describe('a leave or a disband still on its way while they go somewhere else', (
     });
 });
 
-describe('a channel made from a collection\'s page', () => {
-    /** Create Subchannel on the open collection's row, through the real form. */
-    const createInside = async (name: string) => {
-        await act(async () => {
-            rowNamed('Private')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
-        });
-        const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(el => /create subchannel/i.test(el.textContent ?? ''));
-        expect(item, 'the row\'s menu has Create Subchannel').toBeTruthy();
-        await act(async () => { item!.click(); });
-        await settled(3);
-        const field = [...document.querySelectorAll<HTMLInputElement>('input[type="text"]')].find(i => i.closest('.form-group')?.textContent?.includes('Channel Name'))!;
-        expect(field, 'the form is up').toBeTruthy();
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, name);
-        await act(async () => { field.dispatchEvent(new Event('input', { bubbles: true })); });
-        await settle();
-        await act(async () => { field.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
-        await settled();
-    };
+/** The real Create Channel form, up: its name filled in and sent. */
+const submitCreateForm = async (name: string) => {
+    await settled(3);
+    const field = [...document.querySelectorAll<HTMLInputElement>('input[type="text"]')].find(i => i.closest('.form-group')?.textContent?.includes('Channel Name'))!;
+    expect(field, 'the form is up').toBeTruthy();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, name);
+    await act(async () => { field.dispatchEvent(new Event('input', { bubbles: true })); });
+    await settle();
+    await act(async () => { field.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    await settled();
+};
 
+/** Create Subchannel on the open collection's row, through the real form. */
+const createInside = async (name: string) => {
+    await act(async () => {
+        rowNamed('Private')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+    });
+    const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(el => /create subchannel/i.test(el.textContent ?? ''));
+    expect(item, 'the row\'s menu has Create Subchannel').toBeTruthy();
+    await act(async () => { item!.click(); });
+    await submitCreateForm(name);
+};
+
+describe('a channel made from a collection\'s page', () => {
     it('opens that channel, and a delete of both says the words once', async () => {
         h.servers = [{ ...SRV, owner_id: ME }];
         h.channels = [GENERAL, PRIVATE];
@@ -723,6 +735,82 @@ describe('a channel made from a collection\'s page', () => {
         expect(dialogs.notices()).toHaveLength(1);
         expect(dialogs.notices()[0]).toContain('#made-inside is no longer available');
         expect(dialogs.notices()[0]).toContain('from general');
+    });
+});
+
+describe('Enter with no channel open, a new server\'s list still on its way', () => {
+    /** On to Far with its list held back; the function returned lets the list come. */
+    const onToFar = async () => {
+        let come!: () => void;
+        h.holdList = { server: 's2', until: new Promise<void>(r => { come = r; }) };
+        await clickServer('Far');
+        await settled(5);
+        expect(headerText(), 'the state this is about').toContain('No channel selected');
+        return async () => {
+            h.holdList = null;
+            await act(async () => { come(); });
+            await landedOn('far-general');
+        };
+    };
+    const submitForm = async () => {
+        await act(async () => { composer()!.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settled(10);
+    };
+
+    it('the words stay in the box, it says why, and they can go once a channel opens', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        const listCame = await onToFar();
+        await type('hello far');
+        await pressEnter();
+        expect(composer()!.value).toBe('hello far');
+        expect(h.sent).toEqual([]);
+        expect(document.querySelector('.app-toast-text')?.textContent).toContain('still');
+        await listCame();
+        expect(composer()!.value, 'still there on the channel that opened').toBe('hello far');
+        await pressEnter();
+        expect(h.sent[0]?.[0], 'and they go there').toBe(30);
+        expect(composer()!.value).toBe('');
+    });
+
+    it('so does the Send button', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        await type('hello far');
+        await submitForm();
+        expect(composer()!.value).toBe('hello far');
+        expect(h.sent).toEqual([]);
+    });
+
+    it('so do words kept behind a collection\'s page', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, PRIVATE, FAR_GENERAL];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        const listCame = await onToFar();
+        expect(composer()!.value, 'the box is back, with them in it').toBe('from general');
+        await pressEnter();
+        expect(composer()!.value).toBe('from general');
+        expect(h.sent).toEqual([]);
+        expect(dialogs.notices()).toEqual([]);
+        await listCame();
+        expect(composer()!.value).toBe('from general');
+    });
+
+    it('CONTROL: a name for yourself on the server needs no channel, and clears the box as it did', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, FAR_GENERAL];
+        await mountChat();
+        await onToFar();
+        await type('/nick me');
+        await pressEnter();
+        expect(composer()!.value).toBe('');
+        expect(vi.mocked(fetch).mock.calls.some(([url, init]) => /\/servers\/s2\/nickname$/.test(String(url)) && String(init?.body).includes('"me"')), 'the name went').toBe(true);
+        expect(h.sent).toEqual([]);
     });
 });
 
