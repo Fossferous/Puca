@@ -526,7 +526,7 @@ the same pair as offline.
 **Idle and away presence.** A client announces it by putting `presence` in
 its `caps` list (see *Client capabilities and device kind* above) — not by a
 frame, because an older server answers an unknown client→server **frame**
-with an `Error` (which the stock client shows as an alert). The announcement is
+with an `Error` (which the stock client shows as a notice). The announcement is
 latched for the life of the socket. A server that supports a capability
 confirms it to that connection only, right after connect:
 
@@ -609,7 +609,7 @@ table, and chips are free and per table.
 | `GameBet`, `GameClearBet` | `table_id` (+ `amount`) | seated, Blackjack, between rounds |
 | `GameSitOut`, `GameSitIn`, `GameRebuy`, `GameShowCards` | `table_id` | seated |
 | `GameResync` | `table_id` | in the call; at most one a second per connection |
-| `GameClose`, `GameRemovePlayer` | `table_id` (+ `seat`) | in the call, `MOVE_MEMBERS` |
+| `GameClose`, `GameRemovePlayer` | `table_id` (+ `seat`, `user_id`) | in the call, `MOVE_MEMBERS` |
 
 | Server frame | When |
 |---|---|

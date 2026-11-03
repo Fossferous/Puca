@@ -18,10 +18,9 @@ import type { NoteCard } from '../notes/model/notesModel';
 import type { Task } from '../api/tasks';
 
 const h = vi.hoisted(() => ({ tauri: true }));
-const dialog = vi.hoisted(() => ({ save: vi.fn<(o: { defaultPath?: string; title?: string }) => Promise<string | null>>() }));
+const dialog = vi.hoisted(() => ({ save: vi.fn<(o: { suggestedName?: string }) => Promise<string | null>>() }));
 const core = vi.hoisted(() => ({ invoke: vi.fn<(cmd: string, body?: unknown, opts?: unknown) => Promise<unknown>>() }));
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: dialog.save }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: core.invoke }));
 vi.mock('../api/platform', async (orig) => ({
     ...(await orig<typeof import('../api/platform')>()),
@@ -42,10 +41,21 @@ const ASCII = /^[\x20-\x7e]*$/;
 let anchorClick: ReturnType<typeof vi.spyOn>;
 let toasts: string[];
 
+/** The shell as these tests need it: the dialog answers through `dialog.save`,
+ *  and `write` is what attachment_save does. */
+function answerShell(write: () => Promise<string>) {
+    core.invoke.mockReset().mockImplementation(async (cmd: string, body?: unknown) => {
+        if (cmd === 'choose_save_path') return dialog.save(body as { suggestedName?: string });
+        return cmd === 'attachment_save' ? write() : undefined;
+    });
+}
+/** What reached the shell apart from the dialog: a cancel must leave this empty. */
+const shellWrites = () => core.invoke.mock.calls.filter(c => c[0] !== 'choose_save_path');
+
 beforeEach(() => {
     h.tauri = true;
     dialog.save.mockReset().mockResolvedValue(DEST);
-    core.invoke.mockReset().mockImplementation(async (cmd: string) => (cmd === 'attachment_save' ? WRITTEN : undefined));
+    answerShell(async () => WRITTEN);
     anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     URL.createObjectURL = vi.fn(() => 'blob:export');
     URL.revokeObjectURL = vi.fn();
@@ -73,7 +83,7 @@ describe('saveNotesExport in the desktop app', () => {
         const text = '# Café list\n\n- [ ] Crème brûlée\n';
         const r = await saveNotesExport('puca-notes-2026-09-29.md', text, 'text/markdown;charset=utf-8');
         expect(dialog.save).toHaveBeenCalledTimes(1);
-        expect(dialog.save.mock.calls[0][0]).toMatchObject({ defaultPath: 'puca-notes-2026-09-29.md' });
+        expect(dialog.save.mock.calls[0][0]).toEqual({ suggestedName: 'puca-notes-2026-09-29.md' });
         const w = written();
         expect(w.text).toBe(text);
         expect(decodeURIComponent(w.headers['x-dest-path'])).toBe(DEST);
@@ -94,12 +104,12 @@ describe('saveNotesExport in the desktop app', () => {
     it('a cancel writes nothing, downloads nothing, and says it was cancelled', async () => {
         dialog.save.mockResolvedValue(null);
         await expect(saveNotesExport('a.md', 'x', 'text/markdown')).resolves.toEqual({ where: '', onDisk: false, cancelled: true });
-        expect(core.invoke).not.toHaveBeenCalled();
+        expect(shellWrites()).toEqual([]);
         expect(anchorClick).not.toHaveBeenCalled();
     });
 
     it('a failed write rejects with the shell\'s reason, never "saved"', async () => {
-        core.invoke.mockRejectedValue('could not write "C:\\\\x.md": access denied');
+        answerShell(() => Promise.reject('could not write "C:\\\\x.md": access denied'));
         const failed = saveNotesExport('a.md', 'x', 'text/markdown');
         // An Error carrying it, not the bare string the shell rejects with:
         // every caller reads `e instanceof Error ? e.message : <generic>`.
@@ -151,16 +161,16 @@ describe('the account menu\'s export (exportNotes) in the desktop app', () => {
     it('a failed write is a toast with the reason', async () => {
         // The shape the shell really rejects with: attachment_save returns
         // Result<String, String>, and invoke rejects with that bare string.
-        core.invoke.mockRejectedValue('could not write "C:\\\\x.md": Access is denied. (os error 5)');
+        answerShell(() => Promise.reject('could not write "C:\\\\x.md": Access is denied. (os error 5)'));
         await exportNotes([card], 'md');
         expect(toasts).toEqual(['could not write "C:\\\\x.md": Access is denied. (os error 5)']);
     });
 
     it('so is a Save As dialog that fails to open', async () => {
-        dialog.save.mockRejectedValue('dialog.save not allowed');
+        dialog.save.mockRejectedValue('the window is gone');
         await exportNotes([card], 'md');
-        expect(toasts).toEqual(['dialog.save not allowed']);
-        expect(core.invoke).not.toHaveBeenCalled();
+        expect(toasts).toEqual(['the window is gone']);
+        expect(shellWrites()).toEqual([]);
     });
 });
 
@@ -173,11 +183,11 @@ describe('the calendar .ics shares the same way out (deliverIcs)', () => {
     it('cancelled, with nothing written', async () => {
         dialog.save.mockResolvedValue(null);
         await expect(deliverIcs('puca-notes.ics', 'BEGIN:VCALENDAR')).resolves.toEqual({ how: 'cancelled' });
-        expect(core.invoke).not.toHaveBeenCalled();
+        expect(shellWrites()).toEqual([]);
     });
 
     it('a failed write carries the shell\'s reason to the calendar\'s toast', async () => {
-        core.invoke.mockRejectedValue('could not write "D:\\\\cal.ics": The device is not ready. (os error 21)');
+        answerShell(() => Promise.reject('could not write "D:\\\\cal.ics": The device is not ready. (os error 21)'));
         const failed = deliverIcs('puca-notes.ics', 'BEGIN:VCALENDAR');
         await expect(failed).rejects.toBeInstanceOf(Error);
         await expect(failed).rejects.toThrow(/The device is not ready/);

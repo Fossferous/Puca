@@ -23,6 +23,7 @@ import {
     drawStroke, emptyDrawing, renderDrawing, serializeDrawing, toCanvasPoint,
 } from '../api/drawing';
 import './DrawingCanvas.css';
+import { askConfirm } from '../api/appDialogs';
 
 const COLOR_NAMES: Record<string, string> = {
     '#202124': 'Black', '#d93025': 'Red', '#1a73e8': 'Blue', '#188038': 'Green', '#f29900': 'Orange', '#9334e6': 'Purple',
@@ -62,8 +63,8 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
         if (c) renderDrawing(c, doc);
     }, [doc, ctx]);
 
-    const cancel = useCallback(() => {
-        if (dirty && !window.confirm('Discard the changes to this drawing?')) return;
+    const cancel = useCallback(async () => {
+        if (dirty && !await askConfirm('Discard the changes to this drawing?')) return;
         onCancel();
     }, [dirty, onCancel]);
 
@@ -73,7 +74,7 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
         // be discarded over the chat.
         if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel(); }
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); void cancel(); }
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
@@ -160,7 +161,7 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
                     ))}
                     <span className="notes-draw-sep" />
                     <button type="button" className="notes-draw-btn" disabled={doc.strokes.length === 0} onClick={() => setDoc(d => ({ ...d, strokes: d.strokes.slice(0, -1) }))}>Undo</button>
-                    <button type="button" className="notes-draw-btn" disabled={doc.strokes.length === 0} onClick={() => { if (window.confirm('Clear the whole drawing?')) setDoc(d => ({ ...d, strokes: [] })); }}>Clear</button>
+                    <button type="button" className="notes-draw-btn" disabled={doc.strokes.length === 0} onClick={async () => { if (await askConfirm('Clear the whole drawing?')) setDoc(d => ({ ...d, strokes: [] })); }}>Clear</button>
                 </div>
                 <div className="notes-draw-stage">
                     <canvas

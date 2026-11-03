@@ -30,6 +30,7 @@ import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderT
 import { parseWall, viewerZone, isInGap } from '../../utils/calendarMath';
 import { CalendarIcon, CloseIcon, EyeOffIcon, WarningIcon } from '../Icons';
 import './Schedule.css';
+import { askConfirm } from '../../api/appDialogs';
 
 export interface ScheduleEditorProps {
     /** An item, or a NOTE's own reminder (migration 068) — this editor only
@@ -111,12 +112,12 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
         onSave(text, deriveDueAt(built, Date.now()));
     };
 
-    const remove = () => {
+    const remove = async () => {
         // The item keeps a plain due time at its next occurrence, so it does
         // not silently lose its date — but a PRIVATE time is only published
         // to the server on an explicit yes (scheduleForm.dueAtAfterRemoving).
         const reveal = removingRevealsPrivateTime(parsed)
-            ? window.confirm('This item keeps its time private from the server. Keep a reminder at its next time? The server will then see that time. (Cancel removes the date without a reminder.)')
+            ? await askConfirm('This item keeps its time private from the server. Keep a reminder at its next time? The server will then see that time. (Cancel removes the date without a reminder.)')
             : true;
         onSave(null, dueAtAfterRemoving(parsed, task.due_at, Date.now(), reveal));
     };

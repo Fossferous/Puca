@@ -260,7 +260,7 @@ pub enum GameOp {
 /// Why a game frame was refused (`GameRefused.code`, plus the numbers some
 /// codes carry). Typed, never text: the client words each code. Expected
 /// refusals - a call that already has a table, a bet below the minimum - are
-/// these, never the generic `Error` frame the client shows as an alert.
+/// these, never the generic `Error` frame the client shows as a notice.
 ///
 /// A frame naming a table that is not open in that room (it closed, the
 /// server restarted, the id is wrong) is NOT refused: it is answered with

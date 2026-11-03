@@ -14,6 +14,7 @@ import { loadSettings, saveSettings } from '../../components/settingsStore';
 import { isAndroidApp } from '../../api/platform';
 import { locationStatus, mobileLocationAvailable, openLocationSettings, type LocationPermissionStatus } from '../../api/mobileLocation';
 import { clearAllPlaces, listPlaces, placesVersion, requestLocationReminderPermissions, subscribePlaces } from '../../api/taskPlaces';
+import { askConfirm } from '../../api/appDialogs';
 
 const LOCATION_DISCLOSURE =
     'Púca Notes will use this phone’s location — including while the app is closed ("Allow all the time") — '
@@ -39,8 +40,8 @@ export function NotesLocationSettings() {
     // No plugin answered (browser, older APK): nothing to offer.
     if (!isAndroidApp() || !status) return null;
 
-    const toggle = (next: boolean) => {
-        if (next && !window.confirm(LOCATION_DISCLOSURE)) return;
+    const toggle = async (next: boolean) => {
+        if (next && !await askConfirm(LOCATION_DISCLOSURE)) return;
         saveSettings({ ...loadSettings(), locationReminders: next });
         setOn(next);
         if (next) {
@@ -76,9 +77,9 @@ export function NotesLocationSettings() {
                     <button
                         type="button"
                         className="notes-link-btn"
-                        onClick={() => {
+                        onClick={async () => {
                             if (places === 0) return;
-                            if (window.confirm(`Delete all ${places} saved place${places === 1 ? '' : 's'} and their reminders from this phone?`)) clearAllPlaces();
+                            if (await askConfirm(`Delete all ${places} saved place${places === 1 ? '' : 's'} and their reminders from this phone?`)) clearAllPlaces();
                         }}
                         disabled={places === 0}
                     >

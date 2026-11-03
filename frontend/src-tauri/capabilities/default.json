@@ -10,7 +10,6 @@
     "process:allow-restart",
     "process:allow-exit",
     "updater:default",
-    "notification:default",
-    "dialog:allow-save"
+    "notification:default"
   ]
 }

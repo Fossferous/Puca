@@ -4,8 +4,8 @@
  *
  * WHY A HANDSHAKE AT ALL. An older server answers any ClientMessage variant it
  * does not know with an `Error` frame ("unknown variant ..."), and the chat
- * view turns every Error frame into a blocking alert() — a native modal in the
- * desktop app. Reproduced against a 0.9.830 backend during triage. So the new
+ * view shows every Error frame to the person, whatever they were doing.
+ * Reproduced against a 0.9.830 backend during triage. So the new
  * `SetActivity` frame may only ever be sent to a server that has SAID it
  * understands it, on THIS socket: a reconnect can land on an older rollback
  * host, so the answer is latched per socket and forgotten when it closes.

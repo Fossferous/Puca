@@ -8,6 +8,7 @@ import { PlayingCard } from './PlayingCard';
 import { AmountSheet, SeatAvatar, Stepper, TurnClock } from './GameBits';
 import { useCountdown } from './useCountdown';
 import { useGameSounds } from './useGameSounds';
+import { askConfirm } from '../../api/appDialogs';
 
 interface BlackjackTableProps {
     table: HeldTable & { view: BlackjackView };
@@ -159,8 +160,8 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, avatarOf, current
                                     <button
                                         type="button"
                                         className="games-btn games-btn-ghost gseat-remove"
-                                        onClick={() => {
-                                            if (confirm(`Remove ${name} from the table?`)) send(gameFrames.removePlayer(room, id, i));
+                                        onClick={async () => {
+                                            if (await askConfirm(`Remove ${name} from the table?`)) send(gameFrames.removePlayer(room, id, i, s.user_id));
                                         }}
                                     >
                                         Remove
@@ -186,8 +187,8 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, avatarOf, current
                         <button
                             type="button"
                             className="games-btn games-btn-ghost"
-                            onClick={() => {
-                                if (!v.in_round || me.hands.length === 0 || confirm('Stand up now? Your hands stand and settle with this round.')) send(gameFrames.stand(room, id));
+                            onClick={async () => {
+                                if (!v.in_round || me.hands.length === 0 || await askConfirm('Stand up now? Your hands stand and settle with this round.')) send(gameFrames.stand(room, id));
                             }}
                         >
                             Stand up

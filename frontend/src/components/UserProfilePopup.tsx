@@ -12,6 +12,7 @@ import {
 import { usePresence, PRESENCE_LABEL } from '../api/presenceStore';
 import { placeProfilePopup } from './userProfilePopupPlacement';
 import './UserProfilePopup.css';
+import { askConfirm, askText, tellUser } from '../api/appDialogs';
 
 interface UserProfilePopupProps {
     member: MemberWithRoles;
@@ -280,13 +281,13 @@ export function UserProfilePopup({
                                 <button
                                     className="kick-btn"
                                     onClick={async () => {
-                                        if (!confirm(`Kick ${member.username} from the server?`)) return;
+                                        if (!await askConfirm(`Kick ${member.username} from the server?`)) return;
                                         try {
                                             await kickMember(serverId, member.id);
                                             onRolesUpdated(); // Refresh member list
                                             onClose();
                                         } catch (err) {
-                                            alert(`Failed to kick: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                                            tellUser(`Failed to kick: ${err instanceof Error ? err.message : 'Unknown error'}`);
                                         }
                                     }}
                                 >
@@ -295,14 +296,14 @@ export function UserProfilePopup({
                                 <button
                                     className="ban-btn"
                                     onClick={async () => {
-                                        const reason = prompt(`Ban ${member.username}? Enter reason (optional):`);
+                                        const reason = await askText(`Ban ${member.username}? Enter reason (optional):`);
                                         if (reason === null) return; // Cancelled
                                         try {
                                             await banMember(serverId, member.id, reason || undefined);
                                             onRolesUpdated(); // Refresh member list
                                             onClose();
                                         } catch (err) {
-                                            alert(`Failed to ban: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                                            tellUser(`Failed to ban: ${err instanceof Error ? err.message : 'Unknown error'}`);
                                         }
                                     }}
                                 >

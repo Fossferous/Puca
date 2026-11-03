@@ -57,20 +57,20 @@ function mount(schedule: string) {
 }
 
 describe('ScheduleEditor → Remove', () => {
-    it('on a private item it ASKS, and Cancel saves due_at null', () => {
+    it('on a private item it ASKS, and Cancel saves due_at null', async () => {
         vi.spyOn(Date, 'now').mockReturnValue(NOW);
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
         const { onSave, remove } = mount(PRIVATE);
         expect(remove).toBeTruthy();
-        act(() => remove!.click());
+        await act(async () => remove!.click());
         expect(confirm).toHaveBeenCalledTimes(1);
         expect(onSave).toHaveBeenCalledWith(null, null);
     });
-    it('OK keeps a reminder (the user chose to reveal it)', () => {
+    it('OK keeps a reminder (the user chose to reveal it)', async () => {
         vi.spyOn(Date, 'now').mockReturnValue(NOW);
         vi.spyOn(window, 'confirm').mockReturnValue(true);
         const { onSave, remove } = mount(PRIVATE);
-        act(() => remove!.click());
+        await act(async () => remove!.click());
         expect(onSave).toHaveBeenCalledWith(null, NEXT);
     });
     it('positive control: a public item does not ask and keeps its next time', () => {

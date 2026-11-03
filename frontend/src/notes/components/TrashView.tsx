@@ -26,6 +26,7 @@ import { TrashIcon } from '../../components/Icons';
 import { type ListContentActions, useTrashedLists } from '../model/useListContent';
 import { type NoteRef } from '../model/notesModel';
 import '../noteContent.css';
+import { askConfirm } from '../../api/appDialogs';
 
 function subscribeMinute(cb: () => void): () => void {
     const id = window.setInterval(cb, 60_000);
@@ -90,8 +91,8 @@ function TrashRow({ list, content, now, restoreNote, queued }: RowProps) {
                     className="notes-textbtn danger"
                     disabled={queued}
                     title={queued ? QUEUED_TITLE : undefined}
-                    onClick={() => {
-                        if (!window.confirm(`Delete “${title}” forever? Its pictures and attachments go with it. This can’t be undone.`)) return;
+                    onClick={async () => {
+                        if (!await askConfirm(`Delete “${title}” forever? Its pictures and attachments go with it. This can’t be undone.`)) return;
                         void content.deleteForever(list);
                     }}
                 >
@@ -126,9 +127,9 @@ export function TrashView({ content, restoreNote, queuedDeletes }: TrashViewProp
                         className="notes-textbtn danger"
                         disabled={deletable === 0}
                         title={deletable === 0 ? QUEUED_TITLE : undefined}
-                        onClick={() => {
+                        onClick={async () => {
                             const all = deletable === lists.length;
-                            if (!window.confirm(`Delete ${all ? 'all ' : ''}${deletable} note${deletable === 1 ? '' : 's'} in the trash forever?${all ? '' : ' Notes still being moved there are left alone.'} This can’t be undone.`)) return;
+                            if (!await askConfirm(`Delete ${all ? 'all ' : ''}${deletable} note${deletable === 1 ? '' : 's'} in the trash forever?${all ? '' : ' Notes still being moved there are left alone.'} This can’t be undone.`)) return;
                             void content.emptyTrash(queuedDeletes);
                         }}
                     >

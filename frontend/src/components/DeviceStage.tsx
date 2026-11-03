@@ -63,6 +63,7 @@ import { TouchGestures } from '../api/devices/touchGestures';
 import { stageInputDiagnostics, type StageInputState } from '../api/devices/stageInputDiag';
 import { isMobile as isNativeMobile } from '../api/platform';
 import { computeRmoveScale } from '../api/remoteControl';
+import { appQuestionOpen } from '../api/appDialogs';
 import {
     FPS_SENS_MAX, FPS_SENS_MIN,
     loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
@@ -3369,8 +3370,10 @@ export function DeviceStage() {
             // A menu in the bar, or the Type text dialog over the stage, has
             // the keyboard: Tab onto its buttons, Enter or Space on them, Esc,
             // and anything typed after a click on its padding moved the focus
-            // to the page — none of it is for the machine over there.
-            if (barMenuOpenRef.current || typeTextOpen) return;
+            // to the page — none of it is for the machine over there. Nor is what
+            // answers one of the app's own questions (api/appDialogs.ts), which
+            // this listener hears first.
+            if (barMenuOpenRef.current || typeTextOpen || appQuestionOpen()) return;
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
             // typed every character into the controlled PC as well. The

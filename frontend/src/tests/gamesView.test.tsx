@@ -345,6 +345,27 @@ describe('notices and the disclosure', () => {
         expect(container.textContent).toContain('You are watching this table.');
     });
 
+    // Seats are chosen by the players: by the time a moderator answers "Remove Ann?",
+    // that seat may hold someone else, and the server refuses unless it still holds Ann.
+    it('Remove names the person the moderator was asked about, and only after a yes', async () => {
+        await deliver(seated);
+        await show({ gate: gate({ perms: PERM.CONNECT | PERM.PLAY_GAMES | PERM.MOVE_MEMBERS }) });
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+        const remove = document.querySelector<HTMLButtonElement>('.gseat-remove')!;
+        const asked = remove.textContent!.replace('Remove ', '');
+        await act(async () => { remove.click(); });
+        expect(confirm.mock.calls[0][0]).toContain(asked);
+        expect(ws.sentOf('GameRemovePlayer'), 'No sends nothing').toEqual([]);
+        confirm.mockReturnValue(true);
+        await act(async () => { remove.click(); });
+        confirm.mockRestore();
+        const frames = ws.sentOf('GameRemovePlayer');
+        expect(frames).toHaveLength(1);
+        const { seat, user_id: named } = frames[0].payload as unknown as { seat: number; user_id: number };
+        const seats = (seated as unknown as { payload: { view: { seats: ({ user_id: number } | null)[] } } }).payload.view.seats;
+        expect(named, 'the frame names who sits there').toBe(seats[seat]!.user_id);
+    });
+
     it('MOVE_MEMBERS shows Close table and Remove; without it neither', async () => {
         await deliver(seated);
         await show();

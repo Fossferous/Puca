@@ -31,6 +31,7 @@ import { pushMessageToast } from '../messageToastBus';
 import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
 import { asLiteralItemText, isHeadingTask } from '../../api/taskHeading';
+import { askConfirm } from '../../api/appDialogs';
 
 /** The Calendar tab's channels — the shape every dated view takes. */
 export type TasksCalendarChannel = TasksScopeChannel;
@@ -163,7 +164,7 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
     };
 
     const exportIcs = async () => {
-        if (!window.confirm('The .ics file is NOT encrypted: titles, times and places are in it as plain text. Export?')) return;
+        if (!await askConfirm('The .ics file is NOT encrypted: titles, times and places are in it as plain text. Export?')) return;
         let uidFor: (id: number) => string;
         try { uidFor = currentIcsUid(); } catch (err) { pushMessageToast({ title: err instanceof Error ? err.message : String(err) }); return; }
         const items: IcsItem[] = [];

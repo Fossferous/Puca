@@ -60,6 +60,7 @@ import './notes.css'
 // the blanket 44px touch-target rule Notes' own mobile block builds on.
 import '../mobile.css'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { AppDialogs } from '../components/AppDialogs'
 import { NotesApp } from './NotesApp'
 import { NotesUpdateGate } from './components/NotesUpdateGate'
 import { makeNotesQueryClient } from './model/notesQueries'
@@ -72,6 +73,7 @@ void bootNotesOffline(queryClient)
 
 createRoot(document.getElementById('root')!).render(
     <StrictMode>
+        <AppDialogs />
         <ErrorBoundary>
             <QueryClientProvider client={queryClient}>
                 <NotesUpdateGate>

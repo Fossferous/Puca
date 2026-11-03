@@ -44,6 +44,7 @@ import { recreationOrder } from '../model/noteContent';
 import { checkedCount, checkedRoots, deadSeriesAmong, describeUncheckWarning, uncheckOrder } from '../model/noteItemBulk';
 import { Popover } from '../../components/notes/Popover';
 import { UndoBar } from './UndoBar';
+import { askConfirm } from '../../api/appDialogs';
 
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
@@ -108,13 +109,20 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
     const uncheckAll = async () => {
         close();
         if (refusedOffline()) return;
-        const order = uncheckOrder(tasks);
+        const asked = uncheckOrder(tasks);
+        if (asked.length === 0) return;
+        const warning = describeUncheckWarning(deadSeriesAmong(asked));
+        if (warning) {
+            if (!await askConfirm(warning)) return;
+            // On the desktop the page runs on behind a question, for as long as it
+            // stays open: the connection and the list may not be what they were.
+            if (refusedOffline()) return;
+        }
+        const order = uncheckOrder(tasksRef.current);
         if (order.length === 0) return;
-        const warning = describeUncheckWarning(deadSeriesAmong(order));
-        if (warning && !window.confirm(warning)) return;
         // Only the top of each completed branch is re-ticked by the Undo:
         // completing a parent completes its subtree.
-        const roots = checkedRoots(tasks);
+        const roots = checkedRoots(tasksRef.current);
         setBusy(true);
         try {
             for (let i = 0; i < order.length; i++) {
@@ -147,16 +155,24 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
     const deleteChecked = async () => {
         close();
         if (refusedOffline()) return;
-        const roots = checkedRoots(tasks);
-        if (roots.length === 0) return;
+        const asked = checkedRoots(tasks);
+        if (asked.length === 0) return;
         // Deleting a branch takes its subtree on the server, so only the tops
         // are named — but everything under them goes, and the Undo owes all
         // of it back.
         const swept = new Set<number>();
-        for (const r of roots) for (const id of collectSubtreeIds(tasks, r.id)) swept.add(id);
-        if (!window.confirm(swept.size === 1
+        for (const r of asked) for (const id of collectSubtreeIds(tasks, r.id)) swept.add(id);
+        if (!await askConfirm(swept.size === 1
             ? 'Delete the ticked item? Undo brings it back.'
             : `Delete ${swept.size} ticked items? Undo brings them back with their dates, repeats and pictures.`)) return;
+        // On the desktop the page runs on behind a question, for as long as it stays
+        // open. What goes is what they were asked about and is still ticked: nothing
+        // ticked since (which the count they read did not include), nothing untouched.
+        if (refusedOffline()) return;
+        const now = tasksRef.current;
+        const stillTicked = new Set(checkedRoots(now).map(t => t.id));
+        const roots = asked.filter(r => stillTicked.has(r.id));
+        if (roots.length === 0) return;
         setBusy(true);
         const gone = new Set<number>();
         // Counted directly, per REQUEST: `gone` holds swept subtree ids and
@@ -168,7 +184,7 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
             for (let i = 0; i < roots.length; i++) {
                 if (i > 0) await sleep(PACE_MS);
                 if (await actions.deleteTaskFrom(note, roots[i].id)) {
-                    for (const id of collectSubtreeIds(tasks, roots[i].id)) gone.add(id);
+                    for (const id of collectSubtreeIds(now, roots[i].id)) gone.add(id);
                 } else {
                     failed++;
                 }
@@ -178,7 +194,7 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
         }
         // Parents before children, so the Undo re-creates them in an order
         // that can carry the nesting.
-        const left = recreationOrder(tasks).filter(t => gone.has(t.id));
+        const left = recreationOrder(now).filter(t => gone.has(t.id));
         if (failed > 0) {
             pushMessageToast({ title: `Couldn’t delete ${failed} of ${roots.length} items` });
         }

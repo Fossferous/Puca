@@ -49,7 +49,7 @@ export const MEDIA_ANNOUNCE_REFUSALS: readonly string[] = [
  * Capabilities this client announces on every socket (`/ws?caps=`). A query
  * parameter, not a frame: an older server ignores a parameter it does not
  * know, whereas an unknown client→server FRAME draws an Error, which the chat
- * view shows as a blocking alert. The server confirms what it supports with
+ * view shows as an error notice. The server confirms what it supports with
  * `ServerFeatures`, per socket — see `hasServerFeature`.
  */
 export const CLIENT_CAPS: readonly string[] = ['own_voice', 'presence', 'games'];
@@ -532,7 +532,7 @@ class WebSocketClient {
      * Lounge on your PC" banner. Returns false, sending nothing, unless this
      * socket's server has said it understands the frame (it sent
      * OwnVoiceState): an older server would answer with an Error, which is an
-     * alert() in this client.
+     * error notice in this client.
      */
     leaveOwnVoice(roomId: string): boolean {
         if (!ownVoiceSupported()) return false;
@@ -701,7 +701,7 @@ class WebSocketClient {
      * Has the server on the CURRENT socket confirmed `name` in ServerFeatures?
      * A new client→server frame may be sent only when this is true: an older
      * server answers an unknown frame with an Error, which the chat view
-     * shows as an alert. False on a new socket until its server says so.
+     * shows as an error notice. False on a new socket until its server says so.
      */
     hasServerFeature(name: string): boolean {
         return this.serverFeatures.has(name);

@@ -29,6 +29,7 @@ import { CloseIcon, MicIcon, StopIcon, TrashIcon } from '../../components/Icons'
 import { MAX_CLIP_MS, assertClipUploadable, extForMime, formatClipTime, pickAudioMime } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
 import '../noteContent.css';
+import { askConfirm } from '../../api/appDialogs';
 
 export const MIC_DISCLOSURE =
     'Púca Notes will use this phone’s microphone to record a voice note, only while this recorder is open '
@@ -137,7 +138,15 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
         const mime = pickAudioMime();
         if (!mime) { setError('This device can’t record audio.'); setPhase('refused'); return; }
         // The disclosure FIRST — before a single call that could prompt.
-        if (!window.confirm(MIC_DISCLOSURE)) { onCancel(); return; }
+        if (!await askConfirm(MIC_DISCLOSURE)) { onCancel(); return; }
+        // In the desktop app the page goes on running behind that question, so the
+        // sheet can have closed, or Notes left the screen, by the time it is answered:
+        // nothing asks for a microphone with nothing there to record it.
+        if (!alive.current || !onScreenRef.current) {
+            setError('Nothing was recorded: Púca Notes left the screen before the microphone was ready.');
+            setPhase('refused');
+            return;
+        }
         let stream: MediaStream;
         try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });

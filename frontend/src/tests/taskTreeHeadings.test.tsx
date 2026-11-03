@@ -17,6 +17,7 @@ import { TaskTree } from '../components/TaskTree';
 import type { Task } from '../api/tasks';
 import { isHeadingText } from '../api/taskHeading';
 import { readPastedItems } from '../notes/model/noteContent';
+import { mountAppDialogs } from './appDialogsHost';
 
 const task = (id: number, description: string, o: Partial<Task> = {}): Task => ({
     id, channel_id: null, list_id: 1, parent_id: null, description, is_completed: false,
@@ -173,27 +174,27 @@ describe('turning a row into a heading and back', () => {
         expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Calendar');
     });
 
-    it('an item with a due time asks first, and loses the time BEFORE it becomes a heading', () => {
+    it('an item with a due time asks first, and loses the time BEFORE it becomes a heading', async () => {
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
         const calls: string[] = [];
         onSetDue.mockImplementation(() => { calls.push('due'); });
         onEdit.mockImplementation(() => { calls.push('edit'); });
         render([task(1, 'Calendar', { due_at: '2026-09-30T09:00:00Z' })]);
-        act(() => { (titled(rowOf('Calendar'), 'Turn into heading') as HTMLButtonElement).click(); });
+        await act(async () => { (titled(rowOf('Calendar'), 'Turn into heading') as HTMLButtonElement).click(); });
         expect(confirm).toHaveBeenCalledTimes(1);
         expect(onSetDue).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), null);
         expect(calls).toEqual(['due', 'edit']);
     });
 
-    it('a date & repeat is removed the same way; saying no changes nothing', () => {
+    it('a date & repeat is removed the same way; saying no changes nothing', async () => {
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
         render([task(1, 'Standup', { due_at: '2026-09-30T09:00:00Z', schedule: '{"v":1}' })]);
-        act(() => { (titled(rowOf('Standup'), 'Turn into heading') as HTMLButtonElement).click(); });
+        await act(async () => { (titled(rowOf('Standup'), 'Turn into heading') as HTMLButtonElement).click(); });
         expect(confirm).toHaveBeenCalledTimes(1);
         expect(onEdit).not.toHaveBeenCalled();
         expect(onSetSchedule).not.toHaveBeenCalled();
         confirm.mockReturnValue(true);
-        act(() => { (titled(rowOf('Standup'), 'Turn into heading') as HTMLButtonElement).click(); });
+        await act(async () => { (titled(rowOf('Standup'), 'Turn into heading') as HTMLButtonElement).click(); });
         expect(onSetSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), null, null);
         expect(onSetDue).not.toHaveBeenCalled();
         expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Standup');
@@ -216,6 +217,64 @@ function retype(text: string, value: string) {
     act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
 }
 
+/**
+ * Alt-Tab, or a game coming to the front, blurs the field being edited. Real
+ * Edge reports the difference this rests on: the field is still the active
+ * element when the WINDOW lost focus, and is not when focus moved inside the
+ * page. A question at that moment would pull the person back out of their game.
+ */
+describe('committing "## x" over an item with a time, on a blur', () => {
+    function typeHeadingOverDatedItem() {
+        render([task(1, 'Standup', { due_at: '2026-09-30T09:00:00Z' })]);
+        act(() => { (rowOf('Standup').querySelector('.tt-description') as HTMLElement).click(); });
+        const input = host.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+        act(() => { input.focus(); });
+        typeInto(input, '## Section');
+        return input;
+    }
+    const blur = (input: HTMLInputElement) => act(() => { input.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+
+    it('the WINDOW losing focus asks nothing and changes nothing: the edit stays open', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const input = typeHeadingOverDatedItem();
+        expect(document.activeElement).toBe(input);
+        blur(input);
+        expect(confirm).not.toHaveBeenCalled();
+        expect(onEdit).not.toHaveBeenCalled();
+        expect(onSetDue).not.toHaveBeenCalled();
+        expect(host.querySelector<HTMLInputElement>('input.tt-edit-input')?.value, 'still there for when they return').toBe('## Section');
+    });
+
+    it('and pressing Enter on their return asks', async () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const input = typeHeadingOverDatedItem();
+        blur(input);
+        await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+        expect(confirm).toHaveBeenCalledTimes(1);
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Section');
+    });
+
+    it('POSITIVE CONTROL: focus moving elsewhere in the page is a click they made, and asks', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+        const input = typeHeadingOverDatedItem();
+        act(() => { input.blur(); });
+        expect(document.activeElement).not.toBe(input);
+        expect(confirm).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: the window losing focus still saves an ordinary edit, which asks nothing', () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+        render([task(1, 'Standup', { due_at: '2026-09-30T09:00:00Z' })]);
+        act(() => { (rowOf('Standup').querySelector('.tt-description') as HTMLElement).click(); });
+        const input = host.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+        act(() => { input.focus(); });
+        typeInto(input, 'Standup moved');
+        blur(input);
+        expect(confirm).not.toHaveBeenCalled();
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), 'Standup moved');
+    });
+});
+
 describe('a heading is never ticked, never timed, and a "# " label can go back to being an item', () => {
     it('"## x" typed over a TICKED item unticks it as it becomes a heading (a ticked one could never be dragged)', () => {
         const calls: string[] = [];
@@ -237,11 +296,14 @@ describe('a heading is never ticked, never timed, and a "# " label can go back t
 
     it('someone who may edit but not tick is told why, and nothing is written', () => {
         const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+        const dialogs = mountAppDialogs();
         // Their own item (creator may edit), in a channel where they hold no
         // right to tick (myPerms 0).
         render([task(1, 'Open item'), task(2, 'Done item', { is_completed: true })], { myPerms: 0, currentUserId: 1 });
         retype('Done item', '## Section');
-        expect(alert).toHaveBeenCalledTimes(1);
+        expect(dialogs.notices()).toEqual(['“Section” is ticked, and only someone who may tick items can turn it into a heading.']);
+        dialogs.unmount();
+        expect(alert, 'a commit on blur gets here too, with the window gone').not.toHaveBeenCalled();
         expect(onEdit).not.toHaveBeenCalled();
         expect(onToggle).not.toHaveBeenCalled();
         // POSITIVE CONTROL: an open item of theirs still becomes a heading.

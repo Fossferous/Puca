@@ -8,6 +8,7 @@
  */
 
 import { apiClient, ApiError } from './client';
+import { closeAppDialogs } from './appDialogs';
 import { argon2id } from '@noble/hashes/argon2.js';
 
 // SRP-2048 group parameters from RFC 5054
@@ -1341,6 +1342,8 @@ export async function revokeWebDeviceAndScrubKey(devId: string, token: string, u
 export const SESSION_REVOKE_MAX_WAIT_MS = 1500;
 
 export function logout(): void {
+    // Nothing asked of this session may be answered in the next one.
+    closeAppDialogs();
     // Revoke this BROWSER's device row before the token goes, then forget the id.
     //
     // Scrubbing the web device key below without this left the server row alive:

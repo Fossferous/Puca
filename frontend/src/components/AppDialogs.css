@@ -1,0 +1,153 @@
+/* The questions and notices of api/appDialogs.ts. See AppDialogs.tsx. */
+
+/* A modal <dialog> sits in the top layer, so it needs no z-index. The surface is
+   --bg-secondary, as Modal.css has it: --bg-floating stays near black on the Light theme,
+   under Light's dark text. */
+.app-question {
+    box-sizing: border-box;
+    width: min(440px, calc(100vw - 32px));
+    max-height: calc(100dvh - 32px);
+    overflow: auto;
+    margin: auto;
+    padding: 18px 18px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    color: var(--text-normal);
+    font-size: 0.95rem;
+    line-height: 1.4;
+}
+
+.app-question::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+}
+
+/* Several questions are paragraphs with \n between them, as confirm() showed them. */
+.app-question-message {
+    margin: 0 0 14px;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+}
+
+.app-question-input {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 14px;
+    padding: 8px 10px;
+    background: var(--input-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-normal);
+    font: inherit;
+}
+
+.app-question-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.app-question-btn {
+    min-width: 76px;
+    min-height: 36px;
+    padding: 6px 14px;
+    background: var(--bg-modifier-hover);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-normal);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+/* Marked by its border, with the theme's own text: white on the brand colour is under
+   4.5:1 on green, orange and yellow. */
+.app-question-ok {
+    background: var(--bg-secondary);
+    border: 2px solid var(--brand-primary);
+}
+
+.app-question-btn:focus-visible,
+.app-question-input:focus-visible,
+.app-notice-close:focus-visible {
+    outline: 2px solid var(--text-normal);
+    outline-offset: 2px;
+}
+
+/* Above the toasts, the banners, the context menu and the update gate. */
+.app-notices {
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(520px, calc(100vw - 32px));
+    /* Only the cards take a press: the gap between them is still the page. */
+    pointer-events: none;
+}
+
+.app-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    max-height: 40vh;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    color: var(--text-normal);
+    font-size: 0.85rem;
+    line-height: 1.35;
+    pointer-events: auto;
+    animation: app-notice-in 140ms ease-out;
+}
+
+@keyframes app-notice-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .app-notice { animation: none; }
+}
+
+/* A message that did not go is written out here when it cannot go back in the
+   composer, so it can be selected and copied. */
+.app-notice-text {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.app-notice-close {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.app-notice-close:hover {
+    background: var(--bg-modifier-hover);
+    color: var(--text-normal);
+}
+
+@media (pointer: coarse) {
+    .app-notice-close { width: 44px; height: 44px; }
+    .app-question-btn { min-height: 44px; }
+}

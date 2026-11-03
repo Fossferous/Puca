@@ -1221,7 +1221,7 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
             }
         }
 
-        ClientMessage::GameRemovePlayer { table_id, seat, .. } => {
+        ClientMessage::GameRemovePlayer { table_id, seat, user_id, .. } => {
             // (3) again, as for GameClose.
             if !conn_in_call(state, &room, user, conn) {
                 return refuse(GameRefusal::NotInCall);
@@ -1233,6 +1233,11 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
             if ts.closed {
                 drop(ts);
                 return gone(table_id);
+            }
+            // Asked about one person, and the seat changed hands before the answer.
+            if user_id.is_some_and(|named| !ts.engine.occupants().contains(&(seat, named))) {
+                drop(ts);
+                return refuse(GameRefusal::SeatEmpty);
             }
             ts.away.remove(&seat);
             match ts.engine.leave(seat) {

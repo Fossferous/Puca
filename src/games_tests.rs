@@ -657,7 +657,7 @@ async fn the_gate_play_games_to_open_and_sit_move_members_to_close() {
     rig.sit(&b, 0).await;
     rig.sit(&a, 0).await;
     rig.send(&a, ClientMessage::GameClose { room_id: ROOM.into(), table_id: tid }).await;
-    rig.send(&a, ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0 }).await;
+    rig.send(&a, ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0, user_id: None }).await;
     b.drain();
     a.drain();
     let b_codes: Vec<&str> = b.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
@@ -671,7 +671,7 @@ async fn the_gate_play_games_to_open_and_sit_move_members_to_close() {
     b.drain();
     assert_eq!(b.refusals().last().unwrap()["code"], "no_permission");
     // The moderator removes, then closes.
-    rig.send(&m, ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0 }).await;
+    rig.send(&m, ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0, user_id: None }).await;
     assert!(rig.peek().unwrap().occupants.is_empty());
     rig.send(&m, ClientMessage::GameClose { room_id: ROOM.into(), table_id: tid }).await;
     assert!(rig.peek().is_none());
@@ -1195,6 +1195,34 @@ async fn create_rechecks_the_call_after_the_gate() {
     assert_eq!(codes, ["not_in_call"], "five opens after the refused one, none refused");
 }
 
+/// The moderator was asked about one person and answered after that person's
+/// seat changed hands: the one now sitting there stays, and the moderator is told.
+#[tokio::test(start_paused = true)]
+async fn remove_player_refuses_a_seat_that_changed_hands() {
+    let rig = Rig::new(&[1, 2, 3], &[3]);
+    let (a, b, mut m) = (rig.connect(1), rig.connect(2), rig.connect(3));
+    for c in [&a, &b, &m] {
+        rig.join(c);
+    }
+    rig.create(&a, GameKindWire::Holdem).await;
+    let tid = rig.table();
+    rig.sit(&b, 0).await;
+    let remove = |user_id: Option<UserId>| ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0, user_id };
+    // Asked about user 1, who is not in seat 0: user 2 is.
+    rig.send(&m, remove(Some(1))).await;
+    assert_eq!(rig.peek().unwrap().occupants, vec![(0, 2)], "the wrong person stayed seated");
+    m.drain();
+    let codes: Vec<&str> = m.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["seat_empty"]);
+    // CONTROL: the person who is there, by name, is removed.
+    rig.send(&m, remove(Some(2))).await;
+    assert!(rig.peek().unwrap().occupants.is_empty());
+    // CONTROL: a client older than the check names nobody, and is not refused for it.
+    rig.sit(&b, 0).await;
+    rig.send(&m, remove(None)).await;
+    assert!(rig.peek().unwrap().occupants.is_empty());
+}
+
 /// `GameClose` / `GameRemovePlayer` check the call AGAIN after their
 /// MOVE_MEMBERS gate, as `GameCreate` and `GameSit` do: a moderator whose
 /// connection left (or was moved or kicked) while the gate awaited the
@@ -1218,7 +1246,7 @@ async fn close_and_remove_recheck_the_call_after_the_gate() {
             if op == "close" {
                 ClientMessage::GameClose { room_id: ROOM.into(), table_id: tid }
             } else {
-                ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0 }
+                ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0, user_id: None }
             }
         };
         rig.send(&a, msg(tid)).await;

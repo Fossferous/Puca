@@ -112,6 +112,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
+import { askConfirm } from '../api/appDialogs';
 
 /** What this view last read of one list's rows: its headings (and how many
  *  of them an older client ticked), and ALL its rows — which is what the
@@ -638,7 +639,7 @@ export function TasksView() {
                 pushMessageToast({ title: 'Notes to self can’t be moved to the trash' });
                 return;
             }
-            if (!confirm(`Move "${list.title}" to the trash? ${days > 0 ? `You can restore it for ${days} days` : 'You can restore it'} from the Trash below the All tasks board, or in Púca Notes.`)) return;
+            if (!await askConfirm(`Move "${list.title}" to the trash? ${days > 0 ? `You can restore it for ${days} days` : 'You can restore it'} from the Trash below the All tasks board, or in Púca Notes.`)) return;
             // Text typed just before this is still saving: let it land first.
             await flushBodySave(list.id);
             const original = lists;
@@ -657,7 +658,7 @@ export function TasksView() {
             }
             return;
         }
-        if (!confirm(`Delete list "${list.title}" and all its tasks?`)) return;
+        if (!await askConfirm(`Delete list "${list.title}" and all its tasks?`)) return;
         const original = lists;
         setLists(prev => prev.filter(l => l.id !== list.id));
         if (selected?.kind === 'list' && selected.id === list.id) setSelected(null);

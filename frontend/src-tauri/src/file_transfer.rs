@@ -75,23 +75,8 @@ pub struct BeginResult {
 
 /// Strip everything that could escape the download directory or confuse
 /// Windows. The name arrives from a peer, so it is untrusted input.
-fn sanitize_file_name(raw: &str) -> String {
-    // Take the last path segment: a peer sending "../../x" or "C:\\x" must not
-    // get any say in the directory.
-    let base = raw
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or("file");
-
-    let mut cleaned: String = base
-        .chars()
-        .map(|c| match c {
-            // Reserved on Windows, plus control characters.
-            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\0' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
+pub(crate) fn sanitize_file_name(raw: &str) -> String {
+    let mut cleaned = last_segment_cleaned(raw);
 
     // "." and ".." are not names. A trailing dot or space is silently stripped
     // by Windows, which would make the on-disk name differ from what we report.
@@ -100,32 +85,74 @@ fn sanitize_file_name(raw: &str) -> String {
         cleaned = "file".to_string();
     }
 
-    // Reserved DOS device names are invalid even with an extension.
+    // Leave room for the ".part" suffix and a dedup counter. Counted in bytes, so
+    // a name that fits every file system; the extension is what the cut spares.
+    fit_keeping_extension(&not_a_device_name(cleaned), 200, char::len_utf8)
+}
+
+/// Take the last path segment: a peer sending "../../x" or "C:\\x" must not get
+/// any say in the directory. And no character Windows reserves.
+pub(crate) fn last_segment_cleaned(raw: &str) -> String {
+    let base = raw
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or("file");
+
+    base.chars()
+        .map(|c| match c {
+            // Reserved on Windows, plus control characters.
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\0' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect()
+}
+
+/// Reserved DOS device names are invalid even with an extension.
+pub(crate) fn not_a_device_name(name: String) -> String {
     const RESERVED: [&str; 22] = [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
         "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     if RESERVED.contains(&stem.as_str()) {
-        cleaned = format!("_{cleaned}");
+        format!("_{name}")
+    } else {
+        name
     }
+}
 
-    // Leave room for the ".part" suffix and a dedup counter.
-    //
-    // NOT a bare `String::truncate`: `len()` is bytes and truncate panics
-    // unless the index is a char boundary, so a long CJK or emoji name would
-    // panic here. That panic unwinds the command task, the `invoke` promise
-    // never settles, and the download button sits disabled on "saving" forever
-    // with no error — the silent-failure shape this codebase keeps producing.
-    // The name comes from another user: exactly the input an attacker controls.
-    if cleaned.len() > 200 {
-        let mut end = 200;
-        while end > 0 && !cleaned.is_char_boundary(end) {
-            end -= 1;
-        }
-        cleaned.truncate(end);
+/// A name cut down to `max`, in whatever unit `size_of` counts, taking the cut from
+/// the stem: a file that loses its extension no longer opens with anything.
+///
+/// Never a bare `String::truncate`: it panics unless the index is a char boundary,
+/// so a long CJK or emoji name would panic here. That panic unwinds the command
+/// task, the `invoke` promise never settles, and the download button sits disabled
+/// on "saving" forever with no error — the silent-failure shape this codebase keeps
+/// producing. The name comes from another user: exactly the input an attacker
+/// controls. Walking the chars, there is no boundary to get wrong.
+pub(crate) fn fit_keeping_extension(name: &str, max: usize, size_of: fn(char) -> usize) -> String {
+    /// Past this it is a dot in a long name, not an extension worth keeping.
+    const LONGEST_EXTENSION: usize = 32;
+    let size = |s: &str| s.chars().map(size_of).sum::<usize>();
+    if size(name) <= max {
+        return name.to_string();
     }
-    cleaned
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 && name[dot..].chars().count() <= LONGEST_EXTENSION => name.split_at(dot),
+        _ => (name, ""),
+    };
+    let room = max.saturating_sub(size(extension));
+    let mut used = 0;
+    let kept: String = stem
+        .chars()
+        .take_while(|c| {
+            used += size_of(*c);
+            used <= room
+        })
+        .collect();
+    // Windows drops a trailing dot or space, and the cut can leave one.
+    format!("{}{extension}", kept.trim_end_matches(|c: char| c == '.' || c.is_whitespace()))
 }
 
 /// `name.ext` -> `name (2).ext` until nothing is overwritten. A completed
@@ -448,8 +475,8 @@ fn percent_decode(s: &str) -> String {
 /// Folders worth offering when the person at this machine is choosing what to
 /// expose to a remote session.
 ///
-/// `tauri-plugin-dialog` is not registered in this app, so there is no native
-/// folder picker to call. Rather than make the user type an absolute path from
+/// There is no native folder picker in this app (the one OS dialog it opens is
+/// Save As, save_dialog.rs). Rather than make the user type an absolute path from
 /// memory — and get "that is not a folder" back from the agent when they get it
 /// wrong — offer the handful of directories that actually exist, resolved here
 /// where the OS knows where they are.
@@ -540,6 +567,7 @@ mod tests {
     fn bounds_the_length_so_the_part_suffix_still_fits() {
         let long = "x".repeat(500);
         assert!(sanitize_file_name(&long).len() <= 200);
+        assert!(sanitize_file_name(&format!("{long}.pdf")).ends_with(".pdf"), "the cut spares the extension");
     }
 
     /// The ASCII case above passes even with a byte-index `truncate`, because

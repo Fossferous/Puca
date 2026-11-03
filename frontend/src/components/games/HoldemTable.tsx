@@ -9,6 +9,7 @@ import { CardSlot, FlipCard, PlayingCard } from './PlayingCard';
 import { AmountSheet, SeatAvatar, Stepper, TurnClock } from './GameBits';
 import { useCountdown } from './useCountdown';
 import { timelineOf, useGameSounds } from './useGameSounds';
+import { askConfirm } from '../../api/appDialogs';
 
 interface HoldemTableProps {
     table: HeldTable & { view: HoldemView };
@@ -275,9 +276,9 @@ export function HoldemTable({ table, gate, isPhone, nameOf, avatarOf, currentUse
                                     key={i}
                                     type="button"
                                     className="games-btn games-btn-ghost gseat-remove"
-                                    onClick={() => {
-                                        if (confirm(`Remove ${name} from the table? Their hand folds and they get up.`)) {
-                                            send(gameFrames.removePlayer(room, id, i));
+                                    onClick={async () => {
+                                        if (await askConfirm(`Remove ${name} from the table? Their hand folds and they get up.`)) {
+                                            send(gameFrames.removePlayer(room, id, i, s.user_id));
                                         }
                                     }}
                                 >
@@ -312,8 +313,8 @@ export function HoldemTable({ table, gate, isPhone, nameOf, avatarOf, currentUse
                         <button
                             type="button"
                             className="games-btn games-btn-ghost"
-                            onClick={() => {
-                                if (!v.in_hand || me.status === 'folded' || confirm('Stand up now? Your hand folds.')) send(gameFrames.stand(room, id));
+                            onClick={async () => {
+                                if (!v.in_hand || me.status === 'folded' || await askConfirm('Stand up now? Your hand folds.')) send(gameFrames.stand(room, id));
                             }}
                         >
                             Stand up

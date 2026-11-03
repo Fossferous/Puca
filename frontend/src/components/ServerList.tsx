@@ -13,6 +13,7 @@ import {
     CopyIcon, DisbandIcon, EyeIcon, LogoutIcon, MailOpenIcon, MessageIcon, MonitorIcon,
     NoteIcon, SettingsIcon, UserAddIcon, UserIcon,
 } from './Icons';
+import { askConfirm } from '../api/appDialogs';
 
 interface ServerListProps {
     // servers prop removed
@@ -307,22 +308,20 @@ export function ServerList({
         closeMenu();
     };
 
-    const handleLeave = () => {
-        if (contextMenu.server && onLeaveServer) {
-            if (confirm(`Are you sure you want to leave "${contextMenu.server.name}"?`)) {
-                onLeaveServer(contextMenu.server);
-            }
-        }
+    const handleLeave = async () => {
+        const server = contextMenu.server;
         closeMenu();
+        if (server && onLeaveServer && await askConfirm(`Are you sure you want to leave "${server.name}"?`)) {
+            onLeaveServer(server);
+        }
     };
 
-    const handleDisband = () => {
-        if (contextMenu.server && onDisbandServer) {
-            if (confirm(`Are you sure you want to PERMANENTLY DELETE "${contextMenu.server.name}"? This cannot be undone!`)) {
-                onDisbandServer(contextMenu.server);
-            }
-        }
+    const handleDisband = async () => {
+        const server = contextMenu.server;
         closeMenu();
+        if (server && onDisbandServer && await askConfirm(`Are you sure you want to PERMANENTLY DELETE "${server.name}"? This cannot be undone!`)) {
+            onDisbandServer(server);
+        }
     };
 
     const isOwner = contextMenu.server?.owner_id === currentUserId;

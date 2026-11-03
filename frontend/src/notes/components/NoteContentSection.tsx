@@ -57,6 +57,7 @@ import { type EditorUndoApi, useEditorUndo } from './useEditorUndo';
 import { NoteAddMenu } from './NoteAddMenu';
 import { raiseNativeKeyboard } from '../native/notesNative';
 import '../noteContent.css';
+import { askConfirm } from '../../api/appDialogs';
 
 const COARSE = '(pointer: coarse) and (max-width: 1024px)';
 
@@ -180,7 +181,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo, ty
         // The same three words the Remove button carries (NoteImages.tsx):
         // being asked to confirm deleting a "picture" on a note that also
         // holds photos reads as the wrong attachment going.
-        if (!window.confirm(`Remove this ${galleryItemNoun(item)}? It is deleted for good.`)) return;
+        if (!await askConfirm(`Remove this ${galleryItemNoun(item)}? It is deleted for good.`)) return;
         setBusy(true);
         try { await c.setNoteAttachments(listId, withoutItem(refs, item), refsOfItem(item)); } finally { setBusy(false); }
     };
@@ -303,7 +304,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo, ty
             return;
         }
         const warning = describeLosses(losses);
-        if (warning && !window.confirm(warning)) return;
+        if (warning && !await askConfirm(warning)) return;
         const before = text;
         const next = [before, itemsToBody(tasks)].filter(s => s !== '').join('\n');
         if (bodyBytes(next) > MAX_BODY_BYTES) {

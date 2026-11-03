@@ -232,6 +232,7 @@ import './phoneLandscape.css'
 import App from './App.tsx'
 import { UpdateGate } from './components/UpdateGate.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
+import { AppDialogs } from './components/AppDialogs.tsx'
 import { queryClient } from './api/queryClient.ts'
 import { keys, fetchMembersWithPresence } from './hooks/queries'
 import { setVisibleMembersSource } from './api/channelKeys'
@@ -244,6 +245,7 @@ setVisibleMembersSource(visibleMembersFromQueries(queryClient, keys.members, fet
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <AppDialogs />
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>

@@ -7,6 +7,7 @@ import { getToken, decodeJwtPayload } from '../api/auth';
 import './EmojiSettings.css';
 import { AuthedImg } from './AuthedImg';
 import { CloseIcon, TrashIcon } from './Icons';
+import { askConfirm } from '../api/appDialogs';
 
 /** The signed-in user's id, straight from the JWT (0 when unparseable). */
 function currentUserId(): number {
@@ -113,7 +114,7 @@ export function EmojiSettings({ isOpen, onClose, serverId, serverName, isOwner, 
     };
 
     const handleDelete = async (emojiId: string, emojiName: string) => {
-        if (!confirm(`Delete :${emojiName}: emoji?`)) return;
+        if (!await askConfirm(`Delete :${emojiName}: emoji?`)) return;
 
         try {
             await deleteEmoji(serverId, emojiId);

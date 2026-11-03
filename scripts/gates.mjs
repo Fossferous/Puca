@@ -110,7 +110,7 @@ const GATES = [
         steps: [{ run: 'npx vitest run', cwd: FE, check: vitestCheck }],
     },
     {
-        id: 'lint', title: 'npm run lint (eslint + five checks), rules-of-hooks = 0',
+        id: 'lint', title: 'npm run lint (eslint + six checks), rules-of-hooks = 0',
         inputs: ALL, fingerprint: ['node', 'fe-deps'],
         steps: [{ run: 'npm run lint', cwd: FE, check: (out) => (/rules-of-hooks/.test(out) ? 'lint output mentions rules-of-hooks (CLAUDE.md: must be 0)' : null) }],
     },
@@ -228,6 +228,8 @@ const GATES = [
         ['e2e-stream-stats', 'stream-stats-real-browser.mjs'],
         ['e2e-share-quality-live', 'share-quality-live-real-browser.mjs'],
         ['e2e-notes-dialog-escape', 'notes-dialog-escape-real-browser.mjs'],
+        // Screenshots go to the ignored e2e-artifacts, as the two below explain.
+        ['e2e-app-dialogs', 'app-dialogs-real-browser.mjs e2e-artifacts/app-dialogs-shots'],
         ['e2e-user-menu-move-to', 'user-menu-move-to-real-browser.mjs'],
         ['e2e-paste-html', 'paste-html-real-browser.mjs'],
         ['e2e-photo-metadata', 'photo-metadata-real-browser.mjs'],

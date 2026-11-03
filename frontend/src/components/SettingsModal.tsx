@@ -70,6 +70,7 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 // about where a hotkey works is computed by the code that decides it.
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 import WebPushSetting from './WebPushSetting';
+import { askConfirm, tellUser } from '../api/appDialogs';
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -1730,7 +1731,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             onClick={() => {
                                                 const restored = clearAllHiddenMessages();
                                                 setHiddenCount(0);
-                                                if (restored > 0) alert(`${restored} hidden message${restored !== 1 ? 's' : ''} restored.`);
+                                                if (restored > 0) tellUser(`${restored} hidden message${restored !== 1 ? 's' : ''} restored.`, { brief: true });
                                             }}
                                         >
                                             Restore all
@@ -2296,10 +2297,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         </div>
                                         <button
                                             className="secondary-btn"
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 const n = listPlaces().length;
-                                                if (n === 0) { alert('No places are saved on this device.'); return; }
-                                                if (confirm(`Delete all ${n} saved place${n === 1 ? '' : 's'} and their reminders from this phone?`)) {
+                                                if (n === 0) { tellUser('No places are saved on this device.'); return; }
+                                                if (await askConfirm(`Delete all ${n} saved place${n === 1 ? '' : 's'} and their reminders from this phone?`)) {
                                                     clearAllPlaces();
                                                 }
                                             }}
@@ -2356,7 +2357,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 className="secondary-btn"
                                                 onClick={() => void sendTestNotification().then(r => {
                                                     if (!r.ok) {
-                                                        alert(`Test notification failed: ${r.reason ?? 'unknown'}. `
+                                                        tellUser(`Test notification failed: ${r.reason ?? 'unknown'}. `
                                                             + (isMobile()
                                                                 ? 'Check Android notification settings for Púca.'
                                                                 : 'Check Windows notification settings for Púca.'));
@@ -3276,7 +3277,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </p>
                                     <button
                                         className="secondary-btn"
-                                        onClick={() => {
+                                        onClick={async () => {
                                             // Confirmed, because this destroys the trust-on-first-use
                                             // anchors (verified_key_*, control_pin_*) and the
                                             // anti-downgrade pins (e2ee_key_version_*,
@@ -3285,7 +3286,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             // rolling a channel back to a superseded epoch, and a debug
                                             // button that silently disarms them is a footgun pointed at
                                             // exactly the user most likely to press it.
-                                            const ok = window.confirm(
+                                            const ok = await askConfirm(
                                                 'This clears all local app data, including the record of which '
                                                 + 'contacts’ encryption keys you have already verified.\n\n'
                                                 + 'You will have to verify them again, and until you do, a '

@@ -13,7 +13,7 @@ release, never edit by hand.
   `crates/puca-service/vdd/`, licence, release, hashes and signature in
   `crates/puca-service/vdd/NOTICE.md`.
 
-## npm packages in the web/desktop/mobile bundle (145)
+## npm packages in the web/desktop/mobile bundle (144)
 
 | package | licence | origin |
 |---|---|---|
@@ -47,7 +47,6 @@ release, never edit by hand.
 | @tauri-apps/api@2.11.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | @tauri-apps/cli-win32-x64-msvc@2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | @tauri-apps/cli@2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| @tauri-apps/plugin-dialog@2.7.3 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @tauri-apps/plugin-notification@2.4.0 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @tauri-apps/plugin-process@2.3.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @tauri-apps/plugin-updater@2.11.0 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
@@ -171,7 +170,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 |---|---|---|
 | @decky/api@1.1.3 | LGPL-2.1 | https://registry.npmjs.org/@decky/api/-/api-1.1.3.tgz |
 
-## Rust crates in the server, desktop shell, native helpers and the wasm (845)
+## Rust crates in the server, desktop shell, native helpers and the wasm (843)
 
 | crate | licence | used by | origin |
 |---|---|---|---|
@@ -778,8 +777,6 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | tauri-codegen@2.6.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri |
 | tauri-macros@2.6.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri |
 | tauri-plugin-autostart@2.5.1 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-dialog@2.7.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-fs@2.5.2 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-log@2.9.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-notification@2.4.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-process@2.3.1 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |

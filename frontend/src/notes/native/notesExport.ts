@@ -16,6 +16,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { type NoteCard } from '../model/notesModel';
 import { fileStamp, noteToMarkdown, notesToJson, notesToMarkdown, saveNotesExport } from '../model/noteText';
 import { notesNativeAvailable, shareText } from './notesNative';
+import { askConfirm } from '../../api/appDialogs';
 
 /** Share is offered only where the plugin can do it. */
 export function canShareNotes(): boolean {
@@ -42,7 +43,7 @@ export async function exportNotes(cards: NoteCard[], format: 'md' | 'json'): Pro
 const SHARE_WARNING = 'Share as a plain, unencrypted file? Whichever app you pick receives the text of your notes.';
 
 async function share(filename: string, text: string, mime: string): Promise<void> {
-    if (!window.confirm(SHARE_WARNING)) return;
+    if (!await askConfirm(SHARE_WARNING)) return;
     const r = await shareText({ filename, text, mime, subject: filename });
     if (!r.ok) pushMessageToast({ title: r.reason === 'unsupported' ? 'Sharing needs the current Púca Notes app' : r.reason });
 }
