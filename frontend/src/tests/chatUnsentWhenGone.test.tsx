@@ -27,6 +27,7 @@ const h = vi.hoisted(() => ({
     deleted: [] as string[],
     /** What the open channel's history holds. */
     rows: [] as Record<string, unknown>[],
+    nav: null as string | null,
 }));
 
 vi.mock('../api/servers', async importOriginal => ({
@@ -49,6 +50,10 @@ vi.mock('../api/auth', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/auth')>()),
     getToken: () => `h.${btoa(JSON.stringify({ sub: ME, username: 'me' })).replace(/=+$/, '')}.s`,
     currentUserIdFromToken: () => ME,
+}));
+vi.mock('../api/mobileApp', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/mobileApp')>()),
+    consumePendingNav: () => { const target = h.nav; h.nav = null; return target; },
 }));
 vi.mock('../utils/audioFeedback', async importOriginal => ({
     ...(await importOriginal<typeof import('../utils/audioFeedback')>()),
@@ -120,6 +125,7 @@ beforeEach(() => {
     h.discarded = [];
     h.deleted = [];
     h.rows = [];
+    h.nav = null;
     feedLoads = 0;
     vi.spyOn(console, 'debug').mockImplementation((said: unknown) => {
         if (String(said).startsWith('[Chat] Loading collection messages') && ++feedLoads > 300) throw new Error('the feed is going round');
@@ -485,6 +491,14 @@ const landedOn = async (name: string) => {
     await settled(5);
     expect(headerText()).toContain(name);
 };
+const pressInServerMenu = async (item: RegExp) => {
+    const icon = document.querySelector<HTMLElement>('.server-icon[title="Srv"]')!;
+    await act(async () => { icon.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); });
+    const found = [...document.querySelectorAll<HTMLElement>('.context-menu-item, .server-context-menu *')].find(el => item.test(el.textContent?.trim() ?? ''));
+    expect(found, `the server's menu has ${item}`).toBeTruthy();
+    await act(async () => { found!.click(); });
+};
+
 describe('another server, from a collection\'s page with words kept behind it', () => {
     it('a click on one already visited: the words are there on its channel, and nothing is said', async () => {
         h.servers = [SRV, FAR];
@@ -514,6 +528,79 @@ describe('another server, from a collection\'s page with words kept behind it', 
         expect(feedLoads).toBeLessThan(FEW);
         expect(composer()!.value).toBe('from general');
         expect(dialogs.notices()).toEqual([]);
+    });
+});
+
+describe('the server goes from under a collection\'s page', () => {
+    it('CONTROL: on the page, the feed is asked for a few times, not over and over', async () => {
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await open('Private');
+        await settled();
+        expect(feedLoads).toBeGreaterThan(0);
+        expect(feedLoads).toBeLessThan(FEW);
+    });
+
+    it('removed from it: one notice, and nothing goes round afterwards', async () => {
+        h.servers = [SRV, FAR];
+        h.channels = [GENERAL, PRIVATE, FAR_GENERAL];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        h.servers = [FAR];
+        await act(async () => { for (const f of frames.RemovedFromServer) f({ type: 'RemovedFromServer', payload: { server_id: 's1' } }); });
+        await settled();
+        expect(feedLoads).toBeLessThan(FEW);
+        expect(dialogs.notices()).toHaveLength(1);
+        expect(dialogs.notices()[0]).toContain('Srv is no longer available');
+        await clickServer('Far');
+        await landedOn('far-general');
+        expect(dialogs.notices(), 'the collection is not named on top of it').toHaveLength(1);
+        expect(composer()!.value).toBe('');
+    });
+
+    it('gone from the list with no frame: the same', async () => {
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await type('from general');
+        await open('Private');
+        h.servers = [];
+        await act(async () => { await queryClient.invalidateQueries({ queryKey: keys.servers }); });
+        await settled();
+        expect(feedLoads).toBeLessThan(FEW);
+        expect(dialogs.notices()).toHaveLength(1);
+        expect(dialogs.notices()[0]).toContain('Srv is no longer available');
+    });
+
+    it('leaving your last server: the same', async () => {
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await open('Private');
+        await pressInServerMenu(/^leave/i);
+        await settled();
+        expect(h.deleted.some(path => path.endsWith('/servers/s1/leave')), 'the leave went').toBe(true);
+        expect(feedLoads).toBeLessThan(FEW);
+    });
+
+    it('disbanding your last server: the same', async () => {
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await open('Private');
+        await pressInServerMenu(/disband/i);
+        await settled();
+        expect(h.deleted.some(path => path.endsWith('/servers/s1')), 'the disband went').toBe(true);
+        expect(feedLoads).toBeLessThan(FEW);
+    });
+
+    it('home from a notification or a shortcut, with the server still there: nothing goes round', async () => {
+        h.channels = [GENERAL, PRIVATE];
+        await mountChat();
+        await open('Private');
+        h.nav = 'dms';
+        await act(async () => { window.dispatchEvent(new CustomEvent('sovereign-navigate')); });
+        await settled();
+        expect(feedLoads).toBeLessThan(FEW);
     });
 });
 

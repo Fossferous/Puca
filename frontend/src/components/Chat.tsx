@@ -2165,6 +2165,8 @@ export function Chat({ onLogout }: ChatProps) {
             composerGoesWithRef.current('server');
             setCurrentServer(null);
             setCurrentChannel(null);
+            // With no server the list is a new [] every render, and a collection's feed is keyed on it.
+            setCurrentCollection(null);
             setMessages([]);
             setShowFriendsPanel(true);
             setShowDevicesView(false);
@@ -2764,6 +2766,7 @@ export function Chat({ onLogout }: ChatProps) {
                 composerGoesWithRef.current('server');
                 setCurrentServer(null);
                 setCurrentChannel(null);
+                setCurrentCollection(null);
                 // Only a call on this server: voice persists while browsing other servers,
                 // and being removed from this one says nothing about those.
                 setCurrentVoiceChannel(prev => (prev?.server_id === payload.server_id ? null : prev));
@@ -4666,6 +4669,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // current server).
                 setCurrentServer(null);
                 setCurrentChannel(null);
+                setCurrentCollection(null);
                 setFriendsTab('online');
                 setShowFriendsPanel(true);   // home content on desktop
                 setShowDevicesView(false);
@@ -5490,6 +5494,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setCurrentServer(null);
                                 // Channels/Messages cleaned up by hooks/state
                                 setCurrentChannel(null);
+                                setCurrentCollection(null);
                             }
                         }
                     } catch (error) {
@@ -5512,6 +5517,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setCurrentServer(null);
                                 // Channels cleaned up by hooks
                                 setCurrentChannel(null);
+                                setCurrentCollection(null);
                             }
                         }
                     } catch (error) {
