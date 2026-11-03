@@ -3,6 +3,7 @@ import {
     deleteChannelQuestion,
     drawnAtTop,
     drawnUnderCollection,
+    hiddenWithCollection,
     keptByHideMuted,
     parentChoices,
     reorderedChannelIds,
@@ -45,7 +46,7 @@ describe('the row every text channel and collection gets', () => {
 
     // As Chat.tsx's list draws them: each top-level row, then a collection's children.
     const drawnRows = (rows: Row[]) => rows
-        .filter(c => c.channel_type !== VOICE && drawnAtTop(c, rows))
+        .filter(c => c.channel_type !== VOICE && drawnAtTop(c, rows) && !hiddenWithCollection(c, rows))
         .flatMap(c => [c.id, ...(c.channel_type === COLLECTION
             ? rows.filter(sub => sub.parent_id === c.id && !drawnAtTop(sub, rows)).filter(drawnUnderCollection).map(sub => sub.id)
             : [])]);
@@ -69,9 +70,23 @@ describe('the row every text channel and collection gets', () => {
         expect(drawnRows(rows)).toEqual([1, 2, 3]);
     });
 
-    it('draws a channel under a collection this reader cannot see', () => {
-        const rows = [row(3, TEXT, 99)];
-        expect(drawnRows(rows)).toEqual([3]);
+    it('draws nothing under a collection this reader cannot see: denying it is how it looks private', () => {
+        expect(drawnRows([row(3, TEXT, 99)])).toEqual([]);
+        expect(drawnRows([row(1, TEXT), row(3, TEXT, 99)])).toEqual([1]);
+    });
+
+    it('nor anything under a collection inside one, the row that has none other otherwise', () => {
+        expect(drawnRows([row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([]);
+    });
+
+    it('CONTROL: the same rows, with that collection in the reader\'s list, are drawn', () => {
+        expect(drawnRows([row(99, COLLECTION), row(3, TEXT, 99)])).toEqual([99, 3]);
+        expect(drawnRows([row(99, COLLECTION), row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([99, 2, 3]);
+    });
+
+    it('leaves the Modes tab its voice rooms: it asks of one kind of row at a time, and their collection is not one', () => {
+        const rooms = [row(3, VOICE, 99)];
+        expect(drawnAtTop(rooms[0], rooms)).toBe(true);
     });
 
     it('draws a channel the raw API put under something that is no collection', () => {

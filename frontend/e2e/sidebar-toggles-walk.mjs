@@ -21,7 +21,8 @@
 //      manager who cannot see all of a collection is told why they cannot delete it. An open
 //      collection's header follows a rename, an emptied topic stays empty, a cancelled Create
 //      Subchannel leaves no parent behind, and a channel under a collection inside a
-//      collection has a row, and that collection is not offered as a parent.
+//      collection has a row, and that collection is not offered as a parent. A channel under
+//      a collection a member is denied has no row for them, though the server lists it.
 //      NEGATIVE CONTROL: a # row for a voice room injected into the list must be caught.
 //   B. Every switch on Server Settings > Overview (and Modes) is a switch: a track with
 //      a knob, a label beside it, on and off plainly different, at 3:1 on all eight
@@ -884,6 +885,26 @@ try {
     await until(() => dialogs.length > 0, 3000);
     check('control: someone who can see all of it is asked, and the question names the room', (dialogs[0] ?? '').includes('Staff room'), dialogs);
     check('and it goes, for the manager too', !!await until(async () => !hasRow(await sidebarRows(C), 'Guarded'), 8000), (await sidebarRows(C)).map(r => r.name));
+
+    // A collection a member is denied. What is in it has no row for them, though the server lists
+    // it (a channel's permissions are its own, so nothing comes down from the collection): denying
+    // the collection is how an owner makes it look private.
+    const deniedOne = await mk('Denied', 2);
+    await mk('denied-notes', 0, deniedOne.id);
+    await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
+    await sleep(400);
+    const beforeDeny = await until(async () => {
+        const row = named(await sidebarRows(B), 'denied-notes');
+        return row.length === 1 && row[0].sub ? row : null;
+    }, 8000);
+    check('control: a member who can see a collection has a row for what is in it, under it', !!beforeDeny, named(await sidebarRows(B), 'denied-notes'));
+    await api(A, 'PUT', `/channels/${deniedOne.id}/overwrites/${everyone.id}`, { allow: 0, deny: 1 << 0 });
+    check('fixture: denied it, the member has no row for the collection', !!await until(async () => !hasRow(await sidebarRows(B), 'Denied'), 8000), (await sidebarRows(B)).map(r => r.name));
+    const listedForThem = (await api(B, 'GET', `/servers/${srv.id}/channels`)).map(c => c.name);
+    check('fixture: and the server still lists them what is in it, which is the point', listedForThem.includes('denied-notes') && !listedForThem.includes('Denied'), listedForThem);
+    check('a channel under a collection a member is denied has no row for them', !hasRow(await sidebarRows(B), 'denied-notes'), (await sidebarRows(B)).map(r => r.name));
+    check('control: someone who can see the collection keeps it there, under it', named(await sidebarRows(A), 'denied-notes')[0]?.sub === true, named(await sidebarRows(A), 'denied-notes'));
+    await api(A, 'DELETE', `/channels/${deniedOne.id}`);
 
     // ── A7. The phone.
     await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
