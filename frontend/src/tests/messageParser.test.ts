@@ -188,7 +188,16 @@ describe('a delimiter in the words before an address does not close inside it', 
 
     it('CONTROL: one with more of the address after it is the address\'s', () => {
         expect(hrefs('**https://example.org/a**b')).toEqual(['https://example.org/a**b']);
+    });
+
+    it('CONTROL: `_` and `__` are in real addresses, so more of the address after one is the address\'s', () => {
+        expect(hrefs('_https://example.org/a_b')).toEqual(['https://example.org/a_b']);
+        expect(hrefs('__https://example.org/a__b')).toEqual(['https://example.org/a__b']);
+        expect(hrefs('_https://example.org/a_2')).toEqual(['https://example.org/a_2']);
+        expect(hrefs('_https://example.org/a_/')).toEqual(['https://example.org/a_/']);
         expect(hrefs('_https://example.org/a_/b')).toEqual(['https://example.org/a_/b']);
+        // A word in any script: this address is the bug this fix is for, not bold around one.
+        expect(hrefs('my_file https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc')).toEqual(['https://example.org/\u6771\u4eac_\u30bf\u30ef\u30fc']);
     });
 });
 
@@ -245,6 +254,13 @@ describe('a spoiler never stops being one', () => {
         expect(addresses(content)).toEqual({ hidden: [href], shown: [] });
     });
 
+    it('it closes at the first `||`, even one in an address with more after it', () => {
+        expect(parseMessage('||a https://example.org/b||c d||')).toEqual([
+            { type: 'spoiler', children: [{ type: 'text', value: 'a ' }, { type: 'url', href: 'https://example.org/b' }] },
+            { type: 'text', value: 'c d||' },
+        ]);
+    });
+
     it('two in one line', () => {
         expect(addresses('||https://example.org/a|| and ||https://example.org/b_c||!')).toEqual({
             hidden: ['https://example.org/a', 'https://example.org/b_c'],
@@ -277,29 +293,113 @@ describe('a spoiler never stops being one', () => {
         expect(hiddenBy(parseMessage('_https://example.org/w0_w1||w2||_'))).toEqual(new Set(['w2']));
     });
 
+    it.each([
+        // A `>` or `"` leaves too little of a short address, so a delimiter in it comes alive.
+        ['see <https://*> and ||the *butler* did it||'],
+        ['<https://*> ||https://example.org/the-butler*||'],
+        ['https://_> ||_secret||'],
+        ['https://`> ||secret||`'],
+        ['https://[> ||secret](x)||'],
+        ['https://.>_a ||secret_ c||'],
+        ['http://>|| ||secret||'],
+        // A closer that moved re-pairs the delimiters in later addresses.
+        ['_use https://x.invalid/a_b or _a || b at https://x.invalid/c_d ||the butler did it||'],
+        ['*https://x.invalid/a*b *||c https://x.invalid/d* ||secret||'],
+        ['~~https://x.invalid/a~~~~ ||https://x.invalid/b~~ ||secret||'],
+        // A word shaped like an address and not read as one, with a `[` or a backtick in it.
+        ['my_file https://[ ||the butler|| https://x.invalid/d_e](f)'],
+        ['_Https://x/[||secret||https://x/a_](b)'],
+        ['_https://x.invalid/a_`b Https://x.invalid/`||`secret||'],
+        ['_Https://example.org/[||https://example.org/hiddenword||_](y)'],
+        // Reads as it was, and each branch of that reading is what keeps its spoiler.
+        ['Https://example.org/a||secret||'],
+        ['Link:https://example.org/a||secret||'],
+        ['[a](https://x/(b)||secret||)'],
+        ['my_file at https://example.org/my_file ||secret_word||'],
+        ['**my_file at https://example.org/my_file ||secret_word||**'],
+        ['> my_file at https://example.org/my_file ||secret_word||'],
+        ['_||https://example.org/a|| https://example.org/b_c ||secret_ d||'],
+    ])('it is read as it was where the better reading would print it: %s', (content) => {
+        expect(JSON.stringify(parsedAsItWas(content))).toContain('"spoiler"');
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('the better reading is kept where it loses nothing', () => {
+        const content = 'a*b Https://example.org/c_d https://example.org/e*f ||https://example.org/g_h|| and ||the butler did it||';
+        expect(addresses(content)).toEqual({
+            hidden: ['https://example.org/g_h'],
+            shown: ['Https://example.org/c_d', 'https://example.org/e*f'],
+        });
+        expect(parseMessage(content).filter(n => n.type === 'spoiler').map(n => text([n]))).toEqual(['https://example.org/g_h', 'the butler did it']);
+    });
+
+    it.each([
+        ['a word', 'secret'],
+        ['a word in another script', '\u79d8\u5bc6'],
+        ['a mark', ':)'],
+        ['code', '`secret`'],
+        ['an address', 'https://example.org/secret'],
+        ['a link', '[secret](x)'],
+        ['a link\'s address', '[x](secret)'],
+        ['a picture', '![secret](x)'],
+        ['someone mentioned', '@secret'],
+        ['everyone', '@everyone'],
+        ['here', '@here'],
+        ['a channel', '#secret'],
+        ['an emoji', ':secret:'],
+    ])('whatever it hid counts: %s', (_, hidden) => {
+        // Stepped over, the address lets this `_` close inside the spoiler, and it all prints.
+        const content = `_https://example.org/a_b ||${hidden} _ ||`;
+        expect(parsedAsItWas(content).some(n => n.type === 'spoiler')).toBe(true);
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('a word it hid twice has to stay hidden twice, wherever else it is said', () => {
+        const content = '||a|| _https://example.org/w_w ||a_ a||';
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('CONTROL: a word it did not hide is free to be read better, and one it would still hide is too', () => {
+        // Every word of the spoiler is hidden both ways, and the address is whole.
+        expect(addresses('my_file ||https://example.org/hidden|| https://example.org/my_file').shown).toEqual(['https://example.org/my_file']);
+        // Nothing was hidden: this was never a spoiler, and now it is.
+        expect(parsedAsItWas('_||https://example.org/a_b||_').some(n => n.type === 'spoiler')).toBe(false);
+        expect(addresses('_||https://example.org/a_b||_').hidden).toEqual(['https://example.org/a_b']);
+    });
+
     // What goes wrong, in any order. Everything the parser as it was hid must not be printed now.
     const PARTS = ['||', '||', '||', '**', '*', '__', '_', '_', '~~', '`', ' ', ' ', ' ', 'W', 'W', 'W',
         'https://x/W', 'https://x/W_W', 'https://x/W*W', 'https://x/W~~W', 'Https://x/W', 'Https://x/W_W',
         'HTTP://x/W*W', 'https://x/W||W', 'Https://x/W||W', ':', '://', ':https:', '//', ':W_W:', '@W', '#W_W',
         '(', ')', '[W](', ']', '![W](', '!', '.', ',', '>', '"', '<', '\n', '> ', 'W_W', 'W*W', 'W~~W',
-        'https://x/(W', 'https://x/W)', 'Link:https://x/W_W', 'Link:Https://x/W', '[W](https://x/(W)', '-', '?'];
+        'https://x/(W', 'https://x/W)', 'Link:https://x/W_W', 'Link:Https://x/W', '[W](https://x/(W)', '-', '?',
+        'https://*>', 'https://_>', 'https://[', 'https://`>', 'Https://x/[W', 'https://x/W**', 'https://x/W>_W', 'https://x/W"*W'];
 
-    it('as a property, over text made of what goes wrong', () => {
-        let seed = 20261103;
+    it.each<[number, number, string]>([
+        [20261103, 10, ''],
+        [8, 10, ''],
+        [5, 16, ''],
+        [1, 24, ''],
+        [2, 40, ''],
+        [3, 16, ' '],
+        [4, 40, ' '],
+    ])('as a property, over text made of what goes wrong: seed %i, up to %i parts, joined by "%s"', (start, parts, between) => {
+        let seed = start;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
         let spoilers = 0;
         const bad: string[] = [];
-        for (let k = 0; k < 150000; k++) {
+        for (let k = 0; k < 30000; k++) {
             let id = 0;
-            let content = '';
-            for (let j = 1 + next(10); j > 0; j--) content += PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`);
+            const pieces: string[] = [];
+            for (let j = 1 + next(parts); j > 0; j--) pieces.push(PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`));
+            const content = pieces.join(between);
             if (hiddenBy(parsedAsItWas(content)).size) spoilers++;
             const out = leaked(content, parseMessage(content));
             if (out.length) bad.push(`${JSON.stringify(content)} prints ${out.join(', ')}`);
         }
         expect(bad).toEqual([]);
         // Over nothing it would prove nothing.
-        expect(spoilers).toBeGreaterThan(5000);
+        expect(spoilers).toBeGreaterThan(500);
     });
 
     it('CONTROL: the check finds words that are printed, and leaves alone words that are not', () => {
@@ -359,10 +459,9 @@ describe('an address straight after a colon', () => {
             { type: 'text', value: ' ' },
             spoiler('hidden'),
         ]);
-        expect(parseMessage('Link:https://example.org/a||hidden||')).toEqual([
-            { type: 'text', value: 'Link:https://example.org/a' },
-            spoiler('hidden'),
-        ]);
+        // The address would take the spoiler in, so this message reads as it did.
+        expect(parseMessage('Link:https://example.org/a||hidden||')).toEqual(parsedAsItWas('Link:https://example.org/a||hidden||'));
+        expect(parseMessage('Link:https://example.org/a||hidden||').at(-1)).toEqual(spoiler('hidden'));
     });
 });
 
@@ -394,13 +493,24 @@ describe('a raw > or " is never part of an address', () => {
         expect(extractMentions('<https://example.org/@alice> @bob')).toEqual({ users: ['bob'], everyone: false });
     });
 
-    it('what comes after one opens nothing that would take a spoiler apart', () => {
-        expect(parseMessage('<https://example.org/a>_b ||c_d||')).toEqual([
+    it('what comes after one is read as anything else is', () => {
+        expect(parseMessage('<https://example.org/a>_b c_d')).toEqual([
             { type: 'text', value: '<' },
             { type: 'url', href: 'https://example.org/a' },
-            { type: 'text', value: '>_b ' },
-            { type: 'spoiler', children: [{ type: 'text', value: 'c_d' }] },
+            { type: 'text', value: '>' },
+            { type: 'em', children: [{ type: 'text', value: 'b c' }] },
+            { type: 'text', value: 'd' },
         ]);
+        expect(parseMessage('https://example.org/a>`b`')).toEqual([
+            { type: 'url', href: 'https://example.org/a' },
+            { type: 'text', value: '>' },
+            { type: 'code', value: 'b' },
+        ]);
+    });
+
+    it('but where that would take a spoiler apart, the message reads as it did', () => {
+        expect(parseMessage('<https://example.org/a>_b ||c_d||')).toEqual(parsedAsItWas('<https://example.org/a>_b ||c_d||'));
+        expect(parseMessage('<https://example.org/a>_b ||c_d||').at(-1)).toEqual({ type: 'spoiler', children: [{ type: 'text', value: 'c_d' }] });
     });
 });
 
@@ -515,7 +625,7 @@ describe('brackets in a link\'s target', () => {
     it('it stays bounded: a target past the limit is no link, and a message of openers takes no time', () => {
         const target = `https://example.org/${'a'.repeat(2028)}`;
         expect(target).toHaveLength(2048);
-        expect(hrefs(`[a](${target})`)).toEqual([target]);
+        expect(parseMessage(`[a](${target})`)).toEqual([{ type: 'link', label: 'a', href: target }]);
         expect(parseMessage(`[a](${target}b)`).some(n => n.type === 'link')).toBe(false);
         // Past the limit, a first `)` further back is what it stops at, as before it stopped there.
         expect(hrefs(`[a](x(y)${'a'.repeat(3000)})`)).toEqual(['x(y']);
@@ -585,6 +695,69 @@ describe('who an address mentions: nobody', () => {
     ])('CONTROL: a real mention beside one still is: %s', (content) => {
         expect(messageMentionsUser(content, alice)).toBe(true);
         expect(extractMentions(content).users).toEqual(['alice']);
+    });
+});
+
+describe('text with no address in it', () => {
+    const PARTS = ['||', '**', '*', '__', '_', '~~', '`', ' ', '\n', '> ', 'w', 'w_w', 'w*w', 'w~~w', '@w', '@w_w', '#w_w', ':w:', ':w_w:', ':w', '[w](w)', '![w](w)',
+        '[', ']', '(', ')', '!', '.', ',', 'h', 'H', 'http', 'Http', '<', '>', '"'];
+
+    it('reads as it always did', () => {
+        let seed = 20261103;
+        const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+        const bad: string[] = [];
+        for (let k = 0; k < 30000; k++) {
+            let content = '';
+            for (let j = 1 + next(14); j > 0; j--) content += PARTS[next(PARTS.length)];
+            if (JSON.stringify(parseMessage(content)) !== JSON.stringify(parsedAsItWas(content))) bad.push(JSON.stringify(content));
+        }
+        expect(bad).toEqual([]);
+    });
+
+    it('but for two things asked for: the brackets a link\'s target opens, and :name:// being no shortcode', () => {
+        expect(parseMessage('[a](b(c))')).toEqual([{ type: 'link', label: 'a', href: 'b(c)' }]);
+        expect(parsedAsItWas('[a](b(c))')).toEqual([{ type: 'link', label: 'a', href: 'b(c' }, { type: 'text', value: ')' }]);
+        expect(parseMessage(':a://x')).toEqual([{ type: 'text', value: ':a://x' }]);
+        expect(parsedAsItWas(':a://x')).toEqual([{ type: 'emoji', name: 'a' }, { type: 'text', value: '//x' }]);
+    });
+});
+
+describe('what a message costs to read', () => {
+    /** The fastest of a few runs: anything else on the machine only ever adds to it. */
+    const fastest = (content: string) => {
+        let best = Infinity;
+        for (let k = 0; k < 5; k++) {
+            const started = performance.now();
+            parseMessage(content);
+            best = Math.min(best, performance.now() - started);
+        }
+        return best;
+    };
+
+    // A message is at most 8000 long, and is read on the UI thread, on receipt and on
+    // every render of the chat. The first three took 1100, 500 and 60 ms with guards for
+    // spoilers that walked the text at every address and sent the next opener back into
+    // it. The next three still take 190, 35 and 65 ms if each failed walk is free.
+    it.each([
+        ['nested openers, an address and a `||` over and over, and a spoiler', `**__~~*_${'>http://a_b_c||'.repeat(532)}_ ||s||`],
+        ['one `_`, and an address and a `||` over and over', `_${'http://a_b_c ||'.repeat(532)}* ||s||`],
+        ['one word of addresses', `*${'http://a**b>#'.repeat(615)}_`],
+        ['words of a shortcode with an address in them', `**${'~~)"~~@:Hbhttp://****b__H)('.repeat(295)}_ ||s||`],
+        ['a delimiter only the end of a link opens', `${'[x](http://a)**b '.repeat(470)}`],
+        ['every delimiter, and an address that takes them in', `\`${'_***http://:**b~~~~____'.repeat(347)} ||s||`],
+        ['a run of one delimiter in an address', `*https://example.org/${'*'.repeat(7900)}a ||s||`],
+        ['a list of addresses with a spoiler', `my_list:\n${'https://example.org/some_long_path_name\n'.repeat(199)}||s|| *`],
+    ])('%s', (_, content) => {
+        expect(content.length).toBeGreaterThan(7500);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content)).toBeLessThan(30);
+    });
+
+    it('CONTROL: what is cheap is still read in full: a list of addresses, all whole', () => {
+        const line = 'https://example.org/some_long_path\n';
+        const content = `my_list:\n${line.repeat(220)}`;
+        expect(content.length).toBeGreaterThan(7500);
+        expect(hrefs(content)).toEqual(Array(220).fill('https://example.org/some_long_path'));
     });
 });
 

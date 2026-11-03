@@ -31,6 +31,18 @@ export type Node =
     | { type: 'emoji'; name: string };
 
 const MAX_DEPTH = 12;
+
+/**
+ * One reading of a message: `asItWas` (see `parseMessage`) or not, and how much it
+ * may still spend on walks for a closer that find none. Such a walk can be repeated
+ * from the next opener, since what it stepped over is not always what gets read:
+ * `[x](https://a)**b`, over and over, has `**` that only the link's reading opens.
+ * A real message spends a few lengths of itself. Past that a delimiter closes at the
+ * first one, as it used to, which always moves on, so a message of 8000 cannot
+ * cost more than this however it was made.
+ */
+interface Reading { asItWas: boolean; walkLeft: number }
+const WALK_PER_CHAR = 32;
 // A link's target, 2048 long at most, and the `)` after it.
 const LINK_TARGET_RE = /^\S{0,2049}/;
 
@@ -49,6 +61,8 @@ const INLINE_DELIMS: { open: string; type: 'strong' | 'em' | 'underline' | 'stri
  *  they are only ever what is put around an address (`<https://…>`,
  *  `{"url":"https://…"}`). */
 const URL_RE = /^https?:\/\/[^\s<>"]+[^\s<>".,:;')\]]/i;
+/** The address as it was read before (see `parseMessage`). */
+const URL_RE_AS_IT_WAS = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
 
 /** Wikipedia-shaped URLs end in `)`. URL_RE's tail class already dropped it,
  *  so put it back only when the URL has an unmatched `(` that wants it, along
@@ -78,49 +92,9 @@ export function urlAt(rest: string): string | null {
     return m && withBalancedTail(m[0], rest.slice(m[0].length));
 }
 
-/**
- * Is there a spoiler ahead in `input`, from `at` on? A spoiler must never stop
- * being one, and reading an address better can cost one. The `_`, `*`, `~~` and
- * backticks of a text pair up in order, so one that used to be a delimiter and
- * is now part of an address moves every pairing after it, and a later one can
- * land inside `||…||` and take that spoiler apart, printing its words. So where
- * text is read otherwise than it used to be and this says yes, it is read as it
- * used to be unless nothing else in the text can pair differently for it.
- * messageParser.test.ts holds this as a property against the parser as it was.
- */
-function spoilerAhead(input: string, at: number): boolean {
-    const open = input.indexOf('||', at);
-    return open !== -1 && input.lastIndexOf('||') > open;
-}
-
-/** The run of text from `at` on that an address takes in if nothing stops it sooner. */
-function wordAt(input: string, at: number): string {
-    return /^[^\s<]*/.exec(input.slice(at))![0];
-}
-
-/**
- * The address at `at`, as the parser reads it, or null. `lately` says it was not
- * read as one before, having a capital scheme or being straight after a colon:
- * with a spoiler ahead it stays unread where a delimiter in its word could pair
- * differently for it (see `spoilerAhead`), which it can only if there is another
- * of it further on.
- */
-function addressAt(input: string, at: number, lately: boolean): string | null {
-    const href = urlAt(input.slice(at));
-    if (!href || !lately || !spoilerAhead(input, at)) return href;
-    const word = wordAt(input, at);
-    const after = input.slice(at + word.length);
-    if (/[`[|]/.test(word) || ['*', '_', '~'].some((d) => word.includes(d) && after.includes(d))) return null;
-    return href;
-}
-
-/** How many `||` are in `text`. */
-function barsIn(text: string): number {
-    return text.split('||').length - 1;
-}
-
 // Allow letters, numbers, underscore, dot, hyphen in mention/channel names.
 const NAME_RE = /^[a-z0-9_.-]+/i;
+const SHORTCODE_RE = /^:([a-z0-9_+-]+):/i;
 
 // Schemes we will emit as a real href/src. http/https/mailto are the safe
 // external set; `sovereign-enc` is our own attachment scheme (the renderer
@@ -166,14 +140,74 @@ function isNameChar(ch: string | undefined): boolean {
     return ch !== undefined && /[a-z0-9_.-]/i.test(ch);
 }
 
-/** Parse a full message into a node tree. */
+// A word, or one mark that is not a delimiter: `||:)||` is a spoiler too.
+const WORD_RE = /[^\s!-/:-@[-`{-~]+|[^\s*_~`|]/g;
+
+function wordsOf(n: Exclude<Node, { children: Node[] }>): string {
+    switch (n.type) {
+        case 'text':
+        case 'code':
+        case 'codeblock':
+            return n.value;
+        case 'url':
+            return n.href;
+        case 'link':
+            return `${n.label} ${n.href}`;
+        case 'image':
+            return `${n.alt} ${n.href}`;
+        case 'mentionUser':
+        case 'channel':
+        case 'emoji':
+            return n.name;
+        case 'mentionEveryone':
+            return 'everyone';
+        case 'mentionHere':
+            return 'here';
+    }
+}
+
+/** Every word under a spoiler in `nodes`, each with how many times. */
+function hiddenWords(nodes: Node[], under = false, words = new Map<string, number>()): Map<string, number> {
+    for (const n of nodes) {
+        if ('children' in n) {
+            hiddenWords(n.children, under || n.type === 'spoiler', words);
+        } else if (under) {
+            for (const word of wordsOf(n).match(WORD_RE) ?? []) words.set(word, (words.get(word) ?? 0) + 1);
+        }
+    }
+    return words;
+}
+
+/**
+ * Parse a full message into a node tree.
+ *
+ * A spoiler must never stop being one, and reading an address better can cost
+ * one. The `_`, `*`, `~~` and backticks of a text pair up in order, so one that
+ * used to be a delimiter and is now part of an address moves every pairing after
+ * it, and a later one can land inside `||…||` and take that spoiler apart. Which
+ * texts do that cannot be listed: rules for the ones found kept missing others,
+ * and one message could cost them a second to read. So the reading as it was
+ * before addresses were read better stays (`asItWas`), and if it hid a word this
+ * one does not, it is the one used, for the whole message. An address in such a
+ * message is read as it was too; the spoiler is what matters. messageParser.test.ts
+ * holds this as a property against that parser, frozen.
+ */
 export function parseMessage(content: string): Node[] {
     if (!content) return [];
-    return parseBlocks(content);
+    const read = (asItWas: boolean) => parseBlocks(content, { asItWas, walkLeft: WALK_PER_CHAR * content.length });
+    const nodes = read(false);
+    const bars = content.indexOf('||');
+    if (bars === -1 || content.indexOf('||', bars + 2) === -1) return nodes;
+    const asItWas = read(true);
+    const hidden = hiddenWords(nodes);
+    for (const [word, times] of hiddenWords(asItWas)) {
+        if ((hidden.get(word) ?? 0) < times) return asItWas;
+    }
+    return nodes;
 }
 
 /** Block level: fenced code blocks and blockquotes, then inline for the rest. */
-function parseBlocks(input: string): Node[] {
+function parseBlocks(input: string, reading: Reading): Node[] {
     const nodes: Node[] = [];
     let rest = input;
 
@@ -187,7 +221,7 @@ function parseBlocks(input: string): Node[] {
         }
 
         // Blockquote: a run of lines each starting with "> " (or ">").
-        const quote = matchBlockquote(rest);
+        const quote = matchBlockquote(rest, reading);
         if (quote) {
             nodes.push(quote.node);
             rest = rest.slice(quote.length);
@@ -200,7 +234,7 @@ function parseBlocks(input: string): Node[] {
         const stop = [nextFence, nextQuote].filter((i) => i > 0);
         const cut = stop.length ? Math.min(...stop) : rest.length;
         const chunk = rest.slice(0, cut === 0 ? rest.length : cut);
-        nodes.push(...parseInline(chunk, 0));
+        nodes.push(...parseInline(chunk, 0, reading));
         rest = rest.slice(chunk.length);
     }
 
@@ -228,7 +262,7 @@ function matchCodeBlock(s: string): { node: Node; length: number } | null {
     return { node: { type: 'codeblock', value: code, lang }, length: end + 3 };
 }
 
-function matchBlockquote(s: string): { node: Node; length: number } | null {
+function matchBlockquote(s: string, reading: Reading): { node: Node; length: number } | null {
     if (!(s.startsWith('> ') || s.startsWith('>\n') || s === '>')) return null;
     const lines = s.split('\n');
     const quoted: string[] = [];
@@ -243,7 +277,7 @@ function matchBlockquote(s: string): { node: Node; length: number } | null {
     }
     if (quoted.length === 0) return null;
     const length = Math.min(consumed, s.length);
-    return { node: { type: 'blockquote', children: parseInline(quoted.join('\n'), 1) }, length };
+    return { node: { type: 'blockquote', children: parseInline(quoted.join('\n'), 1, reading) }, length };
 }
 
 /** Find the index of the first line (after start) beginning with `prefix`. */
@@ -260,14 +294,14 @@ function findLineStart(s: string, prefix: string): number {
 }
 
 /**
- * What a link or a picture holds, at `at` in `input`, with `head` matching up to
+ * What a link or a picture holds, at the start of `rest`, with `head` matching up to
  * the `(` of its target. The target takes in the brackets it opens, so
  * `[w](https://x/Foo_(bar))` keeps its own, and it stops at the first `)` that
  * closes none: `[a](b) (c)` does not take in `(c)`. With no such `)`, as in
- * `[a](https://x/(b)`, it stops at the first `)` it passed. Bounded, like `head`.
+ * `[a](https://x/(b)`, it stops at the first `)` it passed, as it always used to
+ * (`asItWas`). Bounded, like `head`.
  */
-function matchLinkParts(head: RegExp, input: string, at: number): { label: string; href: string; length: number } | null {
-    const rest = input.slice(at);
+function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: string; href: string; length: number } | null {
     const m = head.exec(rest);
     if (!m) return null;
     const target = LINK_TARGET_RE.exec(rest.slice(m[0].length))![0];
@@ -283,13 +317,13 @@ function matchLinkParts(head: RegExp, input: string, at: number): { label: strin
             depth--;
         }
     }
-    // With a spoiler ahead, what is after the first `)` stays what it was (see `spoilerAhead`).
-    if (first !== -1 && (end === -1 || (spoilerAhead(input, at) && /[*_~`[|:]/.test(target.slice(first, end))))) end = first;
+    if (first !== -1 && (end === -1 || asItWas)) end = first;
     return end > 0 ? { label: m[1], href: target.slice(0, end), length: m[0].length + end + 1 } : null;
 }
 
 /** Inline parser: emits text runs interleaved with markup nodes. */
-function parseInline(input: string, depth: number): Node[] {
+function parseInline(input: string, depth: number, reading: Reading): Node[] {
+    const { asItWas } = reading;
     const nodes: Node[] = [];
     let buf = '';
     let i = 0;
@@ -321,7 +355,7 @@ function parseInline(input: string, depth: number): Node[] {
         // window instead of scanning to end-of-string — otherwise a message of
         // many '[' is O(n^2) and freezes the renderer (client-side DoS).
         if (ch === '!' && input[i + 1] === '[') {
-            const m = matchLinkParts(/^!\[([^\]\n]{0,512})\]\(/, input, i);
+            const m = matchLinkParts(/^!\[([^\]\n]{0,512})\]\(/, rest, asItWas);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme (javascript:, data:, …): keep the
@@ -335,7 +369,7 @@ function parseInline(input: string, depth: number): Node[] {
 
         // Link: [label](url) — bounded (see image note above) to keep parsing linear.
         if (ch === '[') {
-            const m = matchLinkParts(/^\[([^\]\n]{1,512})\]\(/, input, i);
+            const m = matchLinkParts(/^\[([^\]\n]{1,512})\]\(/, rest, asItWas);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme: drop the href and keep the label
@@ -348,19 +382,12 @@ function parseInline(input: string, depth: number): Node[] {
         }
 
         // Bare URL, in either case: a phone's keyboard makes `Https://`.
-        if (ch === 'h' || ch === 'H') {
-            const href = addressAt(input, i, ch === 'H');
+        if (ch === 'h' || (ch === 'H' && !asItWas)) {
+            const href = asItWas ? URL_RE_AS_IT_WAS.exec(rest)?.[0] : urlAt(rest);
             if (href) {
                 flush();
                 nodes.push({ type: 'url', href });
                 i += href.length;
-                // What is after a `>` or `"` in its word used to be in the address. With
-                // a spoiler ahead it is only words, so nothing in it opens (see `spoilerAhead`).
-                const more = wordAt(input, i);
-                if (/[*_~`[|]/.test(more) && spoilerAhead(input, i)) {
-                    buf += more;
-                    i += more.length;
-                }
                 continue;
             }
         }
@@ -400,9 +427,9 @@ function parseInline(input: string, depth: number): Node[] {
         // Shortcode emoji: :smile: Not with // after it: `Link:https://…` is an
         // address straight after a colon, and `:smile://x` is words.
         if (ch === ':') {
-            const m = /^:([a-z0-9_+-]+):/i.exec(rest);
-            if (m && rest.startsWith('//', m[0].length)) {
-                const href = addressAt(input, i + 1, true);
+            const m = SHORTCODE_RE.exec(rest);
+            if (m && !asItWas && rest.startsWith('//', m[0].length)) {
+                const href = urlAt(rest.slice(1));
                 if (href) {
                     buf += ':';
                     flush();
@@ -426,12 +453,12 @@ function parseInline(input: string, depth: number): Node[] {
         if (depth < MAX_DEPTH) {
             const delim = INLINE_DELIMS.find((d) => rest.startsWith(d.open));
             if (delim) {
-                const closeIdx = findClosing(input, i + delim.open.length, delim.open);
+                const closeIdx = findClosing(input, i + delim.open.length, delim.open, reading);
                 if (closeIdx !== -1) {
                     const innerText = input.slice(i + delim.open.length, closeIdx);
                     if (innerText.length > 0) {
                         flush();
-                        nodes.push({ type: delim.type, children: parseInline(innerText, depth + 1) } as Node);
+                        nodes.push({ type: delim.type, children: parseInline(innerText, depth + 1, reading) } as Node);
                         i = closeIdx + delim.open.length;
                         continue;
                     }
@@ -447,24 +474,6 @@ function parseInline(input: string, depth: number): Node[] {
     return nodes;
 }
 
-/** The first `open` from `from` on, outside inline code. */
-function firstDelimiter(input: string, from: number, open: string): number {
-    let i = from;
-    while (i < input.length) {
-        // Don't let a closing delimiter be found inside inline code.
-        if (input[i] === '`') {
-            const close = input.indexOf('`', i + 1);
-            if (close !== -1) {
-                i = close + 1;
-                continue;
-            }
-        }
-        if (input.startsWith(open, i)) return i;
-        i += 1;
-    }
-    return -1;
-}
-
 /** Where the delimiter `open` closes inside the address `href`: at the last one,
  *  if the address ends with it (`**https://x/a**`), give or take what a sentence
  *  puts after it (`**https://x/a**!`, where URL_RE takes the `!` in). Otherwise
@@ -475,40 +484,14 @@ function closeInAddress(href: string, open: string): number {
 }
 
 /**
- * With a spoiler ahead (see `spoilerAhead`), may a delimiter that used to close at
- * `first` close at `found` instead, -1 being not at all? Only if each `||` keeps
- * the partner it had and nothing else can pair differently for it.
- */
-function closeMayMove(input: string, from: number, first: number, found: number, open: string): boolean {
-    // An address took in the backtick that opened inline code.
-    if (found !== -1 && found < first) return false;
-    // `**` or `__` left open is a `*` or a `_` that still opens.
-    if (found === -1 && open !== '~~' && open.length === 2) return false;
-    const stop = found === -1 ? input.length : found;
-    const after = found === -1 ? '' : input.slice(found + open.length);
-    const around = `${input.slice(from, stop)} ${after}`.replace(/https?:\/\/[^\s<>"]+/gi, '');
-    if (/[*_~`[]|\|\|\|/.test(around) || /https?:\/\/[^\s<]*\|\|/i.test(after)) return false;
-    const before = barsIn(input.slice(from, first));
-    const crossed = barsIn(input.slice(first, stop));
-    const beyond = barsIn(after);
-    if (crossed === 0) return true;
-    if (beyond === 0) return before % 2 === 0 || crossed === 1;
-    return before % 2 === 0 && crossed % 2 === 0;
-}
-
-/**
  * Find the matching closing delimiter for `open` starting at `from`. A delimiter
  * in the words before an address does not close inside it, or `my_file is at
- * https://x/my_file.txt` is a link to https://x/my.
+ * https://x/my_file.txt` is a link to https://x/my. A spoiler closes at the first
+ * `||`, always, in an address or not: URL_RE reads all of `https://x/a||!` as one
+ * address, and it is still a spoiler.
  */
-function findClosing(input: string, from: number, open: string): number {
-    const first = firstDelimiter(input, from, open);
-    // A spoiler closes at the first `||`, always, in an address or not: URL_RE reads
-    // all of `https://x/a||!` as one address, and it is still a spoiler.
-    if (open === '||' || first === -1) return first;
-    const guarded = spoilerAhead(input, from);
-    let swallows = false;
-    let found = -1;
+function findClosing(input: string, from: number, open: string, reading: Reading): number {
+    const stepsOver = !reading.asItWas && open !== '||' && reading.walkLeft > 0;
     let i = from;
     while (i < input.length) {
         // Don't let a closing delimiter be found inside inline code.
@@ -519,29 +502,20 @@ function findClosing(input: string, from: number, open: string): number {
                 continue;
             }
         }
-        if (input[i] === 'h' || input[i] === 'H') {
-            const href = addressAt(input, i, input[i] === 'H' || input[i - 1] === ':');
+        if (stepsOver && (input[i] === 'h' || input[i] === 'H')) {
+            const href = urlAt(input.slice(i));
             if (href) {
-                // An address takes in any `||` in its word, but for the one that
-                // closes a spoiler opened before it.
-                if (guarded && barsIn(wordAt(input, i)) > barsIn(input.slice(from, i)) % 2) swallows = true;
                 const inside = closeInAddress(href, open);
-                if (inside !== -1) {
-                    found = i + inside;
-                    break;
-                }
+                if (inside !== -1) return i + inside;
                 i += href.length;
                 continue;
             }
         }
-        if (input.startsWith(open, i)) {
-            found = i;
-            break;
-        }
+        if (input.startsWith(open, i)) return i;
         i += 1;
     }
-    if (found === first || !guarded) return found;
-    return !swallows && closeMayMove(input, from, first, found, open) ? found : first;
+    reading.walkLeft -= input.length - from;
+    return -1;
 }
 
 /** Collect the plain-text names of all users mentioned in a message. */
