@@ -64,7 +64,10 @@ function RemoteImage({ href, alt }: { href: string; alt?: string }) {
         );
     }
     return (
-        <span className="message-image">
+        // stopPropagation: a revealed spoiler wraps this, and a press on the picture would bubble
+        // into its toggle, hiding it again (the attachment's picture does the same). Unrevealed
+        // spoilers never see this (pointer-events:none), so the revealing press still works.
+        <span className="message-image" onClick={(e) => e.stopPropagation()}>
             <img
                 src={href}
                 alt={alt ?? ''}
