@@ -483,15 +483,34 @@ function closeInAddress(href: string, open: string): number {
     return last !== -1 && !/[\p{L}\p{N}/]/u.test(href.slice(last + open.length)) ? last : -1;
 }
 
+/** How long the @name, #name or :name: at `at` is, or 0. */
+function nameLengthAt(input: string, at: number): number {
+    if (input[at] === '@' || input[at] === '#') {
+        const name = NAME_RE.exec(input.slice(at + 1));
+        return name ? 1 + name[0].length : 0;
+    }
+    if (input[at] === ':') {
+        const name = SHORTCODE_RE.exec(input.slice(at));
+        if (!name) return 0;
+        // `:https://…` is an address straight after a colon, and `:a://x` is words, whole.
+        return input.startsWith('//', at + name[0].length) && urlAt(input.slice(at + 1)) ? 0 : name[0].length;
+    }
+    return 0;
+}
+
 /**
  * Find the matching closing delimiter for `open` starting at `from`. A delimiter
  * in the words before an address does not close inside it, or `my_file is at
- * https://x/my_file.txt` is a link to https://x/my. A spoiler closes at the first
- * `||`, always, in an address or not: URL_RE reads all of `https://x/a||!` as one
- * address, and it is still a spoiler.
+ * https://x/my_file.txt` is a link to https://x/my. Once past one it does not close
+ * inside a name either: in `my_file at https://x/a_b cc @alice_c` that is alice_c's
+ * mention, which it was before the address was stepped over, and with no address in
+ * the text a name is what it always was. A spoiler closes at the first `||`, always,
+ * in an address or not: URL_RE reads all of `https://x/a||!` as one address, and it
+ * is still a spoiler.
  */
 function findClosing(input: string, from: number, open: string, reading: Reading): number {
     const stepsOver = !reading.asItWas && open !== '||' && reading.walkLeft > 0;
+    let pastAddress = false;
     let i = from;
     while (i < input.length) {
         // Don't let a closing delimiter be found inside inline code.
@@ -508,6 +527,14 @@ function findClosing(input: string, from: number, open: string, reading: Reading
                 const inside = closeInAddress(href, open);
                 if (inside !== -1) return i + inside;
                 i += href.length;
+                pastAddress = true;
+                continue;
+            }
+        }
+        if (stepsOver && pastAddress) {
+            const name = nameLengthAt(input, i);
+            if (name) {
+                i += name;
                 continue;
             }
         }

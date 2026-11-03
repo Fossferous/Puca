@@ -698,6 +698,56 @@ describe('who an address mentions: nobody', () => {
     });
 });
 
+describe('a delimiter past an address does not close inside a name', () => {
+    it.each<[string, string[]]>([
+        ['see my_file at https://example.org/a_b cc @alice_c', ['alice_c']],
+        ['test_case failed: https://ci.example.org/job_1 @bob_smith please look', ['bob_smith']],
+        ['the build_log is at https://ci.example.org/run_7, ping @carol_d and @erin', ['carol_d', 'erin']],
+        ['my__file at https://example.org/a__b @alice__c', ['alice__c']],
+    ])('%s', (content, users) => {
+        expect(extractMentions(content).users).toEqual(users);
+        expect(messageMentionsUser(content, { username: users[0] })).toBe(true);
+        // and the name's first half is nobody
+        expect(messageMentionsUser(content, { username: users[0].split('_')[0] })).toBe(false);
+    });
+
+    it('a channel and an emoji are the same', () => {
+        expect(parseMessage('my_file https://example.org/a_b #my_channel').at(-1)).toEqual({ type: 'channel', name: 'my_channel' });
+        expect(parseMessage('my_file https://example.org/a_b :thumbs_up:').at(-1)).toEqual({ type: 'emoji', name: 'thumbs_up' });
+    });
+
+    it('nor does it stop there: it closes after the name', () => {
+        expect(parseMessage('_see https://example.org/a_b @alice_c now_')).toEqual([{
+            type: 'em',
+            children: [
+                { type: 'text', value: 'see ' },
+                { type: 'url', href: 'https://example.org/a_b' },
+                { type: 'text', value: ' ' },
+                { type: 'mentionUser', name: 'alice_c' },
+                { type: 'text', value: ' now' },
+            ],
+        }]);
+    });
+
+    it('an address straight after a colon is still an address there, not a shortcode to step over', () => {
+        expect(hrefs('my_file https://example.org/a_b :https://example.org/c_d')).toEqual(['https://example.org/a_b', 'https://example.org/c_d']);
+    });
+
+    it(':name:// with no address in it is words, as the parser reads it', () => {
+        expect(parseMessage('my_file https://example.org/a_b :c_d://x e_f')).toEqual([
+            { type: 'text', value: 'my' },
+            { type: 'em', children: [{ type: 'text', value: 'file ' }, { type: 'url', href: 'https://example.org/a_b' }, { type: 'text', value: ' :c_d://x e' }] },
+            { type: 'text', value: 'f' },
+        ]);
+    });
+
+    it('CONTROL: with no address before it, a name is what it always was', () => {
+        for (const content of ['my_file cc @alice_c', 'my_file #my_channel', 'my_file :thumbs_up:', 'my_file @alice_c https://example.org/a_b']) {
+            expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+        }
+    });
+});
+
 describe('text with no address in it', () => {
     const PARTS = ['||', '**', '*', '__', '_', '~~', '`', ' ', '\n', '> ', 'w', 'w_w', 'w*w', 'w~~w', '@w', '@w_w', '#w_w', ':w:', ':w_w:', ':w', '[w](w)', '![w](w)',
         '[', ']', '(', ')', '!', '.', ',', 'h', 'H', 'http', 'Http', '<', '>', '"'];
@@ -753,11 +803,12 @@ describe('what a message costs to read', () => {
         expect(fastest(content)).toBeLessThan(30);
     });
 
-    it('CONTROL: what is cheap is still read in full: a list of addresses, all whole', () => {
-        const line = 'https://example.org/some_long_path\n';
-        const content = `my_list:\n${line.repeat(220)}`;
+    it('CONTROL: what is cheap is still read in full: a list of addresses, all whole, and every name', () => {
+        const line = 'https://example.org/some_long_path @alice_c\n';
+        const content = `my_list:\n${line.repeat(179)}`;
         expect(content.length).toBeGreaterThan(7500);
-        expect(hrefs(content)).toEqual(Array(220).fill('https://example.org/some_long_path'));
+        expect(hrefs(content)).toEqual(Array(179).fill('https://example.org/some_long_path'));
+        expect(extractMentions(content).users).toEqual(['alice_c']);
     });
 });
 
