@@ -309,7 +309,13 @@ interface UnsentMessage {
     visit: number;
     /** How to name the conversation, if the person has left it by then. */
     where: string;
+    /** A DM, once it is on the socket: what its echo will carry, and when it went. */
+    wire?: string;
+    wentAt?: number;
 }
+
+/** How long after a DM goes its refusal may still be on the way. */
+const DM_REFUSAL_WINDOW_MS = 10_000;
 
 interface User {
     id: number;
@@ -741,8 +747,10 @@ export function Chat({ onLogout }: ChatProps) {
     /** Channel sends nothing has confirmed yet, by their bubble's id: not the answer
      *  to the request, not the socket's echo. */
     const unconfirmedSendsRef = useRef(new Set<string>());
-    /** What each DM still on screen as a bubble held, by the bubble's id. A DM's only
-     *  refusal is a frame that names no message (the Error handler). */
+    /** What each DM with no answer yet held, by its bubble's id, and it outlives the
+     *  bubble: a switch of conversation replaces the list, and the answer still comes.
+     *  A DM's only refusal is a frame that names no message (the Error handler). Its
+     *  echo is the only word that it landed (handleDirectMessage). */
     const unsentDmsRef = useRef(new Map<string, UnsentMessage>());
     const [showJumpLatest, setShowJumpLatest] = useState(false);
     const [missedCount, setMissedCount] = useState(0);
@@ -1657,13 +1665,16 @@ export function Chat({ onLogout }: ChatProps) {
                 return prev.filter(m => !String(m.id).startsWith('local_'));
             });
             // After the updater has run, as the channel send's give-up does. Their words
-            // go back like any send's. This frame may be about something else entirely,
-            // so one of them may have landed: its uploads are left alone.
+            // go back like any send's, for a bubble in this list, and for a DM that went
+            // moments ago from a list since replaced, with no echo yet. This frame may be
+            // about something else entirely, so one of them may have landed: its uploads
+            // are left alone.
             setTimeout(() => {
                 let notice = text;
-                for (const id of dropped) {
-                    const unsent = unsentDmsRef.current.get(id);
-                    if (unsent) notice = giveBackUnsent(unsent, notice, { mayHaveLanded: true });
+                const now = Date.now();
+                for (const [id, unsent] of unsentDmsRef.current) {
+                    const wentJustNow = unsent.wentAt !== undefined && now - unsent.wentAt < DM_REFUSAL_WINDOW_MS;
+                    if (dropped.includes(id) || wentJustNow) notice = giveBackUnsent(unsent, notice, { mayHaveLanded: true });
                 }
                 unsentDmsRef.current.clear();
                 leaveNotice(notice);
@@ -2436,6 +2447,19 @@ export function Chat({ onLogout }: ChatProps) {
             // fires for frames already in flight when the block landed — but a
             // blocked user must never ping you, so belt and braces.
             if (isBlocked(payload.sender.id)) return;
+
+            // One of ours landed, wherever the person has gone since: the list it may
+            // have left, so nothing below would ever notice, and a later Error must not
+            // print its words. By what it carries, because the echo of what the same
+            // account sent from another device comes here too.
+            if (payload.sender.id === currentUserId) {
+                for (const [id, unsent] of unsentDmsRef.current) {
+                    if (unsent.wire === payload.content) {
+                        unsentDmsRef.current.delete(id);
+                        break;
+                    }
+                }
+            }
 
             // Ping for an incoming DM from someone else that isn't the
             // conversation already on screen — the open one with Notes over
@@ -3328,7 +3352,6 @@ export function Chat({ onLogout }: ChatProps) {
         currentChannelIdRef.current = currentChannel?.id ?? null;
         currentDmIdRef.current = currentDM?.id ?? null;
         conversationVisitRef.current++;
-        unsentDmsRef.current.clear();
         setShowJumpLatest(false);
         setMissedCount(0);
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id]);
@@ -3619,6 +3642,8 @@ export function Chat({ onLogout }: ChatProps) {
                 if (!wsClient.isConnected) throw new OfflineSendError();
                 const wire = await encryptDMContent(content, currentDM.other_user_id);
                 if (!wsClient.isConnected) throw new OfflineSendError();
+                unsent.wire = wire;
+                unsent.wentAt = Date.now();
                 wsClient.sendDirectMessage(currentDM.other_user_id, wire);
             } catch (err) {
                 console.error('Failed to send DM:', err);

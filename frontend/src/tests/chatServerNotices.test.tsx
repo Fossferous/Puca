@@ -95,6 +95,7 @@ let host: HTMLElement | null = null;
 let alertSpy: ReturnType<typeof vi.spyOn>;
 let confirmSpy: ReturnType<typeof vi.spyOn>;
 let frameListeners: ((m: Frame) => void)[] = [];
+let dmListeners: ((m: Frame) => void)[] = [];
 let dialogs: ReturnType<typeof mountAppDialogs>;
 
 beforeEach(() => {
@@ -104,6 +105,7 @@ beforeEach(() => {
     const on = wsClient.on.bind(wsClient);
     vi.spyOn(wsClient, 'on').mockImplementation((type, handler) => {
         if (type === 'Error') frameListeners.push(handler as unknown as (m: Frame) => void);
+        if (type === 'DirectMessage') dmListeners.push(handler as unknown as (m: Frame) => void);
         return on(type, handler);
     });
 });
@@ -117,6 +119,7 @@ afterEach(() => {
     h.discarded = [];
     h.sessionOf = ME;
     frameListeners = [];
+    dmListeners = [];
     dialogs.unmount();
     vi.restoreAllMocks();
 });
@@ -379,6 +382,111 @@ describe('the chat view, when nobody just pressed anything', () => {
         await settle(50);
         expect(composer().value).toBe('hi bob');
         expect(dialogs.notices()).toEqual(['They only accept messages from friends']);
+    });
+
+    describe('a DM after the person has moved on', () => {
+        const REFUSED = 'This user only accepts direct messages from friends';
+        const TWO_DMS = [
+            { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+            { id: 'd2', other_user_id: 3, other_username: 'carol', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' },
+        ];
+        const openDm = async (name: string) => {
+            const item = [...document.querySelectorAll<HTMLElement>('.friends-dashboard .dm-item, .dm-item')].find(el => el.textContent?.includes(name));
+            expect(item, `${name}'s conversation is listed`).toBeTruthy();
+            await act(async () => { item!.click(); });
+            await settle(50);
+            expect(document.querySelector('.chat-header')?.textContent, `${name}'s is open`).toContain(name);
+        };
+        const backToTheList = async () => {
+            await act(async () => { document.querySelector<HTMLElement>('.back-to-server-btn')!.click(); });
+            await settle();
+        };
+        /** "hi bob" sent and on the socket, and the person now in carol's conversation. */
+        async function sentThenMovedOn() {
+            h.dms = TWO_DMS;
+            vi.spyOn(wsClient, 'isConnected', 'get').mockReturnValue(true);
+            vi.spyOn(wsClient, 'sendDirectMessage').mockImplementation(() => {});
+            await mountChat();
+            await act(async () => { document.querySelector<HTMLElement>('.server-icon.home-button')!.click(); });
+            await settle();
+            await openDm('bob');
+            await pressSend('hi bob');
+            await settle(50);
+            await backToTheList();
+            await openDm('carol');
+        }
+        const refused = (message = REFUSED) => act(async () => { frameListeners[0]({ type: 'Error', payload: { message } }); });
+        const echo = (over: Record<string, unknown> = {}) => act(async () => {
+            for (const listen of dmListeners) {
+                listen({
+                    type: 'DirectMessage',
+                    payload: { message_id: 'm1', conversation_id: 'd1', sender: { id: ME, username: 'me' }, content: 'sealed', timestamp: 1, ...over },
+                });
+            }
+        });
+
+        it('refused, the notice carries the words and who they were for, as the changelog says', async () => {
+            await sentThenMovedOn();
+            await refused();
+            await settle(50);
+            const [said] = dialogs.notices();
+            expect(said).toContain(REFUSED);
+            expect(said).toContain('your conversation with bob');
+            expect(said).toContain('hi bob');
+            expect(composer().value, 'one Enter from going to carol').toBe('');
+        });
+
+        it('having come back, the words go back in the box instead', async () => {
+            await sentThenMovedOn();
+            await backToTheList();
+            await openDm('bob');
+            await refused();
+            await settle(50);
+            expect(composer().value).toBe('hi bob');
+            expect(dialogs.notices()).toEqual([REFUSED]);
+        });
+
+        it('its echo says it landed: a later Error, about anything, does not print its words', async () => {
+            await sentThenMovedOn();
+            await echo();
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()).toEqual(['Slow down']);
+        });
+
+        it('CONTROL: the echo of what this account sent from another device leaves this one alone', async () => {
+            await sentThenMovedOn();
+            await echo({ content: 'sealed on the phone' });
+            await refused();
+            await settle(50);
+            expect(dialogs.notices()[0]).toContain('hi bob');
+        });
+
+        it('CONTROL: nor does what someone else sent, with the same words on the wire', async () => {
+            await sentThenMovedOn();
+            await echo({ sender: { id: 2, username: 'bob' } });
+            await refused();
+            await settle(50);
+            expect(dialogs.notices()[0]).toContain('hi bob');
+        });
+
+        it('long after it went, an Error is about something else', async () => {
+            await sentThenMovedOn();
+            const later = Date.now() + 11_000;
+            vi.spyOn(Date, 'now').mockReturnValue(later);
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()).toEqual(['Slow down']);
+        });
+
+        it('given back once: the next Error has nothing left to print', async () => {
+            await sentThenMovedOn();
+            await refused();
+            await settle(50);
+            await refused('Slow down');
+            await settle(50);
+            expect(dialogs.notices()[1]).toBe('Slow down');
+        });
     });
 
     it('a later Error frame gives nothing back: that bubble was already gone', async () => {
