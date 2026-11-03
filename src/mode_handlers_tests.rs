@@ -1721,6 +1721,70 @@ mod db {
         assert_eq!(row.2.as_deref(), Some("no uuid at all"));
     }
 
+    /// One brace without the other: the pattern takes each as optional, and the cast refuses
+    /// it. Unchecked, the migration aborts and the backend does not boot on that host.
+    #[tokio::test]
+    async fn the_migration_leaves_a_value_with_one_brace_alone() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let opened = format!("{{{id}");
+        let closed = format!("{id}}}");
+        let cast = |value: String| {
+            let pool = pool.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT $1::text::uuid::text").bind(value).fetch_one(&pool).await.is_ok() }
+        };
+        let casts = (cast(opened.clone()).await, cast(closed.clone()).await, cast(format!("{{{id}}}")).await);
+
+        sqlx::query("UPDATE users SET avatar_file_id = $1, join_sound_file_id = $2, leave_sound_file_id = $1 WHERE id = $3")
+            .bind(&opened)
+            .bind(&closed)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE servers SET icon_file_id = $1 WHERE id = $2").bind(&closed).bind(&f.sid).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO server_emojis (id, server_id, name, uploader_id, file_id) VALUES ($1, $2, 'one', $3, $4)")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&f.sid)
+            .bind(f.owner as i32)
+            .bind(&opened)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO custom_emojis (server_id, name, file_id, creator_id) VALUES ($1, 'two', $2, $3)")
+            .bind(&f.sid)
+            .bind(&closed)
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ran = sqlx::raw_sql(include_str!("../migrations/077_canonical_file_ids.sql")).execute(&pool).await.map(|_| ()).map_err(|e| e.to_string());
+        let user: (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT avatar_file_id, join_sound_file_id, leave_sound_file_id FROM users WHERE id = $1")
+                .bind(f.owner as i32)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (icon,): (Option<String>,) = sqlx::query_as("SELECT icon_file_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let (server_emoji,): (String,) = sqlx::query_as("SELECT file_id FROM server_emojis WHERE server_id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let (custom_emoji,): (String,) = sqlx::query_as("SELECT file_id FROM custom_emojis WHERE server_id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        // Before any assert: a row left behind would fail every later run of this file.
+        let _ = sqlx::query("DELETE FROM server_emojis WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM custom_emojis WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(casts, (false, false, true), "control: the cast refuses one brace and takes two");
+        assert_eq!(ran, Ok(()), "the migration runs");
+        assert_eq!(user.0.as_deref(), Some(opened.as_str()));
+        assert_eq!(user.1.as_deref(), Some(closed.as_str()));
+        assert_eq!(user.2.as_deref(), Some(opened.as_str()));
+        assert_eq!(icon.as_deref(), Some(closed.as_str()));
+        assert_eq!(server_emoji, opened);
+        assert_eq!(custom_emoji, closed);
+    }
+
     /// A member denied a collection has no row of it, so a subchannel's own row has to say which
     /// modes it goes with. And the collection keeps its own, whichever row was read first.
     #[tokio::test]
