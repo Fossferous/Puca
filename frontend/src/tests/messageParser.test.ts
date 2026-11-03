@@ -482,7 +482,7 @@ describe('a spoiler never stops being one', () => {
         expect(bad).toEqual([]);
         // Over nothing it would prove nothing.
         expect(spoilers).toBeGreaterThan(500);
-    });
+    }, 120_000);
 
     it('CONTROL: the check finds words that are printed, and leaves alone words that are not', () => {
         expect(leaked('||w0||', parseMessage('w0'))).toEqual(['w0']);
@@ -909,52 +909,64 @@ describe('text with no address in it', () => {
 });
 
 describe('what a message costs to read', () => {
-    /** The fastest of a few runs: anything else on the machine only ever adds to it. */
-    const fastest = (content: string) => {
+    /**
+     * The fastest it reads in, tried until that is under `bar` or for 20 s. What else is
+     * on the machine only ever adds to it and comes and goes, so a machine under load
+     * still gets there, and a message that really costs this much never does. These run
+     * beside the whole suite: 0.5 ms here has been 34 ms there, on every one of five runs.
+     */
+    const fastest = (content: string, bar: number) => {
+        const giveUp = performance.now() + 20_000;
         let best = Infinity;
-        for (let k = 0; k < 5; k++) {
+        do {
             const started = performance.now();
             parseMessage(content);
             best = Math.min(best, performance.now() - started);
-        }
+        } while (best >= bar && performance.now() < giveUp);
         return best;
     };
+    const WAIT = 60_000;
 
     // A message is at most 8000 long, and is read on the UI thread, on receipt and on
     // every render of the chat. The first three took 1100, 500 and 60 ms with guards for
     // spoilers that walked the text at every address and sent the next opener back into
-    // it. The next three still take 190, 35 and 65 ms if each failed walk is free.
+    // it.
     it.each([
         ['nested openers, an address and a `||` over and over, and a spoiler', `**__~~*_${'>http://a_b_c||'.repeat(532)}_ ||s||`],
         ['one `_`, and an address and a `||` over and over', `_${'http://a_b_c ||'.repeat(532)}* ||s||`],
         ['one word of addresses', `*${'http://a**b>#'.repeat(615)}_`],
         ['words of a shortcode with an address in them', `**${'~~)"~~@:Hbhttp://****b__H)('.repeat(295)}_ ||s||`],
-        ['a delimiter only the end of a link opens', `${'[x](http://a)_b '.repeat(490)}`],
         ['every delimiter, and an address that takes them in', `\`${'_***http://:**b~~~~____'.repeat(347)} ||s||`],
         ['a list of addresses with a spoiler', `my_list:\n${'https://example.org/some_long_path_name\n'.repeat(199)}||s|| *`],
     ])('%s', (_, content) => {
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content)).toBeLessThan(30);
-    });
+        expect(fastest(content, 30)).toBeLessThan(30);
+    }, WAIT);
+
+    it('a delimiter only the end of a link opens: 2 ms, or 18 if a walk that finds nothing is free', () => {
+        const content = '[x](http://a)_b '.repeat(490);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 10)).toBeLessThan(10);
+    }, WAIT);
 
     it('a walk that closes in an address pays for it: 3 ms, or 40 if only a walk that finds nothing does', () => {
         const content = `||s|| ${'_http://_'.repeat(488)}${'('.repeat(1800)}${')'.repeat(1800)}`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content)).toBeLessThan(20);
-    });
+        expect(fastest(content, 20)).toBeLessThan(20);
+    }, WAIT);
 
     it('a run of one delimiter in an address: 1 ms, or 25 with no bound on what stands between a closer and an opener', () => {
         const content = `_https://example.org/${'_'.repeat(7900)}a ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content)).toBeLessThan(10);
-    });
+        expect(fastest(content, 10)).toBeLessThan(10);
+    }, WAIT);
 
     it('very short quotes and one small spoiler: 2 ms, or 116 if each quote reads all that is left of the text', () => {
         const content = `${'>\n\n'.repeat(2665)}||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content)).toBeLessThan(30);
-    });
+        expect(fastest(content, 30)).toBeLessThan(30);
+    }, WAIT);
 
     it('CONTROL: what is cheap is still read in full: a list of addresses, all whole, and every name', () => {
         const line = 'https://example.org/some_long_path @alice_c\n';
