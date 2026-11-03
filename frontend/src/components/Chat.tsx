@@ -4180,6 +4180,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (newChannelType === 0) {
                 setCurrentChannel(newChannel);
                 setCurrentCollection(null); // Made from a collection's page: its page would stay on top
+                setMessages([]); // What is on screen is not the new channel's, and would stay if its history fails
                 setShowFriendsPanel(false);
                 setShowDevicesView(false);
                 setShowNotesView(false);

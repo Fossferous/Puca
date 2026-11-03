@@ -814,6 +814,75 @@ describe('Enter with no channel open, a new server\'s list still on its way', ()
     });
 });
 
+describe('a text channel made with something else on screen', () => {
+    const said = (id: string, channel: number, words: string) => ({ id, channel_id: channel, user_id: ME + 1, username: 'bob', content: words, created_at: '2026-10-01T00:00:00Z' });
+    const onScreen = () => document.querySelector('.messages-container')?.textContent ?? '';
+    const press = async (title: string) => {
+        await act(async () => { document.querySelector<HTMLElement>(`.add-channel-btn[title="${title}"]`)!.click(); });
+    };
+    const shows = async (words: string) => {
+        for (let i = 0; i < 40 && !onScreen().includes(words); i++) await settle();
+        expect(onScreen()).toContain(words);
+    };
+
+    it('what the channel before it said goes at once, and its own history takes the place', async () => {
+        let come!: (rows: Record<string, unknown>[]) => void;
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : new Promise(r => { come = r; }));
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        expect(headerText()).toContain('made-here');
+        expect(onScreen(), 'not under the new name while its history is on its way').not.toContain('what general said');
+        await act(async () => { come([said('m2', 77, 'its first words')]); });
+        await shows('its first words');
+        expect(onScreen()).not.toContain('what general said');
+    });
+
+    it('and stays gone when that history fails', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        h.history = async ch => {
+            if (ch === 10) return [said('m1', 10, 'what general said')];
+            throw new Error('the network went');
+        };
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Text Channel');
+        await submitCreateForm('made-here');
+        await settled();
+        expect(headerText()).toContain('made-here');
+        expect(onScreen()).not.toContain('what general said');
+    });
+
+    it('so does a collection\'s feed, made from its page', async () => {
+        h.history = async ch => (ch === 21 ? [said('m1', 21, 'what inside said')] : new Promise(() => {}));
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL, PRIVATE, row(21, 'inside', { parent_id: 20 })];
+        await mountChat();
+        await open('Private');
+        await shows('what inside said');
+        await createInside('made-inside');
+        expect(headerText()).toContain('made-inside');
+        expect(onScreen()).not.toContain('what inside said');
+    });
+
+    it('CONTROL: a voice channel opens nothing, and takes nothing off the screen', async () => {
+        h.history = async ch => (ch === 10 ? [said('m1', 10, 'what general said')] : []);
+        h.servers = [{ ...SRV, owner_id: ME }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await shows('what general said');
+        await press('Create Voice Channel');
+        await submitCreateForm('a-room');
+        expect(headerText()).toContain('general');
+        expect(onScreen()).toContain('what general said');
+    });
+});
+
 describe('what stays as it was', () => {
     it('CONTROL: their own click on another channel keeps the words', async () => {
         await mountChat();
