@@ -98,9 +98,10 @@ function wordAt(input: string, at: number): string {
 
 /**
  * The address at `at`, as the parser reads it, or null. `lately` says it was not
- * read as one before, being straight after a colon: with a spoiler ahead it stays
- * unread where a delimiter in its word could pair differently for it (see
- * `spoilerAhead`), which it can only if there is another of it further on.
+ * read as one before, having a capital scheme or being straight after a colon:
+ * with a spoiler ahead it stays unread where a delimiter in its word could pair
+ * differently for it (see `spoilerAhead`), which it can only if there is another
+ * of it further on.
  */
 function addressAt(input: string, at: number, lately: boolean): string | null {
     const href = urlAt(input.slice(at));
@@ -315,9 +316,9 @@ function parseInline(input: string, depth: number): Node[] {
             }
         }
 
-        // Bare URL.
-        if (ch === 'h') {
-            const href = urlAt(rest);
+        // Bare URL, in either case: a phone's keyboard makes `Https://`.
+        if (ch === 'h' || ch === 'H') {
+            const href = addressAt(input, i, ch === 'H');
             if (href) {
                 flush();
                 nodes.push({ type: 'url', href });
@@ -487,8 +488,8 @@ function findClosing(input: string, from: number, open: string): number {
                 continue;
             }
         }
-        if (input[i] === 'h') {
-            const href = addressAt(input, i, input[i - 1] === ':');
+        if (input[i] === 'h' || input[i] === 'H') {
+            const href = addressAt(input, i, input[i] === 'H' || input[i - 1] === ':');
             if (href) {
                 // An address takes in any `||` in its word, but for the one that
                 // closes a spoiler opened before it.

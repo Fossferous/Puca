@@ -403,6 +403,51 @@ describe('a raw > or " is never part of an address', () => {
     });
 });
 
+describe('a capital scheme, which a phone keyboard makes', () => {
+    it.each([
+        ['Https://example.org/wiki/Foo_Bar_Baz'],
+        ['Https://example.org/page#top'],
+        ['Https://mastodon.example.org/@alice/123'],
+        ['HTTP://example.org/a_b'],
+        ['HTTPS://EXAMPLE.ORG/A_B_C'],
+    ])('%s is one address, as typed', (href) => {
+        expect(parseMessage(href)).toEqual([{ type: 'url', href }]);
+        expect(hrefs(`see ${href} now`)).toEqual([href]);
+        expect(isSafeUrl(href)).toBe(true);
+    });
+
+    it('@ in it is no mention, and one beside it still is', () => {
+        expect(extractMentions('Https://mastodon.example.org/@alice/123')).toEqual({ users: [], everyone: false });
+        expect(extractMentions('@bob Https://mastodon.example.org/@alice/123 @carol')).toEqual({ users: ['bob', 'carol'], everyone: false });
+    });
+
+    it('as any other address in markup, after a colon, in brackets, and in a delimiter\'s way', () => {
+        expect(parseMessage('**Https://example.org/a**')).toEqual([{ type: 'strong', children: [{ type: 'url', href: 'Https://example.org/a' }] }]);
+        expect(hrefs('Link:Https://example.org/a')).toEqual(['Https://example.org/a']);
+        expect(hrefs('(see Https://example.org/Foo_(bar))')).toEqual(['Https://example.org/Foo_(bar)']);
+        expect(hrefs('my_file Https://example.org/my_file')).toEqual(['Https://example.org/my_file']);
+        expect(hrefs('<Https://example.org/a>')).toEqual(['Https://example.org/a']);
+    });
+
+    it('CONTROL: a word that starts the same is a word', () => {
+        for (const words of ['Hello there', 'Https', 'Https:', 'Https://', 'HTTP/1.1', 'Http: the protocol']) {
+            expect(parseMessage(words)).toEqual([{ type: 'text', value: words }]);
+        }
+    });
+
+    it('a spoiler stays one beside it, or in its word', () => {
+        const spoiler = (value: string) => ({ type: 'spoiler', children: [{ type: 'text', value }] });
+        expect(parseMessage('Https://example.org/a_b ||hidden||')).toEqual([
+            { type: 'url', href: 'Https://example.org/a_b' },
+            { type: 'text', value: ' ' },
+            spoiler('hidden'),
+        ]);
+        expect(parseMessage('Https://example.org/a||hidden||')).toEqual([{ type: 'text', value: 'Https://example.org/a' }, spoiler('hidden')]);
+        // Read as an address, the `_` after it would close inside the spoiler.
+        expect(parseMessage('Https://example.org/a_b c_d ||e_f||').find(n => n.type === 'spoiler')).toEqual(spoiler('e_f'));
+    });
+});
+
 describe('mentions & channels', () => {
     it('parses user, everyone, here mentions and channels', () => {
         const nodes = parseMessage('hey @alice and @everyone in #general');

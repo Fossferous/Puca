@@ -75,6 +75,11 @@ describe('what becomes a link', () => {
         }
     });
 
+    it('a capital scheme is one, as typed', () => {
+        expect(hrefs('Https://a.example/Foo_Bar_Baz')).toEqual(['Https://a.example/Foo_Bar_Baz']);
+        expect(hrefs('see HTTP://a.example/a_b now')).toEqual(['HTTP://a.example/a_b']);
+    });
+
     it('a scheme glued to a word is not a link', () => {
         expect(links('xhttps://evil.example')).toHaveLength(0);
         expect(rebuilt('xhttps://evil.example')).toBe('xhttps://evil.example');

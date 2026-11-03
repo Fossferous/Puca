@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { MessageContent } from '../components/MessageContent';
 import { LinkPreview } from '../components/LinkPreview';
 import { extractUrls } from '../api/linkPreview';
+import { isExternalHref } from '../api/openExternal';
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -147,6 +148,22 @@ describe('the link and the card go to the whole address', () => {
     ])('in < > or quotes: %s', async (content, href) => {
         await bothGoTo(content, href);
         expect(host!.querySelector('a.message-link')!.textContent).toBe(href);
+    });
+
+    it.each([
+        ['Https://example.org/wiki/Foo_Bar_Baz'],
+        ['Https://example.org/page#top'],
+        ['Https://mastodon.example.org/@alice/123'],
+        ['HTTP://example.org/a_b'],
+    ])('with a capital scheme: %s', async (href) => {
+        await bothGoTo(href, href);
+        // Taken as a lower-case one is, by what opens it in the two shells too.
+        expect(isExternalHref(href)).toBe(true);
+    });
+
+    it('a picture with a capital scheme is drawn as one, with no card', async () => {
+        expect(await said('Https://example.invalid/pic.png')).toEqual([]);
+        expect(host!.querySelector('button.message-image-blocked')).not.toBeNull();
     });
 });
 
