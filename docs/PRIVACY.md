@@ -37,11 +37,13 @@ channel or conversation, by design, can open it. A phone photo carries a hidden
 label (EXIF) with a GPS position, the camera's make and model, the time it was
 taken and sometimes the editing program, so Púca removes it **on your device,
 before the photo is encrypted**, for every JPEG, PNG and WebP you attach in a
-channel, a DM, a task or a note, and for avatars, server icons, server mode
-backgrounds and custom emoji (which the server stores as ordinary pictures). Nothing is re-compressed
+channel, a DM, a task or a note, and for avatars, server icons and custom emoji
+(which the server stores as ordinary pictures). Nothing is re-compressed
 or resized: the picture's bytes are copied as they are and only the metadata
 containers are left out. A rotation flag is kept in a block Púca writes itself,
-so a portrait photo is not sent lying down. Not covered: GIF, SVG, AVIF, TIFF,
+so a portrait photo is not sent lying down. A server mode's background is the
+exception: it is re-encoded on your device as a flat JPEG of at most 1920 px, so
+none of the original's metadata survives. Not covered: GIF, SVG, AVIF, TIFF,
 BMP, video and audio are sent as they are, and a photo sent before this change
 keeps its label. `docs/SECURITY_MODEL.md` has the list of what is removed.
 
