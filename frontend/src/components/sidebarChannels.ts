@@ -58,6 +58,17 @@ export function hiddenWithCollection<C extends SidebarRow>(row: C, channels: rea
 }
 
 /**
+ * Of the rows someone could land on who chose none (entering a server, the open channel deleted),
+ * those the sidebar draws. Such a row under a collection they are denied has none to come back to,
+ * so it counts only if nothing else is drawn, and a server holding nothing else still opens. A
+ * #mention or a notification is a choice, and does not ask this.
+ */
+export function landingRows<C extends SidebarRow>(rows: readonly C[], channels: readonly C[]): readonly C[] {
+    const drawn = rows.filter(c => c.channel_type === 1 || !hiddenWithCollection(c, channels));
+    return drawn.length > 0 ? drawn : rows;
+}
+
+/**
  * The parents Nest Under and Parent Collection offer: a collection drawn at the top level,
  * since nothing else draws what is put in it. What a channel is already under stays on offer
  * whatever it is, so the field can show it and leaving it is a real change.

@@ -164,7 +164,7 @@ import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, landingRows, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
     useServers,
     useChannels,
@@ -1971,7 +1971,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (currentChannelIdRef.current === channelId) {
                 composerGoesWithRef.current('channel');
                 // accessing channels from cache would be ideal, but we can look at local state 'channels'
-                const remaining = modeShownChannels.filter(c => c.id !== channelId && c.channel_type === 0);
+                const remaining = landingRows(modeShownChannels.filter(c => c.id !== channelId), channels).filter(c => c.channel_type === 0);
                 setCurrentChannel(remaining[0] || null);
             }
         } catch (error) {
@@ -2231,9 +2231,11 @@ export function Chat({ onLogout }: ChatProps) {
             // the text view would join a room the server refuses it (an alert)
             // and fetch history it refuses too. It gets no text view at all.
             // Nor into a channel a mode hides: entering a server would otherwise open
-            // it for every member, and being open would keep it listed.
-            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : modeShownChannels[0];
-            const landing = modeShownChannels.find(c => c.channel_type === 0) || fallback;
+            // it for every member, and being open would keep it listed. Nor one with no
+            // row because its collection is denied to them, if anything else is listed.
+            const rows = landingRows(modeShownChannels, channels);
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : rows[0];
+            const landing = rows.find(c => c.channel_type === 0) || fallback;
             // A collection opens as a click on its row opens it: one page, the feed of
             // its text channels, which says so when it has none.
             if (landing?.channel_type === 2) setCurrentCollection(landing);

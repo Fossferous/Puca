@@ -60,7 +60,8 @@ A hidden channel's unread messages stay out of the server rail's bubble, because
 nothing in that server's list could clear them. Its own count comes back with the
 mode. (A message arriving live can show in the bubble until the next refresh, at most
 a minute later: only the server knows every server's modes.) Entering a server opens
-the first channel it lists, never a hidden one.
+the first channel it lists, never a hidden one, and nor one under a collection denied to
+that member, which has no row either, unless the server lists nothing else.
 
 Every other list of channels follows the same rule, so no two disagree: Move to on a
 member, the targets for forwarding and for Send to Púca, a collection's merged feed,
