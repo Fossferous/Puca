@@ -1520,7 +1520,8 @@ describe('what a message costs to read', () => {
         const unit = `${'['.repeat(500)}](${'秘'.repeat(1400)} )`;
         const content = unit.repeat(Math.floor(8000 / unit.length));
         expect(content.length).toBeGreaterThan(7500);
-        expect(fastest(content, 25)).toBeLessThan(25);
+        // 9 ms on a quiet machine and 26 under the whole suite: the bar sits between that and 50.
+        expect(fastest(content, 35)).toBeLessThan(35);
     }, WAIT);
 
     it('`[` over and over with no `)` after them, and spoilers the readings disagree on: 7 ms, or 60 reading each target to its end', () => {
@@ -1528,7 +1529,7 @@ describe('what a message costs to read', () => {
         const content = `my_file ||a_b|| and ||c_d|| ${unit.repeat(233)} ||s||`;
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 25)).toBeLessThan(25);
+        expect(fastest(content, 35)).toBeLessThan(35);
     }, WAIT);
 
     it('a `[` with no `](` after it is no try at a link, so a list of them leaves a walk its budget', () => {
