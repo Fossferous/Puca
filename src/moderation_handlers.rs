@@ -211,6 +211,7 @@ pub async fn kick_member(
                 user_id,
                 ServerMessage::RemovedFromServer {
                     server_id: server_id.clone(),
+                    reason: None,
                 },
             );
             let evicting = crate::ws::start_perms_change(&state, &server_id);
@@ -335,6 +336,7 @@ pub async fn ban_member(
         user_id,
         ServerMessage::RemovedFromServer {
             server_id: server_id.clone(),
+            reason: None,
         },
     );
     let evicting = crate::ws::start_perms_change(&state, &server_id);

@@ -163,6 +163,7 @@ import { parseServerTimestampSecs } from '../utils/serverTime';
 import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
+import { serverGoneNotice } from '../utils/serverGone';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
 import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, hiddenWithCollection, keptByHideMuted, landingRows, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
 import {
@@ -919,6 +920,9 @@ export function Chat({ onLogout }: ChatProps) {
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
     const currentVoiceChannelRef = useRef<Channel | null>(null);
+    // Servers this device has pressed Leave or Disband on and has no answer for yet, and
+    // whether the server's RemovedFromServer came first. See handleRemovedFromServer.
+    const ownDeparturesRef = useRef(new Map<string, boolean>());
     // Where the server last cut this device's LiveKit session. See handleVoiceMoved.
     const sfuCutRef = useRef<SfuCut | null>(null);
     // The mode a ServerModeChanged just ended, for the RoomLeft that follows it.
@@ -2162,11 +2166,24 @@ export function Chat({ onLogout }: ChatProps) {
         // eslint-disable-next-line react-hooks/exhaustive-deps -- currentServer is only READ to find its row; re-running on it would loop
     }, [servers]);
 
+    // What was open over a server that has gone. The two flags have no server of their own,
+    // they are the one on screen's: left set they would open over whichever comes next, and
+    // another server going must not close them with what is being typed in them.
+    const closeDialogsOfGoneServer = (serverId: string, onScreen: boolean) => {
+        if (onScreen) {
+            setShowSettingsModal(false);
+            setShowInviteModal(false);
+        }
+        setNickEditServer(prev => (prev?.id === serverId ? null : prev));
+        setEditingChannel(prev => (prev?.server_id === serverId ? null : prev));
+    };
+
     // If the current server vanishes from our list (kicked/banned/deleted),
     // drop it — otherwise the auto-select below can resurrect a stale copy.
     useEffect(() => {
         if (currentServer && !isServersLoading && !servers.some(s => s.id === currentServer.id)) {
             composerGoesWithRef.current('server');
+            closeDialogsOfGoneServer(currentServer.id, true);
             setCurrentServer(null);
             setCurrentChannel(null);
             // With no server the list is a new [] every render, and a collection's feed is keyed on it.
@@ -2760,20 +2777,37 @@ export function Chat({ onLogout }: ChatProps) {
     // into the members query here: the presence store hears every frame
     // whichever view is mounted, and every status render reads it.
 
-    // Real-time removal: if we get kicked/banned from a server, drop it
-    // immediately instead of showing a stale server until the next reload.
+    // Real-time removal: if we get kicked or banned from a server, it is disbanded, or we
+    // left it on another device, drop it immediately instead of showing a stale server
+    // until the next reload.
     useEffect(() => {
         const handleRemovedFromServer = (msg: ServerMessage) => {
-            const payload = msg.payload as { server_id: string };
+            const payload = msg.payload as { server_id: string; reason?: string };
+            // This device pressed Leave or Disband, and its answer is on the way. The two
+            // arrive in either order, and what comes next is the answer's to do: it goes on
+            // to the next server, where this path goes home.
+            if (ownDeparturesRef.current.has(payload.server_id)) {
+                ownDeparturesRef.current.set(payload.server_id, true);
+                return;
+            }
+            // Read before the refetch. No row: this device has let go of it already.
+            const row = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === payload.server_id);
             queryClient.invalidateQueries({ queryKey: keys.servers });
-            if (currentServer?.id === payload.server_id) {
+            const onScreen = currentServer?.id === payload.server_id;
+            // Only a call on this server, wherever they are looking: voice persists while
+            // browsing other servers, and this server going says nothing about those.
+            const callEnds = currentVoiceChannelRef.current?.server_id === payload.server_id;
+            const notice = row && serverGoneNotice(payload.reason, row, currentUserId, callEnds);
+            if (notice && (onScreen || callEnds || !isServerMuted(payload.server_id))) showToast(notice);
+            if (callEnds) setCurrentVoiceChannel(null);
+            closeDialogsOfGoneServer(payload.server_id, onScreen);
+            // Notes has a query client of its own, and stays mounted once opened.
+            window.dispatchEvent(new CustomEvent(MODES_CHANGED_EVENT));
+            if (onScreen) {
                 composerGoesWithRef.current('server');
                 setCurrentServer(null);
                 setCurrentChannel(null);
                 setCurrentCollection(null);
-                // Only a call on this server: voice persists while browsing other servers,
-                // and being removed from this one says nothing about those.
-                setCurrentVoiceChannel(prev => (prev?.server_id === payload.server_id ? null : prev));
                 setMessages([]);
                 setShowFriendsPanel(true);
                 setShowDevicesView(false);
@@ -2784,7 +2818,19 @@ export function Chat({ onLogout }: ChatProps) {
         wsClient.on('RemovedFromServer', handleRemovedFromServer);
         return () => wsClient.off('RemovedFromServer', handleRemovedFromServer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentServer?.id]);
+    }, [currentServer?.id, currentUserId, showToast]);
+
+    // The call's server has left the list and no frame said so: this device's socket was
+    // down when it went, or the host predates the frame. Wherever they are looking: the
+    // effect above drops only the server on screen. The row is read from the cache, not
+    // `servers`, which is also what a list that has not loaded looks like.
+    useEffect(() => {
+        const listed = queryClient.getQueryData<Server[]>(keys.servers);
+        if (currentVoiceChannel && listed && !listed.some(s => s.id === currentVoiceChannel.server_id)) {
+            setCurrentVoiceChannel(null);
+            showToast(callGoneToast(currentVoiceChannel.name));
+        }
+    }, [servers, currentVoiceChannel, queryClient, showToast]);
 
     // WebSocket for real-time updates (channel-specific)
     useEffect(() => {
@@ -2978,7 +3024,7 @@ export function Chat({ onLogout }: ChatProps) {
         // refetch — otherwise we linger in the old channel's roster and appear
         // to be in two places at once. No-op for text rooms.
         const handleGlobalRoomLeft = (msg: ServerMessage) => {
-            const payload = msg.payload as { room_id: string };
+            const payload = msg.payload as { room_id: string; reason?: string };
             if (globalVoiceUsers.get(payload.room_id)?.delete(currentUserId)) {
                 voiceEventSeqRef.current += 1;
                 setVoiceUpdateTrigger(prev => prev + 1);
@@ -2989,7 +3035,10 @@ export function Chat({ onLogout }: ChatProps) {
             // this device was in that call: say why it ended rather than
             // dropping silently. VoicePanel's own RoomLeft handler does the
             // teardown, exactly as for any eviction.
-            const notice = roomLeftNotice(msg.payload, endedModeNameRef.current);
+            const voice = currentVoiceChannelRef.current;
+            // This socket slept through its call's room going, and the server says so on waking.
+            const callGone = voice && payload.reason === 'room_gone' && payload.room_id === `voice_${voice.id}`;
+            const notice = callGone ? callGoneToast(voice.name) : roomLeftNotice(msg.payload, endedModeNameRef.current);
             if (notice) showToast(notice);
             sfuCutRef.current = cutAfterRoomLeft(sfuCutRef.current, payload.room_id);
         };
@@ -4825,6 +4874,47 @@ export function Chat({ onLogout }: ChatProps) {
         setShowWelcomePopup(false);
     }), []);
 
+    /** A press of Leave or Disband on the rail, whichever comes first of its answer and its frame. */
+    const goFromServer = async (server: Server, ask: (id: string) => Promise<unknown>, failed: string) => {
+        const own = ownDeparturesRef.current;
+        own.set(server.id, false);
+        try {
+            await ask(server.id);
+        } catch (error) {
+            // The frame came and the answer did not (a proxy cut it, say): it happened.
+            if (!own.get(server.id)) {
+                own.delete(server.id);
+                console.error(failed, error);
+                tellUser(failed);
+                return;
+            }
+        }
+        own.delete(server.id);
+        // Remove from local list
+        queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
+        // Theirs to know, so nothing says it. In the same tick as the row going, so that
+        // the effect that notices a call on a server no longer listed finds none.
+        setCurrentVoiceChannel(prev => (prev?.server_id === server.id ? null : prev));
+        window.dispatchEvent(new CustomEvent(MODES_CHANGED_EVENT));
+
+        // Asked of the ref: this press is a round trip old, and they may have gone
+        // somewhere else meanwhile, where the box and the screen are that place's.
+        const stillThere = embedCurrentServerRef.current?.id === server.id;
+        closeDialogsOfGoneServer(server.id, stillThere);
+        if (stillThere) {
+            composerGoesWithRef.current('server');
+            const remaining = servers.filter(s => s.id !== server.id);
+            if (remaining.length > 0) {
+                switchServer(remaining[0]);
+            } else {
+                setCurrentServer(null);
+                // Channels/Messages cleaned up by hooks/state
+                setCurrentChannel(null);
+                setCurrentCollection(null);
+            }
+        }
+    };
+
     // Handle server creation from wizard. Everything it collected is acted on
     // (api/serverTemplates.ts): the template's channel set, the icon, and the
     // explicit public listing. Until 0.9.2 only the name survived the call.
@@ -5493,55 +5583,8 @@ export function Chat({ onLogout }: ChatProps) {
                     if (isMobile) setMobilePanel('chat');
                 }}
                 currentUserId={currentUserId}
-                onLeaveServer={async (server) => {
-                    try {
-                        await leaveServer(server.id);
-                        // Remove from local list
-                        queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
-
-                        // Asked of the ref: this press is a round trip old, and they may have gone
-                        // somewhere else meanwhile, where the box and the screen are that place's.
-                        if (embedCurrentServerRef.current?.id === server.id) {
-                            composerGoesWithRef.current('server');
-                            const remaining = servers.filter(s => s.id !== server.id);
-                            if (remaining.length > 0) {
-                                switchServer(remaining[0]);
-                            } else {
-                                setCurrentServer(null);
-                                // Channels/Messages cleaned up by hooks/state
-                                setCurrentChannel(null);
-                                setCurrentCollection(null);
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Failed to leave server:', error);
-                        tellUser('Failed to leave server');
-                    }
-                }}
-                onDisbandServer={async (server) => {
-                    try {
-                        await deleteServer(server.id);
-                        // Remove from local list
-                        queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => (old || []).filter(s => s.id !== server.id));
-
-                        // Asked of the ref, as for a leave.
-                        if (embedCurrentServerRef.current?.id === server.id) {
-                            composerGoesWithRef.current('server');
-                            const remaining = servers.filter(s => s.id !== server.id);
-                            if (remaining.length > 0) {
-                                switchServer(remaining[0]);
-                            } else {
-                                setCurrentServer(null);
-                                // Channels cleaned up by hooks
-                                setCurrentChannel(null);
-                                setCurrentCollection(null);
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Failed to delete server:', error);
-                        tellUser('Failed to delete server');
-                    }
-                }}
+                onLeaveServer={(server) => goFromServer(server, leaveServer, 'Failed to leave server')}
+                onDisbandServer={(server) => goFromServer(server, deleteServer, 'Failed to delete server')}
             />
 
             {/* Left Sidebar - Channels and Voice */}

@@ -2285,6 +2285,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 else if (micTrack) applyMicGate();
             }
 
+            // Out already: the call ended while LiveKit was connecting (the panel unmounted,
+            // or they hung up), and the leave has gone. Saying we joined now would be a start
+            // for a room we have left, which comes back as "Not in this room", and a join
+            // chime for a call that is over.
+            if (!isInVoiceRef.current) return;
+
             // Broadcast that we joined
             wsClient.startStream(roomId);
             // ...and our mute/deafen right behind it. A status ping is one-shot

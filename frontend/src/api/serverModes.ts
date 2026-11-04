@@ -95,7 +95,7 @@ interface ModeRow {
     is_afk?: boolean;
 }
 
-/** Dispatched on `window` when a mode switches, for what keeps its own copy of the servers. */
+/** Dispatched on `window` when a mode switches or a server goes, for what keeps its own copy of the servers. */
 export const MODES_CHANGED_EVENT = 'sovereign:modes-changed';
 
 const parentModes = <C extends ModeRow>(channel: C, channels: readonly C[]): number[] | undefined =>

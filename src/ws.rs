@@ -1969,6 +1969,24 @@ fn tombstone_recent_voice_drops(
 /// `RoomLeft::reason` for a call a server mode ended (docs/SERVER_MODES.md).
 pub(crate) const MODE_ENDED: &str = "mode_ended";
 
+/// `RoomLeft::reason` for a voice room a waking socket can no longer rejoin: the channel
+/// or the server has gone, or this account has left it or lost sight of it.
+const ROOM_GONE: &str = "room_gone";
+
+/// Whether a refused replay's answer will stand. `NotFound` is also how a failed lookup
+/// reads (see get_user_channel_permissions), and a hiccup must not take anyone out of a
+/// call: that one counts only when the database says the channel is gone. `NotMember` and
+/// a denied permission are answers it gave.
+async fn replay_refusal_is_final(state: &Arc<AppState>, access: &ChannelPermAccess, channel_id: i64) -> bool {
+    if !matches!(access, ChannelPermAccess::NotFound) {
+        return true;
+    }
+    matches!(
+        sqlx::query_as::<_, (i32,)>("SELECT id FROM channels WHERE id = $1").bind(channel_id as i32).fetch_optional(&state.pool).await,
+        Ok(None)
+    )
+}
+
 /// Tombstone every session whose socket died in `room_id` (within `voice_drops`'
 /// window): it is out of the room already, so an eviction cannot find it, and its
 /// replay on reconnecting would put it back in a call that was ended for everyone.
@@ -3264,6 +3282,28 @@ pub(crate) async fn handle_message(
                     username,
                     room_id
                 );
+                // A socket that slept through its server or channel going: nobody asked
+                // to join anything, it is remembering. Told with the RoomLeft it missed,
+                // as for a call ended elsewhere above, and never an Error frame: "Not a
+                // member" left on the screen of someone who left the server on their other
+                // device, or whose server was disbanded, reads as having been thrown out.
+                // Tombstoned too, so the client's re-claim that follows is ignored quietly.
+                if replay && refusal == JOIN_REFUSED && replay_refusal_is_final(state, &access, cid).await {
+                    joined_rooms.remove(&room_id);
+                    if need_connect {
+                        state.tombstone_voice(user_id, &session, &room_id, ROOM_GONE, None);
+                    }
+                    state.send_to_conn(
+                        user_id,
+                        conn_id,
+                        ServerMessage::RoomLeft {
+                            room_id: room_id.clone(),
+                            reason: need_connect.then(|| ROOM_GONE.to_string()),
+                            by: None,
+                        },
+                    );
+                    return Ok(());
+                }
                 return Err(refusal.to_string());
             }
             // Tests: hold this join here, where a channel switch's awaits sit.
@@ -5371,6 +5411,63 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
 pub fn start_perms_change(state: &Arc<AppState>, server_id: &str) -> PendingPermsChange {
     let work = tokio::spawn(crate::sfu::carry_test_livekit(perms_changed(Arc::clone(state), server_id.to_string())));
     PendingPermsChange { work, server_id: server_id.to_string() }
+}
+
+/// A server has just been deleted, and its `channels` with it: empty their rooms, every
+/// one, in the background so a cancelled request cannot lose it. The perms sweep cannot
+/// do this: it asks the database which rooms are the server's, and the answer is none.
+/// Without it everyone in a call on the server stayed in it, with nothing to end it.
+/// Wait with [`PendingPermsChange::wait`]. Told before the LiveKit cut, as any eviction.
+pub fn start_server_deleted(state: &Arc<AppState>, server_id: &str, channels: Vec<i32>) -> PendingPermsChange {
+    let work = tokio::spawn(crate::sfu::carry_test_livekit(empty_rooms_of_deleted(Arc::clone(state), channels)));
+    PendingPermsChange { work, server_id: server_id.to_string() }
+}
+
+/// The body of [`start_server_deleted`].
+async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>) {
+    let state = &state;
+    // A text room has nothing to retract, and everybody in it is on their way out.
+    for &channel in &channels {
+        let room_id = format!("channel_{channel}");
+        let members = state.rooms.get(&room_id).map(|room| room.members.clone()).unwrap_or_default();
+        for member in members {
+            if let Some(mut room) = state.rooms.get_mut(&room_id) {
+                room.remove_member(member);
+            } // guard dropped before settle_room re-reads rooms
+            state.settle_room(&room_id);
+            state.send_to_user(member, ServerMessage::RoomLeft { room_id: room_id.clone(), reason: None, by: None });
+        }
+    }
+    // At once rather than one after another, as a mode ending does. No LiveKit here: the
+    // pass below cuts everyone there, those whose socket left this room included.
+    let evictions = channels.iter().flat_map(|&channel| {
+        let room_id = format!("voice_{channel}");
+        let occupants = state.rooms.get(&room_id).map(|room| room.members.clone()).unwrap_or_default();
+        occupants.into_iter().map(move |user| (room_id.clone(), user))
+    });
+    futures::future::join_all(evictions.map(|(room_id, user)| async move {
+        // Tombstoned, so a media start already on its way from their client is ignored
+        // quietly (start_from_displaced_conn) and not answered with an Error frame, which
+        // would be left on their screen beside what the frame before it said.
+        let conns = state.rooms.get(&room_id).and_then(|room| room.conns_of(user).cloned()).unwrap_or_default();
+        for sid in conns.iter().filter_map(|&conn| state.session_sid(user, conn)) {
+            state.tombstone_voice(user, &sid, &room_id, ROOM_GONE, None);
+        }
+        evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::Gone).await
+    }))
+    .await;
+    // Collected first: no map guard across the awaits. A cut, not an eviction: for a channel
+    // that is gone the resync's join check reads a failed lookup and would keep the session,
+    // so one LiveKit did not confirm has to be owed as a cut.
+    let sessions: Vec<(i64, i64)> = channels
+        .iter()
+        .flat_map(|&channel| {
+            let room = crate::sfu::room_name_for_channel(channel as i64);
+            let users = crate::sfu::sfu_only_to_cut(true, &Default::default(), state.sfu_rooms.get(&room).as_deref());
+            users.into_iter().map(move |user| (channel as i64, user))
+        })
+        .collect();
+    futures::future::join_all(sessions.into_iter().map(|(channel, user)| crate::sfu::cut_user_from_channel(state, channel, user))).await;
 }
 
 /// A perms change already running detached ([`start_perms_change`]).
@@ -9048,6 +9145,105 @@ mod own_voice_tests {
         assert!(starts_b.iter().all(|r| r.is_ok()), "after a move elsewhere: no Error frame either: {starts_b:?}");
         assert_eq!(after_b, (vec![], (false, false, false), vec![phone.conn]), "nothing claimed, the phone's call untouched");
         assert_eq!(control, Err("Not in this room".to_string()), "positive control: the ordinary refusal stands");
+    }
+
+    /// A socket that slept through its room going, on waking: its client remembers the
+    /// rooms it was in and asks for them again. Nobody asked to join anything, so the
+    /// answer is the RoomLeft it missed, and its re-claim is ignored: an Error frame is a
+    /// notice left on the screen, and "Not a member" reads as having been thrown out of a
+    /// server someone left on their other device, or whose owner disbanded it.
+    #[tokio::test]
+    async fn a_socket_waking_to_a_room_that_is_gone_is_told_and_not_refused() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (room, other_room, text_room) = (format!("voice_{voice}"), format!("voice_{other}"), format!("channel_{text}"));
+        let left = |frames: Vec<ServerMessage>, room: &str| {
+            frames.into_iter().find_map(|m| match m {
+                ServerMessage::RoomLeft { room_id, reason, .. } if room_id == room => Some(reason),
+                _ => None,
+            })
+        };
+
+        // Left the server on another device, while this socket slept. The replay is the
+        // room being asked for again, from a session that was in it.
+        sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2").bind(&server).bind(b).execute(&pool).await.unwrap();
+        let mut woken = Sock::open(&state, b, "b", "sid-woken");
+        let voice_replay = woken.replay(&state, &room).await;
+        let voice_told = left(woken.drain(), &room);
+        let mut starts = Vec::new();
+        for k in ["StartStream", "ScreenShareStart", "CameraStart"] {
+            starts.push(woken.simple(&state, k, &room).await);
+        }
+        let text_replay = woken.replay(&state, &text_room).await;
+        let text_told = left(woken.drain(), &text_room);
+        // A deliberate join is someone asking, and is answered as one.
+        let deliberate = woken.join(&state, &room).await;
+        // Control: a replay it can still make goes in.
+        let mut member = Sock::open(&state, a, "a", "sid-a");
+        let allowed = member.replay(&state, &room).await;
+        let allowed_in = conns(&state, &room, a as UserId) == vec![member.conn];
+
+        // The whole server gone: the channel's own answer is a NotFound, asked again.
+        sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await.unwrap();
+        let mut waking_later = Sock::open(&state, b, "b", "sid-later");
+        let gone_replay = waking_later.replay(&state, &other_room).await;
+        let gone_told = left(waking_later.drain(), &other_room);
+        let gone_in = conns(&state, &other_room, b as UserId);
+
+        // A failed lookup reads as NotFound too, and must not take anyone out of a call.
+        let closed = crate::migrator::test_pool(1).await.expect("a second pool");
+        closed.close().await;
+        let hiccup_state = AppState::new(closed, "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let hiccup = super::replay_refusal_is_final(&hiccup_state, &crate::permissions::ChannelPermAccess::NotFound, other as i64).await;
+        let not_member = super::replay_refusal_is_final(&hiccup_state, &crate::permissions::ChannelPermAccess::NotMember, other as i64).await;
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(voice_replay, Ok(()), "no Error frame");
+        assert_eq!(voice_told, Some(Some(super::ROOM_GONE.to_string())), "the RoomLeft it missed, saying why");
+        assert!(starts.iter().all(|r| r.is_ok()), "its re-claim is ignored too: {starts:?}");
+        assert_eq!(text_replay, Ok(()), "a text room's replay is no Error frame either");
+        assert_eq!(text_told, Some(None), "and has nothing to say about a call");
+        assert_eq!(deliberate, Err(super::JOIN_REFUSED.to_string()), "control: a deliberate join is still refused out loud");
+        assert_eq!(allowed, Ok(()));
+        assert!(allowed_in, "control: a replay it may make still goes in");
+        assert_eq!(gone_replay, Ok(()));
+        assert_eq!(gone_told, Some(Some(super::ROOM_GONE.to_string())));
+        assert_eq!(gone_in, Vec::<u64>::new());
+        assert!(!hiccup, "a lookup that failed is no answer");
+        assert!(not_member, "control: a NotMember is an answer, and needs no lookup");
+    }
+
+    /// A client can have a media start on its way when its server is disbanded: a join
+    /// still finishing, a re-broadcast's timer, Go Live pressed at that moment. It is out
+    /// of the room by the time that arrives, and an Error frame would be left on its screen
+    /// beside the words that said why, so it is ignored quietly and claims nothing.
+    #[tokio::test]
+    async fn a_media_start_racing_a_disband_is_not_an_error() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let mut in_call = Sock::open(&state, a, "a", "sid-pc");
+        in_call.join(&state, &room).await.expect("joins");
+        // Control: someone who was never in the call gets the ordinary refusal.
+        let mut never = Sock::open(&state, b, "b", "sid-b");
+        let control = never.simple(&state, "StartStream", &room).await;
+
+        sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await.unwrap();
+        super::start_server_deleted(&state, &server, vec![voice, other, text]).wait().await;
+        let mut starts = Vec::new();
+        for k in ["StartStream", "ScreenShareStart", "CameraStart"] {
+            starts.push(in_call.simple(&state, k, &room).await);
+        }
+        let claimed = media(&state, &room, a as UserId);
+        let still_in = conns(&state, &room, a as UserId);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(control, Err("Not in this room".to_string()), "positive control: the ordinary refusal stands");
+        assert!(starts.iter().all(|r| r.is_ok()), "no Error frame: {starts:?}");
+        assert_eq!(claimed, (false, false, false), "and the starts claimed nothing");
+        assert_eq!(still_in, Vec::<u64>::new());
     }
 
     /// A REPLAY must never duplicate or displace a call that is live on
