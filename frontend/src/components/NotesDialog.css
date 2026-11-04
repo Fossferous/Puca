@@ -15,8 +15,6 @@
     width: min(480px, 100%);
     max-height: 90dvh;
     overflow: auto;
-    /* --bg-secondary, as Modal.css has it: --bg-floating stays near black on the Light
-       theme, under Light's dark text. */
     background: var(--bg-secondary);
     border: 1px solid var(--border-subtle);
     border-radius: 12px;

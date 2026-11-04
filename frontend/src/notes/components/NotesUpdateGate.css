@@ -140,7 +140,7 @@
     padding: 6px 14px;
     border: none;
     border-radius: 8px;
-    background: var(--brand-primary);
+    background: var(--brand-active);
     color: #fff;
     font-weight: 600;
     cursor: pointer;

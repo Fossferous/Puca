@@ -44,7 +44,7 @@
     cursor: pointer;
 }
 .notes-draw-btn:hover { background: var(--bg-modifier-hover); }
-.notes-draw-btn.active { border-color: var(--brand-primary); color: var(--brand-primary); }
+.notes-draw-btn.active { border-color: var(--brand-primary); color: var(--brand-text); }
 .notes-draw-btn:disabled { opacity: 0.5; cursor: default; }
 .notes-draw-swatch {
     width: 26px;
@@ -101,7 +101,7 @@
 }
 .notes-draw-foot .notes-textbtn:hover { background: var(--bg-modifier-hover); }
 .notes-draw-foot .notes-textbtn:disabled { opacity: 0.5; cursor: default; }
-.notes-draw-foot .notes-textbtn.primary { color: var(--brand-primary); }
+.notes-draw-foot .notes-textbtn.primary { background: none; color: var(--brand-text); }
 
 @media (pointer: coarse) and (max-width: 1024px) {
     .notes-draw-foot .notes-textbtn { min-height: 44px; }

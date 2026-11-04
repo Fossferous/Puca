@@ -71,7 +71,7 @@
     cursor: pointer;
     font: inherit;
 }
-.sched-seg button.on { background: var(--brand-primary, #5865f2); color: #fff; }
+.sched-seg button.on { background: var(--brand-active, #3c45a5); color: #fff; }
 
 .sched-row {
     display: flex;
@@ -133,7 +133,7 @@
     cursor: pointer;
     font: inherit;
 }
-.sched-btn.primary { background: var(--brand-primary, #5865f2); border-color: transparent; color: #fff; }
+.sched-btn.primary { background: var(--brand-active, #3c45a5); border-color: transparent; color: #fff; }
 .sched-btn.danger { color: var(--text-danger, #f23f43); }
 
 /* Chips beside the plain due chip (TaskTree.css owns .tt-due). */

@@ -203,6 +203,18 @@ chrome; it is wired into `npm run lint`.
   (pattern: `MessageReactions.css`, `FriendsPanel.css`).
 - Use `100dvh`/`--safe-area-*`, never bare `100vh`/`bottom: 0`, for anything
   full-height on mobile.
+- **`:root` in `styles/theme.css` is the dark palette, and a theme only has an
+  answer for what it redefines.** A colour named outright, or a token no theme
+  defines with a dark fallback, stays dark on Light under Light's dark words:
+  this reached 1.00:1, across most of the app's small surfaces. So a surface and
+  its words come from the same place. Take both from tokens; or, for something
+  drawn dark on every theme (a frame around a picture, a menu over a stream),
+  add it to the list at the top of `styles/theme.css`, which gives everything
+  inside it the dark palette. A colour no token can reach goes in
+  `styles/lightTheme.css`. The brand colour as words is `--brand-text`:
+  `--brand-primary` is under 4.5:1 on a surface on every theme, and white on it
+  is under 4.5:1 on most, where `--brand-active` holds.
+  `e2e/light-surfaces-real-browser.mjs` reads every component back on Light.
 
 ## 7. Definition of done for UI work
 

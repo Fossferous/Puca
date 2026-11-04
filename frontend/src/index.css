@@ -1,5 +1,6 @@
 /* Import design system */
 @import './styles/theme.css';
+@import './styles/lightTheme.css';
 
 /* Base styles */
 *,

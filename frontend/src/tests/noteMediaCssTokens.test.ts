@@ -47,6 +47,10 @@ function definedProperties(): Set<string> {
         const p = path.join(FRONTEND, html);
         if (fs.existsSync(p)) for (const m of fs.readFileSync(p, 'utf8').matchAll(/(--[A-Za-z0-9-]+)\s*:/g)) out.add(m[1]);
     }
+    // theme.css sets these to initial: aliases only Light defines, for older components that name
+    // them with a dark fallback. No other theme has them, so they are not vocabulary to reach for.
+    const theme = fs.readFileSync(path.join(SRC, 'styles', 'theme.css'), 'utf8');
+    for (const m of theme.matchAll(/(--[A-Za-z0-9-]+)\s*:\s*initial\s*;/g)) out.delete(m[1]);
     return out;
 }
 

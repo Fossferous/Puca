@@ -1086,7 +1086,7 @@ first in vitest (`activities.test.tsx`, `gamesView.test.tsx`) or the walk:
   the socket's feature and call - never pots, turns or clocks. The table view
   alone follows every frame.
 - **The light theme hid the activity surfaces** (dark ink on the root
-  `--bg-floating`, which the light theme does not redefine: 1.05:1). The
+  `--bg-floating`, which the light theme did not redefine then: 1.05:1). The
   picker is on `--bg-primary`, the notice on `--bg-secondary`; the tile, which
   always sits on the stage's dark tile, has fixed light ink. The sidebar's
   playing mark drops `.voice-status-icon`'s 0.7 opacity (it was under 3:1 in
