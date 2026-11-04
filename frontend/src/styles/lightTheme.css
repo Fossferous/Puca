@@ -12,9 +12,12 @@
 [data-theme="light"] .form-group:not(.login-card .form-group) label { color: var(--text-muted); }
 [data-theme="light"] .form-group:not(.login-card .form-group) input {
     color: var(--text-normal);
-    background: var(--input-bg);
+    background: var(--light-field-bg, var(--input-bg));
     border-color: var(--border-faint);
 }
+/* Server Settings' pane is --input-bg's own colour, so a field of it there had no edge at all. Its
+   fields are white, as ServerSettingsModal.css paints them; Create Channel's pane is white. */
+[data-theme="light"] .server-settings-content { --light-field-bg: var(--bg-primary); }
 [data-theme="light"] .form-group:not(.login-card .form-group) input::placeholder { color: var(--text-faint); }
 [data-theme="light"] .error-message:not(.login-card .error-message) { color: var(--text-danger); }
 

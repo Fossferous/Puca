@@ -284,6 +284,25 @@ const pageReader = () => {
         }))
     ));
     window.__paper = el => paint(el, pageColour()).map(Math.round).join(',');
+    // The text fields of a form with nothing to tell them from what they are on: neither their fill
+    // nor a border of theirs is at `edge` against it. Words in them read fine all the same. The
+    // skeleton keeps no `type`, and the app's checkboxes are the ones in a toggle row or a checkbox
+    // label.
+    window.__flatFields = (edge) => {
+        const page = pageColour();
+        const fields = [...document.querySelectorAll('.form-group input')]
+            .filter(el => !el.closest('.login-card, .toggle-row, .checkbox-label') && !/^(checkbox|radio|file|hidden|range|color)$/.test(el.type));
+        const flat = [];
+        for (const el of fields) {
+            const on = paint(el.parentElement, page);
+            const fill = paint(el, page);
+            const style = getComputedStyle(el);
+            const border = parseFloat(style.borderTopWidth) > 0 ? over(parts(style.borderTopColor), on) : on;
+            const value = Math.max(ratio(fill, on), ratio(border, on));
+            if (value < edge) flat.push({ at: el.getAttribute('data-at') || el.tagName, fill: fill.map(Math.round).join(','), on: on.map(Math.round).join(','), ratio: Math.round(value * 100) / 100 });
+        }
+        return { fields: new Set(fields.map(el => el.getAttribute('data-at'))).size, flat };
+    };
 };
 
 // ---- checks -------------------------------------------------------------------------------------
@@ -529,6 +548,30 @@ for (const [name, options, sheetName, url] of [
     await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
     const old = worse(await read('light')).filter(row => !explained(row));
     check(new Set(old.map(row => row.at)).size >= 40, 'CONTROL: the sweep finds Light as it was', `${new Set(old.map(row => row.at)).size} places, down to ${Math.min(...old.map(row => row.ratio))}:1`);
+    await close();
+}
+
+// 6. What a reading of words cannot see.
+{
+    console.log('\nfields in a form');
+    // A field the colour of the pane it is on has no edge at all, and its words read fine on the
+    // pane: Server Settings' Server Name was plain words on Light until it was pressed.
+    const EDGE = 1.05;
+    const { page, close } = await open(sweepUrl);
+    const fieldsOn = async (look) => {
+        await page.evaluate(l => window.__look(l), look);
+        return page.evaluate(edge => window.__flatFields(edge), EDGE);
+    };
+    for (const contrast of CONTRASTS) {
+        const { fields, flat } = await fieldsOn(['light', contrast]);
+        check(fields >= 5 && flat.length === 0, `on Light (${contrast}) each of the ${fields} text fields in a form stands apart from what it is on, at ${EDGE}:1 or more`,
+            flat.slice(0, 6).map(f => `${f.at} ${f.fill} on ${f.on} ${f.ratio}:1`).join('; '));
+    }
+    // The field colour this sheet first gave them: the pane's own in Server Settings.
+    await page.evaluate(sheet => window.__old(sheet), '[data-theme="light"] .form-group:not(.login-card .form-group) input { background: var(--input-bg) !important; }');
+    const flatThen = (await fieldsOn(['light', 'normal'])).flat;
+    check(flatThen.some(f => f.at.startsWith('components/ServerSettingsModal.tsx')), 'CONTROL: with --input-bg, Server Settings\' fields are flat on their pane', flatThen.slice(0, 3).map(f => `${f.at} ${f.ratio}:1`).join('; '));
+    await page.evaluate(() => window.__old(''));
     await close();
 }
 
