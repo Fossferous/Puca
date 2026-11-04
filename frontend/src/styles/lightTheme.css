@@ -25,6 +25,10 @@
    word colour holds on. The stream's sits on the picture and stays dark (theme.css's list). */
 [data-theme="light"] .stream-stage-header { background: #0d0e10; }
 [data-theme="light"] .voice-stage-header { background: var(--bg-secondary); }
+/* VoiceStage.css whitens its buttons' words under a mouse, for the dark header. */
+@media (pointer: fine) {
+    [data-theme="light"] .voice-stage-header .voice-stage-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+}
 
 /* Pale words chosen for a dark surface. */
 [data-theme="light"] .emoji-name,

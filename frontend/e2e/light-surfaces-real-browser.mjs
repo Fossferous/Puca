@@ -195,6 +195,10 @@ const inApp = inner => `<div id="root" class="chat-container" style="display:blo
 const surfacesUrls = STYLESHEETS.map(([name, sheet], i) => [name, pageWith(`surfaces-${i}.html`, inApp(sectionsFor(name, sheet).join('\n')), sheet)]);
 const sweepUrl = pageWith('sweep.html', inApp(sweep.join('\n')), STYLESHEETS[2][1]);
 const mountsUrl = pageWith('mounts.html', '<div id="root"></div>', mountsCss, mountsJs);
+// The call's header as VoiceStage draws it, alone on a page, for a real pointer to rest on.
+const callHeaders = instancesOf('.voice-stage-header');
+if (!callHeaders.length) throw new Error('.voice-stage-header is no longer in the source: a rename? The pointer check has to follow it.');
+const callHeaderUrl = pageWith('call-header.html', inApp(callHeaders.map(node => `<section data-from="${node.at}"><div class="voice-stage">${toHtml(node, components, { steady: true })}</div></section>`).join('\n')), STYLESHEETS[0][1]);
 
 // ---- reading it ---------------------------------------------------------------------------------
 const pageReader = () => {
@@ -553,7 +557,7 @@ for (const [name, options, sheetName, url] of [
 
 // 6. What a reading of words cannot see.
 {
-    console.log('\nfields in a form');
+    console.log('\nfields in a form, and the call\'s header under the pointer');
     // A field the colour of the pane it is on has no edge at all, and its words read fine on the
     // pane: Server Settings' Server Name was plain words on Light until it was pressed.
     const EDGE = 1.05;
@@ -573,12 +577,40 @@ for (const [name, options, sheetName, url] of [
     check(flatThen.some(f => f.at.startsWith('components/ServerSettingsModal.tsx')), 'CONTROL: with --input-bg, Server Settings\' fields are flat on their pane', flatThen.slice(0, 3).map(f => `${f.at} ${f.ratio}:1`).join('; '));
     await page.evaluate(() => window.__old(''));
     await close();
+
+    // VoiceStage.css whitens the words of the header's buttons under a mouse, for a dark header.
+    const header = await open(callHeaderUrl);
+    const buttons = header.page.locator('.voice-stage-header .voice-stage-btn');
+    const count = await buttons.count();
+    const pointedAt = async () => {
+        const byLook = [];
+        for (let i = 0; i < count; i++) {
+            await buttons.nth(i).hover();
+            for (const look of LOOKS) {
+                await header.page.evaluate(l => window.__look(l), look);
+                byLook.push([look.join('/'), await buttons.nth(i).evaluate(el => window.__measure(el).map(row => ({ ...row, surface: 'call header, under the pointer' })))]);
+            }
+        }
+        await header.page.mouse.move(0, 0);
+        return byLook;
+    };
+    check(await header.page.evaluate(() => matchMedia('(pointer: fine)').matches), 'CONTROL: this is a mouse, which the hover is for');
+    const poor = collect(await pointedAt());
+    for (const { worst, looks } of poor) console.log(describe(worst, looks));
+    check(count >= 2 && poor.length === 0, `the call header's ${count} buttons hold the bar under the pointer on every look`, `${poor.length} below`);
+    await header.page.evaluate(sheet => window.__old(sheet), '[data-theme="light"] .voice-stage-header .voice-stage-btn:hover { background: rgba(255, 255, 255, 0.08) !important; color: #fff !important; }');
+    const poorThen = collect(await pointedAt());
+    check(poorThen.some(({ looks }) => looks.includes('light/normal') && looks.includes('light/high')), 'CONTROL: VoiceStage.css\'s own hover fails on Light\'s header, with and without high contrast', poorThen.map(({ worst }) => `${worst.ratio}:1`).join(' '));
+    await header.page.evaluate(() => window.__old(''));
+    check(header.errors.length === 0, 'and no page error', header.errors.slice(0, 3).join('; '));
+    await header.close();
 }
 
 // The file of Light's rules cannot reach another theme.
 {
     const lightSheet = readFileSync(join(srcDir, 'styles', 'lightTheme.css'), 'utf8');
-    const strays = lightSheet.replace(/\/\*[\s\S]*?\*\//g, '').split('}').flatMap(rule => rule.split('{')[0].split(','))
+    // A media query only says when; the rules in it are read as any other.
+    const strays = lightSheet.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@media[^{]*\{/g, '').split('}').flatMap(rule => rule.split('{')[0].split(','))
         .map(selector => selector.trim()).filter(Boolean).filter(selector => !selector.startsWith('[data-theme="light"]'));
     check(strays.length === 0, 'every selector in styles/lightTheme.css starts at [data-theme="light"]', strays.join(' | '));
 }
