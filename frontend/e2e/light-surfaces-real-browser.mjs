@@ -435,6 +435,22 @@ for (const [name, options, sheetName, url] of [
             await page.screenshot({ path: join(outDir, `after-yellow${name.replace(/[^a-z-]/g, '-')}.png`) });
         }
     }
+    // The lowest reading on each, on Light as it was and as it is, and on any look: what a report quotes.
+    if (outDir) {
+        const figures = {};
+        for (const name of names) {
+            await open_(name);
+            await page.evaluate(l => window.__look(l), ['light', 'normal']);
+            const low = () => page.evaluate(n => Math.min(...window.__measure(document.querySelector(n)).filter(row => row.kind === 'text').map(row => row.ratio)), name);
+            const now = await low();
+            await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
+            const was = await low();
+            await page.evaluate(() => window.__old(''));
+            const any = Math.min(...byLook.flatMap(([, rows]) => rows).filter(row => row.surface === name && row.kind === 'text').map(row => row.ratio));
+            figures[name] = { lightBefore: was, lightAfter: now, lowestOnAnyLook: any };
+        }
+        writeFileSync(join(outDir, 'figures.json'), JSON.stringify(figures, null, 2));
+    }
     const poor = collect(byLook);
     for (const { worst, looks } of poor) console.log(describe(worst, looks));
     check(poor.length === 0, `the real ${names.length} (${names.join(' ')}) hold the same bar on every look, in ${byLook.reduce((sum, [, rows]) => sum + rows.length, 0)} readings`, `${poor.length} below`);
