@@ -1372,16 +1372,26 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 /* A colour or a chip of its own would paint these over the spoiler's transparent, with their words:
-   code, a link, a mention or a channel, the name on a file's Download chip, and the host on the
-   placeholder for a picture from another site. Not painted they also take no press, which goes to
-   the spoiler and reveals it, and no focus, so nothing opens, saves, goes to a channel or asks another
-   site for a picture before it is seen. A press on one once revealed is for it (Spoiler). */
+   code, a fence or a quote, a link, a mention or a channel, the name on a file's Download chip, and the
+   host on the placeholder for a picture from another site. Not painted they also take no press, which
+   goes to the spoiler and reveals it, and no focus, so nothing opens, saves, goes to a channel or asks
+   another site for a picture before it is seen. A press on one once revealed is for it (Spoiler). */
 .spoiler:not(.revealed) .inline-code,
+.spoiler:not(.revealed) .code-block,
+.spoiler:not(.revealed) .message-quote,
 .spoiler:not(.revealed) .message-link,
 .spoiler:not(.revealed) .mention,
 .spoiler:not(.revealed) .message-attachment,
 .spoiler:not(.revealed) .message-image-blocked {
     visibility: hidden;
+}
+
+/* A fence or a quote is a block, and an inline bar is only as big as its lines: over one it would
+   be a gap with no bar on it, and a press there would miss the spoiler. */
+.spoiler:has(.code-block, .message-quote) {
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: bottom;
 }
 
 .spoiler:hover:not(.revealed) {

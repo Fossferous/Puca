@@ -27,7 +27,7 @@
 //      any text. The composer's autocomplete list: no halo on a solid surface of its own, where on
 //      Light it fills the white label's letters. NEGATIVE CONTROLS: with the reset taken out, the
 //      same counts find the words, and find more white in the chosen row.
-//   7. What has a colour or a chip of its own, in a spoiler: inline code, a link, a bare URL, a
+//   7. What has a colour or a chip of its own, in a spoiler: inline code, a fence, a quote, a link, a bare URL, a
 //      mention, @everyone, a channel, the placeholder for a picture from another site (a bare address
 //      and the markdown form), through the REAL parser on all eight themes. Nothing of them is
 //      painted, at rest or under the pointer, read back from the screen. A press on one only reveals
@@ -146,6 +146,8 @@ const chatOptions = {
             const said = (content) => <MessageContent content={content} members={MEMBERS} channels={CHANNELS} onChannelClick={() => window.__pressed.push('channel')} />;
             const KINDS = {
                 code: '||\`the code\`||',
+                fence: '||\`\`\`\\nthe fence\\n\`\`\`||',
+                quote: '||words\\n> the quote\\nmore words||',
                 link: '||[the link](https://example.invalid/hidden)||',
                 url: '||https://example.invalid/bare||',
                 mention: '||@alice||',
@@ -673,7 +675,7 @@ try {
     // Where the halo is the colour of the bar at rest, and only hovering shows it.
     const SAME_AS_THE_BAR = new Set(['light', 'amoled']);
     // The spoilers of 7, by what each holds, and the ones with a look of their own.
-    const KINDS = ['code', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats', 'picture', 'pictureMd'];
+    const KINDS = ['code', 'fence', 'quote', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats', 'picture', 'pictureMd'];
     const OWN_LOOK = KINDS.filter((kind) => kind !== 'formats');
     // A box with the SPOILER pill on it, so these are read against themselves with what is in them
     // out of the way, not against the bar's colour.
