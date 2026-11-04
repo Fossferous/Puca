@@ -392,6 +392,18 @@ pub enum ClientMessage {
     },
 }
 
+/// Why a server went from under someone, when no moderator did it
+/// ([`ServerMessage::RemovedFromServer`]): the words a client says are different, and
+/// neither should read as being thrown out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerGoneReason {
+    /// This account left it, on this device or another.
+    Left,
+    /// Its owner deleted it (the client calls this disbanding).
+    Disbanded,
+}
+
 /// Messages sent from the server to the client
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "payload")]
@@ -593,9 +605,15 @@ pub enum ServerMessage {
     /// viewers refetch that channel's checklist to sync live.
     ChecklistUpdate { channel_id: i64 },
 
-    /// You were removed from a server (kicked or banned) — drop it client-side
-    /// immediately instead of waiting for the next reload.
-    RemovedFromServer { server_id: String },
+    /// You are no longer in a server: drop it client-side immediately instead of
+    /// waiting for the next reload. `reason` is absent for a kick or a ban, so that
+    /// frame stays byte-identical to the one every client already parses; an old
+    /// client ignores the field and drops the server exactly as for a kick.
+    RemovedFromServer {
+        server_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<ServerGoneReason>,
+    },
 
     /// Somebody joined a server you are in. Sent to every EXISTING member
     /// (never the joiner — their own client already knows, from the HTTP
@@ -1475,6 +1493,16 @@ mod voice_speak_state_tests {
 #[cfg(test)]
 mod own_voice_wire_tests {
     use super::*;
+
+    /// A kick's frame is the bytes every client already parses: an old client must read
+    /// a disband or a leave the same way, with one field it ignores.
+    #[test]
+    fn a_kick_is_the_frame_it_always_was_and_the_others_add_one_field() {
+        let frame = |reason| serde_json::to_string(&ServerMessage::RemovedFromServer { server_id: "s1".into(), reason }).unwrap();
+        assert_eq!(frame(None), r#"{"type":"RemovedFromServer","payload":{"server_id":"s1"}}"#);
+        assert_eq!(frame(Some(ServerGoneReason::Left)), r#"{"type":"RemovedFromServer","payload":{"server_id":"s1","reason":"left"}}"#);
+        assert_eq!(frame(Some(ServerGoneReason::Disbanded)), r#"{"type":"RemovedFromServer","payload":{"server_id":"s1","reason":"disbanded"}}"#);
+    }
 
     /// One file pins the server and the client: `ownVoiceState.json` holds the
     /// "your call is on another device" frame in both its shapes, and the two

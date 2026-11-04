@@ -13,6 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::Claims;
+use crate::protocol::{ServerGoneReason, ServerMessage};
 use crate::state::AppState;
 
 // --- DTOs ---
@@ -627,6 +628,19 @@ pub async fn leave_server(
 
     match res {
         Ok(r) if r.rows_affected() > 0 => {
+            // Straight after that delete, as a kick does: this account's other
+            // devices stop showing a server it has left. The sweep below finds
+            // them no longer a member, so it says nothing to them about the list,
+            // and the frame comes first so they know why the RoomLeft that follows
+            // arrived. The device that pressed gets it too, and goes by its own
+            // answer (Chat.tsx, ownDeparturesRef).
+            state.send_to_user(
+                claims.sub,
+                ServerMessage::RemovedFromServer {
+                    server_id: server_id.clone(),
+                    reason: Some(ServerGoneReason::Left),
+                },
+            );
             // Server-side force-evict from any live voice/media room, exactly
             // as kick/ban do (moderation_handlers.rs). Without it a member who
             // leaves keeps their live voice/screen-share/remote-control session
@@ -667,15 +681,52 @@ pub async fn delete_server(
         _ => {}
     }
 
-    let res = sqlx::query("DELETE FROM servers WHERE id = $1")
-        .bind(&server_id)
-        .execute(&state.pool)
-        .await;
+    // Who and what the cascade takes, which nothing can say afterwards. Under the row's
+    // lock: a join or a new channel waits for this and then finds the server gone, so
+    // nobody gets in after the list was read and goes untold.
+    let deleted: Result<(Vec<(i32,)>, Vec<(i32,)>), sqlx::Error> = async {
+        let mut tx = state.pool.begin().await?;
+        sqlx::query("SELECT id FROM servers WHERE id = $1 FOR UPDATE")
+            .bind(&server_id)
+            .execute(&mut *tx)
+            .await?;
+        let members = sqlx::query_as("SELECT user_id FROM server_members WHERE server_id = $1")
+            .bind(&server_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        let channels = sqlx::query_as("SELECT id FROM channels WHERE server_id = $1")
+            .bind(&server_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM servers WHERE id = $1")
+            .bind(&server_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((members, channels))
+    }
+    .await;
 
-    match res {
-        Ok(_) => {
+    match deleted {
+        Ok((members, channels)) => {
+            // Straight after that commit, with no await in between, as a kick does:
+            // every member's client drops the server now (the owner's other devices
+            // too), and the rooms start emptying, detached, so a request cancelled
+            // from here on cannot lose it. The frame comes first so that a client
+            // knows why the RoomLeft that follows arrived.
+            for (member,) in members {
+                state.send_to_user(
+                    member as i64,
+                    ServerMessage::RemovedFromServer {
+                        server_id: server_id.clone(),
+                        reason: Some(ServerGoneReason::Disbanded),
+                    },
+                );
+            }
             // Its channels went with it, and with them every card table.
             state.games.close_server(&state, &server_id, crate::games_wire::GameEndReason::ChannelDeleted);
+            let channels: Vec<i32> = channels.into_iter().map(|(id,)| id).collect();
+            crate::ws::start_server_deleted(&state, &server_id, channels).wait().await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
@@ -2270,5 +2321,300 @@ mod afk_timeout_tests {
         for bad in [0, -1, 2, 10, 14, 16, 20, 45, 59, 61, 120, i32::MAX, i32::MIN] {
             assert!(!afk_timeout_valid(bad), "{bad} must be refused");
         }
+    }
+}
+
+/// Leaving and disbanding, through the real handlers with real sessions and rooms
+/// (TEST_DATABASE_URL; skips without it).
+#[cfg(test)]
+mod server_gone_tests {
+    use super::{delete_server, leave_server};
+    use crate::auth::Claims;
+    use crate::permissions::Permissions;
+    use crate::protocol::{ServerGoneReason, ServerMessage};
+    use crate::state::{AppState, UserId};
+    use axum::{
+        extract::{Path, State},
+        http::StatusCode,
+        response::IntoResponse,
+        Extension,
+    };
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct Sock {
+        rx: mpsc::Receiver<ServerMessage>,
+        conn: u64,
+        user: UserId,
+    }
+
+    impl Sock {
+        fn open(state: &Arc<AppState>, user: i32) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, _, _) = state.register_session(user as i64, format!("u{user}"), tx, false, None, format!("s{user}"));
+            Sock { rx, conn, user: user as i64 }
+        }
+        fn in_room(state: &Arc<AppState>, user: i32, room: &str) -> Sock {
+            let s = Self::open(state, user);
+            state.join_room(room, s.user, s.conn);
+            s
+        }
+        /// What this socket was told about servers going and rooms it left, in order.
+        fn story(&mut self) -> Vec<String> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                match m {
+                    ServerMessage::RemovedFromServer { server_id, reason } => out.push(format!("gone:{server_id}:{reason:?}")),
+                    ServerMessage::RoomLeft { room_id, reason, by } => {
+                        assert_eq!((reason, by), (None, None), "a plain RoomLeft, which every client handles");
+                        out.push(format!("left:{room_id}"));
+                    }
+                    ServerMessage::ChannelPermsChanged { server_id } => out.push(format!("perms:{server_id}")),
+                    _ => {}
+                }
+            }
+            out
+        }
+    }
+
+    fn claims(user: i32) -> Extension<Claims> {
+        Extension(Claims {
+            sub: user as i64,
+            username: format!("u{user}"),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            tv: 0,
+            sst: 0,
+            sid: String::new(),
+            ls: false,
+        })
+    }
+
+    async fn users(pool: &sqlx::PgPool, n: usize) -> Vec<i32> {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(format!("gone_{i}_{}", &tag[..12]))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        ids
+    }
+
+    struct Srv {
+        id: String,
+        text: String,
+        voice: String,
+        voice_id: i32,
+    }
+
+    async fn server(pool: &sqlx::PgPool, owner: i32, members: &[i32]) -> Srv {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&id)
+            .bind(format!("gone_{}", &id[..8]))
+            .bind(owner)
+            .execute(pool)
+            .await
+            .expect("server");
+        for m in std::iter::once(&owner).chain(members) {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&id)
+                .bind(m)
+                .execute(pool)
+                .await
+                .expect("member");
+        }
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&id)
+        .bind((Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK).bits() as i64)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let (text,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 'general', 0) RETURNING id")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .expect("text");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'Lounge', 1, false) RETURNING id")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .expect("voice");
+        Srv { id, text: format!("channel_{text}"), voice: format!("voice_{voice}"), voice_id: voice }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, servers: &[&Srv], ids: &[i32]) {
+        for s in servers {
+            let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&s.id).execute(pool).await;
+        }
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.to_vec()).execute(pool).await;
+    }
+
+    fn in_room(state: &AppState, room: &str, user: i32) -> bool {
+        state.rooms.get(room).is_some_and(|r| r.members.contains(&(user as i64)))
+    }
+
+    #[tokio::test]
+    async fn a_disband_reaches_every_member_empties_its_rooms_and_touches_nothing_else() {
+        let Some(pool) = crate::migrator::test_pool(6).await else { return };
+        let ids = users(&pool, 5).await;
+        let (owner, in_call, in_both, outsider, offline) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+        let doomed = server(&pool, owner, &[in_call, in_both, offline]).await;
+        let other = server(&pool, outsider, &[in_both]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        let mut pressed = Sock::open(&state, owner);
+        let mut owners_phone = Sock::open(&state, owner);
+        let mut caller = Sock::in_room(&state, in_call, &doomed.voice);
+        state.join_room(&doomed.text, caller.user, caller.conn);
+        // On the doomed server's list, in a call on the other server.
+        let mut elsewhere = Sock::in_room(&state, in_both, &other.voice);
+        let mut stranger = Sock::in_room(&state, outsider, &other.voice);
+        state.join_room(&other.text, stranger.user, stranger.conn);
+
+        let status = delete_server(State(Arc::clone(&state)), Path(doomed.id.clone()), claims(owner)).await.into_response().status();
+        let rooms_gone = !state.rooms.contains_key(&doomed.voice) && !state.rooms.contains_key(&doomed.text);
+        let stays = (in_room(&state, &other.voice, in_both), in_room(&state, &other.voice, outsider), in_room(&state, &other.text, outsider));
+        let row_gone = sqlx::query_as::<_, (i32,)>("SELECT owner_id FROM servers WHERE id = $1").bind(&doomed.id).fetch_optional(&pool).await.unwrap().is_none();
+        let gone = format!("gone:{}:{:?}", doomed.id, Some(ServerGoneReason::Disbanded));
+        let (pressed_story, phone_story, caller_story, elsewhere_story, stranger_story) =
+            (pressed.story(), owners_phone.story(), caller.story(), elsewhere.story(), stranger.story());
+        cleanup(&pool, &[&doomed, &other], &ids).await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(row_gone);
+        assert_eq!(pressed_story, vec![gone.clone()], "the device that pressed hears it too, and goes by its own answer");
+        assert_eq!(phone_story, vec![gone.clone()], "the owner's other device");
+        assert_eq!(caller_story[0], gone, "first, so that a client knows why the RoomLeft that follows arrived");
+        assert!(caller_story.contains(&format!("left:{}", doomed.voice)), "{caller_story:?}");
+        assert!(caller_story.contains(&format!("left:{}", doomed.text)), "{caller_story:?}");
+        assert!(rooms_gone, "nobody is left in a room of a channel that is gone");
+        assert_eq!(elsewhere_story, vec![gone], "told of this server, and no RoomLeft for the call on the other");
+        assert_eq!(stays, (true, true, true), "the other server's rooms keep everyone in them");
+        assert_eq!(stranger_story, Vec::<String>::new(), "a member of a different server hears nothing");
+    }
+
+    #[tokio::test]
+    async fn a_leave_reaches_all_of_that_account_and_nobody_else() {
+        let Some(pool) = crate::migrator::test_pool(6).await else { return };
+        let ids = users(&pool, 3).await;
+        let (owner, leaver, outsider) = (ids[0], ids[1], ids[2]);
+        let srv = server(&pool, owner, &[leaver]).await;
+        let other = server(&pool, outsider, &[leaver]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        let mut pressed = Sock::open(&state, leaver);
+        let mut phone = Sock::in_room(&state, leaver, &srv.voice);
+        let mut owners = Sock::in_room(&state, owner, &srv.voice);
+        let mut stranger = Sock::in_room(&state, outsider, &other.voice);
+
+        let status = leave_server(State(Arc::clone(&state)), Path(srv.id.clone()), claims(leaver)).await.into_response().status();
+        let leaver_out = !in_room(&state, &srv.voice, leaver);
+        let owner_stays = in_room(&state, &srv.voice, owner);
+        let gone = format!("gone:{}:{:?}", srv.id, Some(ServerGoneReason::Left));
+        let (pressed_story, phone_story, owners_story, stranger_story) = (pressed.story(), phone.story(), owners.story(), stranger.story());
+        cleanup(&pool, &[&srv, &other], &ids).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pressed_story[0], gone, "the device that pressed");
+        assert_eq!(phone_story[0], gone, "their other device, before the RoomLeft that follows");
+        assert!(phone_story.contains(&format!("left:{}", srv.voice)), "{phone_story:?}");
+        assert!(leaver_out);
+        assert!(owner_stays, "control: the rest of the call stays");
+        assert_eq!(owners_story, vec![format!("perms:{}", srv.id)], "control: told the channels may have changed, and not that the server went");
+        assert_eq!(stranger_story, Vec::<String>::new(), "a member of a different server hears nothing");
+    }
+
+    /// A press the server refused has gone nowhere, so nobody is told it did.
+    #[tokio::test]
+    async fn a_refused_leave_or_disband_tells_nobody() {
+        let Some(pool) = crate::migrator::test_pool(6).await else { return };
+        let ids = users(&pool, 3).await;
+        let (owner, member, stranger_id) = (ids[0], ids[1], ids[2]);
+        let srv = server(&pool, owner, &[member]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let mut owners = Sock::in_room(&state, owner, &srv.voice);
+        let mut members = Sock::in_room(&state, member, &srv.voice);
+        let mut strangers = Sock::open(&state, stranger_id);
+
+        let at = |r: axum::response::Response| r.status();
+        let member_disbands = at(delete_server(State(Arc::clone(&state)), Path(srv.id.clone()), claims(member)).await.into_response());
+        let owner_leaves = at(leave_server(State(Arc::clone(&state)), Path(srv.id.clone()), claims(owner)).await.into_response());
+        let stranger_leaves = at(leave_server(State(Arc::clone(&state)), Path(srv.id.clone()), claims(stranger_id)).await.into_response());
+        let row_stays = sqlx::query_as::<_, (i32,)>("SELECT owner_id FROM servers WHERE id = $1").bind(&srv.id).fetch_optional(&pool).await.unwrap().is_some();
+        let call_stays = in_room(&state, &srv.voice, owner) && in_room(&state, &srv.voice, member);
+        let stories = (owners.story(), members.story(), strangers.story());
+        cleanup(&pool, &[&srv], &ids).await;
+
+        assert_eq!(member_disbands, StatusCode::FORBIDDEN);
+        assert_eq!(owner_leaves, StatusCode::BAD_REQUEST);
+        assert_eq!(stranger_leaves, StatusCode::NOT_FOUND);
+        assert!(row_stays && call_stays);
+        assert_eq!(stories, (vec![], vec![], vec![]));
+    }
+
+    /// LiveKit has its own map of who is in a room, and a session whose socket died is
+    /// in nothing else. Everyone there goes, and a removal LiveKit did not confirm is
+    /// owed as a cut: for a channel that is gone the resync's join check reads a failed
+    /// lookup and would keep the session.
+    #[tokio::test]
+    async fn a_disband_cuts_every_livekit_session_of_the_server_and_no_other() {
+        use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy};
+        use crate::sfu::Recheck;
+        let Some(pool) = crate::migrator::test_pool(6).await else { return };
+        no_env_proxy();
+        let ids = users(&pool, 3).await;
+        let (owner, member, outsider) = (ids[0], ids[1], ids[2]);
+        let doomed = server(&pool, owner, &[member]).await;
+        let other = server(&pool, outsider, &[]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = crate::sfu::room_name_for_channel(doomed.voice_id as i64);
+        let other_room = crate::sfu::room_name_for_channel(other.voice_id as i64);
+        let (socketless, in_voice, unconfirmed, stranger) =
+            (format!("u{member}#gone"), format!("u{owner}#here"), format!("u{}#soon", ids[2]), format!("u{outsider}#there"));
+        {
+            let mut usage = state.sfu_rooms.entry(room.clone()).or_default();
+            usage.participants.insert(socketless.clone(), std::time::Instant::now());
+            usage.participants.insert(in_voice.clone(), std::time::Instant::now());
+            usage.reservations.insert(unconfirmed.clone(), std::time::Instant::now());
+            state.sfu_rooms.entry(other_room.clone()).or_default().participants.insert(stranger.clone(), std::time::Instant::now());
+        }
+        let mut sock = Sock::in_room(&state, owner, &doomed.voice);
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let status = crate::sfu::TEST_LIVEKIT
+            .scope(base, async { delete_server(State(Arc::clone(&state)), Path(doomed.id.clone()), claims(owner)).await.into_response().status() })
+            .await;
+        let seen = asked(srv).await;
+        let owed = |identity: &str| state.sfu_rooms.get(&room).and_then(|u| u.recheck.get(identity).map(|m| m.what));
+        let (socketless_owes, in_voice_owes) = (owed(&socketless), owed(&in_voice));
+        let stranger_there = state.sfu_rooms.get(&other_room).is_some_and(|u| u.participants.contains_key(&stranger));
+        let story = sock.story();
+        cleanup(&pool, &[&doomed, &other], &ids).await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let removed: Vec<String> = seen.iter().map(|s| s.body.clone()).collect();
+        assert!(removed.iter().any(|b| b.contains(&socketless)), "the session with no room entry: {removed:?}");
+        assert!(removed.iter().any(|b| b.contains(&in_voice)), "the one in the room: {removed:?}");
+        assert!(!removed.iter().any(|b| b.contains(&stranger)), "control: another server's call: {removed:?}");
+        assert_eq!(socketless_owes, Some(Recheck::Cut));
+        assert_eq!(in_voice_owes, Some(Recheck::Cut));
+        assert!(stranger_there, "control: another server's call is still in the map");
+        assert!(story.contains(&format!("left:{}", doomed.voice)), "told before the cut: {story:?}");
     }
 }
