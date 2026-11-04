@@ -446,3 +446,8 @@
 .user-profile-popup .ban-btn:hover {
     background: #f04747;
 }
+
+/* On Light. A role's colour on the name is inline and still wins. */
+.user-profile-popup:is([data-theme="light"] *) .profile-info h3 { color: var(--header-primary); }
+.user-profile-popup:is([data-theme="light"] *) .owner-notice p { color: var(--text-warning); }
+.user-profile-popup:is([data-theme="light"] *) .kick-btn { color: #11111b; }

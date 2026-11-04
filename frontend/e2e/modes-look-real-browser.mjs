@@ -826,7 +826,7 @@ try {
                 outside: read(document.querySelector(`#open ${s}`)),
             }]));
         });
-        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !/, 0\)$/.test(l.revealed.colour)), looks);
+        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !/^rgba\(.*, 0\)$/.test(l.revealed.colour)), looks);
         const painted = {};
         for (const kind of OWN_LOOK) {
             const clip = await chat.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, inKind(kind));

@@ -6,8 +6,8 @@
 /* These same tokens also apply inside the surfaces drawn dark on every theme, Light included.
    Their own colours are fixed, so the words on them need the palette they were made for, which
    Light would otherwise reach through and turn dark on dark. */
-:root,
-:where([data-theme="light"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate) {
+:where([data-theme="light"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
+:root {
     /* ==================== Familiar Dark Chat-App Theme Colors ==================== */
 
     /* 
@@ -415,8 +415,8 @@
 /* ==================== High Contrast (Accessibility) ==================== */
 /* Boosts text and border contrast ON TOP of whichever theme is active —
    the lightness ladder of the surfaces stays, text stops being grey. */
-[data-contrast="high"],
-:where([data-theme="light"][data-contrast="high"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate) {
+:where([data-theme="light"][data-contrast="high"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
+[data-contrast="high"] {
     --text-normal: #ffffff;
     --text-muted: #d7dbe2;
     --text-faint: #b9bdc9;
