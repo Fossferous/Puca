@@ -4,6 +4,13 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **A spoiler stays hidden, whatever the words before it say.** `my_file ||secret_word||` printed the spoiler, because the underscore in `my_file` paired up with the one inside the bars, and so did `a*b ||c*d||`, `a__b ||c__d||` and `~~a ||b~~c||`. A mark in your words no longer pairs up with one inside a spoiler. It stays hidden too when it holds a code block or a quote, which used to print, and straight after an address: `https://example.org/a||secret||` put the secret in the link and in the preview under the message. In a message where the `||` could pair up more than one way, such as `my_file ||a_b|| and ||c_d||`, everything between the first `||` and the last is hidden now, each stretch to be revealed on its own.
+- **A picture or a file is no longer lost to an underscore in your words.** In a message with one `_` in the words before an attachment, about three times in four the `_` paired up with one inside the attachment's key: the picture was gone, and part of the key showed as text. The same went for a link with a `_` in its address or its label. A name after one is read whole as well, so `@alice_c` in such a message mentions alice_c, not alice.
+
 ## 0.9.855 — 2026-11-03
 
 Server modes, and the desktop app asks before destructive actions again

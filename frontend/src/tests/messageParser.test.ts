@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { parseMessage, extractMentions, isSafeUrl, type Node } from '../utils/messageParser';
+import { parseMessage, extractMentions, isSafeUrl, urlAt, type Node } from '../utils/messageParser';
 import { messageMentionsUser } from '../utils/messageMentions';
+import { extractUrls } from '../api/linkPreview';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
@@ -95,17 +96,14 @@ describe('markdown', () => {
     });
 });
 
+/** Every address in these nodes. */
+function hrefsIn(nodes: Node[]): string[] {
+    return nodes.flatMap(n => (n.type === 'url' || n.type === 'link' || n.type === 'image' ? [n.href] : 'children' in n ? hrefsIn(n.children) : []));
+}
+
 /** Every address in a message, as the message links it. */
 function hrefs(content: string): string[] {
-    const out: string[] = [];
-    const walk = (nodes: Node[]) => {
-        for (const n of nodes) {
-            if (n.type === 'url' || n.type === 'link' || n.type === 'image') out.push(n.href);
-            else if ('children' in n) walk(n.children);
-        }
-    };
-    walk(parseMessage(content));
-    return out;
+    return hrefsIn(parseMessage(content));
 }
 
 describe('an address ending in a bracket it opened keeps it', () => {
@@ -368,41 +366,95 @@ describe('a spoiler never stops being one', () => {
         });
     });
 
-    it('the address gives way before the spoiler does: a `_` in the spoiler, or a `||` in the address', () => {
-        // Stepping over the address would close the `_` inside the spoiler.
-        expect(hiddenBy(parseMessage('w0_w1 https://example.org/w2_w3 ||w4_w5||'))).toEqual(new Set(['w4', 'w5']));
-        expect(hiddenBy(parseMessage('_https://example.org/w0_w1||w2||_'))).toEqual(new Set(['w2']));
+    it('neither the address nor the spoiler gives way: a `_` in the spoiler, or a `||` in the address', () => {
+        expect(addresses('w0_w1 https://example.org/w2_w3 ||https://example.org/w4_w5||')).toEqual({
+            hidden: ['https://example.org/w4_w5'],
+            shown: ['https://example.org/w2_w3'],
+        });
+        expect(parseMessage('_https://example.org/w0_w1||w2||_')).toEqual([{
+            type: 'em',
+            children: [{ type: 'url', href: 'https://example.org/w0_w1' }, { type: 'spoiler', children: [{ type: 'text', value: 'w2' }] }],
+        }]);
     });
 
     it.each([
+        // The address's `||` takes the spoiler's as its pair, and what it hides is one space.
+        ['https://x.invalid/a|| ||secret||'],
+        ['http://>|| ||secret||'],
         // A `>` or `"` leaves too little of a short address, so a delimiter in it comes alive.
+        ['https://`> ||secret||`'],
+        ['https://[> ||secret](x)||'],
+        // A word shaped like an address and not read as one, with a `[` or a backtick in it.
+        ['my_file https://[ ||the butler|| https://x.invalid/d_e](f)'],
+        // A link takes the spoiler into its target.
+        ['[a](https://x/(b)||secret||)'],
+        // In a quote too, and a fence in the spoiler is as it was: a reading as it was is that.
+        ['> https://x.invalid/a|| ||```secret```||'],
+    ])('it is read as it was where the better reading would print it and hide nothing it did not: %s', (content) => {
+        expect(JSON.stringify(parsedAsItWas(content))).toContain('"spoiler"');
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it.each<[string, string[]]>([
+        // Each one hid what the other prints: there is no telling which `||` pairs with which.
+        ['my_file ||w0_w1|| and ||w2_w3||', ['w0', 'w1', 'w2', 'w3']],
+        ['my_file ||w0_w1|| and ||w2||', ['w0', 'w1', 'w2']],
+        ['w0*w1 ||w2*w3|| and ||w4*w5||', ['w2', 'w3', 'w4', 'w5']],
+        ['||```\nw0\n```|| and ||w1||', ['w0', 'w1']],
+        ['||w0\n> w1\nw2|| and ||w3||', ['w0', 'w1', 'w2', 'w3']],
+        ['my_file ||w0_w1|| w2 || w3', ['w0', 'w1', 'w2']],
+        // A `||` with a space either side opens nothing over a block, but what either hid is what matters here.
+        ['my_file ||w0_w1|| w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
+        ['my_file || w0_w1 || w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
+        // A `||` in the words takes the next `||` as its pair, once no delimiter takes it first.
+        ['**a||w0** ||w1||', ['w0', 'w1']],
+        ['*a||w0* ||w1||', ['w0', 'w1']],
+        ['_a||w0_ ||w1||', ['w0', 'w1']],
+        ['__a||w0__ ||w1||', ['w0', 'w1']],
+        ['~~a||w0~~ ||w1||', ['w0', 'w1']],
+        // A closer that moved re-pairs the delimiters in later addresses.
+        ['_use https://x.invalid/a_b or _a || w0 at https://x.invalid/c_d ||w1 w2||', ['w0', 'w1', 'w2']],
+        ['*https://x.invalid/a*b *||w0 https://x.invalid/d* ||w1||', ['w0', 'w1']],
+        ['~~https://x.invalid/a~~~~ ||https://x.invalid/w0~~ ||w1||', ['w0', 'w1']],
+    ])('where each hides what the other prints, nothing either hid is printed: %s', (content, hidden) => {
+        const read = parseMessage(content);
+        expect([...hiddenBy(read)].sort()).toEqual(hidden);
+        expect(leaked(content, read)).toEqual([]);
+        expect([...printedBy(read)].filter(w => hidden.includes(w))).toEqual([]);
+    });
+
+    it('where each hides what the other prints, each stretch is a spoiler of its own, with no `||` left to see', () => {
+        const spoiler = (...children: unknown[]) => ({ type: 'spoiler', children });
+        const said = (value: string) => ({ type: 'text', value });
+        expect(parseMessage('my_file ||a_b|| and ||c_d||')).toEqual([said('my_file '), spoiler(said('a_b')), spoiler(said(' and ')), spoiler(said('c_d'))]);
+        expect(parseMessage('my_file ||a_b|| and ||c_d|| more')).toEqual([said('my_file '), spoiler(said('a_b')), spoiler(said(' and ')), spoiler(said('c_d')), said(' more')]);
+        expect(parseMessage('||```\na\n```|| and ||b||')).toEqual([
+            spoiler({ type: 'codeblock', value: 'a', lang: null }),
+            spoiler(said(' and ')),
+            spoiler(said('b')),
+        ]);
+        // CONTROL: the first `_` closes nothing in it, so nothing is in question.
+        expect(parseMessage('my_file ||a|| and ||c_d||')).toEqual([said('my_file '), spoiler(said('a')), said(' and '), spoiler(said('c_d'))]);
+    });
+
+    it.each([
         ['see <https://*> and ||the *butler* did it||'],
         ['<https://*> ||https://example.org/the-butler*||'],
         ['https://_> ||_secret||'],
-        ['https://`> ||secret||`'],
-        ['https://[> ||secret](x)||'],
         ['https://.>_a ||secret_ c||'],
-        ['http://>|| ||secret||'],
-        // A closer that moved re-pairs the delimiters in later addresses.
-        ['_use https://x.invalid/a_b or _a || b at https://x.invalid/c_d ||the butler did it||'],
-        ['*https://x.invalid/a*b *||c https://x.invalid/d* ||secret||'],
-        ['~~https://x.invalid/a~~~~ ||https://x.invalid/b~~ ||secret||'],
-        // A word shaped like an address and not read as one, with a `[` or a backtick in it.
-        ['my_file https://[ ||the butler|| https://x.invalid/d_e](f)'],
         ['_Https://x/[||secret||https://x/a_](b)'],
         ['_https://x.invalid/a_`b Https://x.invalid/`||`secret||'],
         ['_Https://example.org/[||https://example.org/hiddenword||_](y)'],
-        // Reads as it was, and each branch of that reading is what keeps its spoiler.
         ['Https://example.org/a||secret||'],
         ['Link:https://example.org/a||secret||'],
-        ['[a](https://x/(b)||secret||)'],
         ['my_file at https://example.org/my_file ||secret_word||'],
         ['**my_file at https://example.org/my_file ||secret_word||**'],
         ['> my_file at https://example.org/my_file ||secret_word||'],
         ['_||https://example.org/a|| https://example.org/b_c ||secret_ d||'],
-    ])('it is read as it was where the better reading would print it: %s', (content) => {
-        expect(JSON.stringify(parsedAsItWas(content))).toContain('"spoiler"');
-        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    ])('the better reading keeps what it hid, with no need to read as it was: %s', (content) => {
+        const hidden = (nodes: Node[]): string[] => nodes.flatMap(n => (n.type === 'spoiler' ? [text([n])] : 'children' in n ? hidden(n.children) : []));
+        expect(hidden(parseMessage(content))).toEqual(hidden(parsedAsItWas(content)));
+        expect(parseMessage(content)).not.toEqual(parsedAsItWas(content));
     });
 
     it('the better reading is kept where it loses nothing', () => {
@@ -429,15 +481,16 @@ describe('a spoiler never stops being one', () => {
         ['a channel', '#secret'],
         ['an emoji', ':secret:'],
     ])('whatever it hid counts: %s', (_, hidden) => {
-        // Stepped over, the address lets this `_` close inside the spoiler, and it all prints.
-        const content = `_https://example.org/a_b ||${hidden} _ ||`;
+        // The address's `||` takes this spoiler's first `||` as its pair, hides one space, and it all prints.
+        const content = `https://x.invalid/a|| ||${hidden}||`;
         expect(parsedAsItWas(content).some(n => n.type === 'spoiler')).toBe(true);
         expect(parseMessage(content)).toEqual(parsedAsItWas(content));
     });
 
     it('a word it hid twice has to stay hidden twice, wherever else it is said', () => {
-        const content = '||a|| _https://example.org/w_w ||a_ a||';
+        const content = '||a|| https://x.invalid/b|| ||a||';
         expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+        expect(parseMessage(content).filter(n => n.type === 'spoiler')).toHaveLength(2);
     });
 
     it('CONTROL: a word it did not hide is free to be read better, and one it would still hide is too', () => {
@@ -541,9 +594,11 @@ describe('an address straight after a colon', () => {
             { type: 'text', value: ' ' },
             spoiler('hidden'),
         ]);
-        // The address would take the spoiler in, so this message reads as it did.
-        expect(parseMessage('Link:https://example.org/a||hidden||')).toEqual(parsedAsItWas('Link:https://example.org/a||hidden||'));
-        expect(parseMessage('Link:https://example.org/a||hidden||').at(-1)).toEqual(spoiler('hidden'));
+        expect(parseMessage('Link:https://example.org/a||hidden||')).toEqual([
+            { type: 'text', value: 'Link:' },
+            { type: 'url', href: 'https://example.org/a' },
+            spoiler('hidden'),
+        ]);
     });
 });
 
@@ -590,9 +645,13 @@ describe('a raw > or " is never part of an address', () => {
         ]);
     });
 
-    it('but where that would take a spoiler apart, the message reads as it did', () => {
-        expect(parseMessage('<https://example.org/a>_b ||c_d||')).toEqual(parsedAsItWas('<https://example.org/a>_b ||c_d||'));
-        expect(parseMessage('<https://example.org/a>_b ||c_d||').at(-1)).toEqual({ type: 'spoiler', children: [{ type: 'text', value: 'c_d' }] });
+    it('and it cannot take a spoiler apart', () => {
+        expect(parseMessage('<https://example.org/a>_b ||c_d||')).toEqual([
+            { type: 'text', value: '<' },
+            { type: 'url', href: 'https://example.org/a' },
+            { type: 'text', value: '>_b ' },
+            { type: 'spoiler', children: [{ type: 'text', value: 'c_d' }] },
+        ]);
     });
 });
 
@@ -635,9 +694,13 @@ describe('a capital scheme, which a phone keyboard makes', () => {
             { type: 'text', value: ' ' },
             spoiler('hidden'),
         ]);
-        expect(parseMessage('Https://example.org/a||hidden||')).toEqual([{ type: 'text', value: 'Https://example.org/a' }, spoiler('hidden')]);
-        // Read as an address, the `_` after it would close inside the spoiler.
-        expect(parseMessage('Https://example.org/a_b c_d ||e_f||').find(n => n.type === 'spoiler')).toEqual(spoiler('e_f'));
+        expect(parseMessage('Https://example.org/a||hidden||')).toEqual([{ type: 'url', href: 'Https://example.org/a' }, spoiler('hidden')]);
+        // The `_` after it does not close inside the spoiler.
+        expect(parseMessage('Https://example.org/a_b c_d ||e_f||')).toEqual([
+            { type: 'url', href: 'Https://example.org/a_b' },
+            { type: 'text', value: ' c_d ' },
+            spoiler('e_f'),
+        ]);
     });
 });
 
@@ -678,6 +741,14 @@ describe('brackets in a link\'s target', () => {
         expect(parseMessage('[a]()')).toEqual([{ type: 'text', value: '[a]()' }]);
         expect(parseMessage('[a](b')).toEqual([{ type: 'text', value: '[a](b' }]);
         expect(parseMessage('[a](b c)')).toEqual([{ type: 'text', value: '[a](b c)' }]);
+    });
+
+    it('CONTROL: a space of any kind ends a target, and what only looks like one does not', () => {
+        for (const space of ['\t', '\n', '\r', '\u00a0', '\u2003', '\u3000', '\ufeff']) {
+            expect(parseMessage(`[a](b${space}c)`)).toEqual(parsedAsItWas(`[a](b${space}c)`));
+            expect(parseMessage(`[a](b${space}c)`).some(n => n.type === 'link')).toBe(false);
+        }
+        expect(parseMessage('[a](b\u200bc)')).toEqual([{ type: 'link', label: 'a', href: 'b\u200bc' }]);
     });
 
     it.each([
@@ -884,27 +955,425 @@ describe('a delimiter past an address does not close inside a name', () => {
     });
 });
 
-describe('text with no address in it', () => {
-    const PARTS = ['||', '**', '*', '__', '_', '~~', '`', ' ', '\n', '> ', 'w', 'w_w', 'w*w', 'w~~w', '@w', '@w_w', '#w_w', ':w:', ':w_w:', ':w', '[w](w)', '![w](w)',
-        '[', ']', '(', ')', '!', '.', ',', 'h', 'H', 'http', 'Http', '<', '>', '"'];
+describe('text with no address and no spoiler in it', () => {
+    const WORDS = ['**', '*', '__', '_', '~~', '`', ' ', '\n', '> ', 'w', 'w_w', 'w*w', 'w~~w', ']', '(', ')', '!', '.', ',', 'h', 'H', 'http', 'Http', '<', '>', '"', '|'];
+    const NAMES = ['@w', '@w_w', '#w_w', ':w:', ':w_w:', ':w', '['];
+    // No `[` to make a link with a `_` in its label, which a `_` now goes past, and no name:
+    // a link is an address, and a name past one is whole, as a name past any address is.
+    const LINKS = ['[w](w)', '![w](w)'];
 
-    it('reads as it always did', () => {
+    it.each([['names', NAMES], ['links', LINKS]])('reads as it always did, with %s', (_, more) => {
+        const parts = [...WORDS, ...more];
         let seed = 20261103;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
         const bad: string[] = [];
         for (let k = 0; k < 30000; k++) {
             let content = '';
-            for (let j = 1 + next(14); j > 0; j--) content += PARTS[next(PARTS.length)];
+            for (let j = 1 + next(14); j > 0; j--) content += parts[next(parts.length)];
             if (JSON.stringify(parseMessage(content)) !== JSON.stringify(parsedAsItWas(content))) bad.push(JSON.stringify(content));
         }
         expect(bad).toEqual([]);
     });
 
-    it('but for two things asked for: the brackets a link\'s target opens, and :name:// being no shortcode', () => {
+    it('but for what was asked for: the brackets a link\'s target opens, :name:// being no shortcode, and a `_` going past a link', () => {
         expect(parseMessage('[a](b(c))')).toEqual([{ type: 'link', label: 'a', href: 'b(c)' }]);
         expect(parsedAsItWas('[a](b(c))')).toEqual([{ type: 'link', label: 'a', href: 'b(c' }, { type: 'text', value: ')' }]);
         expect(parseMessage(':a://x')).toEqual([{ type: 'text', value: ':a://x' }]);
         expect(parsedAsItWas(':a://x')).toEqual([{ type: 'emoji', name: 'a' }, { type: 'text', value: '//x' }]);
+        expect(parseMessage('_[a_b](c)_')).toEqual([{ type: 'em', children: [{ type: 'link', label: 'a_b', href: 'c' }] }]);
+        expect(parsedAsItWas('_[a_b](c)_')).toEqual([{ type: 'em', children: [{ type: 'text', value: '[a' }] }, { type: 'text', value: 'b](c)_' }]);
+        expect(parseMessage('w_w [w](w) @w_w').at(-1)).toEqual({ type: 'mentionUser', name: 'w_w' });
+        expect(parsedAsItWas('w_w [w](w) @w_w').at(-1)).toEqual({ type: 'text', value: 'w' });
+    });
+});
+
+describe('a delimiter in the words before a spoiler does not close inside it', () => {
+    const spoiler = (value: string) => ({ type: 'spoiler', children: [{ type: 'text', value }] });
+    const said = (value: string) => ({ type: 'text', value });
+
+    it.each([
+        ['my_file ||secret_word||', 'my_file ', 'secret_word'],
+        ['my__file ||secret__word||', 'my__file ', 'secret__word'],
+        ['a*b ||c*d||', 'a*b ', 'c*d'],
+        ['a**b ||c**d||', 'a**b ', 'c**d'],
+        ['~~a ||b~~c||', '~~a ', 'b~~c'],
+        ['_a ||b_ c||', '_a ', 'b_ c'],
+        // An empty pair is no spoiler: the reader starts at the last two of them.
+        ['a_b ||||c_d||', 'a_b |', '|c_d'],
+    ])('%s', (content, words, hidden) => {
+        expect(parseMessage(content)).toEqual([said(words), spoiler(hidden)]);
+    });
+
+    it.each([
+        ['_', 'em'],
+        ['__', 'underline'],
+        ['*', 'em'],
+        ['**', 'strong'],
+        ['~~', 'strike'],
+    ])('it closes after the spoiler: %s', (d, type) => {
+        const inside = `b${d}c`;
+        expect(parseMessage(`${d}a ||${inside}|| d${d} e`)).toEqual([
+            { type, children: [said('a '), spoiler(inside), said(' d')] },
+            said(' e'),
+        ]);
+    });
+
+    it('in a quote, and a spoiler that holds no delimiter is what it always was', () => {
+        expect(parseMessage('> my_file ||secret_word||')).toEqual([{ type: 'blockquote', children: [said('my_file '), spoiler('secret_word')] }]);
+        for (const content of ['_a ||b|| c_', '*a ||b|| c*', '**a ||b|| c**', '~~a ||b|| c~~', 'a_b ||c|| d_e', '||a_b|| c_d', 'a_b c_d ||e_f||']) {
+            expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+        }
+    });
+
+    it.each([
+        ['a_b || c_d'],
+        ['a*b || c*d'],
+        ['~~a || b~~ c'],
+        ['a**b || c**d'],
+        ['a_b ||||c_d'],
+        ['a_b `||` c_d || e'],
+        ['a_b || `||` c_d'],
+    ])('CONTROL: with no `||` to close it there is no spoiler, and a delimiter closes where it always did: %s', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it.each<[string, string]>([
+        ['my_file ||a_b|| @alice_c', 'alice_c'],
+        ['my_file ||a|| @alice_c', 'alice_c'],
+        ['my_file ||a_b|| @alice_c now', 'alice_c'],
+    ])('a name past one is whole: %s', (content, name) => {
+        expect(extractMentions(content).users).toEqual([name]);
+        expect(messageMentionsUser(content, { username: name })).toBe(true);
+    });
+
+    // Everything a word can put in front of a spoiler or after it, in any order.
+    const AROUND = ['w_w', 'w__w', 'w*w', 'w**w', 'w~~w', '_', '__', '*', '**', '~~', ' ', ' ', ' ', '\n', 'w', '.', ',', '@w', '@w_w', '#w_w', ':w:', ':w_w:', '`w`', '`w_w`',
+        'https://x/w', 'https://x/w_w', 'https://x/w*w', 'Https://x/w~~w', 'Link:https://x/w_w', '[w](https://x/w_w)', '[w_w](w_w)', '![w](sovereign-enc:w?k=w_w&m=image%2Fpng)', '\n> w\n', '\n```\nw\n```\n'];
+    const THE_SPOILER = '||s_s*s~~s**s__s||';
+    const made = (seed: number, count: number) => {
+        let at = seed;
+        const next = (n: number) => { at = (at * 1664525 + 1013904223) >>> 0; return (at >>> 8) % n; };
+        const words = () => {
+            let out = '';
+            for (let j = next(9); j > 0; j--) out += AROUND[next(AROUND.length)];
+            return out;
+        };
+        return Array.from({ length: count }, () => `${words()}${THE_SPOILER}${words()}`);
+    };
+    const printsIt = (nodes: Node[]): boolean =>
+        nodes.some(n => (n.type === 'spoiler' ? false : 'children' in n ? printsIt(n.children) : /s[_*~]/.test(JSON.stringify(n))));
+
+    it('as a property: nothing around it prints it, or another spoiler like it', () => {
+        const once = made(20261103, 30000);
+        const twice = made(8, 30000).map((content, k) => `${content}${once[k]}`);
+        const bad = [...once, ...twice].filter((content) => {
+            const read = parseMessage(content);
+            return printsIt(read) || !JSON.stringify(read).includes('"spoiler"');
+        });
+        expect(bad).toEqual([]);
+    }, 120_000);
+
+    it('NEGATIVE CONTROL: the same check finds it printed by the parser as it was', () => {
+        const once = made(20261103, 30000);
+        const twice = made(8, 30000).map((content, k) => `${content}${once[k]}`);
+        expect(once.filter(content => printsIt(parsedAsItWas(content))).length).toBeGreaterThan(9000);
+        expect(twice.filter(content => printsIt(parsedAsItWas(content))).length).toBeGreaterThan(9000);
+    }, 120_000);
+
+    // A `||` here is an `or`, by the look of it, but two hide what is between them, as they always
+    // did. What this costs: `_a || b_` now hides more than it used to, and is no italics of its own.
+    it('it hides what is between two `||` however they look', () => {
+        expect(parseMessage('_a || b_ or _c || d_')).toEqual([{ type: 'em', children: [said('a '), { type: 'spoiler', children: [said(' b'), { type: 'em', children: [said(' or ')] }, said('c ')] }, said(' d')] }]);
+        expect(parsedAsItWas('_a || b_ or _c || d_').map(n => n.type)).toEqual(['em', 'text', 'em']);
+        expect(parseMessage('a || b or c || d')).toEqual(parsedAsItWas('a || b or c || d'));
+    });
+
+    // What the change costs `*`, `**`, `~~`, `_` and `__`, all of it: nothing but this.
+    it('a delimiter reads as if each spoiler were one word in it, or the message reads as it did, or each stretch is hidden', () => {
+        const WORD = '\uE000';
+        const BAR = '\uE001';
+        // Everything from the first `||` that pairs to the last: `|| ||` a word, and as many as there are.
+        const everyStretch = (s: string) => {
+            const first = s.indexOf('||');
+            const last = s.lastIndexOf('||');
+            if (first === -1 || last <= first + 1) return s.replaceAll('|', BAR);
+            const stretches = s.slice(first + 2, last).split('||').length;
+            return s.slice(0, first).replaceAll('|', BAR) + WORD.repeat(stretches) + s.slice(last + 2).replaceAll('|', BAR);
+        };
+        // Bars that pair with nothing stay out of the way of the word's reading.
+        const oneWord = (s: string) => {
+            let out = '';
+            let i = 0;
+            while (i < s.length) {
+                if (s.startsWith('||', i)) {
+                    const close = s.indexOf('||', i + 2);
+                    if (close > i + 2) {
+                        out += WORD;
+                        i = close + 2;
+                        continue;
+                    }
+                }
+                out += s[i] === '|' ? BAR : s[i];
+                i++;
+            }
+            return out;
+        };
+        const flat = (nodes: Node[]): string => nodes.map(n => {
+            if (n.type === 'spoiler') return WORD;
+            if (n.type === 'text') return n.value;
+            if ('children' in n) return `<${n.type}>${flat(n.children)}</${n.type}>`;
+            return JSON.stringify(n);
+        }).join('').replaceAll('|', BAR);
+        const PARTS = ['||', '||', '||', '**', '*', '__', '_', '~~', ' ', ' ', 'w', 'w_w', 'w*w', 'w~~w', '.', ','];
+        let seed = 20261103;
+        const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+        const bad: string[] = [];
+        let spoilers = 0;
+        let changed = 0;
+        for (let k = 0; k < 30000; k++) {
+            let content = '';
+            for (let j = 1 + next(14); j > 0; j--) content += PARTS[next(PARTS.length)];
+            // An empty pair is no spoiler, and what it leaves pairs up on its own terms.
+            if (content.includes('|||')) continue;
+            const read = parseMessage(content);
+            const old = parsedAsItWas(content);
+            if (JSON.stringify(read).includes('"spoiler"')) spoilers++;
+            if (JSON.stringify(read) === JSON.stringify(old)) continue;
+            changed++;
+            if (flat(read) !== flat(parsedAsItWas(oneWord(content))) && flat(read) !== flat(parsedAsItWas(everyStretch(content)))) bad.push(JSON.stringify(content));
+        }
+        expect(bad).toEqual([]);
+        // Over nothing it would prove nothing.
+        expect(spoilers).toBeGreaterThan(5000);
+        expect(changed).toBeGreaterThan(1000);
+    }, 120_000);
+});
+
+describe('a delimiter in the words before a link or a picture does not close inside it', () => {
+    const said = (value: string) => ({ type: 'text', value });
+    const PICTURE = 'sovereign-enc:abc?k=AA_BB&m=image%2Fpng&c=CC_DD';
+    const FILE = 'sovereign-enc:abc?k=AA_BB&m=application%2Fzip';
+
+    it.each(['my_file ', 'my__file ', 'see my_file\n', '_', '__', 'a_b_c ', 'a__b__c '])('%s and a picture', (words) => {
+        const read = parseMessage(`${words}![p.png](${PICTURE})`);
+        expect(read.at(-1)).toEqual({ type: 'image', alt: 'p.png', href: PICTURE });
+        expect(JSON.stringify(read.slice(0, -1))).not.toContain('k=');
+    });
+
+    it('a file, a clip and two of them', () => {
+        const clip = 'sovereign-clip:abc?k=AA_BB';
+        expect(parseMessage(`my_file [f.zip](${FILE})`)).toEqual([said('my_file '), { type: 'link', label: 'f.zip', href: FILE }]);
+        expect(parseMessage(`my_file [c](${clip})`)).toEqual([said('my_file '), { type: 'link', label: 'c', href: clip }]);
+        expect(hrefs(`my_file ![p.png](${PICTURE}) [f.zip](${FILE})`)).toEqual([PICTURE, FILE]);
+        // With text after it too, and the spoiler the file may be under.
+        expect(hrefs(`my_file ![p.png](${PICTURE}) other_file`)).toEqual([PICTURE]);
+        expect(parseMessage(`my_file ||![p.png](${PICTURE})||`)).toEqual([said('my_file '), { type: 'spoiler', children: [{ type: 'image', alt: 'p.png', href: PICTURE }] }]);
+    });
+
+    it('it closes after it', () => {
+        const picture = { type: 'image', alt: 'p', href: 'k_k' };
+        expect(parseMessage('_a ![p](k_k) b_')).toEqual([{ type: 'em', children: [said('a '), picture, said(' b')] }]);
+        expect(parseMessage('__a ![p](k__k) b__ c')).toEqual([{ type: 'underline', children: [said('a '), { ...picture, href: 'k__k' }, said(' b')] }, said(' c')]);
+        expect(parseMessage('_see [docs](https://example.org/a)_\'s page')).toEqual([
+            { type: 'em', children: [said('see '), { type: 'link', label: 'docs', href: 'https://example.org/a' }] },
+            said('\'s page'),
+        ]);
+    });
+
+    it('a bracket in its target is the link\'s, and what is after the bracket', () => {
+        expect(parseMessage('_a [x](b(c)_d) e')).toEqual([said('_a '), { type: 'link', label: 'x', href: 'b(c)_d' }, said(' e')]);
+    });
+
+    it('words and a picture in one spoiler, with a `_` in the words: it is the picture, not its key', () => {
+        const picture = 'sovereign-enc:abc?k=AA_BB&m=image%2Fpng';
+        expect(parseMessage(`||my_file ![p.png](${picture})||`)).toEqual([
+            { type: 'spoiler', children: [said('my_file '), { type: 'image', alt: 'p.png', href: picture }] },
+        ]);
+    });
+
+    it('a label is the link\'s too, and a picture need not have one', () => {
+        expect(parseMessage('my_file [a_b](c)')).toEqual([said('my_file '), { type: 'link', label: 'a_b', href: 'c' }]);
+        expect(parseMessage('my_file ![a_b](c)')).toEqual([said('my_file '), { type: 'image', alt: 'a_b', href: 'c' }]);
+        expect(parseMessage('my_file ![](a_b)')).toEqual([said('my_file '), { type: 'image', alt: '', href: 'a_b' }]);
+    });
+
+    it('a dangerous target stays neutralised', () => {
+        expect(parseMessage('my_file [x_y](javascript:a_b)')).toEqual([said('my_file '), said('x_y')]);
+        expect(parseMessage('my_file ![x_y](javascript:a_b)')).toEqual([said('my_file '), said('x_y')]);
+    });
+
+    it.each<[string]>([
+        ['my_file [x](y) @alice_c'],
+        ['my_file [a_b](y) @alice_c'],
+        ['my_file [x](https://example.org/y) @alice_c'],
+        ['my_file ![p](sovereign-enc:a?k=bc) @alice_c'],
+        ['my_file ![p](sovereign-enc:a?k=b_c) @alice_c'],
+    ])('a name past one is whole, whatever a key happens to hold: %s', (content) => {
+        expect(extractMentions(content).users).toEqual(['alice_c']);
+    });
+
+    it.each([
+        ['my_file [a_b](c d)'],
+        ['my_file [a_b]'],
+        ['my_file [a_b](c'],
+        ['my_file [a_b]()'],
+        ['my_file ![a_b](c d)'],
+        ['my_file !a_b'],
+    ])('CONTROL: what is no link is words, and a delimiter closes in them as it always did: %s', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it.each([
+        ['a*b [c*d](e)'],
+        ['a**b [c**d](e)'],
+        ['~~a [b~~c](d)'],
+        ['a*b ![c](d*e)'],
+    ])('CONTROL: every delimiter but `_` closes at the first one, in a link or not, and no key holds one: %s', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    // Real keys: a file's key and its capability are 32 random bytes each, in base64url.
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const refs = (count: number) => {
+        let at = 20261103;
+        const next = (n: number) => { at = (at * 1664525 + 1013904223) >>> 0; return (at >>> 8) % n; };
+        const b64 = () => Array.from({ length: 43 }, () => ALPHABET[next(64)]).join('');
+        return Array.from({ length: count }, () => `sovereign-enc:0f8e7d6c-5b4a-4938-a271-605f4e3d2c1b?k=${b64()}&m=image%2Fpng&c=${b64()}`);
+    };
+
+    it('a real key never costs the picture, or prints', () => {
+        for (const href of refs(4000)) {
+            expect(parseMessage(`my_file ![p.png](${href})`)).toEqual([said('my_file '), { type: 'image', alt: 'p.png', href }]);
+        }
+    }, 120_000);
+
+    it('NEGATIVE CONTROL: the parser as it was lost most of them, printing the key', () => {
+        const lost = refs(4000).filter(href => !hrefsIn(parsedAsItWas(`my_file ![p.png](${href})`)).includes(href));
+        expect(lost.length).toBeGreaterThan(2600);
+        expect(lost.length).toBeLessThan(3200);
+    });
+});
+
+describe('a spoiler around a fence or a quote', () => {
+    const FENCE = '```';
+    const said = (value: string) => ({ type: 'text', value });
+    const spoiler = (...children: unknown[]) => ({ type: 'spoiler', children });
+    const code = (value: string, lang: string | null = null) => ({ type: 'codeblock', value, lang });
+    const quote = (value: string) => ({ type: 'blockquote', children: [said(value)] });
+
+    it('holds the fence as a fence, however it is wrapped', () => {
+        expect(parseMessage(`||${FENCE}py\nthe answer\n${FENCE}||`)).toEqual([spoiler(code('the answer', 'py'))]);
+        expect(parseMessage(`||a\n${FENCE}\nb\n${FENCE}\nc||`)).toEqual([spoiler(said('a\n'), code('b'), said('\nc'))]);
+        expect(parseMessage(`x ||${FENCE}\nb\n${FENCE}|| y`)).toEqual([said('x '), spoiler(code('b')), said(' y')]);
+        expect(parseMessage(`**||${FENCE}\nb\n${FENCE}||**`)).toEqual([{ type: 'strong', children: [spoiler(code('b'))] }]);
+        expect(parseMessage(`my_file ||${FENCE}\nb_c\n${FENCE}||`)).toEqual([said('my_file '), spoiler(code('b_c'))]);
+        expect(parseMessage(`> ||${FENCE}b${FENCE}||`)).toEqual([{ type: 'blockquote', children: [spoiler(code('b'))] }]);
+    });
+
+    it('a spoiler with spaces in it, or a `||` on a line of its own, holds it too', () => {
+        expect(parseMessage(`|| a\n${FENCE}\nb\n${FENCE}\nc ||`)).toEqual([spoiler(said(' a\n'), code('b'), said('\nc '))]);
+        expect(parseMessage(`||\n${FENCE}\nb\n${FENCE}\n||`)).toEqual([spoiler(said('\n'), code('b'), said('\n'))]);
+        expect(parseMessage('|| a\n> b\nc ||')).toEqual([spoiler(said(' a\n'), quote('b'), said('c '))]);
+    });
+
+    it('holds the quote as a quote', () => {
+        expect(parseMessage('||a\n> b\nc||')).toEqual([spoiler(said('a\n'), quote('b'), said('c'))]);
+        expect(parseMessage('||a\n> b||')).toEqual([spoiler(said('a\n'), quote('b'))]);
+        expect(parseMessage('||a\n> b\nc || d')).toEqual([spoiler(said('a\n'), quote('b'), said('c ')), said(' d')]);
+        expect(parseMessage('||> a\n> b||')).toEqual([spoiler({ type: 'blockquote', children: [said('a\nb')] })]);
+    });
+
+    it('another one in the words after it holds its own', () => {
+        expect(parseMessage('||a\n> b|| x\n||c\n> d||')).toEqual([spoiler(said('a\n'), quote('b')), said(' x\n'), spoiler(said('c\n'), quote('d'))]);
+    });
+
+    it('an empty pair is no spoiler, and the one after it is', () => {
+        expect(parseMessage('||||a\n> b||')).toEqual([said('|'), spoiler(said('|a\n'), quote('b'))]);
+    });
+
+    it('and what follows it is read as it always was', () => {
+        expect(parseMessage(`||${FENCE}\nb\n${FENCE}||\n${FENCE}\nc\n${FENCE}\n> d`)).toEqual([spoiler(code('b')), said('\n'), code('c'), said('\n'), quote('d')]);
+        expect(parseMessage('||a\n> b||\n> c\n||d\n> e||')).toEqual([spoiler(said('a\n'), quote('b')), said('\n'), quote('c'), spoiler(said('d\n'), quote('e'))]);
+    });
+
+    it('a line starting with `>` that is no quote, and a fence never closed, are in it as words', () => {
+        expect(parseMessage('||a\n>b||')).toEqual([spoiler(said('a\n>b'))]);
+        expect(parseMessage(`||a ${FENCE}b c||`)).toEqual([spoiler(said(`a ${FENCE}b c`))]);
+    });
+
+    it('no card under the message gives away what is in it', () => {
+        expect(extractUrls(`||${FENCE}\nhttps://example.org/hidden\n${FENCE}||`)).toEqual([]);
+        expect(extractUrls('||a\n> https://example.org/hidden\nb||')).toEqual([]);
+        // CONTROL
+        expect(extractUrls(`${FENCE}\nhttps://example.org/shown\n${FENCE}`)).toEqual(['https://example.org/shown']);
+    });
+
+    it.each([
+        // The `||` that would close it is code.
+        [`a || b\n${FENCE}\nc || d\n${FENCE}`],
+        // Closed before the block starts.
+        [`||a||\n${FENCE}\nb\n${FENCE}\n||c||`],
+        ['||a||\n> b\n||c||'],
+        // Nothing to close it.
+        ['a || b\n> c'],
+        [`a || b\n${FENCE}\nc\n${FENCE}`],
+        // A quote is a block of its own from its first line, whatever opens in it.
+        ['> ||a\nb||'],
+        ['> a || b\nc || d'],
+        // A `||` with a space either side is an `or`, and takes nothing over a block.
+        ['if a || b:\n```\nsome code\n```\nor c || d:'],
+        ['if a || b:\n> a quote\nor c || d:'],
+        ['a || b\n> c\n||secret||'],
+        ['a || b\n```\nc\n```\n||secret||'],
+        ['||secret|| a\n> c\nor b || d'],
+        // In a fence a spoiler is code.
+        [`${FENCE}\n||a||\n${FENCE}`],
+        [`${FENCE}\n||a\n> b||\n${FENCE}`],
+    ])('CONTROL: what is no spoiler around a block is as it was: %j', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+});
+
+describe('an address ends where a spoiler starts', () => {
+    const said = (value: string) => ({ type: 'text', value });
+    const url = (href: string) => ({ type: 'url', href });
+    const spoiler = (value: string) => ({ type: 'spoiler', children: [said(value)] });
+    const A = 'https://example.org/a';
+
+    it.each<[string, unknown[]]>([
+        [`see ${A}||secret||`, [said('see '), url(A), spoiler('secret')]],
+        [`${A}||secret||`, [url(A), spoiler('secret')]],
+        [`${A}||secret|| and more`, [url(A), spoiler('secret'), said(' and more')]],
+        [`${A}.||secret||`, [url(A), said('.'), spoiler('secret')]],
+        [`${A}||two words||`, [url(A), spoiler('two words')]],
+        ['Https://example.org/a||secret||', [url('Https://example.org/a'), spoiler('secret')]],
+        ['Link:https://example.org/a||secret||', [said('Link:'), url(A), spoiler('secret')]],
+        ['https://example.org/(a||secret||)', [url('https://example.org/(a'), spoiler('secret'), said(')')]],
+        [`**${A}||secret||**`, [{ type: 'strong', children: [url(A), spoiler('secret')] }]],
+        [`_${A}_b||secret||_`, [{ type: 'em', children: [url(`${A}_b`), spoiler('secret')] }]],
+        [`_${A}_||secret||`, [{ type: 'em', children: [url(A)] }, spoiler('secret')]],
+    ])('%s', (content, nodes) => {
+        expect(parseMessage(content)).toEqual(nodes);
+    });
+
+    it('so the words in it are on no link and no card', () => {
+        expect(hrefs(`see ${A}||secret||`)).toEqual([A]);
+        expect(extractUrls(`see ${A}||secret||`)).toEqual([A]);
+    });
+
+    it.each([
+        [`${A}||b`],
+        [`${A}||`],
+        [`${A}||||`],
+        [`${A}||||b`],
+        ['https://example.org/?q=a||b'],
+    ])('CONTROL: with nothing to close it, it is the address\'s, as it always was: %s', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('CONTROL: `||` in code closes nothing, and Notes has no spoilers to stop for', () => {
+        expect(hrefs(`${A}||b \`||\``)).toEqual([`${A}||b`]);
+        expect(urlAt(`${A}||secret||`)).toBe(`${A}||secret||`);
     });
 });
 
@@ -944,11 +1413,60 @@ describe('what a message costs to read', () => {
         expect(fastest(content, 30)).toBeLessThan(30);
     }, WAIT);
 
-    it('a delimiter only the end of a link opens: 2 ms, or 18 if a walk that finds nothing is free', () => {
+    it('a delimiter only the end of a link opens: every one closes at the next', () => {
         const content = '[x](http://a)_b '.repeat(490);
         expect(content.length).toBeLessThanOrEqual(8000);
+        expect(parseMessage(content).filter(n => n.type === 'em')).toHaveLength(245);
         expect(fastest(content, 10)).toBeLessThan(10);
     }, WAIT);
+
+    // Found by searching for what is cheap only because of this charge, with it taken out.
+    it('an address with a `||` in it, read to the end of its word each time: 3 ms, or 26 if it pays only for what it stepped over', () => {
+        const content = `__${'](http://a||b)!#a_b]('.repeat(380)}* ||s||`;
+        expect(content.length).toBeGreaterThan(7500);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 12)).toBeLessThan(12);
+    }, WAIT);
+
+    it('what turns out no link is paid for too: past the budget a `_` closes at the first one, as it used to', () => {
+        const href = 'https://example.org/a_b';
+        // CONTROL: a few tries leave the address after them whole.
+        expect(hrefs(`_ ${'[a](b c) '.repeat(4)}_ x_y ${href}`)).toEqual([href]);
+        expect(hrefs(`_ ${'[a](b c) '.repeat(200)}_ x_y ${href}`)).toEqual(['https://example.org/a']);
+        // And the budget stops the walk that spends it trying: this link is not stepped over.
+        expect(hrefs(`_ ${'[a](b c) '.repeat(4)}[x](d_e) f_`)).toEqual(['d_e']);
+        expect(hrefs(`_ ${'[a](b c) '.repeat(200)}[x](d_e) f_`)).toEqual([]);
+        // Past it the whole word is one address: reading it up to each `||` costs ten times this.
+        expect(hrefs(`_ ${'[a](b c) '.repeat(4)}_ https://example.org/a||b||`)).toEqual(['https://example.org/a']);
+        expect(hrefs(`_ ${'[a](b c) '.repeat(200)}_ https://example.org/a||b||`)).toEqual(['https://example.org/a||b||']);
+    });
+
+    it.each([
+        ['spoilers holding every delimiter, with every opener before them', `**__~~*_${'||*_~~**__||'.repeat(665)}`],
+        ['a walk over a word of addresses with a `||` in each', `_${'http://a||'.repeat(799)}`],
+        ['a spoiler over a fence, over and over', `||a\n\`\`\`\nb\n\`\`\`\nc|| `.repeat(440)],
+        ['a spoiler over a quote, over and over', '||a\n> b\nc|| '.repeat(610)],
+        ['a `||` and a block, over and over', 'a||\n> b\n'.repeat(888)],
+        ['spoilers the readings disagree on, over and over', `a_b ${'||c_d|| e '.repeat(796)}`],
+        ['the same, around quotes', `a_b ${'||c_d\n> e\nf|| g '.repeat(470)}`],
+    ])('%s', (_, content) => {
+        expect(content.length).toBeGreaterThan(7000);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 30)).toBeLessThan(30);
+    }, WAIT);
+
+    it.each(['[', '!['])('%s over and over: 3 ms, or 20 and more with a look at 512 characters for each', (open) => {
+        const content = `_${open.repeat(7990 / open.length)}_ ||s||`;
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 12)).toBeLessThan(12);
+    }, WAIT);
+
+    it('a `[` with no `](` after it is no try at a link, so a list of them leaves a walk its budget', () => {
+        const href = 'https://example.org/a_b';
+        const content = `_ ${'[1] '.repeat(200)}_ x_y ${href}`;
+        expect(hrefs(content)).toEqual([href]);
+        expect(extractUrls(content)).toEqual([href]);
+    });
 
     it('a walk that closes in an address pays for it: 3 ms, or 40 if only a walk that finds nothing does', () => {
         const content = `||s|| ${'_http://_'.repeat(488)}${'('.repeat(1800)}${')'.repeat(1800)}`;

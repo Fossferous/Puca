@@ -152,7 +152,7 @@ For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 | `` `code` `` | `code` |
 | ```` ``` ```` on its own lines | code block |
 | `> quote` | block quote |
-| `\|\|spoiler\|\|` | Hidden until clicked, along with any code, link, picture, mention or file in it. The first click only reveals, and a link in a spoiler has no preview under the message |
+| `\|\|spoiler\|\|` | Hidden until clicked, along with any code, code block, quote, link, picture, mention or file in it. The first click only reveals, and a link in a spoiler has no preview under the message |
 | `[text](https://example.com)` | a link that reads *text* |
 
 ### Mention Users and Channels
