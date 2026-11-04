@@ -3,6 +3,7 @@ import { parseMessage, extractMentions, isSafeUrl, urlAt, type Node } from '../u
 import { messageMentionsUser } from '../utils/messageMentions';
 import { extractUrls } from '../api/linkPreview';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
+import { parseMessage as parsedAt855 } from './fixtures/messageParserAt855';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
 function text(nodes: Node[]): string {
@@ -299,10 +300,10 @@ describe('a spoiler never stops being one', () => {
         }
         return out;
     };
-    /** The words the parser as it was hid in `content` that `nodes` prints. */
-    const leaked = (content: string, nodes: Parsed[]) => {
+    /** The words a parser before this one (the one as it was, by default) hid in `content` that `nodes` prints. */
+    const leaked = (content: string, nodes: Parsed[], before: (content: string) => Parsed[] = parsedAsItWas) => {
         const printed = printedBy(nodes);
-        return [...hiddenBy(parsedAsItWas(content))].filter(w => printed.has(w));
+        return [...hiddenBy(before(content))].filter(w => printed.has(w));
     };
     /** The addresses under a spoiler, and those not. */
     const addresses = (content: string) => {
@@ -501,7 +502,31 @@ describe('a spoiler never stops being one', () => {
         expect(addresses('_||https://example.org/a_b||_').hidden).toEqual(['https://example.org/a_b']);
     });
 
-    // What goes wrong, in any order. Everything the parser as it was hid must not be printed now.
+    it.each([
+        // 0.9.855 read the address whole and the `||` in the bold as words; the parser as it
+        // was closed a `_` in the address and hid nothing, so it had nothing to hold this to.
+        ['see config_file, **staging || prod** only: ||https://x.org/w0_w1||'],
+        ['Https://x.org/a_b **staging || prod** ||w0_w1||'],
+        ['Link:https://x.org/a_b **staging || prod** ||w0_w1||'],
+        ['*staging || prod* Https://x.org/a_b ||![w0.png](sovereign-enc:abc?k=w1_w2&m=image%2Fpng&c=w3_w4)||'],
+    ])('what 0.9.855 hid stays hidden, where the parser as it was hid none of it: %s', (content) => {
+        expect(hiddenBy(parsedAsItWas(content)).size).toBe(0);
+        const then = [...hiddenBy(parsedAt855(content))];
+        expect(then.length).toBeGreaterThan(0);
+        expect(leaked(content, parseMessage(content), parsedAt855)).toEqual([]);
+        expect([...hiddenBy(parseMessage(content))]).toEqual(expect.arrayContaining(then));
+    });
+
+    it('a picture 0.9.855 drew is drawn, with no key printed, where the parser as it was lost it', () => {
+        const href = 'sovereign-enc:abc?k=AA_BB&m=image%2Fpng&c=CC_DD';
+        const content = `Https://x.org/a_b **staging||prod** ||e|| \`f||g\` ![p.png](${href})`;
+        expect(hrefsIn(parsedAsItWas(content))).not.toContain(href);
+        expect(hrefsIn(parsedAt855(content))).toContain(href);
+        expect(hrefs(content)).toContain(href);
+        expect(text(parseMessage(content))).not.toMatch(/AA|BB|CC/);
+    });
+
+    // What goes wrong, in any order. Everything either parser before this one hid must not be printed now.
     const PARTS = ['||', '||', '||', '**', '*', '__', '_', '_', '~~', '`', ' ', ' ', ' ', 'W', 'W', 'W',
         'https://x/W', 'https://x/W_W', 'https://x/W*W', 'https://x/W~~W', 'Https://x/W', 'Https://x/W_W',
         'HTTP://x/W*W', 'https://x/W||W', 'Https://x/W||W', ':', '://', ':https:', '//', ':W_W:', '@W', '#W_W',
@@ -522,6 +547,7 @@ describe('a spoiler never stops being one', () => {
         let seed = start;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
         let spoilers = 0;
+        let spoilersAt855 = 0;
         const bad: string[] = [];
         for (let k = 0; k < 30000; k++) {
             let id = 0;
@@ -529,12 +555,15 @@ describe('a spoiler never stops being one', () => {
             for (let j = 1 + next(parts); j > 0; j--) pieces.push(PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`));
             const content = pieces.join(between);
             if (hiddenBy(parsedAsItWas(content)).size) spoilers++;
-            const out = leaked(content, parseMessage(content));
+            if (hiddenBy(parsedAt855(content)).size) spoilersAt855++;
+            const read = parseMessage(content);
+            const out = [...new Set([...leaked(content, read), ...leaked(content, read, parsedAt855)])];
             if (out.length) bad.push(`${JSON.stringify(content)} prints ${out.join(', ')}`);
         }
         expect(bad).toEqual([]);
         // Over nothing it would prove nothing.
         expect(spoilers).toBeGreaterThan(500);
+        expect(spoilersAt855).toBeGreaterThan(500);
     }, 120_000);
 
     it('CONTROL: the check finds words that are printed, and leaves alone words that are not', () => {
