@@ -778,6 +778,14 @@ describe('brackets in a link\'s target', () => {
             expect(parseMessage(`[a](b${space}c)`).some(n => n.type === 'link')).toBe(false);
         }
         expect(parseMessage('[a](b\u200bc)')).toEqual([{ type: 'link', label: 'a', href: 'b\u200bc' }]);
+        // Every code unit ends a target exactly where `\s` says it does.
+        const wrong: string[] = [];
+        for (let unit = 0; unit < 0x10000; unit++) {
+            const ch = String.fromCharCode(unit);
+            if (ch === '(' || ch === ')') continue;
+            if (parseMessage(`[a](/b${ch}c)`).some(n => n.type === 'link') === /\s/.test(ch)) wrong.push(unit.toString(16));
+        }
+        expect(wrong).toEqual([]);
     });
 
     it.each([
@@ -1488,6 +1496,23 @@ describe('what a message costs to read', () => {
         const content = `_${open.repeat(7990 / open.length)}_ ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content, 12)).toBeLessThan(12);
+    }, WAIT);
+
+    // A target is read one character at a time, up to its `)` or a space, as often as there is a `[`
+    // before it. In another script a regular expression for each character cost 4 to 5 times this.
+    it('`[` over and over before targets in another script: 10 ms, or 50 with a regular expression for each character', () => {
+        const unit = `${'['.repeat(500)}](${'秘'.repeat(1400)} )`;
+        const content = unit.repeat(Math.floor(8000 / unit.length));
+        expect(content.length).toBeGreaterThan(7500);
+        expect(fastest(content, 25)).toBeLessThan(25);
+    }, WAIT);
+
+    it('`[` over and over with no `)` after them, and spoilers the readings disagree on: 7 ms, or 60 reading each target to its end', () => {
+        const unit = `${'['.repeat(16)}](${'秘'.repeat(16)}`;
+        const content = `my_file ||a_b|| and ||c_d|| ${unit.repeat(233)} ||s||`;
+        expect(content.length).toBeGreaterThan(7500);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 25)).toBeLessThan(25);
     }, WAIT);
 
     it('a `[` with no `](` after it is no try at a link, so a list of them leaves a walk its budget', () => {

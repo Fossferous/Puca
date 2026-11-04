@@ -405,6 +405,9 @@ function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: 
     if (!m) return null;
     const start = m[0].length;
     const limit = Math.min(rest.length, start + LINK_TARGET_MOST);
+    // With no `)` in reach there is no link, and a text of many `[` need not read its targets to know.
+    const closer = rest.indexOf(')', start);
+    if (closer === -1 || closer >= limit) return null;
     let depth = 0;
     let first = -1;
     let end = -1;
@@ -416,10 +419,17 @@ function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: 
             if (depth === 0) end = i - start;
             else if (first === -1) first = i - start;
             depth--;
-        } else if (c <= 32 ? c === 32 || (c >= 9 && c <= 13) : c >= 160 && /\s/.test(rest[i])) break;
+        } else if (c <= 32 ? c === 32 || (c >= 9 && c <= 13) : c >= 160 && isWideSpace(c)) break;
     }
     if (first !== -1 && (end === -1 || asItWas)) end = first;
     return end > 0 ? { label: m[1], href: rest.slice(start, start + end), length: start + end + 1 } : null;
+}
+
+/** Whether the code unit `c`, 160 or more, is one `\s` matches: the same list, with no
+ *  regular expression run on every character of a target in another script. */
+function isWideSpace(c: number): boolean {
+    return c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029
+        || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
 }
 
 /** Inline parser: emits text runs interleaved with markup nodes. */
