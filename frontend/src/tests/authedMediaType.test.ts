@@ -103,7 +103,8 @@ describe('what an <img> gets is never a Blob', () => {
         expect(cachedFileUrl('a')).toBeNull();
         expect(cachedFileUrl('b')).not.toBeNull();
         expect(cachedFileUrl('c')).not.toBeNull();
-    });
+        // Encoding 36 MiB takes 4 to 6 s on a busy desktop, and what it is about is not time.
+    }, 30_000);
 });
 
 describe('a sound for a one-off <audio> (fetchFileObjectUrl)', () => {
