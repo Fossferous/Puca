@@ -359,6 +359,48 @@ build it yourself and trust your own binary. If Defender quarantines a build,
 submitting it to Microsoft as a false positive genuinely helps, because these
 classifications are per-file-hash and each release is a new file.
 
+## Defender removed Púca, or a file of it. What do I do?
+
+That is the false positive above, and the steps are the same whether it took the
+installer, an update, or a file after installing. Go in this order, and do not
+skip the second step.
+
+1. **Write down the threat name.** Open Windows Security → *Virus & threat
+   protection* → *Protection history* and find the item. `Trojan:Win32/Bearfoos.B!ml`
+   is the one seen so far. If yours is a different name, especially one with no
+   `!ml` on the end, treat it as real until someone has looked at it, and tell
+   whoever runs your server before going further.
+2. **Get the file back, if Defender deleted it.** Open the item, choose
+   *Actions* → *Restore*. Microsoft's own description is that this puts the file
+   where it was and Defender then detects it again and shows a new *Threat found*
+   item. That is expected. Do not run the file yet.
+3. **Check it is the file your server published.** In a command prompt, run
+   `certutil -hashfile <file> SHA256` and compare the result with the line for
+   that file in `SHA256SUMS.txt` on the download page. If they differ, do not run
+   it. A match shows the file is the one the server published; it says nothing
+   about whether the server itself deserves trust.
+4. **Allow it.** On the new *Threat found* item, choose *Actions* → *Allow on
+   device*. This needs administrator rights on the PC. It covers that one file,
+   which is better than excluding the whole folder from scanning. Only do this
+   after step 3 matched.
+5. **Or take Lite.** Uninstall the full app and install Púca Lite from the
+   download page. It does not bundle the remote-control helper programs, which
+   are the files most likely to be flagged. Switching keeps your session, keys
+   and history (see below). Lite is unsigned as well, so it can still be flagged
+   and SmartScreen still prompts.
+6. **Report it to Microsoft** at
+   <https://www.microsoft.com/en-us/wdsi/filesubmission>: upload the file and say
+   it was detected incorrectly. That clears that exact file for everyone. Each
+   release is a new file, so it does not carry over to the next one.
+7. **Tell us.** Send the threat name, the version, and whether it was the
+   installer or one of the helper programs, to whoever runs your server, or open
+   an issue on the project's repository. Every installer is scanned before it is
+   published, but that cannot reproduce every verdict Defender reaches on your own
+   machine, so your report is the only way anyone learns of one.
+
+A code-signing certificate is the lasting fix, and there is not one yet (see
+*Why does Windows warn me when I install it?* above).
+
 ## Full or Lite — which do I want?
 
 Both do chat, voice, video, screen sharing *and* clips, and file transfer.
