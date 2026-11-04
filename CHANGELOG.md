@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.856 — 2026-11-04
 
+Spoilers stay hidden, a server going reaches everyone, and the Light theme is readable
 ### Fixed
 
 - **Disbanding or leaving a server reaches everyone straight away.** When an owner disbanded a server, its other members stayed on it until their server list next refreshed, and everyone in a call on it, the owner included, stayed connected to a room that no longer existed. When you left a server, your other devices kept showing it. Now it goes at once, and says why: "*Name* was disbanded by its owner", or "You left *Name* on another device". A call on that server ends, a call on another server carries on, anything you were writing is kept in a notice, and you land on your home page. A device that was asleep at the time catches up when it wakes, without a "Not a member of this channel's server" message left on its screen.
