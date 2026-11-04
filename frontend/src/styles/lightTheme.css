@@ -54,7 +54,10 @@
 [data-theme="light"] .voice-connected-label,
 [data-theme="light"] .user-profile-bar .user-status,
 [data-theme="light"] .active-status,
-[data-theme="light"] .server-icon.add-server .server-icon-inner.add { color: var(--text-positive); }
+[data-theme="light"] .server-icon.add-server .server-icon-inner.add,
+[data-theme="light"] .tri-btn.tri-allow.active,
+[data-theme="light"] .keybind-scope.is-global { color: var(--text-positive); }
+[data-theme="light"] .tri-btn.tri-deny.active { color: var(--text-danger); }
 [data-theme="light"] .voice-e2ee-warning,
 [data-theme="light"] .recovery-intro strong,
 [data-theme="light"] .keybind-inert,

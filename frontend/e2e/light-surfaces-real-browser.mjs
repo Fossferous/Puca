@@ -96,6 +96,7 @@ const NOT_AS_DRAWN = [
     ['App.tsx', 'the connection error is on the page body, which is dark on every theme'],
     ['RoleSettingsModal.tsx', 'a sub-component of .role-modal, which is drawn dark: the skeleton has it apart from it'],
     ['device-stage-btn', 'inside .device-stage, which is drawn dark'],
+    ['dsb-item', 'inside .dsb-menu, which is drawn dark'],
     ['scm-', 'inside .stream-context-menu, which is drawn dark'],
     ['notes-editor-backdrop', 'its words are the note editor inside it, which has its own surface'],
 ];
@@ -177,8 +178,11 @@ const sectionsFor = (name, sheet) => {
 // Every component's own JSX, unnested: what a new surface would be caught by.
 const sweep = [];
 for (const node of Object.values(components).flat()) {
-    const html = toHtml(node, {}, { steady: true });
-    if (html) sweep.push(`<section data-sweep="1" data-from="${node.at}">${html}</section>`);
+    // With its fixed classes, and with every class a branch can give it: .active is where a colour moves.
+    for (const steady of [true, false]) {
+        const html = toHtml(node, {}, { steady });
+        if (html) sweep.push(`<section data-sweep="1" data-from="${node.at}">${html}</section>`);
+    }
 }
 const stillness = '*,*::before,*::after{transition:none!important;animation:none!important}';
 const pageWith = (name, body, sheet, script = '') => {
@@ -521,7 +525,7 @@ for (const [name, options, sheetName, url] of [
     check(stale.length === 0, 'and every entry of that list still explains something', stale.join(' '));
     const distinct = new Map(found.map(row => [`${row.at} .${row.cls}`, row]));
     for (const row of distinct.values()) console.log(describe(row, ['light/normal']));
-    check(distinct.size === 0, `no word on Light under 3:1 that the dark theme holds, in ${light.length} readings of ${sweep.length} components (past ${NOT_AS_DRAWN.length} explained)`, `${distinct.size} found`);
+    check(distinct.size === 0, `no word on Light under 3:1 that the dark theme holds, in ${light.length} readings of ${sweep.length} blocks of the app's JSX (past ${NOT_AS_DRAWN.length} explained)`, `${distinct.size} found`);
     await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
     const old = worse(await read('light')).filter(row => !explained(row));
     check(new Set(old.map(row => row.at)).size >= 40, 'CONTROL: the sweep finds Light as it was', `${new Set(old.map(row => row.at)).size} places, down to ${Math.min(...old.map(row => row.ratio))}:1`);
