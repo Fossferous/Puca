@@ -105,6 +105,7 @@ const { Chat } = await import('../components/Chat');
 const { wsClient } = await import('../api/websocket');
 const { keys } = await import('../hooks/queries');
 const { MODES_CHANGED_EVENT } = await import('../api/serverModes');
+const { applyOwnVoiceFrame, resetOwnVoice } = await import('../api/ownVoice');
 
 type Frame = { type: string; payload: unknown };
 
@@ -150,6 +151,7 @@ afterEach(() => {
     host?.remove();
     root = null; host = null;
     dialogs.unmount();
+    resetOwnVoice();
     vi.restoreAllMocks();
 });
 
@@ -454,6 +456,51 @@ describe('no frame reached this device', () => {
         await refreshTheList();
         expect(roomUp()).toBe('voice_15');
         expect(toasts()).toEqual([]);
+    });
+
+    /** The account's call is in `room` on the phone, and this device presses Move here on its banner. */
+    const moveHere = async (channelId: number, serverId: string, channelName: string, serverName: string) => {
+        await act(async () => {
+            applyOwnVoiceFrame({ room_id: `voice_${channelId}`, channel_id: channelId, server_id: serverId, channel_name: channelName,
+                server_name: serverName, here: false, device: 'mobile', self_muted: false, deafened: false });
+        });
+        const button = [...document.querySelectorAll<HTMLButtonElement>('.own-voice-banner button')].find(b => b.textContent?.trim() === 'Move here');
+        expect(button, 'the banner offers Move here').toBeTruthy();
+        await act(async () => { button!.click(); });
+        for (let i = 0; i < 40 && roomUp() !== `voice_${channelId}`; i++) await settle();
+        await settled();
+    };
+
+    it('Move here to a call on a server the account joined on the phone, which this device\'s list is from before: the call comes here, and the list catches up', async () => {
+        await mountChat();
+        const NEW = server('s4', 'New');
+        // The phone accepted an invite and joined New's voice room. Nobody tells this device.
+        h.servers = [NEAR, FAR, MINE, NEW];
+        h.channels.push(row(50, 'new-general', 's4'), row(51, 'New room', 's4', 1));
+        await moveHere(51, 's4', 'New room', 'New');
+        expect(roomUp()).toBe('voice_51');
+        expect(h.panels).toEqual(['mount voice_51']);
+        expect(toasts()).toEqual([]);
+        expect(icon('New'), 'the list has it now').not.toBeNull();
+        // Listed now, so its leaving the list is a call that ended, as above.
+        h.servers = [NEAR, FAR, MINE];
+        await refreshTheList();
+        expect(roomUp()).toBeNull();
+        expect(toasts()).toEqual(['New room is no longer available, so you left its call.']);
+    });
+
+    it('the same after this device left the server in a call on it, and the phone joined it again', async () => {
+        await mountChat();
+        await joinRoom(15);
+        await press('Near', /^leave/i);
+        for (let i = 0; i < 40 && roomUp() !== null; i++) await settle();
+        expect(roomUp(), 'its call ended with the leave').toBeNull();
+        expect(icon('Near')).toBeNull();
+        h.servers = [NEAR, FAR, MINE];
+        await moveHere(15, 's1', 'Lounge', 'Near');
+        expect(roomUp()).toBe('voice_15');
+        expect(toasts()).toEqual([]);
+        expect(icon('Near')).not.toBeNull();
     });
 
     it('the server says so on waking (RoomLeft room_gone): that call says why, and any other RoomLeft does not', async () => {
