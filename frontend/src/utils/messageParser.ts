@@ -322,8 +322,9 @@ function nextBlock(s: string, from: number): number {
  * only a question for a run with a `||` in it, which keeps a text of very short quotes
  * from reading all that is left of it at each one. A `||` with a space either side of it
  * opens nothing over a block: `if a || b:`, some code and `or c || d:` is someone talking
- * about code, and the code would be gone until pressed. Where the readings disagree, what
- * matters is what either hid, so there it does.
+ * about code, and the code would be gone until pressed. Nor does a pair with a letter or a
+ * digit right outside it: `x||y fails:`, some code and `but p||q works`. That holds where
+ * the readings disagree too: 0.9.855 hid no block, so one printed is printed as it was.
  */
 function chunkEnd(rest: string, reading: Reading): number {
     let cut = nextBlock(rest, 0);
@@ -340,11 +341,15 @@ function chunkEnd(rest: string, reading: Reading): number {
         }
         at = close + 2;
         if (at > cut) {
-            if (!reading.everyBar && rest[open - 1] === ' ' && rest[open + 2] === ' ') return cut;
+            if ((rest[open - 1] === ' ' && rest[open + 2] === ' ') || isWordChar(rest[open - 1]) || isWordChar(rest[close + 2])) return cut;
             cut = nextBlock(rest, at);
         }
     }
     return cut;
+}
+
+function isWordChar(ch: string | undefined): boolean {
+    return ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 }
 
 function matchCodeBlock(s: string): { node: Node; length: number } | null {

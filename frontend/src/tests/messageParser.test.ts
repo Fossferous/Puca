@@ -404,9 +404,8 @@ describe('a spoiler never stops being one', () => {
         ['||```\nw0\n```|| and ||w1||', ['w0', 'w1']],
         ['||w0\n> w1\nw2|| and ||w3||', ['w0', 'w1', 'w2', 'w3']],
         ['my_file ||w0_w1|| w2 || w3', ['w0', 'w1', 'w2']],
-        // A `||` with a space either side opens nothing over a block, but what either hid is what matters here.
+        // The stretches run from the first `||` to the last, and neither of those is an `or`.
         ['my_file ||w0_w1|| w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
-        ['my_file || w0_w1 || w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
         // A `||` in the words takes the next `||` as its pair, once no delimiter takes it first.
         ['**a||w0** ||w1||', ['w0', 'w1']],
         ['*a||w0* ||w1||', ['w0', 'w1']],
@@ -1363,11 +1362,28 @@ describe('a spoiler around a fence or a quote', () => {
         ['a || b\n> c\n||secret||'],
         ['a || b\n```\nc\n```\n||secret||'],
         ['||secret|| a\n> c\nor b || d'],
+        // So is one with a letter or a digit right outside it.
+        [`x||y fails:\n${FENCE}\nerror_here\n${FENCE}\nbut p||q works`],
+        ['a||b\n> quoted line\nc||d'],
+        [`run it||\n${FENCE}\nx\n${FENCE}\n||2 times`],
+        // And where the readings disagree, as `_` in the words makes them.
+        [`if is_admin || is_mod || is_owner || is_staff:\n${FENCE}py\ngrant_access()\n${FENCE}\notherwise has_role || has_perm`],
         // In a fence a spoiler is code.
         [`${FENCE}\n||a||\n${FENCE}`],
         [`${FENCE}\n||a\n> b||\n${FENCE}`],
     ])('CONTROL: what is no spoiler around a block is as it was: %j', (content) => {
         expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('where the readings disagree and only an `or` would take a block in, it is read as 0.9.855 read it', () => {
+        const content = 'my_file || w0_w1 || w2 || w3\n> w4\nw5 || w6';
+        expect(parseMessage(content)).toEqual(parsedAt855(content));
+        expect(parseMessage(content)).toContainEqual(quote('w4'));
+    });
+
+    it('CONTROL: a spoiler right up against what is not a letter or a digit holds the block', () => {
+        expect(parseMessage(`answer:||${FENCE}\nx\n${FENCE}||.`)).toEqual([said('answer:'), spoiler(code('x')), said('.')]);
+        expect(parseMessage('(||a\n> b\nc||)')).toEqual([said('('), spoiler(said('a\n'), quote('b'), said('c')), said(')')]);
     });
 });
 
