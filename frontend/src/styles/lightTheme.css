@@ -12,9 +12,12 @@
 [data-theme="light"] .form-group:not(.login-card .form-group) label { color: var(--text-muted); }
 [data-theme="light"] .form-group:not(.login-card .form-group) input {
     color: var(--text-normal);
-    background: var(--input-bg);
+    background: var(--light-field-bg, var(--input-bg));
     border-color: var(--border-faint);
 }
+/* Server Settings' pane is --input-bg's own colour, so a field of it there had no edge at all. Its
+   fields are white, as ServerSettingsModal.css paints them; Create Channel's pane is white. */
+[data-theme="light"] .server-settings-content { --light-field-bg: var(--bg-primary); }
 [data-theme="light"] .form-group:not(.login-card .form-group) input::placeholder { color: var(--text-faint); }
 [data-theme="light"] .error-message:not(.login-card .error-message) { color: var(--text-danger); }
 
@@ -22,6 +25,10 @@
    word colour holds on. The stream's sits on the picture and stays dark (theme.css's list). */
 [data-theme="light"] .stream-stage-header { background: #0d0e10; }
 [data-theme="light"] .voice-stage-header { background: var(--bg-secondary); }
+/* VoiceStage.css whitens its buttons' words under a mouse, for the dark header. */
+@media (pointer: fine) {
+    [data-theme="light"] .voice-stage-header .voice-stage-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+}
 
 /* Pale words chosen for a dark surface. */
 [data-theme="light"] .emoji-name,

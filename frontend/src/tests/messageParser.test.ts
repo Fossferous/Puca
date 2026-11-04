@@ -3,6 +3,7 @@ import { parseMessage, extractMentions, isSafeUrl, urlAt, type Node } from '../u
 import { messageMentionsUser } from '../utils/messageMentions';
 import { extractUrls } from '../api/linkPreview';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
+import { parseMessage as parsedAt855 } from './fixtures/messageParserAt855';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
 function text(nodes: Node[]): string {
@@ -299,10 +300,10 @@ describe('a spoiler never stops being one', () => {
         }
         return out;
     };
-    /** The words the parser as it was hid in `content` that `nodes` prints. */
-    const leaked = (content: string, nodes: Parsed[]) => {
+    /** The words a parser before this one (the one as it was, by default) hid in `content` that `nodes` prints. */
+    const leaked = (content: string, nodes: Parsed[], before: (content: string) => Parsed[] = parsedAsItWas) => {
         const printed = printedBy(nodes);
-        return [...hiddenBy(parsedAsItWas(content))].filter(w => printed.has(w));
+        return [...hiddenBy(before(content))].filter(w => printed.has(w));
     };
     /** The addresses under a spoiler, and those not. */
     const addresses = (content: string) => {
@@ -403,9 +404,8 @@ describe('a spoiler never stops being one', () => {
         ['||```\nw0\n```|| and ||w1||', ['w0', 'w1']],
         ['||w0\n> w1\nw2|| and ||w3||', ['w0', 'w1', 'w2', 'w3']],
         ['my_file ||w0_w1|| w2 || w3', ['w0', 'w1', 'w2']],
-        // A `||` with a space either side opens nothing over a block, but what either hid is what matters here.
+        // The stretches run from the first `||` to the last, and neither of those is an `or`.
         ['my_file ||w0_w1|| w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
-        ['my_file || w0_w1 || w2 || w3\n> w4\nw5 || w6', ['w0', 'w1', 'w2', 'w3', 'w4', 'w5']],
         // A `||` in the words takes the next `||` as its pair, once no delimiter takes it first.
         ['**a||w0** ||w1||', ['w0', 'w1']],
         ['*a||w0* ||w1||', ['w0', 'w1']],
@@ -501,7 +501,31 @@ describe('a spoiler never stops being one', () => {
         expect(addresses('_||https://example.org/a_b||_').hidden).toEqual(['https://example.org/a_b']);
     });
 
-    // What goes wrong, in any order. Everything the parser as it was hid must not be printed now.
+    it.each([
+        // 0.9.855 read the address whole and the `||` in the bold as words; the parser as it
+        // was closed a `_` in the address and hid nothing, so it had nothing to hold this to.
+        ['see config_file, **staging || prod** only: ||https://x.org/w0_w1||'],
+        ['Https://x.org/a_b **staging || prod** ||w0_w1||'],
+        ['Link:https://x.org/a_b **staging || prod** ||w0_w1||'],
+        ['*staging || prod* Https://x.org/a_b ||![w0.png](sovereign-enc:abc?k=w1_w2&m=image%2Fpng&c=w3_w4)||'],
+    ])('what 0.9.855 hid stays hidden, where the parser as it was hid none of it: %s', (content) => {
+        expect(hiddenBy(parsedAsItWas(content)).size).toBe(0);
+        const then = [...hiddenBy(parsedAt855(content))];
+        expect(then.length).toBeGreaterThan(0);
+        expect(leaked(content, parseMessage(content), parsedAt855)).toEqual([]);
+        expect([...hiddenBy(parseMessage(content))]).toEqual(expect.arrayContaining(then));
+    });
+
+    it('a picture 0.9.855 drew is drawn, with no key printed, where the parser as it was lost it', () => {
+        const href = 'sovereign-enc:abc?k=AA_BB&m=image%2Fpng&c=CC_DD';
+        const content = `Https://x.org/a_b **staging||prod** ||e|| \`f||g\` ![p.png](${href})`;
+        expect(hrefsIn(parsedAsItWas(content))).not.toContain(href);
+        expect(hrefsIn(parsedAt855(content))).toContain(href);
+        expect(hrefs(content)).toContain(href);
+        expect(text(parseMessage(content))).not.toMatch(/AA|BB|CC/);
+    });
+
+    // What goes wrong, in any order. Everything either parser before this one hid must not be printed now.
     const PARTS = ['||', '||', '||', '**', '*', '__', '_', '_', '~~', '`', ' ', ' ', ' ', 'W', 'W', 'W',
         'https://x/W', 'https://x/W_W', 'https://x/W*W', 'https://x/W~~W', 'Https://x/W', 'Https://x/W_W',
         'HTTP://x/W*W', 'https://x/W||W', 'Https://x/W||W', ':', '://', ':https:', '//', ':W_W:', '@W', '#W_W',
@@ -522,6 +546,7 @@ describe('a spoiler never stops being one', () => {
         let seed = start;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
         let spoilers = 0;
+        let spoilersAt855 = 0;
         const bad: string[] = [];
         for (let k = 0; k < 30000; k++) {
             let id = 0;
@@ -529,12 +554,15 @@ describe('a spoiler never stops being one', () => {
             for (let j = 1 + next(parts); j > 0; j--) pieces.push(PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`));
             const content = pieces.join(between);
             if (hiddenBy(parsedAsItWas(content)).size) spoilers++;
-            const out = leaked(content, parseMessage(content));
+            if (hiddenBy(parsedAt855(content)).size) spoilersAt855++;
+            const read = parseMessage(content);
+            const out = [...new Set([...leaked(content, read), ...leaked(content, read, parsedAt855)])];
             if (out.length) bad.push(`${JSON.stringify(content)} prints ${out.join(', ')}`);
         }
         expect(bad).toEqual([]);
         // Over nothing it would prove nothing.
         expect(spoilers).toBeGreaterThan(500);
+        expect(spoilersAt855).toBeGreaterThan(500);
     }, 120_000);
 
     it('CONTROL: the check finds words that are printed, and leaves alone words that are not', () => {
@@ -749,6 +777,14 @@ describe('brackets in a link\'s target', () => {
             expect(parseMessage(`[a](b${space}c)`).some(n => n.type === 'link')).toBe(false);
         }
         expect(parseMessage('[a](b\u200bc)')).toEqual([{ type: 'link', label: 'a', href: 'b\u200bc' }]);
+        // Every code unit ends a target exactly where `\s` says it does.
+        const wrong: string[] = [];
+        for (let unit = 0; unit < 0x10000; unit++) {
+            const ch = String.fromCharCode(unit);
+            if (ch === '(' || ch === ')') continue;
+            if (parseMessage(`[a](/b${ch}c)`).some(n => n.type === 'link') === /\s/.test(ch)) wrong.push(unit.toString(16));
+        }
+        expect(wrong).toEqual([]);
     });
 
     it.each([
@@ -1326,11 +1362,28 @@ describe('a spoiler around a fence or a quote', () => {
         ['a || b\n> c\n||secret||'],
         ['a || b\n```\nc\n```\n||secret||'],
         ['||secret|| a\n> c\nor b || d'],
+        // So is one with a letter or a digit right outside it.
+        [`x||y fails:\n${FENCE}\nerror_here\n${FENCE}\nbut p||q works`],
+        ['a||b\n> quoted line\nc||d'],
+        [`run it||\n${FENCE}\nx\n${FENCE}\n||2 times`],
+        // And where the readings disagree, as `_` in the words makes them.
+        [`if is_admin || is_mod || is_owner || is_staff:\n${FENCE}py\ngrant_access()\n${FENCE}\notherwise has_role || has_perm`],
         // In a fence a spoiler is code.
         [`${FENCE}\n||a||\n${FENCE}`],
         [`${FENCE}\n||a\n> b||\n${FENCE}`],
     ])('CONTROL: what is no spoiler around a block is as it was: %j', (content) => {
         expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+    });
+
+    it('where the readings disagree and only an `or` would take a block in, it is read as 0.9.855 read it', () => {
+        const content = 'my_file || w0_w1 || w2 || w3\n> w4\nw5 || w6';
+        expect(parseMessage(content)).toEqual(parsedAt855(content));
+        expect(parseMessage(content)).toContainEqual(quote('w4'));
+    });
+
+    it('CONTROL: a spoiler right up against what is not a letter or a digit holds the block', () => {
+        expect(parseMessage(`answer:||${FENCE}\nx\n${FENCE}||.`)).toEqual([said('answer:'), spoiler(code('x')), said('.')]);
+        expect(parseMessage('(||a\n> b\nc||)')).toEqual([said('('), spoiler(said('a\n'), quote('b'), said('c')), said(')')]);
     });
 });
 
@@ -1459,6 +1512,23 @@ describe('what a message costs to read', () => {
         const content = `_${open.repeat(7990 / open.length)}_ ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content, 12)).toBeLessThan(12);
+    }, WAIT);
+
+    // A target is read one character at a time, up to its `)` or a space, as often as there is a `[`
+    // before it. In another script a regular expression for each character cost 4 to 5 times this.
+    it('`[` over and over before targets in another script: 10 ms, or 50 with a regular expression for each character', () => {
+        const unit = `${'['.repeat(500)}](${'秘'.repeat(1400)} )`;
+        const content = unit.repeat(Math.floor(8000 / unit.length));
+        expect(content.length).toBeGreaterThan(7500);
+        expect(fastest(content, 25)).toBeLessThan(25);
+    }, WAIT);
+
+    it('`[` over and over with no `)` after them, and spoilers the readings disagree on: 7 ms, or 60 reading each target to its end', () => {
+        const unit = `${'['.repeat(16)}](${'秘'.repeat(16)}`;
+        const content = `my_file ||a_b|| and ||c_d|| ${unit.repeat(233)} ||s||`;
+        expect(content.length).toBeGreaterThan(7500);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 25)).toBeLessThan(25);
     }, WAIT);
 
     it('a `[` with no `](` after it is no try at a link, so a list of them leaves a walk its budget', () => {

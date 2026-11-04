@@ -2823,12 +2823,23 @@ export function Chat({ onLogout }: ChatProps) {
     // The call's server has left the list and no frame said so: this device's socket was
     // down when it went, or the host predates the frame. Wherever they are looking: the
     // effect above drops only the server on screen. The row is read from the cache, not
-    // `servers`, which is also what a list that has not loaded looks like.
+    // `servers`, which is also what a list that has not loaded looks like. Only a server the
+    // list has had during this call can have left it: Move here to a call on a server this
+    // account joined on another device finds a list from before that, which nothing told
+    // this device to refresh, and a list that is behind is fetched again instead.
+    const callServerListedRef = useRef<string | null>(null);
     useEffect(() => {
         const listed = queryClient.getQueryData<Server[]>(keys.servers);
-        if (currentVoiceChannel && listed && !listed.some(s => s.id === currentVoiceChannel.server_id)) {
+        if (!currentVoiceChannel) callServerListedRef.current = null;
+        if (!currentVoiceChannel || !listed) return;
+        const serverId = currentVoiceChannel.server_id;
+        if (listed.some(s => s.id === serverId)) {
+            callServerListedRef.current = serverId;
+        } else if (callServerListedRef.current === serverId) {
             setCurrentVoiceChannel(null);
             showToast(callGoneToast(currentVoiceChannel.name));
+        } else {
+            queryClient.invalidateQueries({ queryKey: keys.servers });
         }
     }, [servers, currentVoiceChannel, queryClient, showToast]);
 

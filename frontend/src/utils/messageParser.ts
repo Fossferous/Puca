@@ -41,9 +41,10 @@ const MAX_DEPTH = 12;
  * reader opens, over and over. A real message spends a few lengths of itself. Past
  * that a delimiter closes at the first one, as it used to, which always moves on, so
  * a message of 8000 cannot cost more than this however it was made. `everyBar` is the
- * reading of a message whose `||` the others disagree on (see `parseMessage`).
+ * reading of a message whose `||` the others disagree on, and `at855` 0.9.855's own (see
+ * `parseMessage`): it steps over addresses for `_` and `__`, and over nothing else.
  */
-interface Reading { asItWas: boolean; everyBar: boolean; walkLeft: number }
+interface Reading { asItWas: boolean; at855: boolean; everyBar: boolean; walkLeft: number }
 const WALK_PER_CHAR = 32;
 // A link's target, 2048 long at most, and the `)` after it.
 const LINK_TARGET_MOST = 2049;
@@ -234,9 +235,9 @@ function showsBars(nodes: Node[]): boolean {
  * does not moves every pairing after it: `**a||b** ||c||` now pairs up around `b`,
  * and prints the c it used to hide. Which texts do that cannot be listed: rules for
  * the ones found kept missing others, and one message could cost them a second to
- * read. So the reading as it was before all this stays (`asItWas`), and this reading
- * may not print a word that one hid. messageParser.test.ts holds this as a property
- * against that parser, frozen.
+ * read. So what 0.9.855 read stays (`readAt855`), and this reading may not print a
+ * word that one hid. messageParser.test.ts holds this as a property against that
+ * parser, frozen, and against the one before it.
  *
  * Where it would, the one that hides everything the other does is used, for the whole
  * message, and an address in it is read as it was too; the spoiler is what matters.
@@ -248,17 +249,32 @@ function showsBars(nodes: Node[]): boolean {
  */
 export function parseMessage(content: string): Node[] {
     if (!content) return [];
-    const read = (asItWas: boolean, everyBar = false) => parseBlocks(content, { asItWas, everyBar, walkLeft: WALK_PER_CHAR * content.length });
-    const nodes = read(false);
+    const read = (how: Partial<Reading>) => parseBlocks(content, { asItWas: false, at855: false, everyBar: false, ...how, walkLeft: WALK_PER_CHAR * content.length });
+    const nodes = read({});
     const bars = content.indexOf('||');
     if (bars === -1 || content.indexOf('||', bars + 2) === -1) return nodes;
-    const asItWas = read(true);
+    const asItWas = readAt855(content, read);
     const words = wordsIn(nodes);
     const wordsThen = wordsIn(asItWas);
     if (!printsWhatItHid(words, wordsThen)) return nodes;
     if (!printsWhatItHid(wordsThen, words)) return asItWas;
-    const everyBar = read(false, true);
+    const everyBar = read({ everyBar: true });
     return showsBars(everyBar) ? asItWas : everyBar;
+}
+
+/**
+ * What 0.9.855 read: its own reading, or the one before it where its own hid fewer of a
+ * word, which was its rule. With no address and no link in the text the two are one.
+ */
+function readAt855(content: string, read: (how: Partial<Reading>) => Node[]): Node[] {
+    const before = read({ asItWas: true });
+    if (!content.includes('://') && !content.includes('](')) return before;
+    const own = read({ at855: true });
+    const hidden = wordsIn(own).hidden;
+    for (const [word, times] of wordsIn(before).hidden) {
+        if ((hidden.get(word) ?? 0) < times) return before;
+    }
+    return own;
 }
 
 /** Block level: fenced code blocks and blockquotes, then inline for the rest. */
@@ -306,12 +322,13 @@ function nextBlock(s: string, from: number): number {
  * only a question for a run with a `||` in it, which keeps a text of very short quotes
  * from reading all that is left of it at each one. A `||` with a space either side of it
  * opens nothing over a block: `if a || b:`, some code and `or c || d:` is someone talking
- * about code, and the code would be gone until pressed. Where the readings disagree, what
- * matters is what either hid, so there it does.
+ * about code, and the code would be gone until pressed. Nor does a pair with a letter or a
+ * digit right outside it: `x||y fails:`, some code and `but p||q works`. That holds where
+ * the readings disagree too: 0.9.855 hid no block, so one printed is printed as it was.
  */
 function chunkEnd(rest: string, reading: Reading): number {
     let cut = nextBlock(rest, 0);
-    if (reading.asItWas || cut === rest.length || !rest.slice(0, cut).includes('||')) return cut;
+    if (reading.asItWas || reading.at855 || cut === rest.length || !rest.slice(0, cut).includes('||')) return cut;
     let at = 0;
     while (at < cut && reading.walkLeft > 0) {
         const open = findClosing(rest, at, '||', reading);
@@ -324,11 +341,15 @@ function chunkEnd(rest: string, reading: Reading): number {
         }
         at = close + 2;
         if (at > cut) {
-            if (!reading.everyBar && rest[open - 1] === ' ' && rest[open + 2] === ' ') return cut;
+            if ((rest[open - 1] === ' ' && rest[open + 2] === ' ') || isWordChar(rest[open - 1]) || isWordChar(rest[close + 2])) return cut;
             cut = nextBlock(rest, at);
         }
     }
     return cut;
+}
+
+function isWordChar(ch: string | undefined): boolean {
+    return ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 }
 
 function matchCodeBlock(s: string): { node: Node; length: number } | null {
@@ -389,6 +410,9 @@ function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: 
     if (!m) return null;
     const start = m[0].length;
     const limit = Math.min(rest.length, start + LINK_TARGET_MOST);
+    // With no `)` in reach there is no link, and a text of many `[` need not read its targets to know.
+    const closer = rest.indexOf(')', start);
+    if (closer === -1 || closer >= limit) return null;
     let depth = 0;
     let first = -1;
     let end = -1;
@@ -400,10 +424,17 @@ function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: 
             if (depth === 0) end = i - start;
             else if (first === -1) first = i - start;
             depth--;
-        } else if (c <= 32 ? c === 32 || (c >= 9 && c <= 13) : c >= 160 && /\s/.test(rest[i])) break;
+        } else if (c <= 32 ? c === 32 || (c >= 9 && c <= 13) : c >= 160 && isWideSpace(c)) break;
     }
     if (first !== -1 && (end === -1 || asItWas)) end = first;
     return end > 0 ? { label: m[1], href: rest.slice(start, start + end), length: start + end + 1 } : null;
+}
+
+/** Whether the code unit `c`, 160 or more, is one `\s` matches: the same list, with no
+ *  regular expression run on every character of a target in another script. */
+function isWideSpace(c: number): boolean {
+    return c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029
+        || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
 }
 
 /** Inline parser: emits text runs interleaved with markup nodes. */
@@ -466,7 +497,7 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
 
         // Bare URL, in either case: a phone's keyboard makes `Https://`.
         if (ch === 'h' || (ch === 'H' && !asItWas)) {
-            const href = asItWas ? URL_RE_AS_IT_WAS.exec(rest)?.[0] : addressAt(rest, reading);
+            const href = asItWas ? URL_RE_AS_IT_WAS.exec(rest)?.[0] : reading.at855 ? urlAt(rest) : addressAt(rest, reading);
             if (href) {
                 flush();
                 nodes.push({ type: 'url', href });
@@ -512,7 +543,7 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
         if (ch === ':') {
             const m = SHORTCODE_RE.exec(rest);
             if (m && !asItWas && rest.startsWith('//', m[0].length)) {
-                const href = addressAt(rest.slice(1), reading);
+                const href = reading.at855 ? urlAt(rest.slice(1)) : addressAt(rest.slice(1), reading);
                 if (href) {
                     buf += ':';
                     flush();
@@ -541,7 +572,7 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
                     const innerText = input.slice(i + delim.open.length, closeIdx);
                     if (innerText.length > 0) {
                         flush();
-                        const children = delim.type === 'spoiler' && !asItWas && holdsBlock(innerText)
+                        const children = delim.type === 'spoiler' && !asItWas && !reading.at855 && holdsBlock(innerText)
                             ? parseBlocks(innerText, reading, depth + 1)
                             : parseInline(innerText, depth + 1, reading);
                         nodes.push({ type: delim.type, children } as Node);
@@ -668,7 +699,8 @@ function closeInName(input: string, at: number, length: number, open: string): n
  */
 function findClosing(input: string, from: number, open: string, reading: Reading): number {
     const stepsOver = !reading.asItWas && open.includes('_') && reading.walkLeft > 0;
-    const stepsOverSpoilers = !reading.asItWas && open !== '||' && reading.walkLeft > 0;
+    const stepsOverLinks = stepsOver && !reading.at855;
+    const stepsOverSpoilers = !reading.asItWas && !reading.at855 && open !== '||' && reading.walkLeft > 0;
     const linkIsInReach = linkInReach(input);
     let steppedOver = false;
     let i = from;
@@ -681,7 +713,7 @@ function findClosing(input: string, from: number, open: string, reading: Reading
                 continue;
             }
         }
-        if (stepsOver && (input[i] === '[' || (input[i] === '!' && input[i + 1] === '[')) && reading.walkLeft > 0 && linkIsInReach(i)) {
+        if (stepsOverLinks && (input[i] === '[' || (input[i] === '!' && input[i + 1] === '[')) && reading.walkLeft > 0 && linkIsInReach(i)) {
             const link = matchLinkParts(input[i] === '[' ? LINK_HEAD_RE : IMAGE_HEAD_RE, input.slice(i), false);
             reading.walkLeft -= link ? link.length : Math.min(LINK_READ_MOST, input.length - i);
             if (link) {
@@ -691,7 +723,7 @@ function findClosing(input: string, from: number, open: string, reading: Reading
             }
         }
         if (stepsOver && (input[i] === 'h' || input[i] === 'H')) {
-            const href = addressAt(input.slice(i), reading);
+            const href = reading.at855 ? urlAt(input.slice(i)) : addressAt(input.slice(i), reading);
             if (href) {
                 reading.walkLeft -= href.length;
                 const inside = closeInAddress(href, open);
