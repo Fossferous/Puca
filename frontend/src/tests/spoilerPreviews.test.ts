@@ -160,6 +160,19 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(parseMessage(`[ ||words ${ENC('medical-results.png')}||`).some(function has(n: Node): boolean {
             return n.type === 'spoiler' || ('children' in n && n.children.some(has));
         })).toBe(false);
+        // The other way round: the parser takes a `[` INSIDE a label (typed by hand: the composer
+        // writes `_` there), and the ref put back for the chip has to be one the matcher finds.
+        for (const message of [
+            '||[t1xx[](sovereign-enc:)||',
+            '||![ http://a/t1xx ![t2xx](sovereign-enc:abc?k=AA_BB&m=image%2Fpng)||',
+            '|||||[[t3xx](sovereign-enc:)||',
+            `||![a[b ${KEY}](sovereign-enc:abc?k=${KEY}&m=image%2Fpng)||`,
+        ]) {
+            for (const shown of [text(message), messageSearchText(message)]) {
+                expect(shown, message).not.toMatch(/t[123]xx|http:\/\/a|sovereign-enc|k=/);
+                expect(shown, message).not.toContain(KEY);
+            }
+        }
         // CONTROL: the same bracket before a file that is NOT in a spoiler: its name is printed, as
         // it always was, and the bracket stays text.
         expect(text(`ugh :[ ${ENC('holiday.png')}`)).toBe('ugh :[ Image: holiday.png');
