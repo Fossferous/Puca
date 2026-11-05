@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.858 — 2026-11-05
 
+A file sent as a spoiler stays hidden after a sad face like :[, and Save to Notes keeps the words before one
 ### Fixed
 
 - **A file you send as a spoiler stays hidden after a sad face like `:[`.** A `[` left open in your words (`:[`, or `[1`) made the message list read everything from it up to the file as one link: the spoiler was gone, the file was drawn in the clear, and your words were eaten into its name. The `[` is words now and the file is under its spoiler, as the previews already showed it. A link's label takes no `[` in it, as in other chat apps, so `[a [b](https://example.org)` is the words `[a ` and a link, and `[[1](https://example.org)]` is a link in brackets. An `@mention`, a `#channel` or an address that stood between a stray `[` and a link was swallowed into the link's label, and now counts as what it is: the mention notifies and the address gets its card. A message the new reading would print a word of that 0.9.857 hid is read as 0.9.857 read it.
