@@ -819,10 +819,12 @@ pub async fn delete_channel(
     let named_by_a_mode = crate::mode_handlers::channel_is_named_by_a_mode(&state.pool, channel_id as i32).await;
 
     // INT4 as well: every other user of this text binds the column's width.
-    let _ = sqlx::query("DELETE FROM channels WHERE id = $1")
+    let deleted_rows = sqlx::query("DELETE FROM channels WHERE id = $1")
         .bind(channel_id as i32)
         .execute(&state.pool)
-        .await;
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
 
     if named_by_a_mode {
         crate::mode_handlers::announce_edit(&state, &server_id).await;
@@ -846,6 +848,17 @@ pub async fn delete_channel(
         crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
     )
     .await;
+
+    // EMPTY THEIR ROOMS. A client ends its own call when the channel leaves its list, but
+    // that is the client's doing: one that does not (an older build looking at another
+    // server, a socket that died with its LiveKit session alive, a stream-only account
+    // nobody is watching) stayed in the deleted channel's room, and in LiveKit's, for good.
+    // Started straight away, detached, so a request cancelled from here on cannot lose it;
+    // after the frame above, which does not wait on a LiveKit round trip. Only for a row
+    // that went: a delete that failed leaves the channel, and everyone in it.
+    if deleted_rows > 0 {
+        crate::ws::start_channels_deleted(&state, &server_id, doomed).wait().await;
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }

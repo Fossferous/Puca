@@ -820,7 +820,9 @@ the first bet (`BET_WINDOW`), whichever comes first.
   (`GameEnded { reason: "disabled" }`); deleting a channel ends its table
   (`channel_deleted`, beside the clip-channel cleanup in `delete_channel`), and
   deleting a collection ends the table of every voice room the cascade takes -
-  the one table each, since a room id is only its canonical spelling.
+  the one table each, since a room id is only its canonical spelling. The
+  players leave the call with it: the delete also empties those rooms on the
+  server (`RoomLeft {reason: "room_gone"}`), whether or not their client does.
 - **Permission changes reach the launcher live**: a role or overwrite change
   already sends `ChannelPermsChanged` to every member, and the client refetches
   the channel list of THAT server - the viewed one, or (in a call on another

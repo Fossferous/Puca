@@ -1458,6 +1458,11 @@ pub enum SelfNotice {
     /// `Gone`, because the server mode this channel belongs to ended: the connections
     /// that held the call are told so (`MODE_ENDED`) and refused a replay of it.
     ModeEnded,
+    /// `Gone`, because the channel itself was deleted (alone or with a collection): the
+    /// connections that held the call are told so (`ROOM_GONE`), which a client says as "X
+    /// is no longer available, so you left its call", and refused a replay of it. A client
+    /// that does not know the reason ends the call as for any `RoomLeft`.
+    RoomGone,
     /// Join this channel instead.
     ///
     /// Deliberately NOT accompanied by a `RoomLeft`. `VoicePanel`'s RoomLeft
@@ -1589,6 +1594,9 @@ pub async fn evict_user_from_voice_room(
     // its next JoinRoom replay and the eviction undoes itself.
     //
     let ended_by_a_mode = matches!(notice, SelfNotice::ModeEnded);
+    // Where the channel's own answer is not to be trusted (a mode's, or one that is gone: the
+    // resync's join check reads a failed lookup), the LiveKit leg is a cut, not an eviction.
+    let cut_as_cut = ended_by_a_mode || matches!(notice, SelfNotice::RoomGone);
     // Sent BEFORE the SFU cut below, and the order is load-bearing for a MOVE.
     // `evict_user_from_channel` awaits an HTTP round trip to LiveKit, and
     // LiveKit then pushes the forced removal to the browser over its own
@@ -1608,10 +1616,11 @@ pub async fn evict_user_from_voice_room(
                 },
             );
         }
-        SelfNotice::ModeEnded => {
+        SelfNotice::ModeEnded | SelfNotice::RoomGone => {
             // The reason only to a connection that held the call: it is what makes
             // that device say why. Tombstoned, so a device that slept through this
             // cannot replay itself back into a channel the list no longer shows.
+            let why = if ended_by_a_mode { MODE_ENDED } else { ROOM_GONE };
             for c in state.conn_ids_of(user_id) {
                 let held = held_by.contains(&c);
                 state.send_to_conn(
@@ -1619,12 +1628,12 @@ pub async fn evict_user_from_voice_room(
                     c,
                     ServerMessage::RoomLeft {
                         room_id: room_id.to_string(),
-                        reason: held.then(|| MODE_ENDED.to_string()),
+                        reason: held.then(|| why.to_string()),
                         by: None,
                     },
                 );
                 if let Some(sid) = held.then(|| state.session_sid(user_id, c)).flatten() {
-                    state.tombstone_voice(user_id, &sid, room_id, MODE_ENDED, None);
+                    state.tombstone_voice(user_id, &sid, room_id, why, None);
                 }
             }
         }
@@ -1677,7 +1686,7 @@ pub async fn evict_user_from_voice_room(
     // publication has to be severed server-side.
     if cut_sfu {
         if let Some(cid) = parse_voice_room(room_id) {
-            if ended_by_a_mode {
+            if cut_as_cut {
                 crate::sfu::cut_user_from_channel(state, cid, user_id).await;
             } else {
                 crate::sfu::evict_user_from_channel(state, cid, user_id).await;
@@ -5419,12 +5428,35 @@ pub fn start_perms_change(state: &Arc<AppState>, server_id: &str) -> PendingPerm
 /// Without it everyone in a call on the server stayed in it, with nothing to end it.
 /// Wait with [`PendingPermsChange::wait`]. Told before the LiveKit cut, as any eviction.
 pub fn start_server_deleted(state: &Arc<AppState>, server_id: &str, channels: Vec<i32>) -> PendingPermsChange {
-    let work = tokio::spawn(crate::sfu::carry_test_livekit(empty_rooms_of_deleted(Arc::clone(state), channels)));
+    let work = tokio::spawn(crate::sfu::carry_test_livekit(empty_rooms_of_deleted(Arc::clone(state), channels, Deleted::WithItsServer)));
     PendingPermsChange { work, server_id: server_id.to_string() }
 }
 
-/// The body of [`start_server_deleted`].
-async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>) {
+/// A channel has just been deleted, and `channels` with it (itself, and everything under it
+/// when it was a collection): the same emptying of their rooms for the server staying
+/// behind. A client that is told ends its own call on seeing the channel leave its list, but
+/// one that is not told in time (an older build looking at another server, a socket that
+/// died with its LiveKit session alive, a session with no page behind it) never does, and
+/// nothing else ever would: the call stayed in the room map, and in LiveKit, for good. Told
+/// with `room_gone`, so a client says why. Wait with [`PendingPermsChange::wait`].
+pub fn start_channels_deleted(state: &Arc<AppState>, server_id: &str, channels: Vec<i32>) -> PendingPermsChange {
+    let work = tokio::spawn(crate::sfu::carry_test_livekit(empty_rooms_of_deleted(Arc::clone(state), channels, Deleted::Alone)));
+    PendingPermsChange { work, server_id: server_id.to_string() }
+}
+
+/// What went with the rooms [`empty_rooms_of_deleted`] empties.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deleted {
+    /// The whole server: every client has just been told so (`RemovedFromServer`), and says
+    /// why a call ended from that. A `room_gone` as well would say it twice.
+    WithItsServer,
+    /// Only these channels. Nothing else tells a client why its call ended, so the
+    /// `RoomLeft` does.
+    Alone,
+}
+
+/// The body of [`start_server_deleted`] and [`start_channels_deleted`].
+async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>, deleted: Deleted) {
     let state = &state;
     // A text room has nothing to retract, and everybody in it is on their way out.
     for &channel in &channels {
@@ -5446,14 +5478,20 @@ async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>) {
         occupants.into_iter().map(move |user| (room_id.clone(), user))
     });
     futures::future::join_all(evictions.map(|(room_id, user)| async move {
-        // Tombstoned, so a media start already on its way from their client is ignored
-        // quietly (start_from_displaced_conn) and not answered with an Error frame, which
-        // would be left on their screen beside what the frame before it said.
-        let conns = state.rooms.get(&room_id).and_then(|room| room.conns_of(user).cloned()).unwrap_or_default();
-        for sid in conns.iter().filter_map(|&conn| state.session_sid(user, conn)) {
-            state.tombstone_voice(user, &sid, &room_id, ROOM_GONE, None);
+        match deleted {
+            Deleted::WithItsServer => {
+                // Tombstoned, so a media start already on its way from their client is ignored
+                // quietly (start_from_displaced_conn) and not answered with an Error frame, which
+                // would be left on their screen beside what the frame before it said.
+                let conns = state.rooms.get(&room_id).and_then(|room| room.conns_of(user).cloned()).unwrap_or_default();
+                for sid in conns.iter().filter_map(|&conn| state.session_sid(user, conn)) {
+                    state.tombstone_voice(user, &sid, &room_id, ROOM_GONE, None);
+                }
+                evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::Gone).await
+            }
+            // Tombstones the connections that held the call, as it tells them why.
+            Deleted::Alone => evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::RoomGone).await,
         }
-        evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::Gone).await
     }))
     .await;
     // Collected first: no map guard across the awaits. A cut, not an eviction: for a channel
