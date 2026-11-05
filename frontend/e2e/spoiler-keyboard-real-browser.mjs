@@ -23,7 +23,10 @@
 //      list, search results, collection feed) never prints a spoiler's words, in the page text, the
 //      markup or the accessibility tree, whatever the spoiler holds, and revealing it in the message
 //      does not change them. The words of a DM toast made as Chat makes them (messagePreviewText) too.
-//      NEGATIVE CONTROLS: the preview as it was (the covering taken out) and a toast made of the raw body.
+//      The words AROUND a spoiler come out as they were typed on every surface (`my_file_name` stays
+//      `my_file_name`, not `my*file*name`).
+//      NEGATIVE CONTROLS: the preview as it was (the covering taken out), a toast made of the raw body,
+//      and a preview that rewrites the words around the spoiler.
 //   6. FORCED COLOURS (a Windows contrast theme, page.emulateMedia forcedColors: active), light and
 //      dark: the hidden words are not painted, at rest, under the pointer and with the keyboard on it;
 //      the bar is a colour of its own against the page; revealed, the words are painted and read at 4.5:1;
@@ -223,6 +226,9 @@ const getIgnoresHotkeys = lazy('ignores-defaultPrevented', {
 });
 const getUncovered = lazy('previews-uncovered', {
     plugins: [mutate('api/messagePreview.ts', "const source = options.spoilers === 'keep' ? typed : coverSpoilers(typed);", 'const source = typed;')],
+});
+const getRewritten = lazy('previews-rewrite-words', {
+    plugins: [mutate('api/messagePreview.ts', 'covered += content.slice(at, span[0]);', "covered += content.slice(at, span[0]).replaceAll('_', '*');")],
 });
 const getNoForced = lazy('no-forced-colors', {
     css: (c) => {
@@ -561,7 +567,10 @@ const PREVIEW_CASES = [
     `a*b ||c*${SECRET}||`,
     `https://example.invalid/a||${SECRET}||`,
     `||${SECRET} ![f.png](sovereign-enc:abc?k=${KEY}&m=image%2Fpng)||`,
+    `check my_file_name and user_id ||${SECRET}|| ok`,
 ];
+/** The last case's words around its spoiler, as the preview of every surface prints them. */
+const AROUND = /check my_file_name and user_id\s*Spoiler\s*ok/g;
 const DM = `see ![photo.png](sovereign-enc:abc?k=${KEY}&m=image%2Fpng) the end is ||${SECRET}||`;
 
 async function previewsOf(built) {
@@ -593,7 +602,8 @@ async function previewsOf(built) {
     const p = await previewsOf(real);
     check('every preview surface: the page text carries none of the words, a ref or a key', !/demon|Alice|sovereign-enc|y8PY2E/i.test(p.before.text), p.before.text.slice(0, 300));
     check('and the markup (title, label, data) carries none either', !/demon|Alice|sovereign-enc|y8PY2E/i.test(p.before.html));
-    check('each case is a "Spoiler" chip (and a "Spoiler image" beside it, in the last), in all five surfaces', JSON.stringify(p.before.chips) === JSON.stringify([5, 5, 5, 5, 5, 5, 10]), p.before.chips);
+    check('each case is a "Spoiler" chip (and a "Spoiler image" beside it, in the seventh), in all five surfaces', JSON.stringify(p.before.chips) === JSON.stringify([5, 5, 5, 5, 5, 5, 10, 5]), p.before.chips);
+    check('the words around a spoiler are printed as typed in all five surfaces: an underscore stays one', (p.before.text.match(AROUND) ?? []).length === 5 && !/my\*file|user\*id/.test(p.before.text), (p.before.text.match(AROUND) ?? []).length);
     check('every spoiler of the messages was revealed with a real key', p.revealed >= PREVIEW_CASES.length, p.revealed);
     check('after revealing: still none of the words, a ref or a key in the previews', !/demon|Alice|sovereign-enc|y8PY2E/i.test(p.after.text), p.after.text.slice(0, 300));
     check('the previews are the same text before and after', p.before.text === p.after.text);
@@ -604,6 +614,10 @@ async function previewsOf(built) {
     const uncovered = await getUncovered('the previews');
     const u = uncovered ? await previewsOf(uncovered) : null;
     if (u) control('the previews as they were (the covering taken out) print the words, in the text and in the tree', /demon is Alice/.test(u.before.text) && /[|][|]/.test(u.before.text) && /demon is Alice/.test(u.ax.text), u.before.text.slice(0, 160));
+
+    const rewritten = await getRewritten('the words around a spoiler');
+    const w = rewritten ? await previewsOf(rewritten) : null;
+    if (w) control('a preview that rewrites the words around a spoiler fails the check above (my*file*name)', (w.before.text.match(AROUND) ?? []).length === 0 && /my\*file/.test(w.before.text), (w.before.text.match(/check my\S* \S* \S* \S*/g) ?? [])[0]);
 }
 
 // ======================================================================================================

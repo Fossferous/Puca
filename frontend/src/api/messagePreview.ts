@@ -26,7 +26,9 @@
  * whatever they are: text, code, a link, a mention, a file's name. That is
  * read off the SAME parse the message list draws (utils/messageParser), never
  * off a pattern of its own: which `||` pair up is the parser's to say, and a
- * preview that paired them differently would print what the message hides.
+ * preview that paired them differently would print what the message hides. Only
+ * the spoilers are replaced, in the message as it was typed (the parse says where
+ * each is): every other word of it is kept byte for byte.
  * Quote is the one that keeps them (`spoilers: 'keep'`): it copies into the
  * composer, where the bars are what makes the quote a spoiler too.
  *
@@ -36,7 +38,7 @@
 import { audioMimeFor, videoMimeFor } from './attachments';
 import { decodeClipRef } from './clips/clipRef';
 import { formatClock } from './clips/clipPresets';
-import { parseMessage, type Node } from '../utils/messageParser';
+import { parseMessage, spoilerSpan, type Node } from '../utils/messageParser';
 
 export type AttachmentKind = 'image' | 'video' | 'audio' | 'file';
 export type PreviewSegment =
@@ -184,30 +186,11 @@ export interface PreviewOptions {
 const COVER = '\uE000';
 const ENC_OR_CLIP = /^\s*sovereign-(?:enc|clip):/i;
 
-/** The message as the preview reads it: each node as the words it was typed in. */
-function sourceOf(nodes: Node[]): string {
-    return nodes.map((n, i) => {
-        switch (n.type) {
-            case 'text': return n.value;
-            case 'strong': return `**${sourceOf(n.children)}**`;
-            case 'em': return `*${sourceOf(n.children)}*`;
-            case 'underline': return `__${sourceOf(n.children)}__`;
-            case 'strike': return `~~${sourceOf(n.children)}~~`;
-            case 'spoiler': return coverOf(n.children);
-            case 'code': return `\`${n.value}\``;
-            case 'codeblock': return `\`\`\`${n.lang ?? ''}\n${n.value}\n\`\`\``;
-            // The quote's own newline was taken with it, and is put back for what follows.
-            case 'blockquote': return sourceOf(n.children).split('\n').map(l => (l === '' ? '>' : `> ${l}`)).join('\n') + (i < nodes.length - 1 ? '\n' : '');
-            case 'link': return `[${n.label}](${n.href})`;
-            case 'url': return n.href;
-            case 'image': return `![${n.alt}](${n.href})`;
-            case 'mentionUser': return `@${n.name}`;
-            case 'mentionEveryone': return '@everyone';
-            case 'mentionHere': return '@here';
-            case 'channel': return `#${n.name}`;
-            case 'emoji': return `:${n.name}:`;
-        }
-    }).join('');
+type Spoiler = Extract<Node, { type: 'spoiler' }>;
+
+/** A file's ref as it was typed, for the bars of its own it goes back inside. */
+function refOf(n: Extract<Node, { type: 'image' | 'link' }>): string {
+    return n.type === 'image' ? `![${n.alt}](${n.href})` : `[${n.label}](${n.href})`;
 }
 
 /**
@@ -220,7 +203,7 @@ function coverOf(children: Node[]): string {
     let words = false;
     const walk = (nodes: Node[]) => {
         for (const n of nodes) {
-            if ((n.type === 'image' || n.type === 'link') && ENC_OR_CLIP.test(n.href)) refs.push(`||${sourceOf([n])}||`);
+            if ((n.type === 'image' || n.type === 'link') && ENC_OR_CLIP.test(n.href)) refs.push(`||${refOf(n)}||`);
             else if ('children' in n) walk(n.children);
             else if (n.type !== 'text' || n.value.trim() !== '') words = true;
         }
@@ -229,20 +212,41 @@ function coverOf(children: Node[]): string {
     return (words || refs.length === 0 ? COVER : '') + (words && refs.length ? ' ' : '') + refs.join(' ');
 }
 
-/** True when the message list would draw a spoiler out of this: some node of the parse is one. */
-function hasSpoiler(nodes: Node[]): boolean {
-    return nodes.some(n => n.type === 'spoiler' || ('children' in n && hasSpoiler(n.children)));
+/** The spoilers the message list would draw out of these nodes, in the order typed. One in
+ *  another is covered with the one it is in. */
+function spoilersIn(nodes: Node[], found: Spoiler[] = []): Spoiler[] {
+    for (const n of nodes) {
+        if (n.type === 'spoiler') found.push(n);
+        else if ('children' in n) spoilersIn(n.children, found);
+    }
+    return found;
 }
 
 /**
- * The message with each spoiler's words replaced by COVER. Unchanged where the message
- * draws no spoiler (`||` in code, or one with no closer), as it is drawn.
+ * The message with each spoiler's words replaced by COVER, and nothing else touched: the parse
+ * says which `||` make a spoiler and where it was typed (`spoilerSpan`), and only that part of
+ * the message as typed is replaced. Writing the tree back out instead gave every other part
+ * the parse's words for it, not the sender's: the `_` that made `my_file_name` an emphasis
+ * came back as `*`, and search then could not find the message by its own words. Unchanged
+ * where the message draws no spoiler (`||` in code, or one with no closer), as it is drawn.
  */
 function coverSpoilers(content: string): string {
     const bars = content.indexOf('||');
     if (bars === -1 || content.indexOf('||', bars + 2) === -1) return content;
-    const nodes = parseMessage(content);
-    return hasSpoiler(nodes) ? sourceOf(nodes) : content;
+    const spoilers = spoilersIn(parseMessage(content));
+    if (spoilers.length === 0) return content;
+    let covered = '';
+    let at = 0;
+    for (const spoiler of spoilers) {
+        const span = spoilerSpan(spoiler);
+        // Every spoiler of a parse has one. If one did not, its words would go out: cover it all.
+        if (!span) return COVER;
+        if (span[0] > at) covered += content.slice(at, span[0]);
+        covered += coverOf(spoiler.children);
+        // Where every stretch between two `||` is a spoiler, one's closing bars open the next.
+        at = Math.max(at, span[1]);
+    }
+    return covered + content.slice(at);
 }
 
 /**

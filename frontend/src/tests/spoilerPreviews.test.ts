@@ -26,12 +26,21 @@ import {
     segmentLabel,
     type PreviewSegment,
 } from '../api/messagePreview';
-import { parseMessage, type Node } from '../utils/messageParser';
+import { parseMessage, spoilerSpan, type Node } from '../utils/messageParser';
 
 const KEY = 'y8PY2ErUIKyijmVzroOm6CWv9rqH0iHqDybKo1r3Gi8';
 const ENC = (name: string) => `![${name}](sovereign-enc:abc?k=${KEY}&m=image%2Fpng)`;
 
 const text = (c: string, max?: number) => messagePreviewText(c, max);
+
+/** Words the message list reads as more than words (an emphasis in `my_file_name`, a quote, a
+ *  fence, a heading), none with a file in it: a preview of them with no spoiler is them, whole. */
+const WORDS_AROUND = [
+    'check my_file_name', 'a_b_c', 'user_id and group_id', 'build_all_the_things', '_private and _other',
+    'trailing_ and_', '100%_off_today', 'ünï_côdé_text', '# head_ing_x', '- item_one', '_a_ _b_', '__a__ and _b_',
+    '> a\n> \n> b', '> a\n>\n> b', '> ```\n> code\n> ```', '```\ncode\n```', '```py\ncode_x\n```', '```a```', '<https://example.org/a_b>',
+    '[x](javascript:alert(1))', 'a\\_b\\_c', '*a* _b_ **c** __d__ ~~e~~', '@bob_the_builder x_y', 'http://example.org/a_b_c and d_e',
+];
 
 describe('a preview never prints a spoiler\'s words', () => {
     const SECRET = 'thedemonisalice';
@@ -76,6 +85,28 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(text('see **this** ||twist|| and `that`')).toBe('see **this** Spoiler and `that`');
         expect(text('a @alice b #general c :fire: ||x|| d')).toBe('a @alice b #general c :fire: Spoiler d');
         expect(text('read https://example.org/p and ||x||')).toBe('read https://example.org/p and Spoiler');
+    });
+
+    it('the words around a spoiler are kept byte for byte: an underscore stays an underscore', () => {
+        // The message list reads `my_file_name` as text, an emphasis and text, and a preview
+        // that wrote the emphasis back out as it likes printed `my*file*name` and made search
+        // miss a message by its own words.
+        for (const m of WORDS_AROUND) {
+            expect(text(m), 'the words alone are the preview they always were').toBe(m);
+            expect(text(`${m}\n||x||`), JSON.stringify(m)).toBe(`${m}\nSpoiler`);
+            expect(text(`${m} ||x||`), JSON.stringify(m)).toBe(`${m} Spoiler`);
+            expect(text(`||x||\n${m}`), JSON.stringify(m)).toBe(`Spoiler\n${m}`);
+        }
+        expect(text('check my_file_name ||the twist|| ok')).toBe('check my_file_name Spoiler ok');
+    });
+
+    it('search finds a message by the words around its spoiler', () => {
+        const said = 'check my_file_name ||the twist|| ok';
+        expect(messageSearchText(said)).toContain('my_file_name');
+        expect(messageSearchText(said)).toBe('check my_file_name   ok');
+        expect(messageSearchText('user_id and group_id ||x||')).toContain('group_id');
+        // CONTROL: what the spoiler hides is still not found.
+        expect(messageSearchText(said)).not.toContain('twist');
     });
 
     it('a message with no spoiler is the preview it always was, down to the byte', () => {
@@ -190,19 +221,20 @@ function tokensByVisibility(nodes: Node[], under = false, out = { hidden: new Se
     return out;
 }
 
+const WRAPS: Array<(s: string) => string> = [
+    s => s, s => `**${s}**`, s => `*${s}*`, s => `_${s}_`, s => `__${s}__`, s => `~~${s}~~`,
+    s => `\`${s}\``, s => `[${s}](https://example.org/p)`, s => `[lnk](https://example.org/${s})`,
+    s => `https://example.org/${s}`, s => `@${s}`, s => `#${s}`, s => `:${s}:`,
+    s => `![${s}](sovereign-enc:abc?k=${KEY}&m=image%2Fpng)`, s => `\`\`\`\n${s}\n\`\`\``, s => `> ${s}`,
+    s => `${s} ${s.replace('sec', 'sec9')}`,
+];
+const GLUE = [' ', ' and ', '_', '__', '*', '**', '~~', '\n', ' (', ') ', ' https://example.org/v_', '`', ' my_file ', ' a*b '];
+
 function generate(next: () => number): string {
     let count = 0;
     const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)];
     const secret = () => `sec${++count}x`;
     const visible = () => `vis${++count}x`;
-    const WRAPS: Array<(s: string) => string> = [
-        s => s, s => `**${s}**`, s => `*${s}*`, s => `_${s}_`, s => `__${s}__`, s => `~~${s}~~`,
-        s => `\`${s}\``, s => `[${s}](https://example.org/p)`, s => `[lnk](https://example.org/${s})`,
-        s => `https://example.org/${s}`, s => `@${s}`, s => `#${s}`, s => `:${s}:`,
-        s => `![${s}](sovereign-enc:abc?k=${KEY}&m=image%2Fpng)`, s => `\`\`\`\n${s}\n\`\`\``, s => `> ${s}`,
-        s => `${s} ${s.replace('sec', 'sec9')}`,
-    ];
-    const GLUE = [' ', ' and ', '_', '__', '*', '**', '~~', '\n', ' (', ') ', ' https://example.org/v_', '`', ' my_file ', ' a*b '];
     const parts: string[] = [];
     const n = 2 + Math.floor(next() * 5);
     for (let i = 0; i < n; i++) {
@@ -258,5 +290,83 @@ describe('property: whatever the parser hides is not in the preview, whatever it
     it('CONTROL: a pattern of its own (the nearest pair of bars) still leaks where the list pairs them another way', () => {
         const r = sweep(c => c.replace(/\|\|[\s\S]*?\|\|/g, 'Spoiler'));
         expect(r.leaks).toBeGreaterThan(0);
+    });
+});
+
+// ---- The property: a spoiler changes nothing but its own place -------------------------------------
+
+/** A message with no spoiler in it, made of the same pieces: marked-up words, words that only
+ *  look marked up, and the delimiters between them left open or closed as the dice fall. */
+function generatePlain(next: () => number): string {
+    let count = 0;
+    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)];
+    const parts: string[] = [];
+    const n = 1 + Math.floor(next() * 5);
+    for (let i = 0; i < n; i++) {
+        parts.push(next() < 0.35 ? pick(WORDS_AROUND) : pick(WRAPS)(`vis${++count}x`));
+        parts.push(pick(GLUE));
+    }
+    return parts.join('');
+}
+
+describe('property: a spoiler added to a message changes nothing but its own place', () => {
+    const MESSAGES = 1500;
+
+    function sweep(preview: (c: string) => string, tail: boolean) {
+        const next = rng(0xa11e);
+        const broken: string[] = [];
+        for (let i = 0; i < MESSAGES; i++) {
+            const plain = generatePlain(next);
+            const spoiled = tail ? `${plain} ||x||` : `||x||\n${plain}`;
+            const want = tail ? `${preview(plain)} Spoiler` : `Spoiler\n${preview(plain)}`;
+            if (preview(spoiled) !== want && broken.length < 3) broken.push(JSON.stringify([spoiled, preview(spoiled), want]));
+        }
+        return broken;
+    }
+
+    it('after the words: the preview is the words\' own preview and the chip', () => {
+        expect(sweep(c => messagePreviewText(c), true)).toEqual([]);
+    });
+
+    it('before the words, on a line of its own', () => {
+        expect(sweep(c => messagePreviewText(c), false)).toEqual([]);
+    });
+
+    it('search text: the same words are there, and the chip says nothing', () => {
+        const next = rng(0xbeef);
+        for (let i = 0; i < MESSAGES; i++) {
+            const plain = generatePlain(next);
+            // Search reads the words and a file's name, so compare it with the plain message's own.
+            expect(messageSearchText(`${plain} ||x||`).trimEnd(), JSON.stringify(plain)).toBe(messageSearchText(plain).trimEnd());
+        }
+    });
+
+    it('every spoiler the parse draws was typed between a pair of bars, where the span says', () => {
+        const next = rng(0x5eed);
+        let spoilers = 0;
+        const wrong: string[] = [];
+        const walk = (content: string, nodes: Node[]) => {
+            for (const n of nodes) {
+                if (n.type === 'spoiler') {
+                    spoilers++;
+                    const span = spoilerSpan(n);
+                    const typed = span ? content.slice(span[0], span[1]) : '';
+                    if (!(typed.length >= 4 && typed.startsWith('||') && typed.endsWith('||')) && wrong.length < 3) wrong.push(JSON.stringify([content, span]));
+                }
+                if ('children' in n) walk(content, n.children);
+            }
+        };
+        for (let i = 0; i < MESSAGES; i++) {
+            const content = generate(next);
+            walk(content, parseMessage(content));
+        }
+        expect(spoilers).toBeGreaterThan(MESSAGES);
+        expect(wrong).toEqual([]);
+    });
+
+    it('CONTROL: the message written back out from its parse (what the preview did) fails it', () => {
+        // A tree written back out gives `*` for the `_` that made an emphasis: the sweep must see it.
+        const asWritten = (c: string) => c.replace(/(\w)_(\w)/g, '$1*$2');
+        expect(sweep(c => (c.includes('||') ? asWritten(messagePreviewText(c)) : messagePreviewText(c)), true).length).toBeGreaterThan(0);
     });
 });
