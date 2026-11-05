@@ -29,7 +29,10 @@
 //      same counts find the words, and find more white in the chosen row.
 //   7. What has a colour or a chip of its own, in a spoiler: inline code, a fence, a quote, a link, a bare URL, a
 //      mention, @everyone, a channel, the placeholder for a picture from another site (a bare address
-//      and the markdown form), through the REAL parser on all eight themes. Nothing of them is
+//      and the markdown form), and a file sent after a `[` the words left open (`ugh :[ ||![p.png](sovereign-enc:...)||`,
+//      one link with the bars in its label and the file in the clear until a label took no `[`: it must be
+//      inside the spoiler, the words before it words, a box with the pill), through the REAL parser on all
+//      eight themes. Nothing of them is
 //      painted, at rest or under the pointer, read back from the screen. A press on one only reveals
 //      and asks no other site for anything, and a hidden link or placeholder takes no focus. Such a
 //      picture is a box with the SPOILER pill. Once revealed, its placeholder and the picture are each
@@ -157,6 +160,9 @@ const chatOptions = {
                 formats: '||**bold** *lean* __under__ ~~struck~~ :fire:||',
                 picture: '||https://example.invalid/the-ending.png||',
                 pictureMd: '||![the ending](https://example.invalid/the-ending-too.png)||',
+                // A file after a \`[\` the words left open (a smiley): until a label took no \`[\` it was one link
+                // with the bars and the file inside its label, drawn in the clear. The ref is the composer's.
+                strayFile: 'ugh :[ ||![medical-results.png](sovereign-enc:abc?k=y8PY2ErUIKyijmVzroOm6CWv9rqH0iHqDybKo1r3Gi8&m=image%2Fpng)||',
             };
             const OPEN = '\`the code\` [the link](https://example.invalid/open) @alice @everyone #general';
             function Kinds() {
@@ -675,11 +681,11 @@ try {
     // Where the halo is the colour of the bar at rest, and only hovering shows it.
     const SAME_AS_THE_BAR = new Set(['light', 'amoled']);
     // The spoilers of 7, by what each holds, and the ones with a look of their own.
-    const KINDS = ['code', 'fence', 'quote', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats', 'picture', 'pictureMd'];
+    const KINDS = ['code', 'fence', 'quote', 'link', 'url', 'mention', 'everyone', 'channel', 'mixed', 'formats', 'picture', 'pictureMd', 'strayFile'];
     const OWN_LOOK = KINDS.filter((kind) => kind !== 'formats');
     // A box with the SPOILER pill on it, so these are read against themselves with what is in them
     // out of the way, not against the bar's colour.
-    const BOXES = new Set(['picture', 'pictureMd']);
+    const BOXES = new Set(['picture', 'pictureMd', 'strayFile']);
     const inKind = (kind) => `[data-kind="${kind}"] .spoiler`;
     /** Whatever is on the page differs with what is in a spoiler hidden: 0 when nothing of it was painted. */
     const paintedInBox = async (kind) => {
@@ -752,6 +758,21 @@ try {
         // ── 7. What has a colour or a chip of its own.
         await chat.evaluate(() => { window.__resetKinds(); window.__pressed.length = 0; });
         await settled();
+        // A file after a stray `[`: the page has the spoiler, the file is inside it and none is in the clear, and the
+        // words before it are words (the old reading made them its name and the file open).
+        const stray = await chat.evaluate(() => {
+            const kind = document.querySelector('[data-kind="strayFile"]');
+            const all = kind.querySelectorAll('.message-attachment').length;
+            const inside = kind.querySelectorAll('.spoiler .message-attachment').length;
+            return {
+                spoilers: kind.querySelectorAll('.spoiler').length,
+                inside,
+                outside: all - inside,
+                before: [...kind.childNodes].filter((n) => !(n.nodeType === 1 && n.classList.contains('spoiler'))).map((n) => n.textContent).join(''),
+            };
+        });
+        check(`a file after a stray [ on ${theme}: it is inside the spoiler, none is in the clear, and the words before it are words`,
+            stray.spoilers === 1 && stray.inside === 1 && stray.outside === 0 && stray.before === 'ugh :[ ', stray);
         const counted = async () => {
             const out = {};
             for (const kind of KINDS) out[kind] = await paintedIn(kind);

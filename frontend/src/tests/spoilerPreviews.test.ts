@@ -155,11 +155,14 @@ describe('a preview never prints a spoiler\'s words', () => {
             expect(medical.every(s => s.type === 'attachment' && s.spoiler), message).toBe(true);
         }
         expect(text(`ugh :[ ||${ENC('medical-results.png')}||`)).toBe('ugh :[ Spoiler image');
-        // Where the `[` makes the list read the rest as a link's label, there is no spoiler drawn to
-        // cover, and the message is printed as it is drawn: the file is still the spoiler's by its bars.
+        // The list reads that `[` as words, as the preview does, and draws the spoiler: up to 0.9.857 it
+        // read the rest as a link's label (bars, words and file), drew no spoiler, and the message
+        // was printed as it was drawn. Now both cover the words and keep the file's own chip.
         expect(parseMessage(`[ ||words ${ENC('medical-results.png')}||`).some(function has(n: Node): boolean {
             return n.type === 'spoiler' || ('children' in n && n.children.some(has));
-        })).toBe(false);
+        })).toBe(true);
+        expect(text(`[ ||words ${ENC('medical-results.png')}||`)).toBe('[ Spoiler Spoiler image');
+        expect(text(`( ||words ${ENC('medical-results.png')}||`)).toBe('( Spoiler Spoiler image');
         // The other way round: the parser takes a `[` INSIDE a label (typed by hand: the composer
         // writes `_` there), and the ref put back for the chip has to be one the matcher finds.
         for (const message of [
@@ -176,6 +179,26 @@ describe('a preview never prints a spoiler\'s words', () => {
         // CONTROL: the same bracket before a file that is NOT in a spoiler: its name is printed, as
         // it always was, and the bracket stays text.
         expect(text(`ugh :[ ${ENC('holiday.png')}`)).toBe('ugh :[ Image: holiday.png');
+    });
+
+    it('words the list hides stay hidden where it reads a message as 0.9.857 did, and that reading gave a label a `[`', () => {
+        // The list reads a label with no `[` in it, but a message the readings disagree on is read as
+        // 0.9.857 read it where that hides more, and that reading's labels can hold one. Found by a
+        // search over random messages (12 in 250,000 print words the list hides without the `[` put
+        // back as `_` in the ref): the words of the spoiler are w3 to w6, and none of them may print.
+        const message = '|| ]( ! :// > _ \n>  ![w0](x) #w1_w2 || [ w3_w4 w5 ![w6](sovereign-enc:a?k=w7_w8&m=image%2Fpng) >    * ![w9](x) Https://x/w10||w11';
+        const hidden = new Set<string>();
+        const walk = (nodes: Node[], under: boolean) => {
+            for (const n of nodes) {
+                if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+                else if (under) for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) hidden.add(w);
+            }
+        };
+        walk(parseMessage(message), false);
+        expect([...hidden]).toEqual(expect.arrayContaining(['w3', 'w4', 'w5', 'w6']));
+        for (const shown of [text(message), messageSearchText(message)]) {
+            expect((shown.match(/w\d+/g) ?? []).filter(w => hidden.has(w))).toEqual([]);
+        }
     });
 
     it('a cut never lands inside a spoiler: the words are covered before the count', () => {

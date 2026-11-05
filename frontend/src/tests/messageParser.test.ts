@@ -4,6 +4,7 @@ import { messageMentionsUser } from '../utils/messageMentions';
 import { extractUrls } from '../api/linkPreview';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
 import { parseMessage as parsedAt855 } from './fixtures/messageParserAt855';
+import { parseMessage as parsedAt857, spoilerSpan as spoilerSpanAt857 } from './fixtures/messageParserAt857';
 
 // Helper: flatten a node tree back to plain text for concise assertions.
 function text(nodes: Node[]): string {
@@ -1290,6 +1291,351 @@ describe('a delimiter in the words before a link or a picture does not close ins
     });
 });
 
+describe('a stray [ in the words before a link, a picture or a file', () => {
+    const said = (value: string) => ({ type: 'text', value });
+    const spoiler = (...children: unknown[]) => ({ type: 'spoiler', children });
+    const KEY = 'y8PY2ErUIKyijmVzroOm6CWv9rqH0iHqDybKo1r3Gi8';
+    const PICTURE = `sovereign-enc:abc?k=${KEY}&m=image%2Fpng`;
+    const FILE = `sovereign-enc:def?k=${KEY}&m=application%2Fzip`;
+    const picture = { type: 'image', alt: 'medical-results.png', href: PICTURE };
+    const file = { type: 'link', label: 'results.zip', href: FILE };
+    const PICTURE_REF = `![medical-results.png](${PICTURE})`;
+    const FILE_REF = `[results.zip](${FILE})`;
+
+    /** The addresses of what is drawn in the clear, and of what is under a spoiler. */
+    const placed = (content: string) => {
+        const hidden: string[] = [];
+        const shown: string[] = [];
+        const walk = (nodes: Node[], under: boolean) => {
+            for (const n of nodes) {
+                if (n.type === 'link' || n.type === 'image') (under ? hidden : shown).push(n.href);
+                else if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+            }
+        };
+        walk(parseMessage(content), false);
+        return { hidden, shown };
+    };
+
+    it('the smiley `:[` is no link, and the file after it is the spoiler\'s (the report: it was drawn open, with the words eaten into its name)', () => {
+        expect(parseMessage(`ugh :[ ||${PICTURE_REF}||`)).toEqual([said('ugh :[ '), spoiler(picture)]);
+        expect(parseMessage(`ugh :[ ||${FILE_REF}||`)).toEqual([said('ugh :[ '), spoiler(file)]);
+        expect(placed(`ugh :[ ||${PICTURE_REF}||`)).toEqual({ hidden: [PICTURE], shown: [] });
+    });
+
+    it.each([
+        ['ugh :[ '], ['[ '], [':[ '], ['ugh [ '], ['ugh :[[ '], ['(:[ '], ['a [b '], ['see [1 '], ['[[ '], ['[\n'], ['ugh :[\n\n'],
+        ['[a [b [c '], ['ugh ![ '], ['ugh :![ '], ['x [y\n'],
+    ])('words with a `[` in them, then a spoilered picture, a file, and two: %j', (words) => {
+        expect(parseMessage(`${words}||${PICTURE_REF}||`)).toEqual([said(words), spoiler(picture)]);
+        expect(parseMessage(`${words}||${FILE_REF}||`)).toEqual([said(words), spoiler(file)]);
+        expect(placed(`${words}||${PICTURE_REF}|| ||${FILE_REF}||`)).toEqual({ hidden: [PICTURE, FILE], shown: [] });
+        expect(placed(`${words}||${FILE_REF}|| ||${PICTURE_REF}|| ||${FILE_REF}||`).shown).toEqual([]);
+        // With words after it, and on a line of its own.
+        expect(placed(`${words}||${PICTURE_REF}|| thanks`)).toEqual({ hidden: [PICTURE], shown: [] });
+        expect(placed(`${words}\n||${PICTURE_REF}||`)).toEqual({ hidden: [PICTURE], shown: [] });
+    });
+
+    it('a file that is not spoilered is drawn, after the same words, and a link beside it is a link', () => {
+        expect(parseMessage(`ugh :[ ${PICTURE_REF}`)).toEqual([said('ugh :[ '), picture]);
+        expect(parseMessage(`ugh :[ ${FILE_REF}`)).toEqual([said('ugh :[ '), file]);
+        expect(parseMessage('ugh :[ see [docs](https://example.org/a)')).toEqual([
+            said('ugh :[ see '), { type: 'link', label: 'docs', href: 'https://example.org/a' },
+        ]);
+    });
+
+    it('CONTROL: the same message with no stray `[` was always this', () => {
+        expect(parseMessage(`ugh :( ||${PICTURE_REF}||`)).toEqual([said('ugh :( '), spoiler(picture)]);
+        expect(parseMessage(`ugh :( ||${PICTURE_REF}||`)).toEqual(parsedAt857(`ugh :( ||${PICTURE_REF}||`));
+    });
+
+    it('NEGATIVE CONTROL: 0.9.857 read it as one link, the spoiler gone and the file in the clear', () => {
+        expect(parsedAt857(`ugh :[ ||${PICTURE_REF}||`)).toEqual([
+            said('ugh :'), { type: 'link', label: ' ||![medical-results.png', href: PICTURE }, said('||'),
+        ]);
+    });
+
+    // What a text of this kind does to the message after it. A `[` that is not closed before the next
+    // `[` opens nothing: the link starts at the one nearest its `](`, as in CommonMark, and what
+    // stands before it is words.
+    it.each<[string, unknown[]]>([
+        // A link, a picture, either in either.
+        ['[a [b](http://x)', [said('[a '), { type: 'link', label: 'b', href: 'http://x' }]],
+        ['![a [b](http://x)', [said('![a '), { type: 'link', label: 'b', href: 'http://x' }]],
+        ['[a ![b](http://x)', [said('[a '), { type: 'image', alt: 'b', href: 'http://x' }]],
+        ['![a ![b](http://x)', [said('![a '), { type: 'image', alt: 'b', href: 'http://x' }]],
+        // A link in brackets, a footnote, a smiley before a link.
+        ['[[1](http://x)]', [said('['), { type: 'link', label: '1', href: 'http://x' }, said(']')]],
+        [':[ see [docs](http://x)', [said(':[ see '), { type: 'link', label: 'docs', href: 'http://x' }]],
+        // The inner one has no label: there is no link.
+        ['[a [](http://example.org)', [said('[a []('), { type: 'url', href: 'http://example.org' }, said(')')]],
+        // A run of them: the link is the last.
+        ['[[[[a](b)', [said('[[['), { type: 'link', label: 'a', href: 'b' }]],
+    ])('a link or a picture in a label: %j', (content, tree) => {
+        expect(parseMessage(content)).toEqual(tree);
+        expect(parsedAt857(content)).not.toEqual(tree);
+    });
+
+    it.each([
+        // A `[` closed before the next one, or never followed by a `](`: the same as it was.
+        ['[see [this]](http://x)'], ['[a [b] c](http://x)'], ['[a] [b](http://x)'], ['[a]( [b](http://x)'], ['a [ b ](http://x)'],
+        ['[a](http://x) [b](http://y)'], ['![a](http://x) ![b](http://y)'], ['[a][b](http://x)'], ['[a [b'], ['[a [b]'], ['[[[a]](b)'],
+        ['[a\n[b](http://x)'], ['[a_b](c)'], ['my_file [a_b](c)'], ['[x](javascript:alert(1))'],
+        ['||[a](http://x)||'], ['||![a](http://x)||'],
+    ])('CONTROL: what had no `[` in its label is as it was: %j', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAt857(content));
+    });
+
+    // Real keys: a file's key and its capability are 32 random bytes each, in base64url.
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const refs = (count: number) => {
+        let at = 20261105;
+        const next = (n: number) => { at = (at * 1664525 + 1013904223) >>> 0; return (at >>> 8) % n; };
+        const b64 = () => Array.from({ length: 43 }, () => ALPHABET[next(64)]).join('');
+        return Array.from({ length: count }, (_, i) => {
+            const href = `sovereign-enc:0f8e7d6c-5b4a-4938-a271-605f4e3d2c1b?k=${b64()}&m=${i % 2 ? 'image%2Fpng' : 'application%2Fzip'}&c=${b64()}`;
+            return { href, md: `${i % 2 ? '!' : ''}[f${i}.${i % 2 ? 'png' : 'zip'}](${href})` };
+        });
+    };
+
+    it('what a label swallowed is read: emphasis, a mention, a channel, an address, an emoji', () => {
+        expect(parseMessage('_a [b_c [d](http://x)')).toEqual([
+            { type: 'em', children: [said('a [b')] }, said('c '), { type: 'link', label: 'd', href: 'http://x' },
+        ]);
+        expect(parseMessage(':[ @bob #general :smile: [d](http://x)')).toEqual([
+            said(':[ '), { type: 'mentionUser', name: 'bob' }, said(' '), { type: 'channel', name: 'general' }, said(' '),
+            { type: 'emoji', name: 'smile' }, said(' '), { type: 'link', label: 'd', href: 'http://x' },
+        ]);
+        expect(parseMessage('[ https://example.org/a [d](http://x)')).toEqual([
+            said('[ '), { type: 'url', href: 'https://example.org/a' }, said(' '), { type: 'link', label: 'd', href: 'http://x' },
+        ]);
+        // A link that is no link stays words, with the label's own text: nothing is clickable.
+        expect(parseMessage('[a [b](javascript:alert(1))')).toEqual([said('[a '), said('b')]);
+    });
+
+    it('and what is read is acted on: the mention notifies, the address gets its card', () => {
+        const content = ':[ @bob and https://example.org/a see [docs](https://example.org/b)';
+        expect(extractMentions(content)).toEqual({ users: ['bob'], everyone: false });
+        expect(messageMentionsUser(content, { username: 'bob' })).toBe(true);
+        expect(extractMentions(':[ @everyone [docs](https://example.org/b)').everyone).toBe(true);
+        expect(extractUrls(content)).toEqual(['https://example.org/a', 'https://example.org/b']);
+        // 0.9.857 took all of it into the link's label: no mention, no card for the first address.
+        const swallowed = parsedAt857(content);
+        expect(swallowed.map(n => n.type)).toEqual(['text', 'link']);
+        expect(swallowed[1]).toMatchObject({ type: 'link', label: ' @bob and https://example.org/a see [docs', href: 'https://example.org/b' });
+    });
+
+    it('a pairing it moves is held to what 0.9.857 hid: its reading is kept where this one would print a word of it', () => {
+        // The stray `[` took a `||` into a label in 0.9.857; read without that, the pairing moves and w10 is outside
+        // the bars. 0.9.855 and the parser before it hid less than 0.9.857 did here, so only holding this to
+        // 0.9.857 itself keeps w10 hidden. (Found by the property below; the shortest of its finds.)
+        const content = '[w0 *Https://x/w1||w2_[w3](https://x/(w4)https://x/w5_w6![w7](sovereign-enc:a?k=w8_w9&m=image%2Fpng)||Https://x/w10||w11';
+        const hiddenIn = (nodes: Node[], under = false, out = new Set<string>()): Set<string> => {
+            for (const n of nodes) {
+                if ('children' in n) hiddenIn(n.children, under || n.type === 'spoiler', out);
+                else if (under) for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) out.add(w);
+            }
+            return out;
+        };
+        expect([...hiddenIn(parsedAt857(content))]).toContain('w10');
+        expect([...hiddenIn(parsedAt855(content))]).not.toContain('w10');
+        expect([...hiddenIn(parsedAsItWas(content))]).not.toContain('w10');
+        const now = hiddenIn(parseMessage(content));
+        for (const w of hiddenIn(parsedAt857(content))) expect(now.has(w), w).toBe(true);
+        for (const w of hiddenIn(parsedAt855(content))) expect(now.has(w), w).toBe(true);
+    });
+
+    // The ways out of it, each found by a search over random messages (a few in a thousand of those with a `[`
+    // and a `||` to move) and each the shortest of its kind. The reading that hides what 0.9.857's did not is
+    // kept where it hides nothing of it less; where each hides what the other prints, every stretch between `||`
+    // is a spoiler, if that hides all 0.9.857 hid and leaves no `||` to see; and where it cannot, it is 0.9.857's.
+    it.each([
+        // Hiding less than 0.9.857 did.
+        '||w0*w1> [![w2](x)w3w4://w5Https://x/w6||w7w8||://:[]-![#w9_w10[w11](x).',
+        ']:[![w0](x)-\n>|| w1:[([w2](x)w3_w4)[\n>||![||',
+        // Every stretch would split a word of the address 0.9.857 hid whole (`_w0Https`), and read it as an address.
+        '[||[](m)||_w0Https://x/w1||w2',
+        // Every stretch would leave a `||` to see.
+        ' __:[||[](m)||w0_w1]||||://> >',
+        // The same, where a label was turned down in the every-stretch reading only.
+        ' ![w0](x)![w1](x)||||[||[](x)||w2_w3\n>[||[](m)||!||w4*w5](x)https://x/w6 ![w7||w8Https://x/w9||w10 ',
+    ])('it is read as 0.9.857 read it, labels with a `[` and all, where nothing else hides what that did: %j', (content) => {
+        expect(parseMessage(content)).toEqual(parsedAt857(content));
+    });
+
+    it('where each hides what the other prints, and no `||` is left to see, every stretch between `||` is a spoiler of its own', () => {
+        const said = (value: string) => ({ type: 'text', value });
+        const spoiler = (...children: unknown[]) => ({ type: 'spoiler', children });
+        expect(parseMessage('_[||[](m)||_> ])||')).toEqual([said('_['), spoiler(said('[](m)')), spoiler(said('_> ])'))]);
+        expect(parsedAt857('_[||[](m)||_> ])||')).not.toEqual(parseMessage('_[||[](m)||_> ])||'));
+    });
+
+    it('and where the first reading hides all 0.9.857 did, it is the first, with its stray `[` a word', () => {
+        const said = (value: string) => ({ type: 'text', value });
+        const spoiler = (...children: unknown[]) => ({ type: 'spoiler', children });
+        const content = '_> [||[](m)||w0_w1(>  ||[||';
+        expect(parseMessage(content)).toEqual([
+            { type: 'em', children: [said('> ['), spoiler(said('[](m)')), said('w0')] },
+            said('w1(>  '),
+            spoiler(said('[')),
+        ]);
+    });
+
+    it.each([
+        '||__[__![w0](x)|| [(w1*w2',
+        '**(||_||_[w0#w1_w2![w3](x)',
+        'w0_w1 [ w2_w3 ![ || || ](x)',
+    ])('the parsers before 0.9.857 are held to as they were, labels with a `[` and all: %j', (content) => {
+        // Here it is the same tree as the parser as it was, and not 0.9.857's.
+        expect(parseMessage(content)).toEqual(parsedAsItWas(content));
+        expect(parseMessage(content)).not.toEqual(parsedAt857(content));
+    });
+
+    it.each([
+        ' ![w0[||](x)||[w1Https://x/w2||w3',
+        '_*)![[w0](https://x/(w1)||:[w2~~)||[!',
+    ])('and the readings it keeps for that are those parsers, not this one with their names: %j', (content) => {
+        // The first reading hides less than 0.9.857 did here; the one it falls back on has the `[` in the label
+        // that makes the picture one (the alt is `w0[||`), where the same reading without it makes a link of `||`.
+        expect(parseMessage(content)).toEqual(parsedAt857(content));
+        expect(JSON.stringify(parseMessage(content))).toMatch(/"type":"image","alt":"[^"]*\[/);
+    });
+
+    /** The marker words (`w<N>`) a parse hides under a spoiler. */
+    const hiddenWords = (nodes: Node[], under = false, out = new Set<string>()): Set<string> => {
+        for (const n of nodes) {
+            if ('children' in n) hiddenWords(n.children, under || n.type === 'spoiler', out);
+            else if (under) for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) out.add(w);
+        }
+        return out;
+    };
+
+    // Found by an independent search, shrunk (29 of 900,000 random messages): every stretch between `||` was a
+    // spoiler only if no `||` was left to see, which a quote or a fence next to a bar can end without one, and
+    // the words it ended it on printed. The reading is kept only if it hides what 0.9.857 hid as well.
+    it.each([
+        '|| ||)||w1\n>||[||[](m)||p||q',
+        '||:||)||w2```||[||[](o)||p||q',
+        '[||[w](1)||]||[||](g)||w3\n>|| ||w',
+        '||`||```w4||[||[](o)||[||7',
+        'p|| ||b(||[w3\n>||![[||](4)',
+        '[||[](m)||5||[||](g)||\n>[w1||[](1)||w',
+    ])('a quote or a fence beside a bar does not end a spoiler 0.9.857 kept: %j', (content) => {
+        const now = hiddenWords(parseMessage(content));
+        expect([...hiddenWords(parsedAt857(content))].filter(w => !now.has(w))).toEqual([]);
+        expect([...hiddenWords(parsedAt855(content))].filter(w => !now.has(w))).toEqual([]);
+        expect([...hiddenWords(parsedAsItWas(content))].filter(w => !now.has(w))).toEqual([]);
+        expect(hiddenWords(parsedAt857(content)).size).toBeGreaterThan(0);
+    });
+
+    // The composer sends `text + ' ' + ||ref||` for each file it spoilers. Whatever the text before them says,
+    // so long as it opens no spoiler of its own, none of them is drawn.
+    const WORDS = ['ugh', 'ok', ':[', '[', '[ ', '![', '](', ']', '(', ')', 'a_b', 'my_file', '*x*', '__y__', '~~z~~', 'see [docs](https://example.org/a_b)',
+        '[a](b)', '![c](d)', '@bob', '#general', ':smile:', 'https://example.org/x_y', '> ', '\n', '\n> ', '<https://example.org/a>', '[', '[', ':['];
+    it('as a property, over any words before them: no file of a composer\'s message is drawn in the clear', () => {
+        let seed = 20261105;
+        const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+        const files = refs(64);
+        const bad: string[] = [];
+        let strayed = 0;
+        for (let k = 0; k < 20000; k++) {
+            const words = Array.from({ length: next(8) }, () => WORDS[next(WORDS.length)]).join(next(3) ? ' ' : '');
+            const picked = Array.from({ length: 1 + next(3) }, () => files[next(files.length)]);
+            const content = `${words} ${picked.map(f => `||${f.md}||`).join(' ')}`;
+            const { shown, hidden } = placed(content);
+            if (/\[[^\]\n]*\[[^\]\n]*\]\(/.test(content)) strayed++;
+            const drawn = shown.filter(h => picked.some(f => f.href === h));
+            if (drawn.length) bad.push(`${JSON.stringify(content)} draws ${drawn.length}, hides ${hidden.length}`);
+        }
+        expect(bad.slice(0, 5)).toEqual([]);
+        // Over nothing it would prove nothing.
+        expect(strayed).toBeGreaterThan(3000);
+    }, 120_000);
+
+    it('NEGATIVE CONTROL: the same words in 0.9.857 drew many of them', () => {
+        let drawn = 0;
+        let tried = 0;
+        for (const f of refs(40)) {
+            tried++;
+            const nodes = parsedAt857(`ugh :[ ||${f.md}||`);
+            if (!JSON.stringify(nodes).includes('"spoiler"')) drawn++;
+        }
+        expect(drawn).toBe(tried);
+    });
+
+    // Where the parser may differ from 0.9.857 at all: a `[` that is not closed before another `[` that
+    // is closed by a `](`. Where there is none the tree is the same, whatever else is in the message,
+    // and so is where each spoiler was typed.
+    const PARTS = ['||', '||', '||', '**', '*', '__', '_', '_', '~~', '`', ' ', ' ', ' ', 'W', 'W', 'W', 'W_W', 'W*W',
+        'https://x/W', 'https://x/W_W', 'Https://x/W||W', '[', '[', '[W', '![', '![W', ']', '](', '](x)', '](https://x/W)', '[W](x)', '![W](x)',
+        '[W](https://x/(W)', '![W](sovereign-enc:a?k=W_W&m=image%2Fpng)', '[W](sovereign-enc:a?k=W__W)', ':[', ':', '://', ':W_W:', '@W', '#W_W',
+        '(', ')', '.', '>', '"', '\n', '> ', '\n> ', '-', '!', '@W_', 'Link:https://x/W_W',
+        // A quote or a fence beside a bar, bars with nothing between them, and a bar in a stray label.
+        '\n>', '\n>||', '```', '|| ||', ')||', '||[||[](x)||', '[||[](m)||'];
+    const STRAY = /\[[^\]\n]*\[[^\]\n]*\]\(/;
+    /** Where each spoiler of a parse was typed, in the order drawn. */
+    const spansOf = (nodes: Node[], of: (n: Node) => readonly [number, number] | undefined): string => {
+        const out: string[] = [];
+        const walk = (ns: Node[]) => {
+            for (const n of ns) {
+                if (n.type === 'spoiler') out.push(JSON.stringify(of(n)));
+                if ('children' in n) walk(n.children);
+            }
+        };
+        walk(nodes);
+        return out.join(';');
+    };
+
+    it.each<[number, number, string]>([
+        [20261105, 10, ''],
+        [6, 14, ''],
+        [7, 30, ' '],
+        [11, 40, ' '],
+        [13, 12, ''],
+        [17, 12, ' '],
+    ])('as a property: with no stray `[` it reads as 0.9.857 did, and with one it prints nothing 0.9.857 hid: seed %i, up to %i parts, joined by "%s"', (start, parts, between) => {
+        let seed = start;
+        const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+        const words = (nodes: Node[], under: boolean, out: { hidden: Set<string>; shown: Set<string> }) => {
+            for (const n of nodes) {
+                if ('children' in n) words(n.children, under || n.type === 'spoiler', out);
+                else for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) (under ? out.hidden : out.shown).add(w);
+            }
+            return out;
+        };
+        const differ: string[] = [];
+        const leaked: string[] = [];
+        let same = 0;
+        let strayed = 0;
+        let changed = 0;
+        for (let k = 0; k < 30000; k++) {
+            let id = 0;
+            const content = Array.from({ length: 1 + next(parts) }, () => PARTS[next(PARTS.length)].replace(/W/g, () => `w${id++}`)).join(between);
+            const read = parseMessage(content);
+            const then = parsedAt857(content);
+            if (!STRAY.test(content)) {
+                same++;
+                if (JSON.stringify(read) !== JSON.stringify(then) || spansOf(read, spoilerSpan) !== spansOf(then, spoilerSpanAt857)) differ.push(content);
+                continue;
+            }
+            strayed++;
+            if (JSON.stringify(read) !== JSON.stringify(then)) changed++;
+            const now = words(read, false, { hidden: new Set(), shown: new Set() });
+            // 0.9.857, and the two parsers before it, whose guard this is: what any of them hid is not printed.
+            for (const [name, before] of [['0.9.857', then], ['0.9.855', parsedAt855(content)], ['as it was', parsedAsItWas(content)]] as const) {
+                const was = words(before, false, { hidden: new Set(), shown: new Set() });
+                const out = [...was.hidden].filter(w => now.shown.has(w));
+                if (out.length) leaked.push(`${JSON.stringify(content)} prints ${out.join(', ')}, hidden in ${name}`);
+            }
+        }
+        expect(differ.slice(0, 5)).toEqual([]);
+        expect(leaked.slice(0, 5)).toEqual([]);
+        // Over nothing it would prove nothing.
+        expect(same).toBeGreaterThan(10000);
+        expect(strayed).toBeGreaterThan(1500);
+        expect(changed).toBeGreaterThan(500);
+    }, 120_000);
+});
+
 describe('a spoiler around a fence or a quote', () => {
     const FENCE = '```';
     const said = (value: string) => ({ type: 'text', value });
@@ -1553,6 +1899,32 @@ describe('what a message costs to read', () => {
 
     it('very short quotes and one small spoiler: 2 ms, or 116 if each quote reads all that is left of the text', () => {
         const content = `${'>\n\n'.repeat(2665)}||s||`;
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 30)).toBeLessThan(30);
+    }, WAIT);
+
+    // A link turned down for a `[` in its label is read again, as 0.9.857 read it, to hold the first to what
+    // that hid (`Strays`): up to six readings where there were four, the 0.9.855 pair shared, and no more. An
+    // 8000-character message built to cost trunk 26 ms (a quote under a spoiler over and over, then a stray
+    // `[` and an unclosed `||`) costs 42 here; the rows below are the shapes the suite has always held to 30.
+    it.each([
+        ['spoilers the readings disagree on, over and over', `:[ [a](b) a_b ${'||c_d|| e '.repeat(780)}`],
+        ['a spoiler over a fence, over and over', `:[ [a](b) ${'||a\n```\nb\n```\nc|| '.repeat(430)}`],
+        ['a spoiler over a quote, over and over', `:[ [a](b) ${'||a\n> b\nc|| '.repeat(600)}`],
+        ['the same, around quotes', `:[ [a](b) a_b ${'||c_d\n> e\nf|| g '.repeat(460)}`],
+        ['nested openers, an address and a `||` over and over', `:[ [a](b) **__~~*_${'>http://a_b_c||'.repeat(520)}_ ||s||`],
+        ['`[` over and over with no `)` after them, and spoilers the readings disagree on', (() => {
+            const unit = `${'['.repeat(16)}](${'秘'.repeat(16)}`;
+            return `:[ [a](b) my_file ||a_b|| and ||c_d|| ${unit.repeat(230)} ||s||`;
+        })()],
+    ])('behind a `[` it turns down, read again: %s', (_, content) => {
+        expect(content.length).toBeGreaterThan(7000);
+        expect(content.length).toBeLessThanOrEqual(8000);
+        expect(fastest(content, 30)).toBeLessThan(30);
+    }, WAIT);
+
+    it('a text of `[` it turns down, one link and two spoilers: read again at most', () => {
+        const content = `${'[a [b](c) '.repeat(790)} ||s|| ||t||`;
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(fastest(content, 30)).toBeLessThan(30);
     }, WAIT);

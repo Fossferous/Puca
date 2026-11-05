@@ -194,8 +194,11 @@ type Spoiler = Extract<Node, { type: 'spoiler' }>;
 /**
  * A file's ref for the bars of its own it goes back inside. Its label is not read again for what
  * it says (a file in a spoiler is "Spoiler image", name hidden), only so the ref is found as one,
- * and the ref matcher takes no `[` in a label: the parser does (`||[a[](sovereign-enc:)||`, typed
- * by hand), and a label that did not match printed itself.
+ * and the ref matcher takes no `[` in a label. The message list does not either, but a message its
+ * readings disagree on is read as 0.9.857 read it where that hides more, and there a label can hold
+ * one (utils/messageParser, `Strays`; typed by hand: the composer writes `_` there). A label that did
+ * not match printed itself: 12 of 250,000 random messages did, with this taken out
+ * (tests/spoilerPreviews.test.ts).
  */
 function refOf(n: Extract<Node, { type: 'image' | 'link' }>): string {
     const label = (n.type === 'image' ? n.alt : n.label).replace(/\[/g, '_');

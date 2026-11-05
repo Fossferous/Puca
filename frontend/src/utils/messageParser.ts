@@ -70,16 +70,32 @@ export function spoilerSpan(node: Node): readonly [number, number] | undefined {
  * a message of 8000 cannot cost more than this however it was made. `everyBar` is the
  * reading of a message whose `||` the others disagree on, and `at855` 0.9.855's own (see
  * `parseMessage`): it steps over addresses for `_` and `__`, and over nothing else.
+ * `bracketed` reads a link's label as 0.9.857 did, with a `[` in it (`LINK_HEAD_RE_BEFORE`): the
+ * two before it always did. `strays` is where a reading says it turned a label down.
  */
-interface Reading { asItWas: boolean; at855: boolean; everyBar: boolean; walkLeft: number }
+interface Reading { asItWas: boolean; at855: boolean; everyBar: boolean; bracketed: boolean; strays: Strays; walkLeft: number }
+/** Whether a reading turned down a link or a picture that 0.9.857 would have read. */
+interface Strays { seen: boolean }
 const WALK_PER_CHAR = 32;
 // A link's target, 2048 long at most, and the `)` after it.
 const LINK_TARGET_MOST = 2049;
 // Up to the `(` of a link's target and a picture's. Label and target are bounded so a
 // non-matching '[' bails after a fixed window instead of scanning to end-of-string:
 // otherwise a message of many '[' is O(n^2) and freezes the renderer (client-side DoS).
-const LINK_HEAD_RE = /^\[([^\]\n]{1,512})\]\(/;
-const IMAGE_HEAD_RE = /^!\[([^\]\n]{0,512})\]\(/;
+//
+// A label holds no `[`: one left open before a link (`:[`, `[a`) is words, and the link starts at the
+// `[` nearest its `](`, as it does in CommonMark. A label that took one in ran from the stray `[`
+// through everything up to the real `](`, a spoiler's bars and the file inside them with it:
+// `ugh :[ ||![p.png](sovereign-enc:…)||` was one link, no spoiler, and the file drawn in the clear
+// with the words before it eaten into its name. The composer writes `_` for `[ ] ( )` in a file's
+// name (api/attachments.ts), so a `[` in a label is typed, or a smiley's.
+const LINK_HEAD_RE = /^\[([^[\]\n]{1,512})\]\(/;
+const IMAGE_HEAD_RE = /^!\[([^[\]\n]{0,512})\]\(/;
+// The same two as 0.9.857 read them, `[` in the label and all: the readings `parseMessage` falls back
+// on (`asItWas`, `at855`, and 0.9.857's own) are the parsers they were, because what they hid is what a
+// message may not print, and a fallback that read a link differently would hide something else.
+const LINK_HEAD_RE_BEFORE = /^\[([^\]\n]{1,512})\]\(/;
+const IMAGE_HEAD_RE_BEFORE = /^!\[([^\]\n]{0,512})\]\(/;
 // How far ahead of one its `](` can be, and the most a try at one can read.
 const LINK_LABEL_REACH = 514;
 const LINK_READ_MOST = LINK_LABEL_REACH + LINK_TARGET_MOST;
@@ -273,20 +289,77 @@ function showsBars(nodes: Node[]): boolean {
  * every stretch between two `||` is a spoiler of its own (`everyBar`), and nothing
  * either of them hid is printed. If a `||` is left to see, a link or code took it, and
  * then what it hid may be there too.
+ *
+ * 0.9.857 read a `[` in a link's label as part of the label, so `:[ ||![p.png](…)||` was one
+ * link and the spoiler was gone. A label takes none now (`LINK_HEAD_RE`), and that moves
+ * pairings as any better reading can. Where a reading turned a link down for it (`Strays`),
+ * what 0.9.857 read is read too, and this reading may not print a word that one hid. Where none
+ * did, the message is read exactly as 0.9.857 read it, and once. The second reading shares what
+ * it can with the first (`once`): a message is read at most six times where it was read four.
  */
 export function parseMessage(content: string): Node[] {
     if (!content) return [];
-    const read = (how: Partial<Reading>) => parseBlocks(content, { asItWas: false, at855: false, everyBar: false, ...how, walkLeft: WALK_PER_CHAR * content.length }, 0, atStart);
-    const nodes = read({});
     const bars = content.indexOf('||');
-    if (bars === -1 || content.indexOf('||', bars + 2) === -1) return nodes;
-    const asItWas = readAt855(content, read);
+    const spoilers = bars !== -1 && content.indexOf('||', bars + 2) !== -1;
+    // Each reading that can turn a label down says so in its own `Strays`. The readings 0.9.855 and the
+    // parser before it were made of take a label with a `[`, as they did, and never do.
+    const nowStrays: Strays = { seen: false };
+    const everyStrays: Strays = { seen: false };
+    const read = readerOf(content, false, nowStrays);
+    const early = once(() => readAt855(content, read));
+    const now = once(() => read({}));
+    const nowEvery = once(() => readerOf(content, false, everyStrays)({ everyBar: true }));
+    const nodes = readEarlier(spoilers, now.get, early.get, nowEvery.get);
+    if (!spoilers || !(nowStrays.seen || everyStrays.seen)) return nodes;
+    // A label with a `[` in it was turned down: read as 0.9.857 did, and this held to what that hid. A
+    // reading that turned none down is the one 0.9.857 read, and is not read again; nor are the readings
+    // 0.9.855 was made of.
+    const readOld = readerOf(content, true, nowStrays);
+    const was = nowStrays.seen ? once(() => readOld({})) : now;
+    const wasEvery = nowEvery.made && !everyStrays.seen ? nowEvery : once(() => readOld({ everyBar: true }));
+    const asRead = readEarlier(true, was.get, early.get, wasEvery.get);
+    const wordsThen = wordsIn(asRead);
+    if (!printsWhatItHid(wordsIn(nodes), wordsThen)) return nodes;
+    if (!printsWhatItHid(wordsThen, wordsIn(nodes))) return asRead;
+    // Neither hides all the other does. Every stretch between `||` is a spoiler, if that hides what
+    // 0.9.857 did and leaves no `||` to see: a quote or a fence next to a bar can end a spoiler that way.
+    const everyBar = nowEvery.get();
+    return showsBars(everyBar) || printsWhatItHid(wordsIn(everyBar), wordsThen) ? asRead : everyBar;
+}
+
+/** A reader of `content`: one reading of it, made from what `how` changes in the default. */
+function readerOf(content: string, bracketed: boolean, strays: Strays): (how: Partial<Reading>) => Node[] {
+    return (how) => parseBlocks(content, { asItWas: false, at855: false, everyBar: false, bracketed, strays, ...how, walkLeft: WALK_PER_CHAR * content.length }, 0, atStart);
+}
+
+/** A reading, made the first time it is asked for and kept: `made` says whether it was asked for. */
+function once<T>(make: () => T): { get: () => T; readonly made: boolean } {
+    let value: T | undefined;
+    let made = false;
+    return {
+        get: () => {
+            if (!made) { value = make(); made = true; }
+            return value as T;
+        },
+        get made() { return made; },
+    };
+}
+
+/**
+ * The first reading of a message held to what 0.9.855 and the parser before it hid, given the readings
+ * it is made of, each made when asked for: all of `parseMessage` as 0.9.857 had it. `spoilers` is
+ * whether two `||` are in the text, without which there is nothing to hold it to.
+ */
+function readEarlier(spoilers: boolean, first: () => Node[], early: () => Node[], everyBar: () => Node[]): Node[] {
+    const nodes = first();
+    if (!spoilers) return nodes;
+    const asItWas = early();
     const words = wordsIn(nodes);
     const wordsThen = wordsIn(asItWas);
     if (!printsWhatItHid(words, wordsThen)) return nodes;
     if (!printsWhatItHid(wordsThen, words)) return asItWas;
-    const everyBar = read({ everyBar: true });
-    return showsBars(everyBar) ? asItWas : everyBar;
+    const every = everyBar();
+    return showsBars(every) ? asItWas : every;
 }
 
 /**
@@ -444,17 +517,33 @@ function findQuoteLine(s: string, from: number): number {
     return nl === -1 ? -1 : nl + 1;
 }
 
+type LinkParts = { label: string; href: string; length: number };
+
 /**
- * What a link or a picture holds, at the start of `rest`, with `head` matching up to
+ * The link or picture at the start of `rest` in the reading, or null. A reading whose labels
+ * hold no `[` says so when it turns down one that 0.9.857 would have read (`Strays`): that
+ * is the only message it can read otherwise than 0.9.857 did.
+ */
+function readLink(rest: string, image: boolean, reading: Reading): LinkParts | null {
+    const old = reading.bracketed || reading.asItWas || reading.at855;
+    const m = (old ? (image ? IMAGE_HEAD_RE_BEFORE : LINK_HEAD_RE_BEFORE) : (image ? IMAGE_HEAD_RE : LINK_HEAD_RE)).exec(rest);
+    if (m) return linkFrom(m, rest, reading.asItWas);
+    if (!old && !reading.strays.seen) {
+        const was = (image ? IMAGE_HEAD_RE_BEFORE : LINK_HEAD_RE_BEFORE).exec(rest);
+        if (was && linkFrom(was, rest, false)) reading.strays.seen = true;
+    }
+    return null;
+}
+
+/**
+ * What a link or a picture holds, at the start of `rest`, with `m` its head: the match up to
  * the `(` of its target. The target takes in the brackets it opens, so
  * `[w](https://x/Foo_(bar))` keeps its own, and it stops at the first `)` that
  * closes none: `[a](b) (c)` does not take in `(c)`. With no such `)`, as in
  * `[a](https://x/(b)`, it stops at the first `)` it passed, as it always used to
- * (`asItWas`). Bounded, like `head`.
+ * (`asItWas`). Bounded, like the head.
  */
-function matchLinkParts(head: RegExp, rest: string, asItWas: boolean): { label: string; href: string; length: number } | null {
-    const m = head.exec(rest);
-    if (!m) return null;
+function linkFrom(m: RegExpExecArray, rest: string, asItWas: boolean): LinkParts | null {
     const start = m[0].length;
     const limit = Math.min(rest.length, start + LINK_TARGET_MOST);
     // With no `)` in reach there is no link, and a text of many `[` need not read its targets to know.
@@ -516,7 +605,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
 
         // Image: ![alt](url)
         if (ch === '!' && input[i + 1] === '[' && linkIsInReach(i)) {
-            const m = matchLinkParts(IMAGE_HEAD_RE, rest, asItWas);
+            const m = readLink(rest, true, reading);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme (javascript:, data:, …): keep the
@@ -530,7 +619,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
 
         // Link: [label](url)
         if (ch === '[' && linkIsInReach(i)) {
-            const m = matchLinkParts(LINK_HEAD_RE, rest, asItWas);
+            const m = readLink(rest, false, reading);
             if (m) {
                 flush();
                 // Neutralize a dangerous scheme: drop the href and keep the label
@@ -765,7 +854,7 @@ function findClosing(input: string, from: number, open: string, reading: Reading
             }
         }
         if (stepsOverLinks && (input[i] === '[' || (input[i] === '!' && input[i + 1] === '[')) && reading.walkLeft > 0 && linkIsInReach(i)) {
-            const link = matchLinkParts(input[i] === '[' ? LINK_HEAD_RE : IMAGE_HEAD_RE, input.slice(i), false);
+            const link = readLink(input.slice(i), input[i] !== '[', reading);
             reading.walkLeft -= link ? link.length : Math.min(LINK_READ_MOST, input.length - i);
             if (link) {
                 i += link.length;
