@@ -77,12 +77,16 @@ describe('a spoiler is a button', () => {
         expect(press(s, 'Enter').defaultPrevented).toBe(true);
         expect(s.classList.contains('revealed')).toBe(true);
         expect(s.getAttribute('aria-expanded')).toBe('true');
-        // Revealed, it is named by what it says: the words are read once, not "Spoiler" and again.
+        // Revealed, it is named by what it holds, "Spoiler: " first, so a spoiler that holds only a
+        // picture or a file is still named, and the words are read once.
         expect(s.hasAttribute('aria-label')).toBe(false);
+        expect(s.querySelector('.sr-only')?.textContent).toBe('Spoiler: ');
+        expect(s.textContent).toBe('Spoiler: secret');
         press(s, 'Enter');
         expect(s.classList.contains('revealed')).toBe(false);
         expect(s.getAttribute('aria-expanded')).toBe('false');
         expect(s.getAttribute('aria-label')).toBe('Spoiler');
+        expect(s.querySelector('.sr-only')).toBeNull();
         // Space scrolls the chat unless prevented.
         expect(press(s, ' ').defaultPrevented).toBe(true);
         expect(s.classList.contains('revealed')).toBe(true);

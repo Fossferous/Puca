@@ -7,7 +7,8 @@
  *
  *  - role="button" and tabIndex 0, named "Spoiler" and nothing more (the name never
  *    carries the hidden words), with aria-expanded for the state. Revealed, the name
- *    is dropped so the words are what it is called, read once.
+ *    is its content, "Spoiler: " first (visually hidden), so the words are read once and
+ *    a spoiler that holds only a picture or a file still has a name.
  *  - Hidden, the words are `inert` and aria-hidden: out of the accessibility tree,
  *    out of the tab order (a player or a link in it cannot be focused), and never a
  *    target of a pointer, which lands on the spoiler and reveals it.
@@ -55,6 +56,7 @@ export function Spoiler({ children }: { children: React.ReactNode }) {
                 setRevealed(!revealed);
             }}
         >
+            {revealed && <span className="sr-only">Spoiler: </span>}
             <span className="spoiler-body" aria-hidden={revealed ? undefined : true} inert={!revealed}>
                 <SpoilerCover.Provider value={!revealed}>{children}</SpoilerCover.Provider>
             </span>

@@ -1,7 +1,7 @@
 // A `||spoiler||` as a control, in a REAL browser: the real components/Spoiler.tsx inside the real
 // MessageContent, under the real Chat.css and theme.css, the real hotkeys registry (api/hotkeys.ts),
 // the real MessagePreview and MessageToasts. jsdom has no accessibility tree, no Tab order, no forced
-// colours and no pixels, so vitest (tests/spoilerControl.test.tsx, tests/spoilerPreviews.test.tsx) pins
+// colours and no pixels, so vitest (tests/spoilerControl.test.tsx, tests/spoilerPreviews.test.ts) pins
 // the attributes and the arithmetic and this pins what a browser builds from them.
 //
 //   1. KEYBOARD, with REAL keys (page.keyboard): Tab from the control before lands on the spoiler;
