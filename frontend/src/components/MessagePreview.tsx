@@ -10,13 +10,15 @@
  * player's card carries for audio, the paperclip the message's own file chip
  * uses for any other file, the clip frame for a clip,
  * and the eye-off of the composer's spoiler toggle for a spoiler (whose name
- * stays hidden — the name can be the spoiler).
+ * stays hidden — the name can be the spoiler). The words of a `||spoiler||` in
+ * the text are one more such chip, "Spoiler", and never the words.
  */
 import { messagePreviewSegments, segmentDisplayName, segmentLabel, type PreviewSegment } from '../api/messagePreview';
 import { ClipIcon, EyeOffIcon, ImageIcon, MusicIcon, PaperclipIcon } from './Icons';
 import './MessagePreview.css';
 
 function SegmentIcon({ seg }: { seg: Exclude<PreviewSegment, { type: 'text' }> }) {
+    if (seg.type === 'spoiler') return <EyeOffIcon />;
     if (seg.type === 'clip') return <ClipIcon />;
     if (seg.spoiler) return <EyeOffIcon />;
     if (seg.kind === 'image') return <ImageIcon />;
@@ -33,7 +35,7 @@ export function MessagePreview({ content, max }: { content: string; max?: number
                 : (
                     <span
                         key={i}
-                        className={`msg-preview-att msg-preview-att-${seg.type === 'clip' ? 'clip' : seg.spoiler ? 'spoiler' : seg.kind}`}
+                        className={`msg-preview-att msg-preview-att-${seg.type === 'clip' ? 'clip' : seg.type === 'spoiler' || seg.spoiler ? 'spoiler' : seg.kind}`}
                         title={segmentLabel(seg)}
                     >
                         <span className="msg-preview-att-icon" aria-hidden="true"><SegmentIcon seg={seg} /></span>

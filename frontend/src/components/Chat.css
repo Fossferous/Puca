@@ -1403,6 +1403,33 @@ button.message-attachment.error { color: #ffb4b4; }
     color: var(--text-normal);
 }
 
+/* A spoiler is a control (Spoiler.tsx): the keyboard gets a ring. Drawn in the text colour, not the
+   brand: the chat's picture is mapped so that text reads on every pixel of it (api/modeLook.ts),
+   and nothing promises the brand colour does, while High Contrast sets the text colour to white or
+   black. The ring is outside the bar, so it shows on the bar's own colour too. */
+.spoiler:focus-visible {
+    outline: 2px solid var(--text-normal);
+    outline-offset: 2px;
+}
+
+/* Windows contrast themes (forced colors) paint over `color: transparent` with the system text
+   colour, so the words of a hidden spoiler were printed in the clear. The hidden state keeps its
+   own colours (forced-color-adjust) and takes a bar that is a system colour, CanvasText, which is
+   never the page's Canvas whatever contrast theme is on, instead of a theme colour that might be.
+   Revealed, it is left to the system: text on Canvas, readable on any of them. */
+@media (forced-colors: active) {
+    .spoiler:not(.revealed),
+    .spoiler:not(.revealed):hover {
+        forced-color-adjust: none;
+        color: transparent;
+        background: CanvasText;
+    }
+
+    .spoiler:focus-visible {
+        outline-color: Highlight;
+    }
+}
+
 /* Inline Code */
 .inline-code {
     background: var(--bg-tertiary);

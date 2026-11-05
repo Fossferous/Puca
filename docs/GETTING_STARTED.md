@@ -106,7 +106,7 @@ Your avatar now appears in:
 ```
 **bold** → bold
 *italic* → italic
-||spoiler|| → hidden text (click to reveal)
+||spoiler|| → hidden text (click to reveal, or Tab to it and press Enter)
 `code` → monospace
 ```
 

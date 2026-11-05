@@ -21,18 +21,32 @@
  * form would put a dangling `![photo.png](sovereign-enc:…?k=…` back on screen
  * the next time anything cuts one.
  *
+ * A `||spoiler||` is just as much a thing a preview must not print. Its words
+ * become a `spoiler` segment (a chip like the one a spoilered file gets),
+ * whatever they are: text, code, a link, a mention, a file's name. That is
+ * read off the SAME parse the message list draws (utils/messageParser), never
+ * off a pattern of its own: which `||` pair up is the parser's to say, and a
+ * preview that paired them differently would print what the message hides. Only
+ * the spoilers are replaced, in the message as it was typed (the parse says where
+ * each is): every other word of it is kept byte for byte.
+ * Quote is the one that keeps them (`spoilers: 'keep'`): it copies into the
+ * composer, where the bars are what makes the quote a spoiler too.
+ *
  * Pure and React-free; components/MessagePreview.tsx renders the segments
- * with icons. Tests: tests/messagePreview.test.ts.
+ * with icons. Tests: tests/messagePreview.test.ts, tests/spoilerPreviews.test.ts.
  */
 import { audioMimeFor, videoMimeFor } from './attachments';
 import { decodeClipRef } from './clips/clipRef';
 import { formatClock } from './clips/clipPresets';
+import { parseMessage, spoilerSpan, type Node } from '../utils/messageParser';
 
 export type AttachmentKind = 'image' | 'video' | 'audio' | 'file';
 export type PreviewSegment =
     | { type: 'text'; text: string }
     | { type: 'attachment'; kind: AttachmentKind; name: string; spoiler: boolean }
-    | { type: 'clip'; label: string };
+    | { type: 'clip'; label: string }
+    /** The words of a `||spoiler||`, which a preview never prints. */
+    | { type: 'spoiler' };
 
 /**
  * One attachment or clip reference, in any of the shapes a message can hold:
@@ -143,35 +157,124 @@ function capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** What a preview says where a spoiler's words would be. A spoilered file's own is "Spoiler image". */
+export const SPOILER_LABEL = 'Spoiler';
+
 /** The words a non-text segment stands for, where only text can go (Quote,
  *  search matching, an accessible name). A spoiler names its kind, not its file. */
 export function segmentLabel(seg: Exclude<PreviewSegment, { type: 'text' }>): string {
+    if (seg.type === 'spoiler') return SPOILER_LABEL;
     if (seg.type === 'clip') return seg.label;
     return seg.spoiler ? `Spoiler ${seg.kind}` : `${capitalize(seg.kind)}: ${seg.name}`;
 }
 
 /** What the visual chip prints next to its icon (the icon says the kind). */
 export function segmentDisplayName(seg: Exclude<PreviewSegment, { type: 'text' }>): string {
+    if (seg.type === 'spoiler') return SPOILER_LABEL;
     if (seg.type === 'clip') return seg.label;
     return seg.spoiler ? `Spoiler ${seg.kind}` : seg.name;
+}
+
+export interface PreviewOptions {
+    /** `hide` (the default) puts a `spoiler` segment where a spoiler's words are. `keep`
+     *  leaves them, bars and all, for the one place that copies a message as it is. */
+    spoilers?: 'hide' | 'keep';
+}
+
+/** Stands for a spoiler's words while the rest is read: a private-use character that no one
+ *  types, and any that is typed is replaced first. */
+const COVER = '\uE000';
+const ENC_OR_CLIP = /^\s*sovereign-(?:enc|clip):/i;
+
+type Spoiler = Extract<Node, { type: 'spoiler' }>;
+
+/** A file's ref as it was typed, for the bars of its own it goes back inside. */
+function refOf(n: Extract<Node, { type: 'image' | 'link' }>): string {
+    return n.type === 'image' ? `![${n.alt}](${n.href})` : `[${n.label}](${n.href})`;
+}
+
+/**
+ * What stands for a spoiler: one cover for its words, whatever they are. A file in it
+ * keeps its own chip ("Spoiler image", its name hidden), which is what a spoilered file
+ * has always been here; its ref goes back inside bars of its own for that.
+ */
+function coverOf(children: Node[]): string {
+    const refs: string[] = [];
+    let words = false;
+    const walk = (nodes: Node[]) => {
+        for (const n of nodes) {
+            if ((n.type === 'image' || n.type === 'link') && ENC_OR_CLIP.test(n.href)) refs.push(`||${refOf(n)}||`);
+            else if ('children' in n) walk(n.children);
+            else if (n.type !== 'text' || n.value.trim() !== '') words = true;
+        }
+    };
+    walk(children);
+    return (words || refs.length === 0 ? COVER : '') + (words && refs.length ? ' ' : '') + refs.join(' ');
+}
+
+/** The spoilers the message list would draw out of these nodes, in the order typed. One in
+ *  another is covered with the one it is in. */
+function spoilersIn(nodes: Node[], found: Spoiler[] = []): Spoiler[] {
+    for (const n of nodes) {
+        if (n.type === 'spoiler') found.push(n);
+        else if ('children' in n) spoilersIn(n.children, found);
+    }
+    return found;
+}
+
+/**
+ * The message with each spoiler's words replaced by COVER, and nothing else touched: the parse
+ * says which `||` make a spoiler and where it was typed (`spoilerSpan`), and only that part of
+ * the message as typed is replaced. Writing the tree back out instead gave every other part
+ * the parse's words for it, not the sender's: the `_` that made `my_file_name` an emphasis
+ * came back as `*`, and search then could not find the message by its own words. Unchanged
+ * where the message draws no spoiler (`||` in code, or one with no closer), as it is drawn.
+ */
+function coverSpoilers(content: string): string {
+    const bars = content.indexOf('||');
+    if (bars === -1 || content.indexOf('||', bars + 2) === -1) return content;
+    const spoilers = spoilersIn(parseMessage(content));
+    if (spoilers.length === 0) return content;
+    let covered = '';
+    let at = 0;
+    for (const spoiler of spoilers) {
+        const span = spoilerSpan(spoiler);
+        // Every spoiler of a parse has one. If one did not, its words would go out: cover it all.
+        if (!span) return COVER;
+        if (span[0] > at) covered += content.slice(at, span[0]);
+        covered += coverOf(spoiler.children);
+        // Where every stretch between two `||` is a spoiler, one's closing bars open the next.
+        at = Math.max(at, span[1]);
+    }
+    return covered + content.slice(at);
 }
 
 /**
  * The message as preview segments, optionally capped at `max` characters (a
  * label counts as its displayed name; a label is never cut in half — a cut
  * ends with `…`). Text is returned verbatim, newlines included, so Quote can
- * keep a multi-line message's lines.
+ * keep a multi-line message's lines. A spoiler's words are a `spoiler` segment
+ * unless `spoilers: 'keep'`, and are covered before the cut, so a cut can never
+ * land inside one.
  */
-export function messagePreviewSegments(content: string, max?: number): PreviewSegment[] {
-    const refs = findRefs(content);
+export function messagePreviewSegments(content: string, max?: number, options: PreviewOptions = {}): PreviewSegment[] {
+    const typed = content.includes(COVER) ? content.replaceAll(COVER, '\uFFFD') : content;
+    const source = options.spoilers === 'keep' ? typed : coverSpoilers(typed);
+    const refs = findRefs(source);
     const all: PreviewSegment[] = [];
+    const pushText = (text: string) => {
+        text.split(COVER).forEach((piece, i) => {
+            if (i > 0) all.push({ type: 'spoiler' });
+            if (piece) all.push({ type: 'text', text: piece });
+        });
+    };
     let at = 0;
     for (const r of refs) {
-        if (r.start > at) all.push({ type: 'text', text: content.slice(at, r.start) });
+        if (r.start > at) pushText(source.slice(at, r.start));
         all.push(r.segment);
         at = r.end;
     }
-    if (at < content.length) all.push({ type: 'text', text: content.slice(at) });
+    if (at < source.length) pushText(source.slice(at));
     if (max === undefined) return all;
 
     const out: PreviewSegment[] = [];
@@ -196,18 +299,19 @@ export function messagePreviewSegments(content: string, max?: number): PreviewSe
     return out;
 }
 
-/** The preview as plain text: what Quote inserts. */
-export function messagePreviewText(content: string, max?: number): string {
-    return messagePreviewSegments(content, max)
+/** The preview as plain text: what Quote inserts, and what a notification toast says. */
+export function messagePreviewText(content: string, max?: number, options: PreviewOptions = {}): string {
+    return messagePreviewSegments(content, max, options)
         .map(s => (s.type === 'text' ? s.text : segmentLabel(s)))
         .join('');
 }
 
 /**
  * What search matches: the text plus each attachment's file NAME. Not the
- * labels the preview generates ("Image: ", "File: ", "Spoiler image", "Clip ·
- * 0:30") — matching those made "image" or "file" hit every attachment — and
- * not a spoilered file's name, which the spoiler exists to hide.
+ * labels the preview generates ("Image: ", "File: ", "Spoiler image", "Spoiler",
+ * "Clip · 0:30") — matching those made "image" or "file" hit every attachment —
+ * and not what a spoiler hides, a file's name or its words: a result that came
+ * up for a word it then does not show would give that word away.
  */
 export function messageSearchText(content: string): string {
     return messagePreviewSegments(content)

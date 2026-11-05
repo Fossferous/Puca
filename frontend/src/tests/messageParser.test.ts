@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseMessage, extractMentions, isSafeUrl, urlAt, type Node } from '../utils/messageParser';
+import { parseMessage, extractMentions, isSafeUrl, spoilerSpan, urlAt, type Node } from '../utils/messageParser';
 import { messageMentionsUser } from '../utils/messageMentions';
 import { extractUrls } from '../api/linkPreview';
 import { parseMessage as parsedAsItWas } from './fixtures/messageParserAsItWas';
@@ -1657,5 +1657,65 @@ describe('link scheme safety (H7)', () => {
         const img = parseMessage('![x](//evil.com/a.png)');
         expect(img.some((n) => n.type === 'image')).toBe(false);
         expect(JSON.stringify(img)).not.toContain('evil.com');
+    });
+});
+
+describe('where a spoiler was typed (spoilerSpan)', () => {
+    /** Every spoiler of the parse, in the order drawn, as the part of the message it was typed in. */
+    function typedIn(content: string): string[] {
+        const found: string[] = [];
+        const walk = (nodes: Node[]) => {
+            for (const n of nodes) {
+                if (n.type === 'spoiler') {
+                    const span = spoilerSpan(n);
+                    found.push(span ? content.slice(span[0], span[1]) : '(no span)');
+                }
+                if ('children' in n) walk(n.children);
+            }
+        };
+        walk(parseMessage(content));
+        return found;
+    }
+
+    it('is the spoiler\'s own bars and what they hold, wherever it is', () => {
+        expect(typedIn('a ||b|| c')).toEqual(['||b||']);
+        expect(typedIn('||b|| and ||c||')).toEqual(['||b||', '||c||']);
+        expect(typedIn('**x ||b|| y** ||c||')).toEqual(['||b||', '||c||']);
+        expect(typedIn('_x ||b|| y_ and __z ||c||__')).toEqual(['||b||', '||c||']);
+        expect(typedIn('my_file_name ||b_c|| ok')).toEqual(['||b_c||']);
+        expect(typedIn('a *b ~~c ||d|| e~~ f* ||g||')).toEqual(['||d||', '||g||']);
+        expect(typedIn('see `||code||` and ||real||')).toEqual(['||real||']);
+        expect(typedIn('a ||b ![p](sovereign-enc:x?k=1&m=image%2Fpng) c||')).toEqual(['||b ![p](sovereign-enc:x?k=1&m=image%2Fpng) c||']);
+        expect(typedIn('h ||a\nb\nc|| t')).toEqual(['||a\nb\nc||']);
+    });
+
+    it('is found again through a quote, whose `> ` the words were read without', () => {
+        expect(typedIn('> a ||b|| c')).toEqual(['||b||']);
+        expect(typedIn('before\n> a ||b||\n> c ||d|| e\nafter ||f||')).toEqual(['||b||', '||d||', '||f||']);
+        expect(typedIn('> ||a\n> b||')).toEqual(['||a\n> b||']);
+        expect(typedIn('>\n> x ||y||')).toEqual(['||y||']);
+        expect(typedIn('> a\n> \n> b ||c||')).toEqual(['||c||']);
+        expect(typedIn('> **a ||b||** c')).toEqual(['||b||']);
+        // A spoiler that holds a quote is one spoiler, typed from its bars to its bars.
+        expect(typedIn('x ||a\n> b\nc|| tail')).toEqual(['||a\n> b\nc||']);
+    });
+
+    it('is found again after a fenced block, and in what a spoiler holds', () => {
+        expect(typedIn('```\ncode ||no||\n```\nthen ||yes||')).toEqual(['||yes||']);
+        expect(typedIn('||a```py\nx\n```b||')).toEqual(['||a```py\nx\n```b||']);
+    });
+
+    it('is each stretch between two bars, where the readings disagree and they all are spoilers', () => {
+        // `everyBar`: the closing bars of one open the next, so the two share them.
+        const spans = typedIn('my_file ||a_b|| and ||c_d||');
+        expect(spans.length).toBeGreaterThan(0);
+        for (const t of spans) expect(t.startsWith('||') && t.endsWith('||'), t).toBe(true);
+        expect(spans.join('')).toContain('a_b');
+        expect(spans.join('')).toContain('c_d');
+    });
+
+    it('is nothing for a node that is not a spoiler of a parse', () => {
+        expect(spoilerSpan({ type: 'spoiler', children: [] })).toBeUndefined();
+        expect(spoilerSpan({ type: 'text', value: '||a||' })).toBeUndefined();
     });
 });

@@ -33,6 +33,33 @@ export type Node =
 const MAX_DEPTH = 12;
 
 /**
+ * Where the text a reader has was typed: maps a position in it to the same position in the
+ * message `parseMessage` was handed. A quote's lines have their `> ` taken off before they are
+ * read, and a delimiter's words are read apart from it, so each stage says how to get back.
+ */
+type Origin = (index: number) => number;
+const atStart: Origin = (index) => index;
+
+/**
+ * Where each spoiler of a parse was typed: from its opening `||` to just past its closing one,
+ * in the text `parseMessage` was handed (`spoilerSpan`). Beside the tree and not in it, so a
+ * tree reads and compares as it always did. A reading that disagrees with another is another
+ * tree, and each spoiler in it has its own.
+ */
+const spoilerSpans = new WeakMap<Node, [number, number]>();
+
+/**
+ * The part of the message a spoiler was typed in, bars and all, or undefined for a node that is
+ * not a spoiler of a parse. This is what lets a surface that is not the message list (the
+ * previews) cover a spoiler in the message AS TYPED, rather than write the whole tree back out
+ * in its own words. It may overlap the next one's by the two bars they share, where every
+ * stretch between two `||` is a spoiler (`everyBar`).
+ */
+export function spoilerSpan(node: Node): readonly [number, number] | undefined {
+    return spoilerSpans.get(node);
+}
+
+/**
  * One reading of a message: `asItWas` (see `parseMessage`) or not, and how much it
  * may still spend on walks for a closer: the whole walk when it finds none, and every
  * address, link and spoiler it reads when it does. Such a walk can be repeated from
@@ -249,7 +276,7 @@ function showsBars(nodes: Node[]): boolean {
  */
 export function parseMessage(content: string): Node[] {
     if (!content) return [];
-    const read = (how: Partial<Reading>) => parseBlocks(content, { asItWas: false, at855: false, everyBar: false, ...how, walkLeft: WALK_PER_CHAR * content.length });
+    const read = (how: Partial<Reading>) => parseBlocks(content, { asItWas: false, at855: false, everyBar: false, ...how, walkLeft: WALK_PER_CHAR * content.length }, 0, atStart);
     const nodes = read({});
     const bars = content.indexOf('||');
     if (bars === -1 || content.indexOf('||', bars + 2) === -1) return nodes;
@@ -278,11 +305,13 @@ function readAt855(content: string, read: (how: Partial<Reading>) => Node[]): No
 }
 
 /** Block level: fenced code blocks and blockquotes, then inline for the rest. */
-function parseBlocks(input: string, reading: Reading, depth = 0): Node[] {
+function parseBlocks(input: string, reading: Reading, depth: number, at: Origin): Node[] {
     const nodes: Node[] = [];
     let rest = input;
 
     while (rest.length > 0) {
+        const base = input.length - rest.length;
+        const here: Origin = (index) => at(base + index);
         // Fenced code block: ```lang\n...\n``` (lang optional).
         const fence = matchCodeBlock(rest);
         if (fence) {
@@ -292,7 +321,7 @@ function parseBlocks(input: string, reading: Reading, depth = 0): Node[] {
         }
 
         // Blockquote: a run of lines each starting with "> " (or ">").
-        const quote = matchBlockquote(rest, reading, depth + 1);
+        const quote = matchBlockquote(rest, reading, depth + 1, here);
         if (quote) {
             nodes.push(quote.node);
             rest = rest.slice(quote.length);
@@ -301,7 +330,7 @@ function parseBlocks(input: string, reading: Reading, depth = 0): Node[] {
 
         // Otherwise consume up to the next block construct and inline-parse it.
         const chunk = rest.slice(0, chunkEnd(rest, reading));
-        nodes.push(...parseInline(chunk, depth, reading));
+        nodes.push(...parseInline(chunk, depth, reading, here));
         rest = rest.slice(chunk.length);
     }
 
@@ -373,22 +402,33 @@ function matchCodeBlock(s: string): { node: Node; length: number } | null {
     return { node: { type: 'codeblock', value: code, lang }, length: end + 3 };
 }
 
-function matchBlockquote(s: string, reading: Reading, depth: number): { node: Node; length: number } | null {
+function matchBlockquote(s: string, reading: Reading, depth: number, at: Origin): { node: Node; length: number } | null {
     if (!(s.startsWith('> ') || s.startsWith('>\n') || s === '>')) return null;
     // Up to the first line that is not quoted, and no further: a text of very short
     // quotes comes back here for each one, with nearly all of itself still to read.
     const quoted: string[] = [];
+    // Where each line's words begin: in the quote as it is read (the lines joined) and in `s`.
+    const begins: Array<[number, number]> = [];
+    let joined = 0;
     let consumed = 0;
     while (consumed < s.length) {
         const nl = s.indexOf('\n', consumed);
         const line = s.slice(consumed, nl === -1 ? s.length : nl);
         if (line !== '>' && !line.startsWith('> ')) break;
-        quoted.push(line === '>' ? '' : line.slice(2));
+        const words = line === '>' ? '' : line.slice(2);
+        begins.push([joined, consumed + line.length - words.length]);
+        quoted.push(words);
+        joined += words.length + 1;
         consumed += line.length + 1; // + newline
     }
     if (quoted.length === 0) return null;
     const length = Math.min(consumed, s.length);
-    return { node: { type: 'blockquote', children: parseInline(quoted.join('\n'), depth, reading) }, length };
+    const inQuote: Origin = (index) => {
+        let line = begins.length - 1;
+        while (line > 0 && begins[line][0] > index) line--;
+        return at(begins[line][1] + index - begins[line][0]);
+    };
+    return { node: { type: 'blockquote', children: parseInline(quoted.join('\n'), depth, reading, inQuote) }, length };
 }
 
 /** Find the index of the first line (after start, and at or after `from`) beginning with `>`. */
@@ -438,7 +478,7 @@ function isWideSpace(c: number): boolean {
 }
 
 /** Inline parser: emits text runs interleaved with markup nodes. */
-function parseInline(input: string, depth: number, reading: Reading): Node[] {
+function parseInline(input: string, depth: number, reading: Reading, at: Origin): Node[] {
     const { asItWas } = reading;
     const linkIsInReach = linkInReach(input);
     const nodes: Node[] = [];
@@ -572,10 +612,14 @@ function parseInline(input: string, depth: number, reading: Reading): Node[] {
                     const innerText = input.slice(i + delim.open.length, closeIdx);
                     if (innerText.length > 0) {
                         flush();
+                        const inner = i + delim.open.length;
+                        const within: Origin = (index) => at(inner + index);
                         const children = delim.type === 'spoiler' && !asItWas && !reading.at855 && holdsBlock(innerText)
-                            ? parseBlocks(innerText, reading, depth + 1)
-                            : parseInline(innerText, depth + 1, reading);
-                        nodes.push({ type: delim.type, children } as Node);
+                            ? parseBlocks(innerText, reading, depth + 1, within)
+                            : parseInline(innerText, depth + 1, reading, within);
+                        const node = { type: delim.type, children } as Node;
+                        if (node.type === 'spoiler') spoilerSpans.set(node, [at(i), at(closeIdx + 1) + 1]);
+                        nodes.push(node);
                         i = closeIdx + delim.open.length;
                         // This `||` opens the next stretch too, if any `||` is left to close it.
                         if (reading.everyBar && delim.type === 'spoiler' && findClosing(input, i, '||', reading) !== -1) i = closeIdx;

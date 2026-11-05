@@ -8,7 +8,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MessagePreview } from '../components/MessagePreview';
-import { MusicIcon, PaperclipIcon } from '../components/Icons';
+import { EyeOffIcon, MusicIcon, PaperclipIcon } from '../components/Icons';
 
 const KEY = 'y8PY2ErUIKyijmVzroOm6CWv9rqH0iHqDybKo1r3Gi8';
 let root: Root | null = null;
@@ -61,6 +61,24 @@ describe('<MessagePreview>', () => {
         expect(drawn(chips[0])).toBe(renderToStaticMarkup(<MusicIcon />));
         expect(drawn(chips[1])).toBe(renderToStaticMarkup(<PaperclipIcon />));
         expect(chips[0].getAttribute('title')).toBe('Audio: song.mp3');
+    });
+
+    it('the words of a text spoiler are one "Spoiler" chip with the eye-off icon, never the words', () => {
+        const el = render('the twist is ||the demon is **Alice** [a link](https://example.org/x) `code`|| ok');
+        expect(el.textContent).toBe('the twist is Spoiler ok');
+        expect(el.textContent).not.toMatch(/demon|alice|example|code/i);
+        const chips = Array.from(el.querySelectorAll('.msg-preview-att'));
+        expect(chips.map(c => c.className)).toEqual(['msg-preview-att msg-preview-att-spoiler']);
+        expect(chips[0].getAttribute('title')).toBe('Spoiler');
+        expect(chips[0].querySelector('.msg-preview-att-name')?.textContent).toBe('Spoiler');
+        expect(chips[0].querySelector('.msg-preview-att-icon svg')!.outerHTML).toBe(renderToStaticMarkup(<EyeOffIcon />));
+        // Nothing of it is anywhere else in the markup either: a title, a label, a data attribute.
+        expect(el.innerHTML).not.toMatch(/demon|alice/i);
+    });
+
+    it('a spoiler cut by the cap is never cut inside', () => {
+        expect(render('abcdefghij ||secretwords||', 12).textContent).toBe('abcdefghij Spoiler');
+        expect(render('||secretwords|| tail', 9).textContent).toBe('Spoiler t…');
     });
 
     it('plain text renders as just that text (negative control)', () => {

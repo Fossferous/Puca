@@ -152,7 +152,7 @@ For how this works and why, see [SERVER_MODES.md](SERVER_MODES.md).
 | `` `code` `` | `code` |
 | ```` ``` ```` on its own lines | code block |
 | `> quote` | block quote |
-| `\|\|spoiler\|\|` | Hidden until clicked, along with any code, code block, quote, link, picture, mention or file in it. The first click only reveals, and a link in a spoiler has no preview under the message |
+| `\|\|spoiler\|\|` | Hidden until clicked, or until you Tab to it and press Enter or Space (press again to hide it), along with any code, code block, quote, link, picture, mention or file in it. The first press only reveals, and a link in a spoiler has no preview under the message. A screen reader calls it "Spoiler, button" and does not read what is in it until it is revealed; on a Windows contrast theme it is a solid bar |
 | `[text](https://example.com)` | a link that reads *text* |
 
 ### Mention Users and Channels
@@ -251,9 +251,11 @@ encrypted copy, with nothing downloaded again (docs/SECURITY_MODEL.md, *Decrypte
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the
 **Replying to** bar, the line above a reply, **Pinned messages**, search
-results — an attachment appears as a small icon and its file name; a spoiler
-shows only **Spoiler image** (or video, audio, file). Search finds an attachment by its file
-name, except a spoilered one.
+results, and the toast for a direct message — an attachment appears as a small icon and its file name; a spoiler
+shows only **Spoiler image** (or video, audio, file), and the words of a `||spoiler||` are one **Spoiler**
+whatever they hold (text, code, a link, a mention, a file name), however it was revealed in the message. Search finds an attachment by its file
+name, and a message by its words, except what a spoiler hides. **Quote** is the exception: it copies the message into the box as it is,
+with the `||` around the spoiler, so the quote is a spoiler too. Notifications from the system never carry what a message says.
 
 ### Photos and where they were taken
 Púca removes the hidden details a phone adds to a photo (where it was taken, the phone's model, the exact time) before it sends a JPEG, PNG or WebP, so the people you send it to see the picture and nothing else. Nothing is compressed or resized, and portrait photos still arrive upright. If a photo is too damaged for that, it is not sent and the message tells you to re-save it. Photos sent earlier keep their details.

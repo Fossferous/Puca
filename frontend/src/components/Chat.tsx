@@ -2565,7 +2565,10 @@ export function Chat({ onLogout }: ChatProps) {
                         decryptDMContent(payload.content, payload.sender.id, payload.sender.id)
                             .then(body => pushMessageToast({
                                 title: from,
-                                body: body.length > 120 ? `${body.slice(0, 120)}…` : body,
+                                // As every preview says it (api/messagePreview.ts): an attachment by its
+                                // name and not its ref with the file's key in it, and a spoiler's words
+                                // not at all.
+                                body: messagePreviewText(body, 120),
                             }))
                             .catch(() => pushMessageToast({ title: `${from} sent you a message` }));
                     }
@@ -3899,7 +3902,9 @@ export function Chat({ onLogout }: ChatProps) {
         // photo.png"), never its ref. The old key-stripped ref was a dead link
         // that also put `sovereign-enc:<id>?m=…` in the composer. (audit LOW
         // still holds: no key reaches the composer.)
-        const quoted = formatQuote(messagePreviewText(content));
+        // A spoiler keeps its bars here, and only here: this copies the message into the box, and the
+        // bars are what make the quote a spoiler too (every other preview hides the words).
+        const quoted = formatQuote(messagePreviewText(content, undefined, { spoilers: 'keep' }));
         setInput(prev => prev && !prev.endsWith('\n') ? `${prev}\n${quoted}` : prev + quoted);
         inputRef.current?.focus();
     };

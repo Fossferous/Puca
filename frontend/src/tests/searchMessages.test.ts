@@ -172,6 +172,21 @@ describe('search matches the preview text, not the attachment ref', () => {
         expect((await searchChannel(1, 'image', isBlocked)).hits).toHaveLength(1);
     });
 
+    it('is not hit by the words a text spoiler hides, and a hit does not print them', async () => {
+        const said = 'the ending ||Snape kills Dumbledore|| was sad';
+        channelPages = [[msg('1', NORMAL, said)]];
+        expect((await searchChannel(1, 'snape', isBlocked)).hits, 'a word inside').toEqual([]);
+        channelPages = [[msg('1', NORMAL, said)]];
+        expect((await searchChannel(1, 'dumbledore', isBlocked)).hits, 'another word inside').toEqual([]);
+        // Positive controls: the words around it are found, and the hit is the message, whole.
+        channelPages = [[msg('1', NORMAL, said)]];
+        const around = await searchChannel(1, 'ending', isBlocked);
+        expect(around.hits).toHaveLength(1);
+        expect(around.hits[0].content).toBe(said); // the surface prints it through MessagePreview, which covers it
+        channelPages = [[msg('1', NORMAL, 'Snape kills Dumbledore')]];
+        expect((await searchChannel(1, 'snape', isBlocked)).hits, 'the same words, unspoilered').toHaveLength(1);
+    });
+
     it('the same holds in a DM', async () => {
         dmRows = [dm('1', NORMAL, ref)];
         expect((await searchDM('c1', NORMAL, 'sovereign', isBlocked)).hits).toEqual([]);
