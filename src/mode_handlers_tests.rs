@@ -1449,6 +1449,260 @@ mod db {
         );
     }
 
+    /// What a Sock was told about rooms, in order: `left:<room>:<reason>`.
+    fn left(frames: &[M]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                M::RoomLeft { room_id, reason, .. } => Some(format!("left:{room_id}:{}", reason.as_deref().unwrap_or("-"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn members_of(state: &AppState, room: &str) -> Vec<i64> {
+        state.rooms.get(room).map(|r| r.members.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// A deleted channel's rooms are emptied by the server, whatever the clients do. A client
+    /// ends its own call when the channel leaves its list, but one that is not told in time
+    /// (an older build on another server, a socket the page never reacts through) stayed in the
+    /// room for good: the room map is what OwnVoiceState, voice exclusivity and every broadcast
+    /// to the room read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deleted_channels_rooms_are_emptied_and_each_call_is_told_why() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let rooms = channel(&pool, &f.sid, "rooms", 2).await;
+        let under = subchannel(&pool, &f.sid, "under", 1, rooms).await;
+        let lone = channel(&pool, &f.sid, "lone", 1).await;
+        let other = channel(&pool, &f.sid, "other", 1).await;
+        let (lone_room, under_room, other_room, text_room) = (format!("voice_{lone}"), format!("voice_{under}"), format!("voice_{other}"), format!("channel_{}", f.text));
+
+        // Two people in the lone room, one of them with a second device that is in no call.
+        let mut caller = Sock::in_room(&state, f.plain, lone);
+        let mut phone = Sock::open(&state, f.plain);
+        let mut mate = Sock::in_room(&state, f.mover, lone);
+        // One under the collection, one in a room beside it, one reading a text channel.
+        let mut below = Sock::in_room(&state, f.switcher, under);
+        let mut beside = Sock::in_room(&state, f.manager, other);
+        let mut reader = Sock::open(&state, f.owner);
+        state.join_room(&text_room, reader.user, reader.conn);
+        let fixture = (members_of(&state, &lone_room).len(), members_of(&state, &under_room).len(), members_of(&state, &other_room).len(), members_of(&state, &text_room).len());
+
+        for s in [&mut caller, &mut phone, &mut mate, &mut below, &mut beside, &mut reader] {
+            s.drain();
+        }
+        // A refused delete empties nothing.
+        let refused = delete_channel_as(&state, f.plain, lone).await;
+        let after_refusal = (members_of(&state, &lone_room).len(), caller.drain().len());
+
+        let gone = delete_channel_as(&state, f.owner, lone).await;
+        let (caller_told, phone_told, mate_told) = (left(&caller.drain()), left(&phone.drain()), left(&mate.drain()));
+        let lone_after = members_of(&state, &lone_room);
+        let held_tombstone = state.voice_replay_tombstone(f.plain, &format!("s{}", f.plain), &lone_room).map(|t| t.reason);
+        let control_told = (left(&beside.drain()), left(&below.drain()), members_of(&state, &other_room), members_of(&state, &under_room));
+
+        let collection = delete_channel_as(&state, f.owner, rooms).await;
+        let below_told = left(&below.drain());
+        let under_after = members_of(&state, &under_room);
+
+        let text = delete_channel_as(&state, f.owner, f.text).await;
+        let reader_told = left(&reader.drain());
+        let text_after = members_of(&state, &text_room);
+        let other_still = members_of(&state, &other_room);
+        teardown(&pool, &f).await;
+
+        assert_eq!(fixture, (2, 1, 1, 1), "control: the fixture has everyone where it says");
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert_eq!(after_refusal, (2, 0), "a delete that is refused takes nobody out and tells nobody");
+        assert_eq!(gone.0, StatusCode::NO_CONTENT);
+        assert!(lone_after.is_empty(), "nobody is left in a room of a channel that is gone: {lone_after:?}");
+        assert_eq!(caller_told, vec![format!("left:{lone_room}:room_gone")], "the call says why it ended");
+        assert_eq!(mate_told, vec![format!("left:{lone_room}:room_gone")]);
+        assert_eq!(phone_told, vec![format!("left:{lone_room}:-")], "the same account's other device, in no call, is told plainly");
+        assert_eq!(held_tombstone, Some("room_gone"), "and a device that slept through it is refused a replay of the call");
+        assert_eq!(control_told.0, Vec::<String>::new(), "control: a room beside it is told nothing");
+        assert_eq!(control_told.1, Vec::<String>::new(), "control: nor one under a collection that stays");
+        assert_eq!((control_told.2.len(), control_told.3.len()), (1, 1), "and keeps its person");
+        assert_eq!(collection.0, StatusCode::NO_CONTENT);
+        assert!(under_after.is_empty(), "a collection's delete empties the room under it: {under_after:?}");
+        assert_eq!(below_told, vec![format!("left:{under_room}:room_gone")]);
+        assert_eq!(text.0, StatusCode::NO_CONTENT);
+        assert!(text_after.is_empty(), "a text channel's room too");
+        assert_eq!(reader_told, vec![format!("left:{text_room}:-")], "and its reader is told plainly: there is no call to say why about");
+        assert_eq!(other_still.len(), 1, "control: the room beside them all is untouched");
+    }
+
+    /// A delete that did not happen takes nobody out: the channel is still there, and so is
+    /// everyone in it. (The answer to the press is unchanged by this: delete_channel has
+    /// never read the DELETE's result for it.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_delete_that_did_not_happen_takes_nobody_out_of_the_channel() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let stuck = channel(&pool, &f.sid, "undeletable-room-test", 1).await;
+        let stuck_room = format!("voice_{stuck}");
+        // Static SQL, and a trigger that looks at one name no other test uses.
+        sqlx::query("CREATE OR REPLACE FUNCTION refuse_undeletable_channel() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$ LANGUAGE plpgsql")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER IF EXISTS refuse_undeletable_channel ON channels").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_undeletable_channel BEFORE DELETE ON channels FOR EACH ROW              WHEN (OLD.name = 'undeletable-room-test') EXECUTE FUNCTION refuse_undeletable_channel()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut caller = Sock::in_room(&state, f.plain, stuck);
+        caller.drain();
+
+        let _ = delete_channel_as(&state, f.owner, stuck).await;
+        let told = caller.drain();
+        let still_in = members_of(&state, &stuck_room);
+        let row_stays = still_there(&pool, &[stuck]).await;
+        sqlx::query("DROP TRIGGER IF EXISTS refuse_undeletable_channel ON channels").execute(&pool).await.unwrap();
+        teardown(&pool, &f).await;
+
+        assert_eq!(row_stays, vec![stuck], "control: the delete did not happen");
+        assert_eq!(still_in.len(), 1, "so nobody is taken out of the room: {still_in:?}");
+        assert_eq!(left(&told), Vec::<String>::new(), "and nobody is told they left");
+    }
+
+    /// A card table in the room ends with the channel, and the people at it leave the call with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deleted_room_with_a_card_table_takes_its_players_out_of_the_call() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let room = channel(&pool, &f.sid, "table-room", 1).await;
+        let room_id = format!("voice_{room}");
+        let mut player = Sock::in_room(&state, f.owner, room);
+        state.set_conn_games(f.owner, player.conn, true);
+        crate::games::handle_frame(
+            &state,
+            f.owner,
+            player.conn,
+            crate::protocol::ClientMessage::GameCreate { room_id: room_id.clone(), kind: crate::games_wire::GameKindWire::Holdem, config: None },
+        )
+        .await;
+        let table_open = state.games.peek(&room_id).is_some();
+        player.drain();
+
+        let gone = delete_channel_as(&state, f.owner, room).await;
+        let told = player.drain();
+        let table_after = state.games.peek(&room_id).is_some();
+        let still_in = members_of(&state, &room_id);
+        teardown(&pool, &f).await;
+
+        assert!(table_open, "control: the fixture has a table");
+        assert_eq!(gone.0, StatusCode::NO_CONTENT);
+        assert!(!table_after, "the table ends");
+        assert!(
+            told.iter().any(|m| matches!(m, M::GameEnded { room_id: r, reason: crate::games_wire::GameEndReason::ChannelDeleted, .. } if *r == room_id)),
+            "and whoever sits at it is told why"
+        );
+        assert!(still_in.is_empty(), "and is out of the call: {still_in:?}");
+        assert_eq!(left(&told), vec![format!("left:{room_id}:room_gone")]);
+    }
+
+    /// The channel a mode names as its main voice channel: the mode stays, with no main channel,
+    /// and the people who were in the channel are out of it like anyone else's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_a_modes_main_channel_empties_it_and_leaves_the_mode() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let (mode,): (i32,) = sqlx::query_as("INSERT INTO server_modes (server_id, name, home_channel_id) VALUES ($1, 'Game', $2) RETURNING id")
+            .bind(&f.sid)
+            .bind(f.town)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO server_mode_channels (mode_id, channel_id) VALUES ($1, $2), ($1, $3)")
+            .bind(mode)
+            .bind(f.town)
+            .bind(f.cottage)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE servers SET active_mode_id = $1 WHERE id = $2").bind(mode).bind(&f.sid).execute(&pool).await.unwrap();
+        let town_room = format!("voice_{}", f.town);
+        let mut caller = Sock::in_room(&state, f.plain, f.town);
+        let mut cottage = Sock::in_room(&state, f.mover, f.cottage);
+
+        let gone = delete_channel_as(&state, f.owner, f.town).await;
+        let (caller_told, cottage_told) = (caller.drain(), cottage.drain());
+        let home: Option<i32> = sqlx::query_scalar("SELECT home_channel_id FROM server_modes WHERE id = $1").bind(mode).fetch_one(&pool).await.unwrap();
+        let active: Option<i32> = sqlx::query_scalar("SELECT active_mode_id FROM servers WHERE id = $1").bind(&f.sid).fetch_one(&pool).await.unwrap();
+        let in_town = members_of(&state, &town_room);
+        let in_cottage = members_of(&state, &format!("voice_{}", f.cottage));
+        teardown(&pool, &f).await;
+
+        assert_eq!(gone.0, StatusCode::NO_CONTENT);
+        assert_eq!((home, active), (None, Some(mode)), "the mode stays on, with no main channel");
+        assert!(in_town.is_empty(), "{in_town:?}");
+        assert_eq!(left(&caller_told), vec![format!("left:{town_room}:room_gone")]);
+        assert!(caller_told.iter().any(|m| matches!(m, M::ServerModesEdited { .. })), "and is told the mode changed");
+        assert_eq!(in_cottage.len(), 1, "control: the mode's other room keeps its person");
+        assert_eq!(left(&cottage_told), Vec::<String>::new());
+    }
+
+    /// LiveKit has its own map of who is in a room, and a session whose socket died is in
+    /// nothing else. Everyone there goes, and a removal LiveKit did not confirm is owed as a
+    /// cut: for a channel that is gone the resync's join check reads a failed lookup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deleted_channel_cuts_every_livekit_session_of_it_and_no_other() {
+        use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy};
+        use crate::sfu::Recheck;
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        no_env_proxy();
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let room = crate::sfu::room_name_for_channel(f.town as i64);
+        let other_room = crate::sfu::room_name_for_channel(f.cottage as i64);
+        let (socketless, in_voice, unconfirmed, stranger) =
+            (format!("u{}#gone", f.plain), format!("u{}#here", f.mover), format!("u{}#soon", f.manager), format!("u{}#there", f.switcher));
+        {
+            let mut usage = state.sfu_rooms.entry(room.clone()).or_default();
+            usage.participants.insert(socketless.clone(), std::time::Instant::now());
+            usage.participants.insert(in_voice.clone(), std::time::Instant::now());
+            usage.reservations.insert(unconfirmed.clone(), std::time::Instant::now());
+            state.sfu_rooms.entry(other_room.clone()).or_default().participants.insert(stranger.clone(), std::time::Instant::now());
+        }
+        let mut sock = Sock::in_room(&state, f.mover, f.town);
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 500, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let status = crate::sfu::TEST_LIVEKIT.scope(base, async { delete_channel_as(&state, f.owner, f.town).await.0 }).await;
+        let seen = asked(srv).await;
+        let owed = |identity: &str| state.sfu_rooms.get(&room).and_then(|u| u.recheck.get(identity).map(|m| m.what));
+        let (socketless_owes, in_voice_owes) = (owed(&socketless), owed(&in_voice));
+        let stranger_there = state.sfu_rooms.get(&other_room).is_some_and(|u| u.participants.contains_key(&stranger));
+        let story = left(&sock.drain());
+        teardown(&pool, &f).await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let removed: Vec<String> = seen.iter().map(|s| s.body.clone()).collect();
+        assert!(removed.iter().any(|b| b.contains(&socketless)), "the session with no room entry: {removed:?}");
+        assert!(removed.iter().any(|b| b.contains(&in_voice)), "the one in the room: {removed:?}");
+        assert!(removed.iter().any(|b| b.contains(&unconfirmed)), "the one that holds a mint and has not arrived: {removed:?}");
+        assert!(!removed.iter().any(|b| b.contains(&stranger)), "control: another room's call: {removed:?}");
+        assert_eq!(socketless_owes, Some(Recheck::Cut));
+        assert_eq!(in_voice_owes, Some(Recheck::Cut));
+        assert!(stranger_there, "control: another room's call is still in the map");
+        assert_eq!(story, vec![format!("left:voice_{}:room_gone", f.town)], "told before the cut");
+    }
+
     /// Nobody but the deleter or the dragger used to learn: every other member's list kept a
     /// deleted row until it was next refetched, and the old order. The frame names only the
     /// server, so the list has to say it.

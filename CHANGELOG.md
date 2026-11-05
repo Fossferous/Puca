@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Deleting a channel or a collection ends the calls in it on the server too.** Your own app leaves a call whose channel was deleted, but one that did not hear in time stayed in it: a build from before 0.9.855 looking at another server, a phone that had lost its connection mid-call, a session nobody was driving. The server went on counting it as in the deleted channel, and on a channel using the media server LiveKit went on carrying its microphone, for as long as that app stayed open, while it was answered "Not a member of this channel's server" every time it pinged. The server now takes everyone out of the room when the channel goes, as it does when a server is disbanded, and says why: "*Name* is no longer available, so you left its call". The same goes for the voice channels in a deleted collection and for a mode's main voice channel (the mode stays on, with no main channel). A card table in the room ends with it, as before. Needs the new server.
+
 ## 0.9.856 — 2026-11-04
 
 Spoilers stay hidden, a server going reaches everyone, and the Light theme is readable
