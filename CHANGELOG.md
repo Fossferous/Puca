@@ -9,6 +9,7 @@ one-line summary; this file is the full story. Versions follow
 ### Fixed
 
 - **A file you send as a spoiler stays hidden after a sad face like `:[`.** A `[` left open in your words (`:[`, or `[1`) made the message list read everything from it up to the file as one link: the spoiler was gone, the file was drawn in the clear, and your words were eaten into its name. The `[` is words now and the file is under its spoiler, as the previews already showed it. A link's label takes no `[` in it, as in other chat apps, so `[a [b](https://example.org)` is the words `[a ` and a link, and `[[1](https://example.org)]` is a link in brackets. An `@mention`, a `#channel` or an address that stood between a stray `[` and a link was swallowed into the link's label, and now counts as what it is: the mention notifies and the address gets its card. A message the new reading would print a word of that 0.9.857 hid is read as 0.9.857 read it.
+- **Save to Notes keeps the words before a sad face.** `hello :[ world` followed by a picture saved only `hello :` and named the picture ` world ![beach.png`; the same open `[` that opened a spoilered file now stops there. The words stay in the note and the picture keeps its own name.
 
 ## 0.9.857 — 2026-11-05
 

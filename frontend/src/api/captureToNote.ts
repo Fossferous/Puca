@@ -32,7 +32,11 @@ export const CAPTURE_TITLE_MAX = 100;
 // leading `!`. `i` throughout: URL schemes are case-insensitive, and a
 // case-sensitive matcher let `SOVEREIGN-ENC:` through carrying its key — the
 // bug api/contextMenuUtils.ts already records on the clipboard path.
-const ENC_MARKDOWN = /!?\[[^\]\n]*\]\(\s*sovereign-enc:[^)\s]*\s*\)/gi;
+//
+// A label takes no `[`, as the message list's does (utils/messageParser): a smiley left open before a
+// file (`hello :[ ![beach.png](sovereign-enc:…)`) is words, not the start of a label that runs on to
+// the file's own `[` and takes the words before it with it.
+const ENC_MARKDOWN = /!?\[[^[\]\n]*\]\(\s*sovereign-enc:[^)\s]*\s*\)/gi;
 // Anything left that still names an attachment — a bare ref someone typed or a
 // half-broken markdown link. Removed whole: the skeleton `sovereign-enc:<id>`
 // stripAttachmentKeys leaves behind is right for the clipboard (it shows what
@@ -63,7 +67,7 @@ export function captureTextFromMessage(content: string): string {
 export function attachmentRefsInMessage(content: string): TaskAttachmentRef[] {
     const out: TaskAttachmentRef[] = [];
     const seen = new Set<string>();
-    for (const m of content.matchAll(/(!?)\[([^\]\n]*)\]\(\s*(sovereign-enc:[^)\s]*)\s*\)/gi)) {
+    for (const m of content.matchAll(/(!?)\[([^[\]\n]*)\]\(\s*(sovereign-enc:[^)\s]*)\s*\)/gi)) {
         const href = m[3];
         if (!isEncAttachment(href) || seen.has(href)) continue;
         seen.add(href);

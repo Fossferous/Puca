@@ -57,6 +57,17 @@ describe('captureTextFromMessage', () => {
     it('positive control: a plain message round-trips unchanged', () => {
         expect(captureTextFromMessage('pack the tent and the stove')).toBe('pack the tent and the stove');
     });
+
+    it('a bracket left open before a picture is words: they stay, and only the picture goes', () => {
+        // `:[` is a smiley. The label of the picture ran from it to the picture's own `[`, so the words
+        // before the picture went with it and the note held `hello :`.
+        const out = captureTextFromMessage(`hello :[ world ![beach.png](${REF})`);
+        expect(out).toBe('hello :[ world');
+        expect(out).not.toContain('SECRETKEY');
+        expect(out).not.toContain('FILEID123');
+        // CONTROL: the same message without the stray keeps its words and loses the picture.
+        expect(captureTextFromMessage(`hello world ![beach.png](${REF})`)).toBe('hello world');
+    });
 });
 
 describe('attachmentRefsInMessage', () => {
@@ -69,6 +80,14 @@ describe('attachmentRefsInMessage', () => {
 
     it('finds nothing in a message with no attachments (positive control)', () => {
         expect(attachmentRefsInMessage('just words')).toEqual([]);
+    });
+
+    it('names a picture by its own label, not by the words before a stray bracket', () => {
+        const refs = attachmentRefsInMessage(`hello :[ world ![beach.png](${REF})`);
+        expect(refs.map(r => r.name)).toEqual(['beach.png']);
+        expect(refs[0].href).toBe(REF);
+        // A label that holds a `[` is not a label: the link starts at the nearest `[`.
+        expect(attachmentRefsInMessage(`[a [b.png](${REF})`).map(r => r.name)).toEqual(['b.png']);
     });
 });
 
