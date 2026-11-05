@@ -424,8 +424,15 @@ function matchBlockquote(s: string, reading: Reading, depth: number, at: Origin)
     if (quoted.length === 0) return null;
     const length = Math.min(consumed, s.length);
     const inQuote: Origin = (index) => {
-        let line = begins.length - 1;
-        while (line > 0 && begins[line][0] > index) line--;
+        // The last line that begins at or before `index` (a binary search: a quote of a thousand
+        // lines with a spoiler on each asked the lines one by one, from the end, for every spoiler).
+        let line = 0;
+        let high = begins.length - 1;
+        while (line < high) {
+            const mid = (line + high + 1) >> 1;
+            if (begins[mid][0] > index) high = mid - 1;
+            else line = mid;
+        }
         return at(begins[line][1] + index - begins[line][0]);
     };
     return { node: { type: 'blockquote', children: parseInline(quoted.join('\n'), depth, reading, inQuote) }, length };

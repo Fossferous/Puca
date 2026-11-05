@@ -1695,6 +1695,10 @@ describe('where a spoiler was typed (spoilerSpan)', () => {
         expect(typedIn('> ||a\n> b||')).toEqual(['||a\n> b||']);
         expect(typedIn('>\n> x ||y||')).toEqual(['||y||']);
         expect(typedIn('> a\n> \n> b ||c||')).toEqual(['||c||']);
+        // A spoiler at the very start of a quoted line after the first: the line it is on is the one
+        // that begins there, not the one before (an off-by-one here starts its span at the `> `).
+        expect(typedIn('> a\n> ||b||')).toEqual(['||b||']);
+        expect(typedIn('> a\n> b\n> ||c|| d\n> ||e||')).toEqual(['||c||', '||e||']);
         expect(typedIn('> **a ||b||** c')).toEqual(['||b||']);
         // A spoiler that holds a quote is one spoiler, typed from its bars to its bars.
         expect(typedIn('x ||a\n> b\nc|| tail')).toEqual(['||a\n> b\nc||']);

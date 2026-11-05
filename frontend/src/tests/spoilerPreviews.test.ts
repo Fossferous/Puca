@@ -132,6 +132,39 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(text(`||the twist ${ENC('end.png')}||`)).not.toContain('twist');
     });
 
+    it('a file in a spoiler stays hidden after a bracket nobody closed', () => {
+        // `:[` is a sad face, and a `[` left open before a spoilered file made the label of the
+        // file run from it through the cover and the bars to the real `](`: the name printed,
+        // `Image: ||![medical-results.png||`, in every preview and in what search matches.
+        const cases = [
+            `ugh :[ ||${ENC('medical-results.png')}||`,
+            `ugh :[ ${ENC('x.png')} ||${ENC('medical-results.png')}||`,
+            `[ ||words ${ENC('medical-results.png')}||`,
+            `[||\n${ENC('medical-results.png')}||`,
+            `a [b ||${ENC('medical-results.png')}||`,
+        ];
+        for (const message of cases) {
+            const segments = messagePreviewSegments(message);
+            for (const shown of [text(message), messageSearchText(message), segments.map(s => (s.type === 'text' ? s.text : segmentLabel(s))).join(' ')]) {
+                expect(shown, message).not.toContain('medical-results');
+                expect(shown, message).not.toMatch(/sovereign-enc|k=/);
+            }
+            // The file is the spoiler's: its segment says so, which is what keeps its name off the screen.
+            const medical = segments.filter(s => s.type === 'attachment' && s.name.includes('medical-results'));
+            expect(medical.length, message).toBe(1);
+            expect(medical.every(s => s.type === 'attachment' && s.spoiler), message).toBe(true);
+        }
+        expect(text(`ugh :[ ||${ENC('medical-results.png')}||`)).toBe('ugh :[ Spoiler image');
+        // Where the `[` makes the list read the rest as a link's label, there is no spoiler drawn to
+        // cover, and the message is printed as it is drawn: the file is still the spoiler's by its bars.
+        expect(parseMessage(`[ ||words ${ENC('medical-results.png')}||`).some(function has(n: Node): boolean {
+            return n.type === 'spoiler' || ('children' in n && n.children.some(has));
+        })).toBe(false);
+        // CONTROL: the same bracket before a file that is NOT in a spoiler: its name is printed, as
+        // it always was, and the bracket stays text.
+        expect(text(`ugh :[ ${ENC('holiday.png')}`)).toBe('ugh :[ Image: holiday.png');
+    });
+
     it('a cut never lands inside a spoiler: the words are covered before the count', () => {
         const printed = text(`aaaaaaaaaa ||${SECRET}||`, 12);
         expect(printed).not.toContain('thedemon');

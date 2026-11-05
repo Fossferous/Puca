@@ -53,12 +53,15 @@ export type PreviewSegment =
  *   1-5  `||`? `!`? `[label](` scheme-href ( `)` `||`? | END-OF-TEXT )
  *        — the markdown form, spoiler-wrapped or not, complete or cut off;
  *   6    a bare `sovereign-enc:` / `sovereign-clip:` href someone typed.
+ * A label holds no `[`: one left open before the ref (`:[`) would otherwise run the label from it through
+ * everything between, the cover of a spoiler and its bars included, to the real `](`, and print the file's
+ * name from inside a spoiler. The ref starts at ITS `[`, and what stands before it stays words.
  * `i` throughout: URL schemes are case-insensitive (isSafeUrl lowercases), and
  * a case-sensitive matcher once let `SOVEREIGN-ENC:` carry its key past a scrub.
  */
-const REF_RE = /(\|\|)?(!?)\[([^\]\n]*)\]\(\s*(sovereign-(?:enc|clip):[^)\s]*)\s*(?:\)(\|\|)?|$)|(sovereign-(?:enc|clip):[^\s)\]|]*)/gi;
+const REF_RE = /(\|\|)?(!?)\[([^\[\]\n]*)\]\(\s*(sovereign-(?:enc|clip):[^)\s]*)\s*(?:\)(\|\|)?|$)|(sovereign-(?:enc|clip):[^\s)\]|]*)/gi;
 /** A markdown link cut off before its scheme was even complete: `![a.png](sover`. */
-const CUT_LINK_RE = /(\|\|)?(!?)\[([^\]\n]*)\]\(\s*([a-z-]*)$/i;
+const CUT_LINK_RE = /(\|\|)?(!?)\[([^\[\]\n]*)\]\(\s*([a-z-]*)$/i;
 
 interface RefMatch {
     start: number;
