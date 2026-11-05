@@ -1403,6 +1403,15 @@ button.message-attachment.error { color: #ffb4b4; }
     color: var(--text-normal);
 }
 
+/* A spoiler is a control (Spoiler.tsx): the keyboard gets a ring. Drawn in the text colour, not the
+   brand: the chat's picture is mapped so that text reads on every pixel of it (api/modeLook.ts),
+   and nothing promises the brand colour does, while High Contrast sets the text colour to white or
+   black. The ring is outside the bar, so it shows on the bar's own colour too. */
+.spoiler:focus-visible {
+    outline: 2px solid var(--text-normal);
+    outline-offset: 2px;
+}
+
 /* Inline Code */
 .inline-code {
     background: var(--bg-tertiary);

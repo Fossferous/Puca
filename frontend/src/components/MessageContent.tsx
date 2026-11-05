@@ -5,7 +5,7 @@
  * only maps the resulting node tree to React elements and resolves mention /
  * channel names against the current server context.
  */
-import React, { createContext, useContext, useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
+import React, { useContext, useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
 import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
@@ -17,6 +17,8 @@ import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf, type Show
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
 import { VideoPlayer } from './VideoPlayer';
+import { Spoiler } from './Spoiler';
+import { SpoilerCover } from './spoilerCover';
 import { AttachmentLoading } from './AttachmentLoading';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
@@ -105,12 +107,6 @@ function audioPlayerRef(el: HTMLAudioElement | null): (() => void) | undefined {
     // On the Output Device chosen in Settings, not the OS default.
     return followOutputDeviceRef(el);
 }
-
-/** True inside a spoiler that is not revealed yet: a player there is
- *  covered, and nothing in it may be focused or pressed (VideoPlayer's
- *  `covered`). The cover itself is CSS (Chat.css, Spoilered media), which
- *  already keeps the pointer out; this keeps the keyboard out too. */
-const SpoilerCover = createContext(false);
 
 /** Fetch + decrypt an E2EE attachment and render it (image, video and audio
  *  inline, else a download link). The plaintext bytes only ever exist in this
@@ -653,24 +649,6 @@ const EMOJI: Record<string, string> = {
     check: '✅', x: '❌', warning: '⚠️', star: '⭐', skull: '💀',
 };
 // icon-lint:end
-
-function Spoiler({ children }: { children: React.ReactNode }) {
-    const [revealed, setRevealed] = useState(false);
-    return (
-        <span
-            className={`spoiler ${revealed ? 'revealed' : ''}`}
-            onClick={(e) => {
-                // Revealed, a press on a link, a channel or a Download is for that one, and would
-                // otherwise hide what it just pressed. Hidden, they take no press (Chat.css).
-                const control = (e.target as Element).closest('a, button, [role="button"]');
-                if (revealed && control && e.currentTarget.contains(control)) return;
-                setRevealed(!revealed);
-            }}
-        >
-            <SpoilerCover.Provider value={!revealed}>{children}</SpoilerCover.Provider>
-        </span>
-    );
-}
 
 interface Ctx {
     members: MemberWithRoles[];
