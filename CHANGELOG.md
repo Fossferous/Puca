@@ -4,6 +4,14 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **A spoiler can be opened from the keyboard, and a screen reader no longer reads out what is in it.** Tab to a spoiler and press Enter or Space to reveal it, and again to hide it. It has a ring while the keyboard is on it, on every theme and with High Contrast. A screen reader says "Spoiler, button" and nothing of the words until you open it, and you cannot Tab to a link or a player inside one that is shut. A voice hotkey on Space or Enter still takes that key first, as it does for every button, so a push-to-talk never opens one, and typing in the box is as before.
+- **A spoiler's words show only in the message itself.** The line above a reply, the **Replying to** bar, **Pinned messages**, search results, a collection's feed and the toast for a direct message printed `||the words||` as they were typed, with a link, a file's name or a mention in it, and the toast the key of an attached file as well. They now say **Spoiler** (**Spoiler image** and so on for a file), whatever the spoiler holds, and opening it in the message changes none of them. Search no longer finds a message by what is inside a spoiler. Left as they were on purpose: **Quote** copies the message as it is, with the `||` around the spoiler, so your quote hides it too, but you can read it in the box until you send it. **Copy Text**, **Save to Notes** (Púca Notes has no spoilers) and **Edit** on your own message keep the words as written. Notifications from the system never carried what a message says.
+- **On a Windows contrast theme, a hidden spoiler hides.** Those themes paint over the colour that made the words invisible, so a hidden spoiler printed them in the clear. It is now a solid bar in the theme's text colour, which stays a bar when the pointer is over it or the keyboard is on it, and it reads as ordinary text once opened.
+
 ## 0.9.856 — 2026-11-04
 
 Spoilers stay hidden, a server going reaches everyone, and the Light theme is readable
