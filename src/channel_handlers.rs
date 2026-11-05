@@ -826,41 +826,64 @@ pub async fn delete_channel(
         .map(|r| r.rows_affected())
         .unwrap_or(0);
 
-    if named_by_a_mode {
-        crate::mode_handlers::announce_edit(&state, &server_id).await;
-    }
-
-    // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
-    for id in &doomed {
-        state.games.close_room(
-            &state,
-            &format!("voice_{id}"),
-            crate::games_wire::GameEndReason::ChannelDeleted,
-        );
-    }
-
-    // TELL EVERYONE, as update_channel does: every member refetches the channel list, and
-    // the refetch is what takes the rows off theirs and closes whichever of them was open.
-    // Nothing else would until they left the server and came back.
-    crate::mode_handlers::push_to_members(
-        &state,
-        &server_id,
-        crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
-    )
-    .await;
-
-    // EMPTY THEIR ROOMS. A client ends its own call when the channel leaves its list, but
-    // that is the client's doing: one that does not (an older build looking at another
-    // server, a socket that died with its LiveKit session alive, a stream-only account
-    // nobody is watching) stayed in the deleted channel's room, and in LiveKit's, for good.
-    // Started straight away, detached, so a request cancelled from here on cannot lose it;
-    // after the frame above, which does not wait on a LiveKit round trip. Only for a row
-    // that went: a delete that failed leaves the channel, and everyone in it.
-    if deleted_rows > 0 {
-        crate::ws::start_channels_deleted(&state, &server_id, doomed).wait().await;
-    }
+    // EVERYTHING AFTER THE ROW IS GONE runs detached, started with nothing awaited between it and
+    // the DELETE (delete_server's own rule): a client that drops its connection a few
+    // milliseconds after pressing Delete cancels this handler, and a tail that was still to
+    // start would never run. The channel would be gone from the database with its people
+    // still in its room, and nobody told the list had changed.
+    let tail = finish_channel_delete(&state, &server_id, doomed, named_by_a_mode, deleted_rows);
+    let _ = tail.await;
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// What follows a `DELETE FROM channels`, detached ([`delete_channel`] says why): a mode that
+/// named the channel is told, a card table in a voice room ends, everyone's list is told to
+/// refetch, and then the rooms of everything the cascade took are emptied on the server.
+///
+/// A client ends its own call when the channel leaves its list, but that is the client's doing:
+/// one that does not (an older build looking at another server, a socket that died with its
+/// LiveKit session alive, a stream-only account nobody is watching) stayed in the deleted
+/// channel's room, and in LiveKit's, for good. The emptying comes after the frame that tells
+/// the lists, which does not wait on a LiveKit round trip, and only for a row that went: a
+/// delete that failed leaves the channel, and everyone in it.
+pub(crate) fn finish_channel_delete(
+    state: &Arc<AppState>,
+    server_id: &str,
+    doomed: Vec<i32>,
+    named_by_a_mode: bool,
+    deleted_rows: u64,
+) -> tokio::task::JoinHandle<()> {
+    let state = Arc::clone(state);
+    let server_id = server_id.to_string();
+    tokio::spawn(crate::sfu::carry_test_livekit(async move {
+        if named_by_a_mode {
+            crate::mode_handlers::announce_edit(&state, &server_id).await;
+        }
+
+        // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
+        for id in &doomed {
+            state.games.close_room(
+                &state,
+                &format!("voice_{id}"),
+                crate::games_wire::GameEndReason::ChannelDeleted,
+            );
+        }
+
+        // TELL EVERYONE, as update_channel does: every member refetches the channel list, and
+        // the refetch is what takes the rows off theirs and closes whichever of them was open.
+        // Nothing else would until they left the server and came back.
+        crate::mode_handlers::push_to_members(
+            &state,
+            &server_id,
+            crate::protocol::ServerMessage::ChannelUpdated { server_id: server_id.clone() },
+        )
+        .await;
+
+        if deleted_rows > 0 {
+            crate::ws::start_channels_deleted(&state, &server_id, doomed).wait().await;
+        }
+    }))
 }
 
 /// Reorder channels in a server

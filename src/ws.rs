@@ -1518,6 +1518,23 @@ pub async fn evict_user_from_voice_room(
     cut_sfu: bool,
     notice: SelfNotice,
 ) -> bool {
+    evict_user_from_voice_room_together(state, room_id, user_id, cut_sfu, notice, &[]).await
+}
+
+/// [`evict_user_from_voice_room`] for a sweep that is taking `leaving_too` out of the same
+/// room at the same moment (a deleted channel's occupants): the people who stay hear that this
+/// one left, and the people who are leaving too hear it only from their own `RoomLeft`. Told
+/// to each other as well, a call of N people got N-1 `UserLeft` apiece in the same instant,
+/// and every client still in the call played a leave sound for each of them (and spoke each
+/// name, with Read Joins and Leaves Aloud on) before the frame that ended its call arrived.
+pub async fn evict_user_from_voice_room_together(
+    state: &Arc<AppState>,
+    room_id: &str,
+    user_id: UserId,
+    cut_sfu: bool,
+    notice: SelfNotice,
+    leaving_too: &[UserId],
+) -> bool {
     // Snapshot BEFORE mutating. The broadcasts below must reach the room's
     // PRE-eviction member list: removing the last member deletes the room
     // outright, and a broadcast against a room that just vanished reaches
@@ -1560,7 +1577,7 @@ pub async fn evict_user_from_voice_room(
 
     // Remaining members get the full media-stopped + left set (mirrors the
     // unclean-disconnect path) so no ghost tile survives either.
-    let peers = || members.iter().copied().filter(|&m| m != user_id);
+    let peers = || members.iter().copied().filter(|&m| m != user_id && !leaving_too.contains(&m));
     if was_sharer {
         let msg = ServerMessage::ScreenShareStopped {
             room_id: room_id.to_string(),
@@ -1594,9 +1611,6 @@ pub async fn evict_user_from_voice_room(
     // its next JoinRoom replay and the eviction undoes itself.
     //
     let ended_by_a_mode = matches!(notice, SelfNotice::ModeEnded);
-    // Where the channel's own answer is not to be trusted (a mode's, or one that is gone: the
-    // resync's join check reads a failed lookup), the LiveKit leg is a cut, not an eviction.
-    let cut_as_cut = ended_by_a_mode || matches!(notice, SelfNotice::RoomGone);
     // Sent BEFORE the SFU cut below, and the order is load-bearing for a MOVE.
     // `evict_user_from_channel` awaits an HTTP round trip to LiveKit, and
     // LiveKit then pushes the forced removal to the browser over its own
@@ -1686,7 +1700,7 @@ pub async fn evict_user_from_voice_room(
     // publication has to be severed server-side.
     if cut_sfu {
         if let Some(cid) = parse_voice_room(room_id) {
-            if cut_as_cut {
+            if ended_by_a_mode {
                 crate::sfu::cut_user_from_channel(state, cid, user_id).await;
             } else {
                 crate::sfu::evict_user_from_channel(state, cid, user_id).await;
@@ -5474,10 +5488,10 @@ async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>, delete
     // pass below cuts everyone there, those whose socket left this room included.
     let evictions = channels.iter().flat_map(|&channel| {
         let room_id = format!("voice_{channel}");
-        let occupants = state.rooms.get(&room_id).map(|room| room.members.clone()).unwrap_or_default();
-        occupants.into_iter().map(move |user| (room_id.clone(), user))
+        let occupants: Vec<UserId> = state.rooms.get(&room_id).map(|room| room.members.clone()).unwrap_or_default();
+        occupants.clone().into_iter().map(move |user| (room_id.clone(), user, occupants.clone()))
     });
-    futures::future::join_all(evictions.map(|(room_id, user)| async move {
+    futures::future::join_all(evictions.map(|(room_id, user, together)| async move {
         match deleted {
             Deleted::WithItsServer => {
                 // Tombstoned, so a media start already on its way from their client is ignored
@@ -5487,10 +5501,10 @@ async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>, delete
                 for sid in conns.iter().filter_map(|&conn| state.session_sid(user, conn)) {
                     state.tombstone_voice(user, &sid, &room_id, ROOM_GONE, None);
                 }
-                evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::Gone).await
+                evict_user_from_voice_room_together(state, &room_id, user, false, SelfNotice::Gone, &together).await
             }
             // Tombstones the connections that held the call, as it tells them why.
-            Deleted::Alone => evict_user_from_voice_room(state, &room_id, user, false, SelfNotice::RoomGone).await,
+            Deleted::Alone => evict_user_from_voice_room_together(state, &room_id, user, false, SelfNotice::RoomGone, &together).await,
         }
     }))
     .await;

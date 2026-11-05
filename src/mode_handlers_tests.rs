@@ -1499,7 +1499,9 @@ mod db {
         let after_refusal = (members_of(&state, &lone_room).len(), caller.drain().len());
 
         let gone = delete_channel_as(&state, f.owner, lone).await;
-        let (caller_told, phone_told, mate_told) = (left(&caller.drain()), left(&phone.drain()), left(&mate.drain()));
+        let (caller_frames, phone_frames, mate_frames) = (caller.drain(), phone.drain(), mate.drain());
+        let (caller_told, phone_told, mate_told) = (left(&caller_frames), left(&phone_frames), left(&mate_frames));
+        let heard_each_other_leave = [&caller_frames, &mate_frames].iter().any(|frames| frames.iter().any(|m| matches!(m, M::UserLeft { .. })));
         let lone_after = members_of(&state, &lone_room);
         let held_tombstone = state.voice_replay_tombstone(f.plain, &format!("s{}", f.plain), &lone_room).map(|t| t.reason);
         let control_told = (left(&beside.drain()), left(&below.drain()), members_of(&state, &other_room), members_of(&state, &under_room));
@@ -1521,6 +1523,10 @@ mod db {
         assert!(lone_after.is_empty(), "nobody is left in a room of a channel that is gone: {lone_after:?}");
         assert_eq!(caller_told, vec![format!("left:{lone_room}:room_gone")], "the call says why it ended");
         assert_eq!(mate_told, vec![format!("left:{lone_room}:room_gone")]);
+        assert!(
+            !heard_each_other_leave,
+            "people taken out together are not told of each other leaving: each client still in the call played a leave sound (and spoke a name) for every one of them"
+        );
         assert_eq!(phone_told, vec![format!("left:{lone_room}:-")], "the same account's other device, in no call, is told plainly");
         assert_eq!(held_tombstone, Some("room_gone"), "and a device that slept through it is refused a replay of the call");
         assert_eq!(control_told.0, Vec::<String>::new(), "control: a room beside it is told nothing");
@@ -1701,6 +1707,81 @@ mod db {
         assert_eq!(in_voice_owes, Some(Recheck::Cut));
         assert!(stranger_there, "control: another room's call is still in the map");
         assert_eq!(story, vec![format!("left:voice_{}:room_gone", f.town)], "told before the cut");
+    }
+
+    /// A sweep taking several people out of one room tells each of them only that THEIR call
+    /// ended. People who stay still hear who left (the control, and the ordinary case).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn people_leaving_a_room_together_are_not_told_of_each_other_and_those_who_stay_are() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let room = channel(&pool, &f.sid, "together", 1).await;
+        let room_id = format!("voice_{room}");
+        let mut going = Sock::in_room(&state, f.plain, room);
+        let mut also = Sock::in_room(&state, f.mover, room);
+        let mut staying = Sock::in_room(&state, f.manager, room);
+        for s in [&mut going, &mut also, &mut staying] {
+            s.drain();
+        }
+        let left_by = |frames: &[M], who: i64| frames.iter().any(|m| matches!(m, M::UserLeft { user_id, .. } if *user_id == who));
+
+        crate::ws::evict_user_from_voice_room_together(&state, &room_id, f.plain, false, crate::ws::SelfNotice::RoomGone, &[f.mover]).await;
+        let (also_frames, staying_frames) = (also.drain(), staying.drain());
+        // Control: the same person, still in the room, IS told when someone leaves on their own.
+        crate::ws::evict_user_from_voice_room(&state, &room_id, f.manager, false, crate::ws::SelfNotice::Gone).await;
+        let also_after = also.drain();
+        teardown(&pool, &f).await;
+
+        assert!(!left_by(&also_frames, f.plain), "someone leaving in the same sweep is not announced to them: {also_frames:?}");
+        assert!(left_by(&staying_frames, f.plain), "someone who stays is told: {staying_frames:?}");
+        assert!(left_by(&also_after, f.manager), "control: and the one leaving with them can hear a leave, when it is not their own sweep: {also_after:?}");
+    }
+
+    /// A client that drops its connection a few milliseconds after pressing Delete cancels the
+    /// handler, so what follows the row going runs detached: this is the part nobody waits for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_tail_of_a_channel_delete_finishes_when_nothing_waits_for_it() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let gone = channel(&pool, &f.sid, "detached", 1).await;
+        let kept = channel(&pool, &f.sid, "detached-control", 1).await;
+        let (gone_room, kept_room) = (format!("voice_{gone}"), format!("voice_{kept}"));
+        let mut caller = Sock::in_room(&state, f.plain, gone);
+        let _bystander = Sock::in_room(&state, f.mover, kept);
+        caller.drain();
+        // The handle is dropped on the spot: the request that started it is gone.
+        drop(crate::channel_handlers::finish_channel_delete(&state, &f.sid, vec![gone], false, 1));
+        // A delete that did not happen starts the same tail and must empty nothing.
+        drop(crate::channel_handlers::finish_channel_delete(&state, &f.sid, vec![kept], false, 0));
+        let mut emptied = false;
+        for _ in 0..100 {
+            if members_of(&state, &gone_room).is_empty() {
+                emptied = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let told = left(&caller.drain());
+        let kept_members = members_of(&state, &kept_room);
+        teardown(&pool, &f).await;
+
+        assert!(emptied, "the room was emptied with nobody waiting for the tail");
+        assert_eq!(told, vec![format!("left:{gone_room}:room_gone")]);
+        assert_eq!(kept_members.len(), 1, "control: a delete that did not happen empties nothing");
+    }
+
+    /// The handler may be cancelled at any await. delete_server starts its tail with none between
+    /// the commit and the spawn; so does this: one `.await` between the DELETE and the tail is
+    /// the DELETE's own.
+    #[test]
+    fn nothing_is_awaited_between_a_channels_delete_and_its_tail() {
+        let src = include_str!("channel_handlers.rs");
+        let from = src.find("let deleted_rows = sqlx::query(\"DELETE FROM channels WHERE id = $1\")").expect("the delete");
+        let to = from + src[from..].find("finish_channel_delete(&state").expect("the tail");
+        let between = &src[from..to];
+        assert_eq!(between.matches(".await").count(), 1, "only the DELETE's own: {between}");
     }
 
     /// Nobody but the deleter or the dragger used to learn: every other member's list kept a
