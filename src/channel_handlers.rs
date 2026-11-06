@@ -414,6 +414,21 @@ pub async fn create_channel(
                 Some(ids) => members.into_iter().filter(|(m,)| !ids.contains(&(*m as i64))).collect(),
                 None => Vec::new(),
             };
+            // A channel created inside a collection is NOT decided by base
+            // permissions: the collection's overwrites reach it from the first
+            // moment (docs/USER_GUIDE.md, Collections and permissions). Told only to those the
+            // real resolver lets see it. Fail closed: an Err tells nobody.
+            let members: Vec<(i32,)> = if parent_id.is_some() {
+                match crate::permissions::get_channel_viewer_ids(&state.pool, channel_id as i64, &server_id).await {
+                    Ok(viewers) => members.into_iter().filter(|(m,)| viewers.contains(&(*m as i64))).collect(),
+                    Err(e) => {
+                        tracing::error!("ChannelCreated: viewer resolve failed for channel {}: {}", channel_id, e);
+                        Vec::new()
+                    }
+                }
+            } else {
+                members
+            };
             let channel_info = crate::protocol::ChannelInfo {
                 id: channel_id as i64,
                 name: payload.name.clone(),
@@ -436,9 +451,16 @@ pub async fn create_channel(
             }
 
             // The creator's effective bits on the new channel = their base
-            // server permissions (no overwrites exist yet).
-            let my_permissions =
-                get_user_server_permissions(&state.pool, &server_id, claims.sub).await;
+            // server permissions (no overwrites exist yet), unless a collection
+            // holds it: then its overwrites already apply to the creator too.
+            let my_permissions = if parent_id.is_some() {
+                match crate::permissions::get_user_channel_permissions(&state.pool, channel_id as i64, claims.sub).await {
+                    crate::permissions::ChannelPermAccess::Allowed { perms, .. } => perms,
+                    _ => Permissions::empty(),
+                }
+            } else {
+                get_user_server_permissions(&state.pool, &server_id, claims.sub).await
+            };
 
             Json(ChannelResponse {
                 id: channel_id as i64,
@@ -532,7 +554,8 @@ pub async fn update_channel(
         let unchanged = before.is_some_and(|(_, _, parent)| parent == Some(parent_id));
         if !unchanged
             && (parent_id as i64 == channel_id
-                || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await)
+                || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
+                || parent_would_loop(&state.pool, &server_id, channel_id, parent_id as i64).await)
         {
             return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
@@ -584,6 +607,18 @@ pub async fn update_channel(
             if payload.is_afk == Some(true) {
                 crate::mode_handlers::release_afk_channel(&state, &server_id, channel_id as i32).await;
             }
+
+            // A channel that changes collection changes who may see it: the
+            // collections' overwrites travel with it (docs/USER_GUIDE.md, Collections and permissions). The
+            // same sweep an overwrite edit runs - tell the members, rotate the
+            // key for the new viewer set, put out whoever lost the channel from
+            // its rooms. Started before anything else is awaited so a request
+            // cancelled from here on cannot lose it.
+            let moved = match payload.parent_id {
+                Some(now) => before.is_none_or(|(_, _, was)| was != now),
+                None => false,
+            };
+            let sweep = moved.then(|| crate::ws::start_perms_change(&state, &server_id));
 
             // TELL EVERYONE, not just the editor. Every member refetches the
             // channel list, and the refetch applies each reader's own
@@ -664,6 +699,9 @@ pub async fn update_channel(
                     }
                 }
             }
+            if let Some(sweep) = sweep {
+                sweep.wait().await;
+            }
             StatusCode::OK.into_response()
         }
         Err(e) => {
@@ -700,6 +738,22 @@ pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Optio
 
 /// What a client is told when a channel it names cannot be a parent.
 const PARENT_REFUSED: &str = "Parent channel must be a collection in the same server";
+
+/// Would making `parent_id` the parent of `channel_id` close a loop - is
+/// `channel_id` already one of the collections above `parent_id`? A loop makes
+/// no collection reachable and has the permission resolvers read each
+/// collection's rows once. A failed read says yes (refuse).
+async fn parent_would_loop(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, parent_id: i64) -> bool {
+    let rows: Result<Vec<(i64, i64)>, _> =
+        sqlx::query_as("SELECT id::bigint, parent_id::bigint FROM channels WHERE server_id = $1 AND parent_id IS NOT NULL")
+            .bind(server_id)
+            .fetch_all(pool)
+            .await;
+    match rows {
+        Ok(rows) => crate::permissions::ancestor_chain(&rows.into_iter().collect(), parent_id).contains(&channel_id),
+        Err(_) => true,
+    }
+}
 
 /// Is this channel a collection of this server? A failed read says no.
 async fn parent_is_a_collection_here(pool: &sqlx::PgPool, parent_id: i32, server_id: &str) -> bool {

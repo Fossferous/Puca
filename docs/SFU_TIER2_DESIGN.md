@@ -317,6 +317,11 @@ versions; details in the repo):
    participant churn; an event-driven rekey (WS push + in-call minting) and
    rotation-on-permission-revoke (the migration-033 overwrite path never bumps
    the generation) remain open follow-ups.
+   (Today the sweep after an overwrite change, a role change or a channel moving
+   between collections does bump the generation, so what is written afterwards is
+   wrapped only for the members who still view the channel. What a member already
+   holds is not revoked: a collection's deny closes the channel's routes and rooms
+   to them, not the keys they were given for earlier epochs.)
 3. **"One shared group key" is overstated** — per-sender keys (SFrame RFC 9605)
    also traverse an SFU and preserve sender authentication; the shared-key mode
    (built, v1) lets any member forge frames as another member, and a CK-derived

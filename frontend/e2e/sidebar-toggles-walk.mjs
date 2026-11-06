@@ -23,7 +23,9 @@
 //      collection's header follows a rename, an emptied topic stays empty, a cancelled Create
 //      Subchannel leaves no parent behind, and a channel under a collection inside a
 //      collection has a row, and that collection is not offered as a parent. A channel under
-//      a collection a member is denied has no row for them, though the server lists it.
+//      a collection a member is denied is not listed to them at all, and refused if they ask for
+//      it by number (the server enforces a collection's deny on what is inside it); a channel
+//      inside with its own allow is listed and drawn at the top (control).
 //      NEGATIVE CONTROL: a # row for a voice room injected into the list must be caught.
 //   B. Every switch on Server Settings > Overview (and Modes) is a switch: a track with
 //      a knob, a label beside it, on and off plainly different, at 3:1 on all eight
@@ -899,11 +901,13 @@ try {
     check('control: someone who can see all of it is asked, and the question names the room', (dialogs[0] ?? '').includes('Staff room'), dialogs);
     check('and it goes, for the manager too', !!await until(async () => !hasRow(await sidebarRows(C), 'Guarded'), 8000), (await sidebarRows(C)).map(r => r.name));
 
-    // A collection a member is denied. What is in it has no row for them, though the server lists
-    // it (a channel's permissions are its own, so nothing comes down from the collection): denying
-    // the collection is how an owner makes it look private.
+    // A collection a member is denied. What is in it is not theirs either: the SERVER leaves it out of
+    // their list and refuses it by number (a collection's deny reaches what is inside it, and a channel
+    // inside with an allow of its own takes it back). Denying the collection is how an owner makes it
+    // private, and until the server did that only this sidebar kept the rows out of sight.
     const deniedOne = await mk('Denied', 2);
     await mk('denied-notes', 0, deniedOne.id);
+    const takenBack = await mk('taken-back', 0, deniedOne.id);
     await B.locator('.mobile-nav-btn').nth(1).tap().catch(() => {});
     await sleep(400);
     const beforeDeny = await until(async () => {
@@ -911,11 +915,17 @@ try {
         return row.length === 1 && row[0].sub ? row : null;
     }, 8000);
     check('control: a member who can see a collection has a row for what is in it, under it', !!beforeDeny, named(await sidebarRows(B), 'denied-notes'));
+    const notesId = (await api(A, 'GET', `/servers/${srv.id}/channels`)).find(c => c.name === 'denied-notes').id;
+    await api(A, 'PUT', `/channels/${takenBack.id}/overwrites/${everyone.id}`, { allow: 1 << 0, deny: 0 });
     await api(A, 'PUT', `/channels/${deniedOne.id}/overwrites/${everyone.id}`, { allow: 0, deny: 1 << 0 });
     check('fixture: denied it, the member has no row for the collection', !!await until(async () => !hasRow(await sidebarRows(B), 'Denied'), 8000), (await sidebarRows(B)).map(r => r.name));
     const listedForThem = (await api(B, 'GET', `/servers/${srv.id}/channels`)).map(c => c.name);
-    check('fixture: and the server still lists them what is in it, which is the point', listedForThem.includes('denied-notes') && !listedForThem.includes('Denied'), listedForThem);
-    check('a channel under a collection a member is denied has no row for them', !hasRow(await sidebarRows(B), 'denied-notes'), (await sidebarRows(B)).map(r => r.name));
+    check('the server does not list them what is in it, nor the collection', !listedForThem.includes('denied-notes') && !listedForThem.includes('Denied'), listedForThem);
+    check('and has no row for it, because there is none to draw', !hasRow(await sidebarRows(B), 'denied-notes'), (await sidebarRows(B)).map(r => r.name));
+    const refused = await api(B, 'GET', `/channels/${notesId}/messages`).then(() => 'answered', e => String(e.message).match(/: (\d+) /)?.[1]);
+    check('asked for by number it is refused as one that does not exist', refused === '404', refused);
+    check('control: the channel inside with an allow of its own is listed to them', listedForThem.includes('taken-back'), listedForThem);
+    check('and drawn at the top, its collection not being theirs to see', !!await until(async () => named(await sidebarRows(B), 'taken-back').length === 1 && named(await sidebarRows(B), 'taken-back')[0].sub === false, 8000), named(await sidebarRows(B), 'taken-back'));
     check('control: someone who can see the collection keeps it there, under it', named(await sidebarRows(A), 'denied-notes')[0]?.sub === true, named(await sidebarRows(A), 'denied-notes'));
     await api(A, 'DELETE', `/channels/${deniedOne.id}`);
 

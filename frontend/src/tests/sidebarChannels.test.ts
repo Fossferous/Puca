@@ -3,9 +3,7 @@ import {
     deleteChannelQuestion,
     drawnAtTop,
     drawnUnderCollection,
-    hiddenWithCollection,
     keptByHideMuted,
-    landingRows,
     parentChoices,
     reorderedChannelIds,
     withoutDeletedChannel,
@@ -47,7 +45,7 @@ describe('the row every text channel and collection gets', () => {
 
     // As Chat.tsx's list draws them: each top-level row, then a collection's children.
     const drawnRows = (rows: Row[]) => rows
-        .filter(c => c.channel_type !== VOICE && drawnAtTop(c, rows) && !hiddenWithCollection(c, rows))
+        .filter(c => c.channel_type !== VOICE && drawnAtTop(c, rows))
         .flatMap(c => [c.id, ...(c.channel_type === COLLECTION
             ? rows.filter(sub => sub.parent_id === c.id && !drawnAtTop(sub, rows)).filter(drawnUnderCollection).map(sub => sub.id)
             : [])]);
@@ -71,13 +69,15 @@ describe('the row every text channel and collection gets', () => {
         expect(drawnRows(rows)).toEqual([1, 2, 3]);
     });
 
-    it('draws nothing under a collection this reader cannot see: denying it is how it looks private', () => {
-        expect(drawnRows([row(3, TEXT, 99)])).toEqual([]);
-        expect(drawnRows([row(1, TEXT), row(3, TEXT, 99)])).toEqual([1]);
+    it('draws a channel whose collection is not in the list at the top: the server lists it only because its own allow wins', () => {
+        // The server enforces a collection's deny on what is in it (docs/USER_GUIDE.md, Collections and permissions), so a row
+        // that arrives without its collection is one the reader was let into, not a leak to hide.
+        expect(drawnRows([row(3, TEXT, 99)])).toEqual([3]);
+        expect(drawnRows([row(1, TEXT), row(3, TEXT, 99)])).toEqual([1, 3]);
     });
 
-    it('nor anything under a collection inside one, the row that has none other otherwise', () => {
-        expect(drawnRows([row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([]);
+    it('and a collection inside one that is not listed, with what is in it', () => {
+        expect(drawnRows([row(2, COLLECTION, 99), row(3, TEXT, 2)])).toEqual([2, 3]);
     });
 
     it('CONTROL: the same rows, with that collection in the reader\'s list, are drawn', () => {
@@ -107,37 +107,6 @@ describe('the row every text channel and collection gets', () => {
 
     it('stops at a row with no parent, whatever spelling of none the server sent', () => {
         expect(drawnAtTop({ id: 1, name: 'a', channel_type: TEXT }, [])).toBe(true);
-    });
-});
-
-describe('what someone who chose no channel may land on', () => {
-    const hidden = { id: 50, name: 'staff-plans', channel_type: TEXT, parent_id: 99 };
-    const open = { id: 51, name: 'general', channel_type: TEXT, parent_id: null };
-    const room = { id: 52, name: 'Staff room', channel_type: VOICE, parent_id: 99 };
-
-    it('leaves out a row under a collection the reader cannot see, in the list\'s order', () => {
-        const rows = [hidden, open];
-        expect(landingRows(rows, rows)).toEqual([open]);
-    });
-
-    it('a voice room under one is drawn all the same, in its own section', () => {
-        const rows = [hidden, room];
-        expect(landingRows(rows, rows)).toEqual([room]);
-    });
-
-    it('takes such a row only when nothing else is drawn', () => {
-        expect(landingRows([hidden], [hidden])).toEqual([hidden]);
-    });
-
-    it('CONTROL: a row under a collection the reader can see is drawn', () => {
-        const parent = { id: 99, name: 'Open', channel_type: COLLECTION, parent_id: null };
-        const rows = [hidden, open, parent];
-        expect(landingRows(rows, rows)).toEqual(rows);
-    });
-
-    it('reads the parents from the whole list, not the rows it is given', () => {
-        const parent = { id: 99, name: 'Open', channel_type: COLLECTION, parent_id: null };
-        expect(landingRows([hidden, open], [hidden, open, parent])).toEqual([hidden, open]);
     });
 });
 

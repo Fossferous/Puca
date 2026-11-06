@@ -28,44 +28,15 @@ export function drawnUnderCollection(channel: { channel_type: number }): boolean
  * the raw API named that is no collection. Whoever draws a collection's children leaves these
  * out, which is what stops a loop being drawn twice. A parent not among `channels` draws nothing
  * either: the Modes tab asks this of one kind of row at a time, so a voice room's collection is
- * never among them. The sidebar's own list also asks hiddenWithCollection.
+ * never among them. So does a channel whose collection is denied to the reader but which allows the
+ * reader itself (its own allow wins over the collection's deny, docs/USER_GUIDE.md, Collections and permissions): the server lists
+ * it and not its collection, and it is drawn at the top. A channel under a collection the reader is
+ * denied, with no allow of its own, is not listed at all: the server enforces it.
  */
 export function drawnAtTop<C extends SidebarRow>(row: C, channels: readonly C[]): boolean {
     if (!row.parent_id) return true;
     const parent = channels.find(c => c.id === row.parent_id);
     return !parent || parent.channel_type !== 2 || !!parent.parent_id;
-}
-
-/**
- * Whether this row sits under a collection the reader cannot see, at any depth, and so stays out
- * of the sidebar's text list. The server lists a channel by its own permissions and carries no
- * deny down from its collection, so the row is there to draw, but denying a collection is how an
- * owner makes it look private, and it would put what is in it in front of every member denied it.
- * (A voice room is drawn in its own section, under this or not.)
- */
-export function hiddenWithCollection<C extends SidebarRow>(row: C, channels: readonly C[]): boolean {
-    const walked = new Set([row.id]);
-    let parentId = row.parent_id;
-    while (parentId) {
-        const parent = channels.find(c => c.id === parentId);
-        if (!parent) return true;
-        // A loop the raw API made: every row of it is here to see.
-        if (walked.has(parent.id)) return false;
-        walked.add(parent.id);
-        parentId = parent.parent_id;
-    }
-    return false;
-}
-
-/**
- * Of the rows someone could land on who chose none (entering a server, the open channel deleted),
- * those the sidebar draws. Such a row under a collection they are denied has none to come back to,
- * so it counts only if nothing else is drawn, and a server holding nothing else still opens. A
- * #mention or a notification is a choice, and does not ask this.
- */
-export function landingRows<C extends SidebarRow>(rows: readonly C[], channels: readonly C[]): readonly C[] {
-    const drawn = rows.filter(c => c.channel_type === 1 || !hiddenWithCollection(c, channels));
-    return drawn.length > 0 ? drawn : rows;
 }
 
 /**

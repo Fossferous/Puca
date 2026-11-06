@@ -878,6 +878,123 @@ fn layer_rows(
     compute_channel_permissions(base, &[everyone, merged_roles], None)
 }
 
+/// One overwrite row as the layering reads it: (allow, deny, is_default).
+type OverwriteRow = (i64, i64, bool);
+
+/// How many collections above a channel are read. A collection holds channels
+/// and nothing draws a collection inside another one, so one is the depth the
+/// product has; `PATCH parent_id` refuses a loop but will still accept a
+/// collection under a collection, so a deny is carried down through up to this
+/// many levels, and a level beyond it is not read (ignored, never guessed).
+pub const MAX_COLLECTION_DEPTH: usize = 8;
+
+/// The collections above `id`, OUTERMOST first, at most MAX_COLLECTION_DEPTH of
+/// the nearest. `parents` maps a channel to its parent. A loop (rows from before
+/// `PATCH parent_id` refused them) ends the walk at the first channel seen
+/// twice, so every collection of the loop counts once and the walk always ends.
+pub fn ancestor_chain(parents: &std::collections::HashMap<i64, i64>, id: i64) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::from([id]);
+    let mut chain = Vec::new();
+    let mut at = id;
+    while chain.len() < MAX_COLLECTION_DEPTH {
+        match parents.get(&at) {
+            Some(&parent) if seen.insert(parent) => {
+                chain.push(parent);
+                at = parent;
+            }
+            _ => break,
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// What the collections above a channel have taken away from a member, as a
+/// set of bits, for a member whose base is `base`. `chain` holds each
+/// collection's rows for THIS member (their roles and @everyone), outermost
+/// first.
+///
+/// Each collection is layered like any channel, with one addition: a deny that
+/// reached it from above stays unless its own rows allow the bit again. What it
+/// took from the base is `base & !effective`; only a REMOVAL is carried down. A
+/// collection's allow grants nothing here, it only lifts a deny at its own level
+/// (so staff allowed on a denied collection keep its children).
+///
+/// Collections are layered as plain channels, whatever the member: a
+/// stream-only member resolves to nothing in a collection for a reason
+/// unrelated to its overwrites, and that must not read as "denied everything".
+fn inherited_denial(base: Permissions, chain: &[&[OverwriteRow]]) -> Permissions {
+    let mut denied = Permissions::empty();
+    for rows in chain {
+        let own = layer_rows(0, base, rows);
+        let effective = own & !(denied & !allow_union(rows));
+        denied = base & !effective;
+    }
+    denied
+}
+
+/// The union of the allow masks of `rows`, clamped to what an overwrite may set.
+fn allow_union(rows: &[OverwriteRow]) -> Permissions {
+    rows.iter().fold(Permissions::empty(), |acc, &(allow, _, _)| {
+        acc | (Permissions::from_bits_truncate(allow as u64) & Permissions::OVERWRITABLE)
+    })
+}
+
+/// [`layer_overwrite_rows`] for a channel inside collections: its own rows
+/// layered as ever, minus every bit a collection above denied this member that
+/// the channel's own rows do not allow back. The result is never more than the
+/// channel's own rows give (a collection can only take away), which is what the
+/// owner decided on 2026-11-05 (docs/USER_GUIDE.md, Collections and permissions).
+///
+/// All three resolvers call this one function: do not add a rule to one of them
+/// without adding it here.
+fn layer_with_collections(
+    channel_id: i64,
+    kind: ChannelKind,
+    base: Permissions,
+    chain: &[&[OverwriteRow]],
+    own_rows: &[OverwriteRow],
+) -> Permissions {
+    let own = layer_overwrite_rows(channel_id, kind, base, own_rows);
+    if base.is_admin() || chain.is_empty() {
+        return own;
+    }
+    let denied = inherited_denial(base, chain);
+    if denied.is_empty() {
+        return own;
+    }
+    let result = own & !(denied & !allow_union(own_rows));
+    // A stream-only member keeps a channel only while it can both see it and
+    // join it (stream_only_layer): a collection that took either leaves nothing.
+    if base.is_stream_only() && !result.contains(Permissions::VIEW_CHANNEL | Permissions::CONNECT) {
+        return Permissions::empty();
+    }
+    result
+}
+
+/// channel -> parent for every channel of the server that has one.
+async fn server_parent_map(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+) -> Result<std::collections::HashMap<i64, i64>, sqlx::Error> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id::bigint, parent_id::bigint FROM channels WHERE server_id = $1 AND parent_id IS NOT NULL",
+    )
+    .bind(server_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Overwrite rows with their channel, grouped by channel.
+fn group_rows(rows: Vec<(i64, i64, i64, bool)>) -> std::collections::HashMap<i64, Vec<OverwriteRow>> {
+    let mut by_channel: std::collections::HashMap<i64, Vec<OverwriteRow>> = std::collections::HashMap::new();
+    for (cid, allow, deny, is_default) in rows {
+        by_channel.entry(cid).or_default().push((allow, deny, is_default));
+    }
+    by_channel
+}
+
 /// Resolve a channel's owning server and the caller's EFFECTIVE permissions in
 /// it: server owner -> ADMINISTRATOR; non-member -> NotMember; otherwise the OR
 /// of the member's role permissions (roles held + @everyone) layered with this
@@ -895,9 +1012,10 @@ pub async fn get_user_channel_permissions(
     channel_id: i64,
     user_id: i64,
 ) -> ChannelPermAccess {
-    // Channel -> owning server + owner status + type in one round-trip.
-    let row: Option<(Option<String>, bool, i32)> = match sqlx::query_as(
-        "SELECT c.server_id, COALESCE(s.owner_id = $2, false), c.type \
+    // Channel -> owning server + owner status + type + whether a collection
+    // holds it, in one round-trip.
+    let row: Option<(Option<String>, bool, i32, bool)> = match sqlx::query_as(
+        "SELECT c.server_id, COALESCE(s.owner_id = $2, false), c.type, c.parent_id IS NOT NULL \
          FROM channels c LEFT JOIN servers s ON c.server_id = s.id \
          WHERE c.id = $1",
     )
@@ -917,8 +1035,8 @@ pub async fn get_user_channel_permissions(
         }
     };
 
-    let (server_id, is_owner, kind) = match row {
-        Some((Some(sid), owner, channel_type)) => (sid, owner, ChannelKind::from_type(channel_type)),
+    let (server_id, is_owner, kind, in_collection) = match row {
+        Some((Some(sid), owner, channel_type, held)) => (sid, owner, ChannelKind::from_type(channel_type), held),
         _ => return ChannelPermAccess::NotFound,
     };
 
@@ -980,21 +1098,43 @@ pub async fn get_user_channel_permissions(
         };
     }
 
-    // Overwrites for THIS channel restricted to the caller's roles + @everyone.
-    let rows: Vec<(i64, i64, bool)> =
+    // The collections above this channel (none for most channels: no extra
+    // query then). A failed read is NotFound, never "no collections".
+    let chain = if in_collection {
+        match server_parent_map(pool, &server_id).await {
+            Ok(parents) => ancestor_chain(&parents, channel_id),
+            Err(e) => {
+                tracing::error!(
+                    "get_user_channel_permissions: parent lookup failed for channel {}: {}",
+                    channel_id, e
+                );
+                return ChannelPermAccess::NotFound;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut wanted = chain.clone();
+    wanted.push(channel_id);
+
+    // Overwrites for THIS channel and the collections above it, restricted to
+    // the caller's roles + @everyone.
+    let rows: Vec<(i64, i64, i64, bool)> =
         match sqlx::query_as(
             r#"
-        SELECT o.allow, o.deny, sr.is_default
+        SELECT o.channel_id::bigint, o.allow, o.deny, sr.is_default
         FROM channel_permission_overwrites o
         JOIN server_roles sr ON o.role_id = sr.id
-        WHERE o.channel_id = $1
+        WHERE o.channel_id = ANY($1)
+        AND sr.server_id = $3
         AND (sr.is_default = true OR EXISTS (
             SELECT 1 FROM member_roles mr WHERE mr.role_id = o.role_id AND mr.user_id = $2
             AND mr.server_id = sr.server_id))
         "#,
         )
-        .bind(channel_id)
+        .bind(&wanted)
         .bind(user_id as i32)
+        .bind(&server_id)
         .fetch_all(pool)
         .await
         {
@@ -1008,9 +1148,14 @@ pub async fn get_user_channel_permissions(
             }
         };
 
+    let mut by_channel = group_rows(rows);
+    let own = by_channel.remove(&channel_id).unwrap_or_default();
+    let above: Vec<Vec<OverwriteRow>> = chain.iter().map(|c| by_channel.remove(c).unwrap_or_default()).collect();
+    let above: Vec<&[OverwriteRow]> = above.iter().map(Vec::as_slice).collect();
+
     ChannelPermAccess::Allowed {
         server_id,
-        perms: layer_overwrite_rows(channel_id, kind, base, &rows),
+        perms: layer_with_collections(channel_id, kind, base, &above, &own),
     }
 }
 
@@ -1041,10 +1186,17 @@ pub async fn get_user_channels_permissions(
         return Ok(map);
     }
 
-    // ONE query for every overwrite relevant to this user across the channels.
+    // The collections above each requested channel, then ONE query for every
+    // overwrite relevant to this user across the channels AND those collections.
+    let parents = server_parent_map(pool, server_id).await?;
+    let chains: std::collections::HashMap<i64, Vec<i64>> =
+        channel_ids.iter().map(|&cid| (cid, ancestor_chain(&parents, cid))).collect();
+    let mut wanted: std::collections::HashSet<i64> = channel_ids.iter().copied().collect();
+    wanted.extend(chains.values().flatten().copied());
+    let wanted: Vec<i64> = wanted.into_iter().collect();
     let rows: Vec<(i64, i64, i64, bool)> = sqlx::query_as(
         r#"
-        SELECT o.channel_id, o.allow, o.deny, sr.is_default
+        SELECT o.channel_id::bigint, o.allow, o.deny, sr.is_default
         FROM channel_permission_overwrites o
         JOIN server_roles sr ON o.role_id = sr.id
         WHERE o.channel_id = ANY($1)
@@ -1054,20 +1206,13 @@ pub async fn get_user_channels_permissions(
             AND mr.server_id = sr.server_id))
         "#,
     )
-    .bind(channel_ids)
+    .bind(&wanted)
     .bind(server_id)
     .bind(user_id as i32)
     .fetch_all(pool)
     .await?;
 
-    let mut by_channel: std::collections::HashMap<i64, Vec<(i64, i64, bool)>> =
-        std::collections::HashMap::new();
-    for (cid, allow, deny, is_default) in rows {
-        by_channel
-            .entry(cid)
-            .or_default()
-            .push((allow, deny, is_default));
-    }
+    let by_channel = group_rows(rows);
 
     // Only the stream-only cap reads a channel's kind, so only a stream-only
     // caller pays for the lookup. A channel the query does not return is not a
@@ -1089,7 +1234,11 @@ pub async fn get_user_channels_permissions(
     for &cid in channel_ids {
         let kind = if voice.contains(&cid) { ChannelKind::Voice } else { ChannelKind::Other };
         let rows = by_channel.get(&cid).map(Vec::as_slice).unwrap_or(&[]);
-        map.insert(cid, layer_overwrite_rows(cid, kind, base, rows));
+        let above: Vec<&[OverwriteRow]> = chains[&cid]
+            .iter()
+            .map(|c| by_channel.get(c).map(Vec::as_slice).unwrap_or(&[]))
+            .collect();
+        map.insert(cid, layer_with_collections(cid, kind, base, &above, rows));
     }
     Ok(map)
 }
@@ -1145,20 +1294,24 @@ pub async fn get_channel_viewer_ids(
     .await?
     .0;
 
-    // This channel's overwrites + which members hold each overwritten role.
-    let ov_rows: Vec<(i64, i64, i64, bool)> = sqlx::query_as(
+    // The collections above this channel, then their overwrites and this
+    // channel's own + which members hold each overwritten role.
+    let chain = ancestor_chain(&server_parent_map(pool, server_id).await?, channel_id);
+    let mut wanted = chain.clone();
+    wanted.push(channel_id);
+    let ov_rows: Vec<(i64, i64, i64, i64, bool)> = sqlx::query_as(
         r#"
-        SELECT o.role_id, o.allow, o.deny, sr.is_default
+        SELECT o.channel_id::bigint, o.role_id, o.allow, o.deny, sr.is_default
         FROM channel_permission_overwrites o
         JOIN server_roles sr ON o.role_id = sr.id
-        WHERE o.channel_id = $1 AND sr.server_id = $2
+        WHERE o.channel_id = ANY($1) AND sr.server_id = $2
         "#,
     )
-    .bind(channel_id)
+    .bind(&wanted)
     .bind(server_id)
     .fetch_all(pool)
     .await?;
-    let role_ids: Vec<i64> = ov_rows.iter().filter(|r| !r.3).map(|r| r.0).collect();
+    let role_ids: Vec<i64> = ov_rows.iter().filter(|r| !r.4).map(|r| r.1).collect();
     let mut role_members: std::collections::HashMap<i64, std::collections::HashSet<i64>> =
         std::collections::HashMap::new();
     if !role_ids.is_empty() {
@@ -1181,14 +1334,22 @@ pub async fn get_channel_viewer_ids(
     for (uid, role_bits) in member_bases {
         let uid = uid as i64;
         let base = Permissions::from_bits_truncate((role_bits | default_bits) as u64);
-        let rows: Vec<(i64, i64, bool)> = ov_rows
+        // This member's rows, by channel: the roles they hold and @everyone.
+        let mine = group_rows(
+            ov_rows
+                .iter()
+                .filter(|(_, rid, _, _, is_default)| {
+                    *is_default || role_members.get(rid).map_or(false, |m| m.contains(&uid))
+                })
+                .map(|&(cid, _, allow, deny, is_default)| (cid, allow, deny, is_default))
+                .collect(),
+        );
+        let own = mine.get(&channel_id).map(Vec::as_slice).unwrap_or(&[]);
+        let above: Vec<&[OverwriteRow]> = chain
             .iter()
-            .filter(|(rid, _, _, is_default)| {
-                *is_default || role_members.get(rid).map_or(false, |m| m.contains(&uid))
-            })
-            .map(|&(_, allow, deny, is_default)| (allow, deny, is_default))
+            .map(|c| mine.get(c).map(Vec::as_slice).unwrap_or(&[]))
             .collect();
-        if layer_overwrite_rows(channel_id, kind, base, &rows).has(Permissions::VIEW_CHANNEL) {
+        if layer_with_collections(channel_id, kind, base, &above, own).has(Permissions::VIEW_CHANNEL) {
             viewers.insert(uid);
         }
     }
@@ -1917,3 +2078,7 @@ mod stream_only_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "permissions_collection_tests.rs"]
+mod collection_tests;

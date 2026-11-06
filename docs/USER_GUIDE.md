@@ -910,6 +910,42 @@ How the settings combine:
   sharing; a camera or share already running is not stopped. In an SFU channel
   a new **Allow** applies after the member rejoins.
 
+#### Collections and permissions
+
+A collection's permissions reach the channels inside it. The rule:
+
+- **A cross on a collection is a cross on every channel inside it**, for the
+  people it denies. Deny **View Channel** to @everyone on a collection and its
+  channels are gone for everyone but the people you let past: they are not in
+  their channel list, a number typed into the address is refused as a channel
+  that does not exist, no message or notification from them arrives, and a
+  voice room inside cannot be joined.
+- **A tick on the channel itself takes it back**, for the roles it names. A
+  channel inside a denied collection that allows View Channel to a role is
+  visible to that role (its collection is not, so it is drawn on its own in the
+  list), and nothing else the collection denies comes back with it.
+- **A tick on a collection grants nothing inside it.** It only lifts the cross
+  on the collection itself: a role allowed on the collection gets past the
+  collection's own cross, so it keeps the channels that cross would have taken
+  from it. Whatever a channel gives a member on its own rules and their roles
+  stays exactly as it was.
+- A cross on one role does not take what another role allows in that channel; a
+  more specific role's setting wins over @everyone's, as in a single channel.
+- Collections inside a collection are followed up to eight levels (the app draws
+  one). A collection cannot be put inside one of its own channels.
+- Moving a channel into or out of a collection changes who can see it, and
+  takes effect straight away like any permission change.
+
+**What a cross does not undo.** Someone who could read a channel before you
+denied its collection still holds the keys they were given for what was already
+written there, and can still read that history in the app they already have it
+in. The channel's key changes when you save the cross, so what is written
+afterwards is closed to them. Before the server enforced this, a collection's
+cross hid the channels only from the sidebar and members could reach them in
+other ways: if you used a cross on a collection to keep something private,
+treat what was written in it until then as seen by everyone who was on the
+server.
+
 ### Kick and Ban (Owner)
 The member's profile popup has **Kick** and **Ban** buttons; each asks for
 confirmation first.

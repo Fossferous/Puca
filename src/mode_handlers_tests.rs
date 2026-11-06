@@ -3075,4 +3075,153 @@ mod db {
         assert!(joined_status.is_success(), "{joined}");
         assert_eq!(joined.as_object().unwrap().get("active_mode_id"), Some(&json!(mode)), "a server just joined");
     }
+
+    /// Deny View to @everyone on `channel` (a collection or a channel).
+    async fn deny_view_to_everyone(pool: &sqlx::PgPool, sid: &str, channel: i32) {
+        sqlx::query(
+            "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny)              SELECT $1, id, 0, $3 FROM server_roles WHERE server_id = $2 AND is_default",
+        )
+        .bind(channel as i64)
+        .bind(sid)
+        .bind(P::VIEW_CHANNEL.bits() as i64)
+        .execute(pool)
+        .await
+        .expect("deny");
+    }
+
+    fn saw_channel_named(told: &[M], name: &str) -> bool {
+        told.iter().any(|m| matches!(m, M::ChannelCreated { channel, .. } if channel.name == name))
+    }
+
+    /// A channel made INSIDE a denied collection is announced to the members the
+    /// collection lets see it and to nobody else, and the creator's own bits
+    /// are the resolved ones (create_channel used to decide both from base
+    /// permissions on the ground that a new channel has no overwrites).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_channel_created_in_a_denied_collection_is_announced_to_nobody_it_denies() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let vault = channel(&pool, &f.sid, "vault", 2).await;
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        deny_view_to_everyone(&pool, &f.sid, vault).await;
+        let mut plain = Sock::open(&state, f.plain);
+        let mut owner = Sock::open(&state, f.owner);
+        let create = |name: &str, parent: i32| {
+            let state = Arc::clone(&state);
+            let sid = f.sid.clone();
+            let body = json!({ "name": name, "channel_type": 0, "parent_id": parent });
+            async move {
+                read(
+                    crate::channel_handlers::create_channel(State(state), Path(sid), Extension(claims(f.manager)), Json(serde_json::from_value(body).unwrap()))
+                        .await
+                        .into_response(),
+                )
+                .await
+            }
+        };
+        let (denied_status, denied) = create("vault-room", vault).await;
+        let (open_status, _) = create("shelf-room", shelf).await;
+        let (plain_told, owner_told) = (plain.drain(), owner.drain());
+        teardown(&pool, &f).await;
+        assert_eq!(denied_status, StatusCode::OK, "{denied}");
+        assert_eq!(open_status, StatusCode::OK);
+        assert!(!saw_channel_named(&plain_told, "vault-room"), "told of a channel the collection denies it: {plain_told:?}");
+        assert!(saw_channel_named(&owner_told, "vault-room"), "control: the owner still is");
+        assert!(saw_channel_named(&plain_told, "shelf-room"), "control: a channel under an unrelated collection");
+        // The creator (manager, no View override of their own) is denied the collection too:
+        // their answer carries the resolved bits, not their base.
+        let bits = P::from_bits_truncate(denied["my_permissions"].as_i64().unwrap() as u64);
+        assert!(!bits.has(P::VIEW_CHANNEL), "the creator's my_permissions ignored the collection: {bits:?}");
+    }
+
+    /// A channel moved into a denied collection (or out of it) changes who sees it: the
+    /// members are told to refetch, the sweep runs (the key is rotated, the rooms are
+    /// emptied of whoever lost it), and a collection cannot be moved under its own
+    /// descendant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn moving_a_channel_between_collections_sweeps_and_a_loop_is_refused() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let vault = channel(&pool, &f.sid, "vault", 2).await;
+        let inner = channel(&pool, &f.sid, "inner", 2).await;
+        deny_view_to_everyone(&pool, &f.sid, vault).await;
+        let room = channel(&pool, &f.sid, "room", 1).await;
+        let edit = |channel: i32, body: Value| {
+            crate::channel_handlers::update_channel(State(Arc::clone(&state)), Path(channel as i64), Extension(claims(f.owner)), Json(serde_json::from_value(body).unwrap()))
+        };
+        let generation = || {
+            let pool = pool.clone();
+            let sid = f.sid.clone();
+            async move {
+                let (g,): (i64,) = sqlx::query_as("SELECT member_generation::bigint FROM servers WHERE id = $1").bind(sid).fetch_one(&pool).await.unwrap();
+                g
+            }
+        };
+        // The plain member is in the voice room before it is moved under the denied collection.
+        let mut plain = Sock::in_room(&state, f.plain, room);
+        plain.drain();
+        let g0 = generation().await;
+        let moved = edit(room, json!({ "parent_id": vault })).await.into_response().status();
+        let g1 = generation().await;
+        let told = plain.drain();
+        let still_there = state.rooms.get(&format!("voice_{room}")).map(|r| r.members.contains(&f.plain)).unwrap_or(false);
+        // A rename that names the parent again is no move and sweeps nothing.
+        let renamed = edit(room, json!({ "name": "room-2", "parent_id": vault })).await.into_response().status();
+        let g2 = generation().await;
+        // vault -> inner is fine; inner -> vault would close a loop.
+        let nested = edit(inner, json!({ "parent_id": vault })).await.into_response().status();
+        let looped = edit(vault, json!({ "parent_id": inner })).await.into_response().status();
+        let parent: (Option<i32>,) = sqlx::query_as("SELECT parent_id FROM channels WHERE id = $1").bind(vault).fetch_one(&pool).await.unwrap();
+        teardown(&pool, &f).await;
+        assert_eq!(moved, StatusCode::OK);
+        assert_eq!(g1, g0 + 1, "a move runs the perms sweep (the key rotates for the new viewer set)");
+        assert!(told.iter().any(|m| matches!(m, M::ChannelPermsChanged { .. })), "members are told to refetch: {told:?}");
+        assert!(!still_there, "the member who lost the channel by the move is put out of its room");
+        assert_eq!(renamed, StatusCode::OK);
+        assert_eq!(g2, g1, "control: naming the same parent again is not a move");
+        assert_eq!(nested, StatusCode::OK);
+        assert_eq!(looped, StatusCode::BAD_REQUEST, "a collection under its own descendant");
+        assert_eq!(parent.0, None, "and the refusal changed nothing");
+    }
+
+    /// The SFU token and the channel-key routes ask the same resolver: a voice room whose
+    /// transport is the SFU, inside a denied collection, is a 404 for whoever the collection
+    /// denies, before LiveKit is asked anything (so this needs no LiveKit); the owner is
+    /// never answered 404 (control), and neither is a channel beside it under an open collection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_voice_room_in_a_denied_collection_mints_no_sfu_token_and_serves_no_key() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let vault = channel(&pool, &f.sid, "vault", 2).await;
+        let shelf = channel(&pool, &f.sid, "shelf", 2).await;
+        deny_view_to_everyone(&pool, &f.sid, vault).await;
+        let behind = subchannel(&pool, &f.sid, "behind", 1, vault).await;
+        let beside = subchannel(&pool, &f.sid, "beside", 1, shelf).await;
+        for id in [behind, beside] {
+            sqlx::query("UPDATE channels SET sfu_mode = true WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+        }
+        let token = |user: i64, channel: i32| {
+            let state = Arc::clone(&state);
+            async move { crate::sfu::get_sfu_token(State(state), Path(channel as i64), Extension(claims(user))).await.into_response().status() }
+        };
+        let keys = |user: i64, channel: i32| {
+            let state = Arc::clone(&state);
+            async move { crate::key_handlers::get_channel_keys(State(state), Path(channel as i64), Extension(claims(user))).await.into_response().status() }
+        };
+        let got = (
+            token(f.plain, behind).await, keys(f.plain, behind).await,
+            token(f.owner, behind).await, keys(f.owner, behind).await,
+            token(f.plain, beside).await, keys(f.plain, beside).await,
+        );
+        teardown(&pool, &f).await;
+        assert_eq!(got.0, StatusCode::NOT_FOUND, "no token for a room the collection denies");
+        assert_eq!(got.1, StatusCode::NOT_FOUND, "and no key");
+        assert_ne!(got.2, StatusCode::NOT_FOUND, "control: the owner is not refused as not found");
+        assert_eq!(got.3, StatusCode::OK, "control: the owner is served the key");
+        assert_ne!(got.4, StatusCode::NOT_FOUND, "control: a room under an open collection");
+        assert_eq!(got.5, StatusCode::OK, "control: and its key");
+    }
 }

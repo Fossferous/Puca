@@ -406,9 +406,29 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
                                     <>
                                         <p className="channel-perms-hint">
                                             — inherit falls back to the role's server-level permissions.
-                                            The tick allows and the cross denies the permission in this
-                                            channel only.
+                                            The tick allows and the cross denies the permission in this{' '}
+                                            {channel.channel_type === 2 ? 'collection' : 'channel'}.
                                         </p>
+                                        {/* The server's rule (permissions.rs layer_with_collections,
+                                            docs/USER_GUIDE.md Collections and permissions): a collection's cross
+                                            reaches what is inside it, a tick on the channel itself
+                                            restores it, and a tick on a collection grants nothing
+                                            to what is inside. */}
+                                        {channel.channel_type === 2 && (
+                                            <p className="channel-perms-hint" data-testid="collection-perms-hint">
+                                                A cross here also applies to every channel inside this collection
+                                                for the people it denies. A tick on a channel inside takes it back
+                                                for that channel. A tick here lets people past a cross here and
+                                                gives them nothing in the channels that those channels do not
+                                                already give.
+                                            </p>
+                                        )}
+                                        {channel.channel_type !== 2 && channel.parent_id != null && (
+                                            <p className="channel-perms-hint" data-testid="channel-inherits-hint">
+                                                A cross on the collection this channel is in also applies here.
+                                                A tick here takes it back.
+                                            </p>
+                                        )}
                                         {/* Every claim here is what the server does, not a
                                             convention: the owner resolves to ADMINISTRATOR and
                                             an admin base skips overwrites entirely; role rows

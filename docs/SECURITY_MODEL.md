@@ -1540,6 +1540,30 @@ all go through the one layering function, so the three cannot disagree about
 who is a viewer. `MANAGE_CHANNELS` itself still cannot be granted through a
 per-channel allow mask.
 
+**A collection's deny reaches the channels inside it (decided 2026-11-05).**
+Until then the three resolvers read only the overwrite rows of the channel they
+were asked about, so a member denied View on a *collection* could still list,
+read, write in, fetch the epoch key of, join the voice room of and receive live
+traffic from every channel inside it (only the official client's sidebar hid
+the rows); a deny on the channel itself or on the whole server was always
+complete. Now `layer_with_collections` in `src/permissions.rs`, which all three
+resolvers call, carries a collection's removals down to its channels and
+nothing else: it is the **intersection** form. For a member, what the
+collections above a channel removed from their base permissions is taken from
+the channel's own result, except the bits the channel's own overwrites allow
+back; a collection's *allow* contributes nothing to a channel, it only lifts
+the collection's own deny on the collection. So the result is never more than
+the channel's own rules give (a test over thousands of generated rows checks
+exactly that), nobody gains anything at deploy, and members who reached those
+channels through a denied collection lose that. Collections are followed up to
+`MAX_COLLECTION_DEPTH` (8) levels and a loop ends the walk (PATCH refuses to
+build one). `create_channel` announces a new channel inside a collection to the
+resolver's viewer set, not to base permissions, and moving a channel to another
+collection runs the same perms sweep as an overwrite edit. **Not changed:** a
+member who held the keys before keeps them, and can read what they already hold;
+the sweep rotates the key for what is written afterwards (see
+SFU_TIER2_DESIGN.md).
+
 **Read Message History covers reactions (0.9.5).** Who reacted to a message,
 and reacting or un-reacting yourself, need `READ_MESSAGE_HISTORY` in the
 channel as well as VIEW (`require_message_history!`,
