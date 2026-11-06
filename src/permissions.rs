@@ -881,22 +881,19 @@ fn layer_rows(
 /// One overwrite row as the layering reads it: (allow, deny, is_default).
 type OverwriteRow = (i64, i64, bool);
 
-/// How many collections above a channel are read. A collection holds channels
-/// and nothing draws a collection inside another one, so one is the depth the
-/// product has; `PATCH parent_id` refuses a loop but will still accept a
-/// collection under a collection, so a deny is carried down through up to this
-/// many levels, and a level beyond it is not read (ignored, never guessed).
-pub const MAX_COLLECTION_DEPTH: usize = 8;
-
-/// The collections above `id`, OUTERMOST first, at most MAX_COLLECTION_DEPTH of
-/// the nearest. `parents` maps a channel to its parent. A loop (rows from before
-/// `PATCH parent_id` refused them) ends the walk at the first channel seen
-/// twice, so every collection of the loop counts once and the walk always ends.
+/// The collections above `id`, OUTERMOST first, at ANY depth. A collection holds
+/// channels and nothing draws a collection inside another one, but `PATCH
+/// parent_id` accepts a collection under a collection with no depth limit, and a
+/// limit here would drop the OUTERMOST collections, the ones most likely to carry
+/// a deny: the walk is a map lookup per level, so it has none. `parents` maps a
+/// channel to its parent. A loop (a concurrent pair of PATCHes, or rows from
+/// before one was refused) ends the walk at the first channel seen twice, so
+/// every collection of the loop counts once and the walk always ends.
 pub fn ancestor_chain(parents: &std::collections::HashMap<i64, i64>, id: i64) -> Vec<i64> {
     let mut seen = std::collections::HashSet::from([id]);
     let mut chain = Vec::new();
     let mut at = id;
-    while chain.len() < MAX_COLLECTION_DEPTH {
+    loop {
         match parents.get(&at) {
             Some(&parent) if seen.insert(parent) => {
                 chain.push(parent);
@@ -1260,11 +1257,11 @@ pub async fn get_channel_viewer_ids(
 
     // The channel's kind, for the stream-only cap (voice channels only). A
     // channel that is gone reads as not-voice: the cap then admits no one.
-    let kind = sqlx::query_as::<_, (i32,)>("SELECT type FROM channels WHERE id = $1")
+    let (kind, in_collection) = sqlx::query_as::<_, (i32, bool)>("SELECT type, parent_id IS NOT NULL FROM channels WHERE id = $1")
         .bind(channel_id)
         .fetch_optional(pool)
         .await?
-        .map_or(ChannelKind::Other, |(t,)| ChannelKind::from_type(t));
+        .map_or((ChannelKind::Other, false), |(t, held)| (ChannelKind::from_type(t), held));
 
     // Every member with the OR of their held-role bits (0 when roleless).
     // `AND sr.server_id = sm.server_id` is the C2 cross-server pin the other
@@ -1296,7 +1293,11 @@ pub async fn get_channel_viewer_ids(
 
     // The collections above this channel, then their overwrites and this
     // channel's own + which members hold each overwritten role.
-    let chain = ancestor_chain(&server_parent_map(pool, server_id).await?, channel_id);
+    let chain = if in_collection {
+        ancestor_chain(&server_parent_map(pool, server_id).await?, channel_id)
+    } else {
+        Vec::new()
+    };
     let mut wanted = chain.clone();
     wanted.push(channel_id);
     let ov_rows: Vec<(i64, i64, i64, i64, bool)> = sqlx::query_as(
@@ -2082,3 +2083,7 @@ mod stream_only_tests {
 #[cfg(test)]
 #[path = "permissions_collection_tests.rs"]
 mod collection_tests;
+
+#[cfg(test)]
+#[path = "permissions_differential_tests.rs"]
+mod differential_tests;

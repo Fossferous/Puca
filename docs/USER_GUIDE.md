@@ -929,10 +929,13 @@ A collection's permissions reach the channels inside it. The rule:
   collection's own cross, so it keeps the channels that cross would have taken
   from it. Whatever a channel gives a member on its own rules and their roles
   stays exactly as it was.
-- A cross on one role does not take what another role allows in that channel; a
-  more specific role's setting wins over @everyone's, as in a single channel.
-- Collections inside a collection are followed up to eight levels (the app draws
-  one). A collection cannot be put inside one of its own channels.
+- A tick on the channel takes a cross back whichever role it is on: if the
+  collection crosses View for a role and the channel ticks it for @everyone, a
+  member of that role sees the channel. Inside one channel a role's cross would
+  win over @everyone's tick; between a collection and its channel the channel's
+  own tick wins.
+- Collections inside a collection are followed all the way up (the app draws
+  one level). A collection cannot be put inside one of its own channels.
 - Moving a channel into or out of a collection changes who can see it, and
   takes effect straight away like any permission change.
 

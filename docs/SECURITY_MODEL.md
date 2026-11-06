@@ -1556,8 +1556,11 @@ the collection's own deny on the collection. So the result is never more than
 the channel's own rules give (a test over thousands of generated rows checks
 exactly that), nobody gains anything at deploy, and members who reached those
 channels through a denied collection lose that. Collections are followed up to
-`MAX_COLLECTION_DEPTH` (8) levels and a loop ends the walk (PATCH refuses to
-build one). `create_channel` announces a new channel inside a collection to the
+any depth (no limit, which would drop the outermost collection, the one most
+likely to hold the deny) and a loop ends the walk (PATCH refuses to build one;
+two requests at once could, and the walk survives it). The channel's own allow
+restores a bit whichever role it is on, so it does not follow the one-channel
+rule that a role's cross beats @everyone's tick. `create_channel` announces a new channel inside a collection to the
 resolver's viewer set, not to base permissions, and moving a channel to another
 collection runs the same perms sweep as an overwrite edit. **Not changed:** a
 member who held the keys before keeps them, and can read what they already hold;

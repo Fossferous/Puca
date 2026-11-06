@@ -323,12 +323,15 @@ fn a_loop_ends_the_walk_and_counts_each_collection_once() {
     assert_eq!(chain_of(&[(5, 4), (4, 5)], 5), vec![4], "the channel itself is never its own ancestor");
 }
 
+/// No depth limit: a limit would drop the OUTERMOST collections, the ones most
+/// likely to carry the deny (a nested chain is only reachable through PATCH).
 #[test]
-fn the_chain_stops_at_the_documented_depth() {
+fn the_chain_has_no_depth_limit_so_the_outermost_collection_is_always_read() {
     let pairs: Vec<(i64, i64)> = (0..30).map(|i| (i, i + 1)).collect();
     let chain = chain_of(&pairs, 0);
-    assert_eq!(chain.len(), MAX_COLLECTION_DEPTH);
-    assert_eq!(*chain.last().unwrap(), 1, "the nearest collection is always read");
+    assert_eq!(chain.len(), 30);
+    assert_eq!(chain[0], 30, "the outermost first");
+    assert_eq!(*chain.last().unwrap(), 1, "the nearest last");
 }
 
 /// Whatever the collections say, the result is never MORE than the channel's
