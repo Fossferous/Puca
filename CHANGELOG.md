@@ -4,6 +4,14 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Púca reopens when an update finishes
+
+### Fixed
+
+- **Púca reopens with its window after an update.** If Windows had started Púca for you at sign-in, an update would install and Púca would be running again, but only in the tray with its window closed, so it looked as if the update had quit it and you had to open it by hand. The next update did the same, until you restarted Púca yourself. An update you start, with **Update** on the banner or with **Install updates automatically**, now brings Púca back with its window, in Púca and Púca Lite. Púca still starts in the tray when Windows starts it, and a computer that keeps itself up to date while nobody is connected still comes back in the tray. The installer of the new version does this, so the first update that installs it is the first to reopen with its window.
+
 ## 0.9.858 — 2026-11-05
 
 A file sent as a spoiler stays hidden after a sad face like :[, and Save to Notes keeps the words before one

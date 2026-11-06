@@ -28,6 +28,9 @@
 ; The puca:// invite-link scheme (HKCU\Software\Classes\puca): registered after
 ; the files are in place, removed by the uninstaller. See that file.
 !include "${__FILEDIR__}\installer-url-scheme.nsh"
+; The app an update relaunches comes back with its window, not in the tray.
+; See that file.
+!include "${__FILEDIR__}\installer-relaunch.nsh"
 
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro StopOrphanedHelpers
@@ -40,6 +43,9 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; What .onInstSuccess starts the new app with: no `--hidden` after a passive
+  ; update, so the app reopens instead of sitting in the tray.
+  !insertmacro RelaunchVisibleAfterPassiveUpdate
   !insertmacro RepairShortcutsToRenamedBinary
   ; "app" is this product's pre-rename binary. The in-place rename kept the
   ; install directory, so it was left sitting there, launchable.

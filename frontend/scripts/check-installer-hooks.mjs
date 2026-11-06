@@ -34,6 +34,13 @@
  * are install identity, and a name typed into this script would prove nothing
  * about the installer that ships.
  *
+ * THE RELAUNCH AFTER AN UPDATE (installer-relaunch.nsh) is checked by running
+ * it. The updater starts the installer with `/P /UPDATE /R /ARGS --hidden` when
+ * the app was started by Windows at sign-in, Tauri's template starts the new
+ * exe with whatever follows /ARGS, and the app hides its window on `--hidden`:
+ * an update that "does not reopen". See the last section of this file for the
+ * test installer that proves it, and what it is allowed to touch (nothing).
+ *
  * Needs makensis. That is not optional and it does not skip: a gate that
  * quietly no-ops when its tool is missing reports success for a file nobody
  * compiled. The Tauri CLI downloads NSIS to %LOCALAPPDATA%\tauri\NSIS on the
@@ -41,7 +48,7 @@
  * it elsewhere.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -70,7 +77,7 @@ function findMakensis() {
  * and MAINBINARYNAME, so a hook that used either outside a macro body fails
  * here exactly as it would in the real build.
  */
-function harness(hooksFile, productName, mainBinaryName) {
+function harness(hooksFile, productName, mainBinaryName, { postInstall = true } = {}) {
     return [
         'Unicode true',
         `Name "${productName}"`,
@@ -82,11 +89,14 @@ function harness(hooksFile, productName, mainBinaryName) {
         `!include "${join(tauriDir, hooksFile).replace(/\\/g, '\\\\')}"`,
         `!define PRODUCTNAME "${productName}"`,
         `!define MAINBINARYNAME "${mainBinaryName}"`,
+        // The template declares this (and sets it from /P) before its sections,
+        // and installer-relaunch.nsh reads it.
+        'Var PassiveMode',
         '',
         'Section "Install"',
         '  !insertmacro NSIS_HOOK_PREINSTALL',
         '  WriteUninstaller "$INSTDIR\\uninstall.exe"',
-        '  !insertmacro NSIS_HOOK_POSTINSTALL',
+        ...(postInstall ? ['  !insertmacro NSIS_HOOK_POSTINSTALL'] : []),
         'SectionEnd',
         '',
         'Section "Uninstall"',
@@ -168,9 +178,9 @@ function bundlerIdentity(files) {
 }
 
 /** The harness through makensis's preprocessor only: nothing is compiled or run. */
-function preprocess(tag, hooksFile, { productName, mainBinaryName }) {
+function preprocess(tag, hooksFile, { productName, mainBinaryName }, options) {
     const nsi = join(dir, `${tag}-ppo.nsi`);
-    writeFileSync(nsi, '﻿' + harness(hooksFile, productName, mainBinaryName), 'utf8');
+    writeFileSync(nsi, '﻿' + harness(hooksFile, productName, mainBinaryName, options), 'utf8');
     try {
         return execFileSync(makensis, ['/PPO', nsi], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -348,4 +358,229 @@ for (const f of ['installer-hooks.nsh', 'installer-hooks-lite.nsh']) {
     }
 }
 console.log('  ok  both hooks stop orphaned helpers and remove the superseded binary');
+
+// ---------------------------------------------------------------------------
+// The relaunch after an update comes back with its window.
+//
+// The chain, each link read from the code that runs it (2026-11-06, after "puca
+// doesnt currently reopen when update is complete"):
+//   1. Windows starts the app at sign-in as `Puca.exe --hidden` (lib.rs, the
+//      autostart plugin); lib.rs hides the window on `--hidden`.
+//   2. Click Update in that app and tauri-plugin-updater runs the installer as
+//      `/P /UPDATE /R /ARGS <the running app's own arguments>` (updater.rs,
+//      `updater_parameters`).
+//   3. Tauri's template, in `.onInstSuccess`, starts the new exe with what
+//      follows /ARGS. The new process has `--hidden` too, so it is in the tray
+//      with no window, and so is the one after the next update.
+// installer-relaunch.nsh takes `--hidden` off that command line after a
+// PASSIVE install (a progress window was on the screen) and leaves a SILENT one
+// alone (a PC updating itself while nobody is there: host_update.rs).
+//
+// Proved by running it, in a test installer built here: the template's own
+// relaunch lines, copied below, with `RunAsUser` swapped for a line that writes
+// the arguments to a file. Run with the updater's real command lines it shows
+// what the new app would be started with. It contains NONE of the hook files:
+// those write the registry (puca://), stop processes and copy files, and must
+// never run from a gate. Its macro touches only $CMDLINE and two registers.
+// Nothing here starts, stops or replaces an installed Puca.
+
+/**
+ * Tauri's template, verbatim: the flag parse in `.onInit` and the whole of
+ * `.onInstSuccess` (tauri-bundler 2.x; read from the installer.nsi it
+ * generated). The comparison with the generated file, when there is one,
+ * is what keeps these from drifting from the real template.
+ */
+const TEMPLATE_INIT_FLAG = [
+    '${GetOptions} $CMDLINE "/P" $PassiveMode',
+    '${IfNot} ${Errors}',
+    'StrCpy $PassiveMode 1',
+    '${EndIf}',
+];
+const TEMPLATE_ON_INST_SUCCESS = [
+    '${If} $PassiveMode = 1',
+    '${OrIf} ${Silent}',
+    '${GetOptions} $CMDLINE "/R" $R0',
+    '${IfNot} ${Errors}',
+    '${GetOptions} $CMDLINE "/ARGS" $R0',
+    'nsis_tauri_utils::RunAsUser "$INSTDIR\\${MAINBINARYNAME}.exe" "$R0"',
+    '${EndIf}',
+    '${EndIf}',
+];
+
+/** Lines as the drift comparison sees them: trimmed, no blanks, no comments. */
+const significant = (lines) => lines.map(l => l.trim()).filter(l => l && !l.startsWith(';'));
+
+const generatedNsi = join(tauriDir, 'target', 'release', 'nsis', 'x64', 'installer.nsi');
+if (existsSync(generatedNsi)) {
+    const text = readFileSync(generatedNsi, 'utf8').replace(/^﻿/, '');
+    const success = text.match(/^Function \.onInstSuccess\r?\n([\s\S]*?)^FunctionEnd/m);
+    const init = text.match(/^Function \.onInit\r?\n([\s\S]*?)^FunctionEnd/m);
+    const problems = [];
+    if (!success || significant(success[1].split(/\r?\n/)).join('\n') !== TEMPLATE_ON_INST_SUCCESS.join('\n')) {
+        problems.push('.onInstSuccess is not the copy this gate runs');
+    }
+    if (!init || !significant(init[1].split(/\r?\n/)).join('\n').includes(TEMPLATE_INIT_FLAG.join('\n'))) {
+        problems.push('.onInit no longer reads /P the way this gate does');
+    }
+    if (problems.length) {
+        console.error(`FAIL: ${generatedNsi}\n  - ${problems.join('\n  - ')}`);
+        console.error('Tauri\'s installer template changed how it relaunches the app. Re-read the new '
+            + 'template, make TEMPLATE_INIT_FLAG / TEMPLATE_ON_INST_SUCCESS here say what it now does, '
+            + 'and re-check that installer-relaunch.nsh still changes what the new app is started with.');
+        process.exit(1);
+    }
+    console.log('  ok  the template\'s relaunch lines in the last generated installer.nsi are the ones this gate runs');
+} else {
+    console.log('  --  no generated installer.nsi in this checkout: the template-drift comparison is skipped (it runs after a tauri build)');
+}
+
+/** A test installer: the template's relaunch lines, with or without the macro. */
+function relaunchHarness(withMacro) {
+    const recorder = '  FileWrite $9 "ARGS=[$R0]$\\r$\\n"';
+    return [
+        'Unicode true',
+        'Name "relaunch"',
+        `OutFile "relaunch-${withMacro ? 'fixed' : 'asis'}.exe"`,
+        'RequestExecutionLevel user',
+        'SilentInstall silent',
+        '!include LogicLib.nsh',
+        '!include FileFunc.nsh',
+        // This installer is compiled silent so it never opens a window, which
+        // makes NSIS's own ${Silent} (IfSilent) true for EVERY command line:
+        // a gate that could not tell /S from no /S, and so could not see a
+        // macro that edits a silent install (the independent review found
+        // exactly that). So ${Silent} here asks the command line for /S, as
+        // NSIS does at run time for a build that is not compiled silent, and
+        // the template's own `${OrIf} ${Silent}` below sees the same answer.
+        'Var HarnessSilent',
+        '!macroundef _Silent',
+        '!macro _Silent _a _b _t _f',
+        '  StrCmp $HarnessSilent 1 `${_t}` `${_f}`',
+        '!macroend',
+        ...(withMacro ? [`!include "${join(tauriDir, 'installer-relaunch.nsh').replace(/\\/g, '\\\\')}"`] : []),
+        'Var PassiveMode',
+        'Function .onInit',
+        ...TEMPLATE_INIT_FLAG.map(l => '  ' + l),
+        '  ${GetOptions} $CMDLINE "/S" $0',
+        '  ${IfNot} ${Errors}',
+        '    StrCpy $HarnessSilent 1',
+        '  ${EndIf}',
+        'FunctionEnd',
+        'Section "Install"',
+        ...(withMacro ? ['  !insertmacro RelaunchVisibleAfterPassiveUpdate'] : []),
+        'SectionEnd',
+        'Function .onInstSuccess',
+        '  FileOpen $9 "$EXEDIR\\relaunch.txt" w',
+        ...TEMPLATE_ON_INST_SUCCESS.map(l => (l.includes('RunAsUser') ? recorder : '  ' + l)),
+        '  FileClose $9',
+        'FunctionEnd',
+        '',
+    ].join('\r\n');
+}
+
+/** Build one harness; return the path of the test installer. */
+function buildRelaunchHarness(withMacro) {
+    const nsi = join(dir, `relaunch-${withMacro ? 'fixed' : 'asis'}.nsi`);
+    writeFileSync(nsi, '﻿' + relaunchHarness(withMacro), 'utf8');
+    try {
+        execFileSync(makensis, ['/V3', nsi], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+        console.error(`FAIL: makensis rejected the relaunch test installer (${withMacro ? 'with' : 'without'} installer-relaunch.nsh)\n`);
+        console.error((e.stdout || '') + (e.stderr || ''));
+        process.exit(1);
+    }
+    return join(dir, `relaunch-${withMacro ? 'fixed' : 'asis'}.exe`);
+}
+
+/**
+ * What the template would start the new app with for this installer command
+ * line: the text it hands to RunAsUser, or null when it starts nothing.
+ * `windowsVerbatimArguments` hands the line over as written, quotes and all,
+ * as ShellExecute does for the updater.
+ */
+function relaunchArgs(exe, commandLine) {
+    const out = join(dir, 'relaunch.txt');
+    rmSync(out, { force: true });
+    execFileSync(exe, [commandLine], { cwd: dir, windowsVerbatimArguments: true, stdio: 'ignore', timeout: 60_000 });
+    if (!existsSync(out)) {
+        console.error(`FAIL: the relaunch test installer wrote nothing for "${commandLine}" — .onInstSuccess did not run`);
+        process.exit(1);
+    }
+    const m = readFileSync(out, 'latin1').match(/^ARGS=\[(.*)\]\s*$/m);
+    return m ? m[1] : null;
+}
+
+// [what it is, the installer's command line, the arguments the new app is
+// started with WITHOUT the macro, and WITH it]. null = nothing is started.
+const RELAUNCH_CASES = [
+    ['a passive update of an app that was started with --hidden (the owner\'s case)',
+        '/P /UPDATE /R /ARGS --hidden', '--hidden', ''],
+    ['a passive update of an app that was started with no arguments',
+        '/P /UPDATE /R', '', ''],
+    ['a passive update of an app that was started by an invite link',
+        '/P /UPDATE /R /ARGS "puca://invite/abc"', 'puca://invite/abc', 'puca://invite/abc'],
+    ['a passive update of an app started with an invite link AND --hidden',
+        '/P /UPDATE /R /ARGS "puca://invite/abc" --hidden', '"puca://invite/abc" --hidden', 'puca://invite/abc'],
+    ['a flag that only starts with --hidden is not --hidden',
+        '/P /UPDATE /R /ARGS --hiddenly', '--hiddenly', '--hiddenly'],
+    // host_update.rs: the config's install mode supplies /P, the host's own
+    // updater appends /S after the plugin's /ARGS. Passive AND silent.
+    ['a PC updating ITSELF while nobody is there (passive + silent, as host_update.rs runs it) keeps --hidden',
+        '/P /UPDATE /R /ARGS --hidden /S', '--hidden', '--hidden'],
+    ['a silent install with no /P keeps --hidden too',
+        '/S /UPDATE /R /ARGS --hidden', '--hidden', '--hidden'],
+    ['no /R: the installer starts nothing, with or without the macro',
+        '/P /UPDATE /ARGS --hidden', null, null],
+];
+
+const asIs = buildRelaunchHarness(false);
+const fixed = buildRelaunchHarness(true);
+const show = (v) => (v === null ? 'starts nothing' : `starts the app with [${v}]`);
+let relaunchFailed = false;
+for (const [what, cmd, before, after] of RELAUNCH_CASES) {
+    const got = { before: relaunchArgs(asIs, cmd), after: relaunchArgs(fixed, cmd) };
+    // The first column is the control: the template as it is must show the
+    // bug (--hidden handed to the new app), or the harness sees nothing.
+    for (const [column, want] of [['before', before], ['after', after]]) {
+        if (got[column] !== want) {
+            relaunchFailed = true;
+            console.error(`FAIL relaunch (${column === 'before' ? 'template alone' : 'with installer-relaunch.nsh'}): ${what}\n`
+                + `  installer command line: ${cmd}\n  expected: ${show(want)}\n  got:      ${show(got[column])}`);
+        }
+    }
+}
+if (relaunchFailed) process.exit(1);
+console.log(`  ok  relaunch: the template alone starts a --hidden app hidden; with installer-relaunch.nsh a passive update starts it with its window, `
+    + `and a silent one (a PC updating itself runs /P ... /S), an invite link and a bare /R are unchanged (${RELAUNCH_CASES.length} installer command lines, each run twice)`);
+
+/**
+ * Both hook files must actually insert the macro in the Install section (and
+ * nothing of it in the Uninstall one). Read out of the preprocessed script,
+ * the same way the scheme checks are.
+ */
+function relaunchHookProblems(ppoText) {
+    const install = sectionLines(ppoText, 'Install');
+    const uninstall = sectionLines(ppoText, 'Uninstall');
+    if (!install || !uninstall) return ['no Install/Uninstall section in the preprocessed script'];
+    const problems = [];
+    if (!install.some(l => /^StrCpy \$CMDLINE /.test(l))) {
+        problems.push('the Install section never rewrites $CMDLINE, so .onInstSuccess hands the new app --hidden');
+    }
+    if (uninstall.some(l => l.includes('$CMDLINE'))) problems.push('the Uninstall section touches $CMDLINE');
+    return problems;
+}
+for (const [tag, id, file] of [['full', fullId, 'installer-hooks.nsh'], ['lite', liteId, 'installer-hooks-lite.nsh']]) {
+    const problems = relaunchHookProblems(ppo[tag]);
+    if (problems.length) {
+        console.error(`FAIL ${tag}: ${file} and the relaunch after an update:`);
+        for (const p of problems) console.error('  - ' + p);
+        process.exit(1);
+    }
+    // Control: the same hook with NSIS_HOOK_POSTINSTALL never inserted.
+    if (relaunchHookProblems(preprocess(`${tag}-nopost`, file, id, { postInstall: false })).length === 0) {
+        console.error(`FAIL control: ${tag} passes the relaunch check with its POSTINSTALL hook not inserted — the check proves nothing`);
+        process.exit(1);
+    }
+}
+console.log('  ok  both hooks insert it in their POSTINSTALL (control: with POSTINSTALL left out the check fails)');
 console.log('check-installer-hooks: PASS');
