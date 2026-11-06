@@ -152,7 +152,7 @@ import {
     CameraIcon, ScreenShareIcon, LiveDotIcon,
     SmileIcon, ReplyIcon, ForwardIcon, PencilIcon, PinIcon, TrashIcon,
     PaperclipIcon, LockIcon, LockOpenIcon, BanIcon, EyeOffIcon, SendIcon,
-    CloseIcon, PendingIcon, SettingsIcon, ChevronDownIcon,
+    CloseIcon, PendingIcon, SettingsIcon, ChevronDownIcon, ChevronRightIcon,
     CheckboxIcon, CheckboxCheckedIcon, WarningIcon, RocketIcon, CardsIcon,
 } from './Icons';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
@@ -165,7 +165,11 @@ import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, cutAfterRoomLeft, movedOutOfHere, opensFromNav, userMenuVoiceModeration, type SfuCut } from '../utils/voiceMove';
 import { serverGoneNotice } from '../utils/serverGone';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
-import { deleteChannelQuestion, drawnAtTop, drawnUnderCollection, keptByHideMuted, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { collapseTextRows, deleteChannelQuestion, drawnAtTop, drawnUnderCollection, keptByHideMuted, keptVoiceWhenCollapsed, parentChoices, reorderedChannelIds, withoutDeletedChannel } from './sidebarChannels';
+import { ALL_SERVERS, foldedCollections, toggleCollapsed, useCollapsed } from './sidebarCollapseStore';
+import { VoiceRosterTip } from './VoiceRosterCard';
+import { ActiveInServers } from './ActiveInServers';
+import { activeServersView, useActiveInServers } from './activeServers';
 import {
     useServers,
     useChannels,
@@ -1946,6 +1950,27 @@ export function Chat({ onLogout }: ChatProps) {
     // "Hide Muted Channels" for the server being viewed (per-device toggle in
     // the server rail's context menu).
     const hideMutedHere = currentServer ? isHideMutedChannels(currentServer.id) : false;
+
+    // Folded groups of the channel list (this device, per server: sidebarCollapseStore.ts) and the
+    // member list's "Active in your servers" panel, which the Appearance setting turns off.
+    const foldedHere = useCollapsed(currentServer?.id);
+    const activePanelFolded = useCollapsed(ALL_SERVERS).has('active');
+    const [activeInServersOn, setActiveInServersOn] = useState(() => loadSettings().activeInServers !== false);
+    useEffect(() => {
+        const sync = () => setActiveInServersOn(loadSettings().activeInServers !== false);
+        window.addEventListener('settingsChanged', sync);
+        return () => window.removeEventListener('settingsChanged', sync);
+    }, []);
+    // The other servers' calls: read once and then kept right (activeServers.ts). The open
+    // server's are Chat's own, above.
+    const activeReadStatus = useActiveInServers({
+        enabled: activeInServersOn,
+        servers,
+        currentServerId: currentServer?.id,
+        eventSeq: () => voiceEventSeqRef.current,
+        callRoomId: currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null,
+        onChange: () => setVoiceUpdateTrigger(prev => prev + 1),
+    });
 
     // Context menu for channels, messages, users
     const { contextMenu, showContextMenu, showContextMenuAt, hideContextMenu } = useContextMenu();
@@ -4547,6 +4572,77 @@ export function Chat({ onLogout }: ChatProps) {
         occupants: (id) => getVoiceUsersInRoom(`voice_${id}`).length,
     });
 
+    // The text list: the rows it always drew, then the folds. A folded section or collection keeps
+    // the channel that is open and every unread one, so nothing waiting for you is folded out of
+    // sight (sidebarChannels.ts, collapseTextRows).
+    const textListBase = channels
+        .filter(c => (c.channel_type === 0 || c.channel_type === 2) && drawnAtTop(c, channels))
+        // A hidden collection stays as the header of an open subchannel.
+        .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && openRowId === sub.id))
+        .filter(c => !hideMutedHere || keptByHideMuted(c, channels, isChannelMuted, openRowId))
+        .map(channel => ({
+            channel,
+            subchannels: channels.filter(sub => sub.parent_id === channel.id && !drawnAtTop(sub, channels))
+                .filter(drawnUnderCollection)
+                .filter(listed)
+                .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || openRowId === sub.id),
+        }));
+    const textList = collapseTextRows(
+        textListBase,
+        { section: foldedHere.has('text'), collections: foldedCollections(foldedHere) },
+        { openId: openRowId, unread: id => (currentServerMuted ? 0 : (unreadCounts.get(id) || 0)), isMuted: isChannelMuted },
+    );
+    // The voice list: a folded section keeps the rooms with somebody in them and the one you are in.
+    const voiceListed = channels.filter(c => c.channel_type === 1).filter(listed);
+    const voiceDrawn = foldedHere.has('voice')
+        ? voiceListed.filter(c => keptVoiceWhenCollapsed(c.id, {
+            occupants: id => getVoiceUsersInRoom(`voice_${id}`).length,
+            voiceChannelId: currentVoiceChannel?.id,
+        }))
+        : voiceListed;
+
+    // "Active in your servers": every server's voice rooms with somebody in them. The open server's
+    // list is this component's own; the others' come from the cache that useActiveInServers fills.
+    const activeView = activeInServersOn
+        ? activeServersView({
+            servers,
+            currentServerId: currentServer?.id,
+            channelsOf: sid => (sid === currentServer?.id ? channels : queryClient.getQueryData<Channel[]>(keys.channels(sid))),
+            rosterOf: roomId => getVoiceUsersInRoom(roomId),
+        })
+        : [];
+    // Going to a room the panel named: its server's sidebar, scrolled to that voice row once it is
+    // drawn. It never joins the call (a join opens the microphone, and is a press on the row itself).
+    const revealVoiceRef = useRef<{ channelId: number; until: number } | null>(null);
+    const goToActiveRoom = (serverId: string, channelId: number) => {
+        const server = servers.find(s => s.id === serverId);
+        if (!server) return;
+        setShowFriendsPanel(false);
+        setShowDevicesView(false);
+        setShowNotesView(false);
+        setShowAllChecklists(false);
+        // A few seconds to arrive: a room that has emptied meanwhile is not chased later.
+        revealVoiceRef.current = { channelId, until: Date.now() + 5000 };
+        if (server.id !== currentServer?.id) switchServer(server);
+        if (isMobile) setMobilePanel('channels');
+        // Already the open server: nothing re-renders to run the effect below, so look now.
+        revealVoiceRow();
+    };
+    // Scroll to the row and mark it for a moment. Not focused: a focused voice row joins on Enter or
+    // Space, and the next key after a press on the panel must never join a call with the microphone open.
+    const revealVoiceRow = () => {
+        const wanted = revealVoiceRef.current;
+        if (!wanted) return;
+        if (Date.now() > wanted.until) { revealVoiceRef.current = null; return; }
+        const row = document.querySelector<HTMLElement>(`[data-testid="voice-channel"][data-channel-id="${wanted.channelId}"]`);
+        if (!row) return;
+        revealVoiceRef.current = null;
+        row.scrollIntoView({ block: 'nearest' });
+        row.setAttribute('data-revealed', '');
+        window.setTimeout(() => row.removeAttribute('data-revealed'), 2500);
+    };
+    useEffect(() => { revealVoiceRow(); });
+
     const voiceGamesGate = gamesGate({
         feature: callActivity.feature,
         gamesEnabled: voiceGamesEnabled,
@@ -5647,7 +5743,23 @@ export function Chat({ onLogout }: ChatProps) {
                 {/* Text Channels Section */}
                 <div className="sidebar-section">
                     <div className="sidebar-header">
-                        <h3>Text Channels</h3>
+                        <h3>
+                            <button
+                                type="button"
+                                className="section-toggle"
+                                data-testid="toggle-text-channels"
+                                aria-expanded={!foldedHere.has('text')}
+                                aria-controls="text-channel-list"
+                                aria-label={foldedHere.has('text')
+                                    ? `Text Channels, folded${textList.hidden > 0 ? `, ${textList.hidden} hidden` : ''}. Show them`
+                                    : 'Text Channels. Fold them away'}
+                                onClick={() => toggleCollapsed(currentServer.id, 'text')}
+                            >
+                                {foldedHere.has('text') ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                                <span>Text Channels</span>
+                                {foldedHere.has('text') && textList.hidden > 0 && <span className="section-hidden">{textList.hidden} hidden</span>}
+                            </button>
+                        </h3>
                         <button
                             className="add-channel-btn"
                             onClick={() => openCreateChannel(0)}
@@ -5656,11 +5768,11 @@ export function Chat({ onLogout }: ChatProps) {
                             +
                         </button>
                     </div>
-                    <ul className="channel-list">
+                    <ul className="channel-list" id="text-channel-list">
 
                         {/* Server-wide "All checklists" board — only when the server
                             has at least one checklist channel. */}
-                        {modeShownChannels.some(c => c.has_checklist) && (
+                        {modeShownChannels.some(c => c.has_checklist) && (!foldedHere.has('text') || showAllChecklists) && (
                             <li
                                 className={`channel ${showAllChecklists ? 'active' : ''}`}
                                 onClick={() => {
@@ -5684,18 +5796,10 @@ export function Chat({ onLogout }: ChatProps) {
                             "Hide Muted Channels" (server context menu) filters muted
                             ones out — except the channel currently open, which must
                             never vanish from under the reader. */}
-                        {channels
-                            .filter(c => (c.channel_type === 0 || c.channel_type === 2) && drawnAtTop(c, channels))
-                            // A hidden collection stays as the header of an open subchannel.
-                            .filter(c => listed(c) || channels.some(sub => sub.parent_id === c.id && drawnUnderCollection(sub) && openRowId === sub.id))
-                            .filter(c => !hideMutedHere || keptByHideMuted(c, channels, isChannelMuted, openRowId))
-                            .map(channel => {
+                        {textList.rows
+                            .map(({ channel, subchannels, folded }) => {
                                 const unreadCount = currentServerMuted ? 0 : (unreadCounts.get(channel.id) || 0);
                                 const isCollection = channel.channel_type === 2;
-                                const subchannels = channels.filter(sub => sub.parent_id === channel.id && !drawnAtTop(sub, channels))
-                                    .filter(drawnUnderCollection)
-                                    .filter(listed)
-                                    .filter(sub => !hideMutedHere || !isChannelMuted(sub.id) || openRowId === sub.id);
 
                                 return (
                                     <React.Fragment key={channel.id}>
@@ -5728,8 +5832,29 @@ export function Chat({ onLogout }: ChatProps) {
                                             onMouseLeave={handleChannelMouseLeave}
                                             style={{ cursor: draggingChannelId ? 'grabbing' : (currentServer?.owner_id === currentUserId ? 'grab' : 'pointer') }}
                                         >
+                                            {/* Fold this collection's subchannels away, as Discord's category arrow
+                                                does. Not offered while the whole section is folded: that fold
+                                                decides first, and the section's own button is the one to press. */}
+                                            {isCollection && !foldedHere.has('text') && (
+                                                <button
+                                                    type="button"
+                                                    className="collection-toggle"
+                                                    data-testid="toggle-collection"
+                                                    data-channel-id={channel.id}
+                                                    aria-expanded={!folded}
+                                                    aria-label={folded ? `${channel.name}, folded. Show its channels` : `${channel.name}. Fold its channels away`}
+                                                    onMouseDown={(e) => e.stopPropagation()}
+                                                    onClick={(e) => { e.stopPropagation(); toggleCollapsed(currentServer.id, `c${channel.id}`); }}
+                                                >
+                                                    {folded ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                                                </button>
+                                            )}
                                             <span className="hash">{channel.has_checklist ? <ChecklistIcon /> : isCollection ? <FolderIcon /> : <HashIcon />}</span>
                                             <span className="channel-name">{channel.name}</span>
+                                            {folded && (() => {
+                                                const held = (textListBase.find(r => r.channel.id === channel.id)?.subchannels.length ?? 0) - subchannels.length;
+                                                return held > 0 ? <span className="section-hidden">{held} hidden</span> : null;
+                                            })()}
                                             {unreadCount > 0 && (
                                                 <span className="unread-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>
                                             )}
@@ -5777,7 +5902,25 @@ export function Chat({ onLogout }: ChatProps) {
                 {/* Voice Channels Section */}
                 <div className="sidebar-section">
                     <div className="sidebar-header">
-                        <h3>Voice Channels</h3>
+                        <h3>
+                            <button
+                                type="button"
+                                className="section-toggle"
+                                data-testid="toggle-voice-channels"
+                                aria-expanded={!foldedHere.has('voice')}
+                                aria-controls="voice-channel-list"
+                                aria-label={foldedHere.has('voice')
+                                    ? `Voice Channels, folded${voiceListed.length - voiceDrawn.length > 0 ? `, ${voiceListed.length - voiceDrawn.length} empty hidden` : ''}. Show them`
+                                    : 'Voice Channels. Fold away the empty ones'}
+                                onClick={() => toggleCollapsed(currentServer.id, 'voice')}
+                            >
+                                {foldedHere.has('voice') ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                                <span>Voice Channels</span>
+                                {foldedHere.has('voice') && voiceListed.length - voiceDrawn.length > 0 && (
+                                    <span className="section-hidden">{voiceListed.length - voiceDrawn.length} empty</span>
+                                )}
+                            </button>
+                        </h3>
                         <button
                             className="add-channel-btn"
                             onClick={() => openCreateChannel(1)}
@@ -5788,12 +5931,11 @@ export function Chat({ onLogout }: ChatProps) {
                     </div>
                     <ul
                         className="channel-list voice-channel-list"
+                        id="voice-channel-list"
                         ref={setVoiceDragContainer}
                         onPointerDown={onVoiceDragPointerDown}
                     >
-                        {channels
-                            .filter(c => c.channel_type === 1)
-                            .filter(listed)
+                        {voiceDrawn
                             // AFK is always pinned last; the rest keep server order.
                             .sort((a, b) => (a.is_afk ? 1 : 0) - (b.is_afk ? 1 : 0))
                             .map(channel => {
@@ -5815,6 +5957,20 @@ export function Chat({ onLogout }: ChatProps) {
                                         // Automation contract (docs/AUTOMATION.md): open + join.
                                         data-testid="voice-channel"
                                         data-channel-id={channel.id}
+                                        // Reachable by keyboard, which brings up who is in the room
+                                        // (VoiceRosterTip below). Enter or Space does what a click does.
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-label={`${channel.name}, ${voiceUsers.length === 0 ? 'empty' : `${voiceUsers.length} in the channel`}`}
+                                        onKeyDown={(e) => {
+                                            // A push-to-talk or mute key on Space or Enter is taken by the hotkeys first (api/hotkeys.ts
+                                            // preventDefaults it), and a control's own handler has to ask.
+                                            if (e.defaultPrevented || e.target !== e.currentTarget || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                e.preventDefault();
+                                                handleChannelClick(channel);
+                                            }
+                                        }}
                                         onClick={() => handleChannelClick(channel)}
                                         onContextMenu={(e) => showContextMenu(e, [
                                             menuItems.channel.edit(() => setEditingChannel(channel)),
@@ -5836,6 +5992,22 @@ export function Chat({ onLogout }: ChatProps) {
                                                 <RocketIcon /> {GAME_NAMES[voiceTable.kind]}
                                             </span>
                                         )}
+                                        {/* Mouse resting on the row, or the keyboard on it: who is in the
+                                            room, or that nobody is (VoiceRosterCard.tsx). */}
+                                        <VoiceRosterTip
+                                            title={channel.name}
+                                            people={voiceUsers.map(u => {
+                                                const m = allMembers.find(x => x.id === u.id);
+                                                return {
+                                                    id: u.id,
+                                                    name: m?.server_nickname || m?.display_name || u.username,
+                                                    muted: u.isMuted,
+                                                    deafened: u.isDeafened,
+                                                    noMic: u.noMic,
+                                                    live: isUserStreaming(u.id),
+                                                };
+                                            })}
+                                        />
                                     </div>
                                     {/* Show users in this voice channel */}
                                     {voiceUsers.length > 0 && (
@@ -7255,6 +7427,35 @@ export function Chat({ onLogout }: ChatProps) {
                             ))}
                         </ul>
                     </div>
+                )}
+
+                {/* Last in the column, at the bottom of a short list: who is in a voice channel in ANY of your
+                    servers, not only this one (components/ActiveInServers.tsx). */}
+                {activeInServersOn && (
+                    <ActiveInServers
+                        view={activeView}
+                        status={activeReadStatus}
+                        collapsed={activePanelFolded}
+                        onToggle={() => toggleCollapsed(ALL_SERVERS, 'active')}
+                        onGo={goToActiveRoom}
+                        nameOf={(serverId, userId, username) => {
+                            // Nicknames are per server, and only the open server's members are loaded.
+                            const m = serverId === currentServer?.id ? allMembers.find(x => x.id === userId) : undefined;
+                            return m?.server_nickname || m?.display_name || username;
+                        }}
+                        personOf={(serverId, channelId, userId, username) => {
+                            const m = serverId === currentServer?.id ? allMembers.find(x => x.id === userId) : undefined;
+                            const s = globalVoiceUsers.get(`voice_${channelId}`)?.get(userId);
+                            return {
+                                id: userId,
+                                name: m?.server_nickname || m?.display_name || username,
+                                muted: s?.isMuted,
+                                deafened: s?.isDeafened,
+                                noMic: s?.noMic,
+                                live: isUserStreaming(userId),
+                            };
+                        }}
+                    />
                 )}
             </aside>
             )}

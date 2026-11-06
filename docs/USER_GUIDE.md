@@ -46,9 +46,41 @@ Left to right on a desktop window:
 | Server rail | A strip of round icons. **Direct Messages** is pinned at the top; below it, one icon per server you belong to; at the bottom, **Join a Server** and **Create a Server** |
 | Channel list | The server name with a **Server Settings** button, then text and voice channels; your name and avatar are in the bar at the bottom |
 | Chat area | Messages, the pinned-messages button, and the message box |
-| Member list | Everyone on the server. A crown marks the **Server Owner** |
+| Member list | Everyone on the server. A crown marks the **Server Owner**. Under it, **Active in your servers** lists the voice channels that have people in them in any of your servers ([below](#active-in-your-servers)) |
 
 On a phone the same areas are tabs along the bottom (**Chat**, **Members**, …).
+
+### The channel list: folding, and who is in a voice channel
+**Fold what you are not reading.** The **Text Channels** and **Voice Channels** headings are buttons
+with an arrow, as a category is in Discord, and so is the arrow in front of each collection. Press one
+(or Tab to it and press Enter or Space) to fold it away, and again to bring it back.
+
+- A folded **Text Channels** keeps the channel you have open and **every channel with unread
+  messages** (a muted channel's unread does not keep it). Messages are end-to-end encrypted, so the
+  list cannot tell which unread channel has a mention for you; none is folded out of sight, and a
+  mention still pings and still lights the server's bubble in the rail. The heading says how many
+  channels it is holding back (**4 hidden**).
+- A folded collection does the same for its own channels.
+- A folded **Voice Channels** keeps every room with someone in it, and the one you are in, and
+  takes the empty rooms away (**1 empty**).
+- Folds are your own and stay on this device: one per server, never sent to the server, so nobody
+  else's list changes. **Hide Muted Channels** (the server menu above) is separate and still works.
+
+**Who is in a voice channel.** The people in a room are listed under its name. To check a room, rest the
+mouse on its row, or Tab to it: a card names everyone in it, with who is muted, deafened or sharing, or
+says **Nobody is here**. Enter or Space on a focused row joins it, the same as a click. A touch screen has
+no hover, so a phone opens no card: it lists the people under the room, and a room with nobody under it is
+empty.
+
+### Active in your servers
+Under the member list, **Active in your servers** shows every voice channel with someone in it in
+any server you belong to, not only the one you have open, grouped by server, with who is in each.
+Press a row to go to that server; its voice row is scrolled into view and outlined for a moment, and
+the call is **not** joined (joining opens your microphone, so it is the room's own row you press). Rest
+the mouse on a row for everyone in the room. It only ever lists servers you are a member of and
+channels you are allowed to see. While it is still looking, or could not read a server, it says that
+instead of saying nobody is there. The arrow folds it. To turn it off, untick **Settings → Appearance → Active in Your Servers**; it then stops
+looking at your other servers' calls too.
 
 ---
 

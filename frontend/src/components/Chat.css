@@ -244,6 +244,91 @@
     color: var(--text-normal);
 }
 
+/* Folding a group of the channel list (sidebarCollapseStore.ts): the section's name is the button,
+   as Discord's category name is, with a chevron and, folded, how many channels it is holding back. */
+.sidebar-section h3 .section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-height: 24px;
+    margin: 0 0 0 -0.25rem;
+    padding: 0 0.25rem;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    /* Muted, not the heading's faint: a control is read at 4.5:1 on every theme. */
+    color: var(--text-muted);
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+}
+
+.sidebar-section h3 .section-toggle:hover {
+    color: var(--text-normal);
+}
+
+.section-toggle svg,
+.collection-toggle svg {
+    width: 12px;
+    height: 12px;
+    flex: none;
+}
+
+.section-toggle:focus-visible,
+.collection-toggle:focus-visible,
+.voice-channel:focus-visible,
+.voice-channel[data-revealed] {
+    outline: 2px solid var(--text-normal);
+    outline-offset: -2px;
+}
+
+.section-hidden {
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.collection-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin: 0 -0.25rem 0 -0.4rem;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+}
+
+.collection-toggle:hover {
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+}
+
+/* A finger needs 44 px. The negative margins keep the row as tall as it was. */
+@media (pointer: coarse) {
+    .sidebar-section h3 .section-toggle {
+        min-height: 44px;
+        margin-block: -10px;
+    }
+
+    .collection-toggle {
+        width: 44px;
+        height: 44px;
+        margin: -12px -0.5rem -12px -0.9rem;
+    }
+}
+
 /* DM Sidebar Section */
 .dm-section {
     border-top: 1px solid var(--bg-tertiary);
@@ -1967,6 +2052,16 @@ button.message-attachment.error { color: #ffb4b4; }
     overflow-y: auto;
     overflow-x: hidden;
     padding: 1rem 0.5rem;
+    /* A column, so "Active in your servers" (ActiveInServers.css) can sit at the bottom of a short
+       list as well as under a long one. It is here and not in that file so that the display:none
+       of the narrow-window rule below, later in this file, still wins. */
+    display: flex;
+    flex-direction: column;
+}
+
+/* The member list's sections keep their size: only the column scrolls. */
+.member-sidebar > .member-section {
+    flex: none;
 }
 
 .member-section {

@@ -1,0 +1,87 @@
+/* The hover / focus card of a voice room (VoiceRosterCard.tsx). A tooltip: it takes no pointer
+   events, so the row under it stays the one thing a press lands on. */
+.roster-tip-anchor {
+    display: none;
+}
+
+.roster-card {
+    position: fixed;
+    z-index: 10001;
+    min-width: 160px;
+    max-width: min(260px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow: hidden;
+    padding: 10px 12px;
+    background: var(--bg-floating);
+    color: var(--text-normal);
+    border: 1px solid var(--border-separator);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    font-size: 0.85rem;
+}
+
+.roster-card-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.roster-card-count {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.roster-card-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.roster-card-person {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.roster-card-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.roster-card-flag,
+.roster-card-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: none;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.roster-card-flag svg,
+.roster-card-live svg {
+    width: 14px;
+    height: 14px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .roster-card {
+        animation: rosterCardIn 0.1s ease;
+    }
+}
+
+@keyframes rosterCardIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}

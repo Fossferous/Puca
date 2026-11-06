@@ -3,7 +3,9 @@ import {
     deleteChannelQuestion,
     drawnAtTop,
     drawnUnderCollection,
+    collapseTextRows,
     keptByHideMuted,
+    keptVoiceWhenCollapsed,
     parentChoices,
     reorderedChannelIds,
     withoutDeletedChannel,
@@ -245,5 +247,89 @@ describe('deleting a collection', () => {
         ];
         expect(deleteChannelQuestion(loop, 1)).toBe('Delete One? Everything in it is deleted too: Two.');
         expect(withoutDeletedChannel(loop, 1)).toEqual([]);
+    });
+});
+
+describe("folding a group of the channel list (Discord's Collapse Category)", () => {
+    type Row = { id: number; name: string; channel_type: number; parent_id: number | null };
+    const r = (id: number, channel_type: number, parent_id: number | null = null): Row => ({ id, name: `r${id}`, channel_type, parent_id });
+    // lobby(1), Rooms(2){general(3), plans(4)}, Empty(5){}, rules(6)
+    const rows = [
+        { channel: r(1, TEXT), subchannels: [] as Row[] },
+        { channel: r(2, COLLECTION), subchannels: [r(3, TEXT, 2), r(4, TEXT, 2)] },
+        { channel: r(5, COLLECTION), subchannels: [] as Row[] },
+        { channel: r(6, TEXT), subchannels: [] as Row[] },
+    ];
+    const keep = (over: Partial<{ openId: number | null; unread: Record<number, number>; muted: number[] }> = {}) => ({
+        openId: over.openId ?? null,
+        unread: (id: number) => over.unread?.[id] ?? 0,
+        isMuted: (id: number) => over.muted?.includes(id) ?? false,
+    });
+    const ids = (out: ReturnType<typeof collapseTextRows<Row>>) => out.rows.map(x => [x.channel.id, ...x.subchannels.map(s => s.id)]);
+
+    it('changes nothing when nothing is folded', () => {
+        const out = collapseTextRows(rows, { section: false, collections: new Set() }, keep());
+        expect(ids(out)).toEqual([[1], [2, 3, 4], [5], [6]]);
+        expect(out.hidden).toBe(0);
+    });
+
+    it('folds a whole section down to nothing, and counts the channels it holds back', () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set() }, keep());
+        expect(ids(out)).toEqual([]);
+        // lobby, general, plans, rules: the collections are headers, not channels.
+        expect(out.hidden).toBe(4);
+    });
+
+    it('keeps the channel that is open, and a collection that is the header of it', () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set() }, keep({ openId: 3 }));
+        expect(ids(out)).toEqual([[2, 3]]);
+        expect(out.hidden).toBe(3);
+    });
+
+    it('keeps every unread channel, so nothing waiting for you is folded away', () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set() }, keep({ unread: { 4: 2, 6: 1 } }));
+        expect(ids(out)).toEqual([[2, 4], [6]]);
+        expect(out.hidden).toBe(2);
+    });
+
+    it("does not let a muted channel's unread hold the fold open", () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set() }, keep({ unread: { 6: 5 }, muted: [6] }));
+        expect(ids(out)).toEqual([]);
+    });
+
+    it('folds one collection and leaves the rest of the list', () => {
+        const out = collapseTextRows(rows, { section: false, collections: new Set([2]) }, keep());
+        expect(ids(out)).toEqual([[1], [2], [5], [6]]);
+        expect(out.rows.find(x => x.channel.id === 2)?.folded).toBe(true);
+        expect(out.hidden).toBe(2);
+    });
+
+    it('keeps an open or unread subchannel of a folded collection', () => {
+        const out = collapseTextRows(rows, { section: false, collections: new Set([2]) }, keep({ openId: 4, unread: { 3: 1 } }));
+        expect(ids(out)).toEqual([[1], [2, 3, 4], [5], [6]]);
+        expect(out.hidden).toBe(0);
+    });
+
+    it("lets the section's fold decide over a collection's own, which is then not shown as folded", () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set([2]) }, keep({ openId: 3 }));
+        expect(out.rows.find(x => x.channel.id === 2)?.folded).toBe(false);
+    });
+
+    it("keeps a folded section's collection that is itself open", () => {
+        const out = collapseTextRows(rows, { section: true, collections: new Set() }, keep({ openId: 5 }));
+        expect(ids(out)).toEqual([[5]]);
+    });
+});
+
+describe('the Voice Channels section folded', () => {
+    const here = (occupied: number[], inCall: number | null = null) => ({
+        occupants: (id: number) => (occupied.includes(id) ? 2 : 0),
+        voiceChannelId: inCall,
+    });
+
+    it('keeps a room with somebody in it, and the one you are in, and drops the empty ones', () => {
+        expect(keptVoiceWhenCollapsed(1, here([1]))).toBe(true);
+        expect(keptVoiceWhenCollapsed(2, here([1], 2))).toBe(true);
+        expect(keptVoiceWhenCollapsed(3, here([1], 2))).toBe(false);
     });
 });

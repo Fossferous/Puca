@@ -48,6 +48,10 @@ export const defaultSettings = {
      *  (docs/SERVER_MODES.md). Someone else's picture behind your messages is
      *  yours to decline. */
     serverLooks: true,
+    /** The member list's "Active in your servers" panel: the voice channels with somebody in them in
+     *  every server you are in, not only the open one (components/ActiveInServers.tsx). Off stops
+     *  it, and the reading of the other servers' calls that feeds it. */
+    activeInServers: true,
 
     // Notifications
     desktopNotifications: true,
