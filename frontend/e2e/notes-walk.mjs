@@ -3190,7 +3190,10 @@ ck('phone calendar: a note’s own reminder has a bell, not a tick box',
 // all. It is THREE days out, not tomorrow: the Reminders section above
 // retimed it from its row (18:45, +3 days), which is the point of that
 // check — so this one follows it rather than looking where it used to be.
-const mEggs = new Date(); mEggs.setDate(mEggs.getDate() + 3);
+// The day the Reminders section retimed it to is `later`, taken at ITS time: a fresh `new Date()` here
+// is a day further on when the walk runs across local midnight (0.9.858: 709 checks, 1 failed, then 709
+// on a rerun at 00:20), and "three days out" is then a day with no Eggs on it.
+const mEggs = new Date(later);
 await m.goto(`/notes/#/calendar?v=day&d=${mEggs.getFullYear()}-${mpad(mEggs.getMonth() + 1)}-${mpad(mEggs.getDate())}`);
 await m.waitForSelector('.cal-daylist', { timeout: 10000 });
 const calItemRow = m.locator('.cal-daylist .cal-row', { hasText: 'Eggs' });
