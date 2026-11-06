@@ -267,6 +267,32 @@ described one that did not exist.)
    update must never raise one, so the service keeps waiting for someone at
    the PC (ServiceUpdateBanner, "One Windows prompt"), and a session at the
    lock or sign-in screen meets the older agent until then.
+5. **The app that comes back.** The installer, not the old app, starts the
+   new one: tauri-plugin-updater runs it as `/P /UPDATE /R /ARGS <the running
+   app's own arguments>` and Tauri's NSIS template, in `.onInstSuccess`, starts
+   the new exe with whatever follows `/ARGS`. Windows starts Púca at sign-in as
+   `Puca.exe --hidden` and `--hidden` hides the window, so a Púca that Windows
+   started, or that came back from an earlier update, handed `--hidden` to its
+   successor: the update finished, Púca was running, and nothing was on the
+   screen ("puca doesnt currently reopen when update is complete",
+   2026-11-06; the relaunched `Puca.exe` on the owner's PC was started nine
+   seconds after the installer wrote its files, with `--hidden` on its command
+   line). Every later update did the same, because the new process carried
+   `--hidden` too. `src-tauri/installer-relaunch.nsh` takes `--hidden` off that
+   command line after a PASSIVE install (`/P`: the Update button and
+   *Install updates automatically*; a progress window was on the screen, so
+   someone is looking). A SILENT install (`/S`, item 4) keeps it, and so does
+   every other argument (a `puca://` invite). It is the NEW version's installer
+   that does this, for both variants, so the update that installs the first
+   version carrying it is the first to come back with its window; the version
+   being replaced does not matter. Two things follow from the design: a
+   login-time *Install updates automatically* update (opt-in) also comes back
+   with its window, not in the tray; and the macro edits `$CMDLINE`, which the
+   template reads, so a Tauri upgrade that changes how `.onInstSuccess` reads
+   its arguments must be re-checked. `npm run check:installer-hooks` runs the
+   template's relaunch lines in a test installer with the updater's real
+   command lines (the template alone as the control, which shows the bug) and
+   compares them with the last generated `installer.nsi` when there is one.
 
 ### Downgrade and replay (desktop)
 

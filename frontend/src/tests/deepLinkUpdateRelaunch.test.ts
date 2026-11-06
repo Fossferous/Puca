@@ -22,6 +22,11 @@
  * merges, is not basicUi (no `/R`: the installer would not relaunch, and a
  * click on its finish page runs the app with no arguments); and
  * installUpdateInPlace never turns the relaunch off.
+ *
+ * ONE argument does not go through: after a passive install the installer
+ * takes `--hidden` out (src-tauri/installer-relaunch.nsh), so an app Windows
+ * started in the tray comes back with its window. See
+ * installerRelaunchVisible.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
