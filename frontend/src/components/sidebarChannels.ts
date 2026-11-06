@@ -96,6 +96,80 @@ export function keptByHideMuted<C extends SidebarRow>(
 }
 
 /**
+ * Collapsing a group of the sidebar, as Discord's "Collapse Category" does it: what is open and
+ * what is waiting for you stays, so folding a group away never costs you a message. The unread
+ * rule is the same as Hide Muted Channels': a muted channel's unread does not hold it open.
+ * Messages are end-to-end encrypted, so the list cannot know which unread channel holds an
+ * @mention; every unread channel stays, and the mention's own ping and the rail's bubble are
+ * unchanged by any of this.
+ */
+export interface CollapseKeep {
+    /** The row whose page is open. */
+    openId: number | null | undefined;
+    /** The unread count the row would show. */
+    unread: (channelId: number) => number;
+    isMuted: (channelId: number) => boolean;
+}
+
+/** Whether a collapsed group still draws this text channel. */
+export function keptWhenCollapsed(channelId: number, keep: CollapseKeep): boolean {
+    return keep.openId === channelId || (keep.unread(channelId) > 0 && !keep.isMuted(channelId));
+}
+
+/** One top-level text-list row with the children the list would draw under it. */
+export interface TextListRow<C> {
+    channel: C;
+    subchannels: C[];
+}
+
+export interface CollapsedTextRow<C> extends TextListRow<C> {
+    /** This collection's own fold is closed (it never is while the whole section is folded). */
+    folded: boolean;
+}
+
+/**
+ * Applies the section's fold and each collection's fold to the rows the list would draw. A
+ * collection stays as the header of whatever is kept under it, and is drawn alone when only its
+ * own fold hides what is inside. `hidden` counts the text channels (not the collections) the folds
+ * took out, for the header to say.
+ */
+export function collapseTextRows<C extends SidebarRow>(
+    rows: readonly TextListRow<C>[],
+    fold: { section: boolean; collections: ReadonlySet<number> },
+    keep: CollapseKeep,
+): { rows: CollapsedTextRow<C>[]; hidden: number } {
+    const out: CollapsedTextRow<C>[] = [];
+    let hidden = 0;
+    for (const row of rows) {
+        const isCollection = row.channel.channel_type === 2;
+        const own = isCollection && !fold.section && fold.collections.has(row.channel.id);
+        if (!isCollection) {
+            if (fold.section && !keptWhenCollapsed(row.channel.id, keep)) { hidden += 1; continue; }
+            out.push({ ...row, folded: false });
+            continue;
+        }
+        const folding = fold.section || own;
+        const subchannels = folding ? row.subchannels.filter(sub => keptWhenCollapsed(sub.id, keep)) : row.subchannels;
+        hidden += row.subchannels.length - subchannels.length;
+        // Only the section's fold takes the collection's own row away, and only when nothing under it is kept.
+        if (fold.section && subchannels.length === 0 && !keptWhenCollapsed(row.channel.id, keep)) continue;
+        out.push({ channel: row.channel, subchannels, folded: own });
+    }
+    return { rows: out, hidden };
+}
+
+/**
+ * Whether the folded Voice Channels section still draws a room: one with somebody in it, the one
+ * you are in, and the one whose page is open. An empty room is what the fold takes away.
+ */
+export function keptVoiceWhenCollapsed(
+    channelId: number,
+    here: { occupants: (channelId: number) => number; voiceChannelId?: number | null; openId?: number | null },
+): boolean {
+    return here.occupants(channelId) > 0 || here.voiceChannelId === channelId || here.openId === channelId;
+}
+
+/**
  * The ids to store after dragging one row onto another, in their new order, or null
  * if the drag moves nothing.
  *

@@ -1,0 +1,168 @@
+/* The member list's "Active in your servers" panel (ActiveInServers.tsx): pinned to the bottom of the
+   right column, under the members, whatever their number. */
+.active-panel {
+    position: sticky;
+    bottom: -1rem;
+    margin: auto -0.5rem -1rem;
+    padding: 0.5rem 0.5rem 1rem;
+    flex: none;
+    max-height: 45%;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-separator);
+    z-index: 1;
+}
+
+.active-panel .member-section-title.active-panel-title {
+    margin: 0 0 0.25rem;
+}
+
+.active-panel-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: 100%;
+    min-height: 28px;
+    padding: 0.2rem 0.5rem;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.active-panel-toggle:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+}
+
+.active-panel-toggle:focus-visible,
+.active-room:focus-visible {
+    outline: 2px solid var(--text-normal);
+    outline-offset: -2px;
+}
+
+.active-panel-toggle svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+}
+
+.active-panel-count {
+    margin-left: auto;
+    min-width: 18px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    font-size: 0.7rem;
+    text-align: center;
+}
+
+.active-panel-empty {
+    margin: 0.25rem 0.5rem 0;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.active-servers,
+.active-rooms {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.active-server + .active-server {
+    margin-top: 0.5rem;
+}
+
+.active-server-name {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding: 0 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.active-server-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.active-server-here {
+    flex: none;
+    font-weight: 400;
+    font-size: 0.7rem;
+}
+
+.active-room {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-height: 36px;
+    padding: 0.25rem 0.5rem;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-normal);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.active-room:hover {
+    background: var(--bg-tertiary);
+}
+
+.active-room-icon {
+    flex: none;
+    display: inline-flex;
+    color: var(--text-muted);
+}
+
+.active-room-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.active-room-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.active-room-name,
+.active-room-who {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.active-room-name {
+    font-size: 0.85rem;
+}
+
+.active-room-who {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+/* A finger needs 44 px; the phone's panel is the member list's drawer. */
+@media (pointer: coarse) {
+    .active-panel-toggle {
+        min-height: 44px;
+    }
+
+    .active-room {
+        min-height: 44px;
+    }
+}

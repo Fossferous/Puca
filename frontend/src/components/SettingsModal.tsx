@@ -1977,6 +1977,21 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             onChange={(e) => updateSetting('compactMode', e.target.checked)}
                                         />
                                     </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Active in Your Servers</label>
+                                            <span className="option-hint">
+                                                Under the member list, show the voice channels that have people in them in every server you are in, not only the one open.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            aria-label="Show active voice channels from all servers"
+                                            data-testid="setting-active-in-servers"
+                                            checked={settings.activeInServers !== false}
+                                            onChange={(e) => updateSetting('activeInServers', e.target.checked)}
+                                        />
+                                    </div>
                                 </div>
                             </div>
                         )}

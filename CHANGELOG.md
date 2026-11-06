@@ -4,6 +4,15 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Fold the channel list, see who is in a voice channel, and see calls in all your servers
+### Added
+
+- **Fold the Text Channels and Voice Channels lists, and each collection, as in Discord.** The headings and the collections' arrows are buttons (they work from the keyboard). A folded Text Channels keeps the channel you have open and every channel with unread messages, so nothing waiting for you is folded out of sight, and says how many it is holding back; a folded Voice Channels keeps the rooms with someone in them. The fold is yours, kept per server on this device, and changes nobody else's list.
+- **Rest the mouse on a voice channel, or Tab to it, to see who is in it.** A card names everyone in the room and who is muted, deafened or sharing, or says **Nobody is here**. Enter or Space on a focused voice row joins it, as a click does. A touch screen has no hover, so a phone shows the people under the room as before.
+- **Active in your servers.** Under the member list, the voice channels that have people in them in every server you belong to, not only the one you have open. Pressing a row takes you to that server without joining the call. It shows only servers you are in and channels you may see, folds with its arrow, and **Settings → Appearance → Active in Your Servers** turns it off. Works with the server you already run: no server update is needed.
+
 ## 0.9.858 — 2026-11-05
 
 A file sent as a spoiler stays hidden after a sad face like :[, and Save to Notes keeps the words before one
