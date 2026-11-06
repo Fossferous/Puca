@@ -49,6 +49,7 @@ export function VoiceRosterTip({ title, people, hereLabel = 'in this channel' }:
     const [open, setOpen] = useState(false);
     const [at, setAt] = useState<{ left: number; top: number } | null>(null);
     const [rect, setRect] = useState<DOMRect | null>(null);
+    const openRef = useRef(false);
 
     // The card belongs to the element it sits in, so it is attached to that element: the row's own
     // markup, which is shared with drag and the context menu, takes no handlers for it.
@@ -71,8 +72,15 @@ export function VoiceRosterTip({ title, people, hereLabel = 'in this channel' }:
         host.addEventListener('focus', onFocus);
         host.addEventListener('blur', hide);
         host.addEventListener('keydown', onKey);
-        // A scroll of the list moves the row from under a card placed where it was.
-        window.addEventListener('scroll', hide, true);
+        // A scroll of whatever holds the row moves it from under a card placed where it was: follow it, and let go
+        // of it only once the row has left the window. A scroll elsewhere (the chat taking a new message) is not its business.
+        const onScroll = (e: Event) => {
+            if (!openRef.current || !(e.target instanceof Node) || !e.target.contains(host)) return;
+            const r = host.getBoundingClientRect();
+            if (r.bottom < 0 || r.top > window.innerHeight) { hide(); return; }
+            setRect(r);
+        };
+        window.addEventListener('scroll', onScroll, true);
         host.setAttribute('data-roster-card', id);
         return () => {
             window.clearTimeout(timer);
@@ -82,7 +90,7 @@ export function VoiceRosterTip({ title, people, hereLabel = 'in this channel' }:
             host.removeEventListener('focus', onFocus);
             host.removeEventListener('blur', hide);
             host.removeEventListener('keydown', onKey);
-            window.removeEventListener('scroll', hide, true);
+            window.removeEventListener('scroll', onScroll, true);
             host.removeAttribute('data-roster-card');
             host.removeAttribute('aria-describedby');
         };
@@ -91,6 +99,7 @@ export function VoiceRosterTip({ title, people, hereLabel = 'in this channel' }:
     useEffect(() => {
         const host = anchor.current?.parentElement;
         if (!host) return;
+        openRef.current = open;
         if (open) host.setAttribute('aria-describedby', id); else host.removeAttribute('aria-describedby');
     }, [open, id]);
 

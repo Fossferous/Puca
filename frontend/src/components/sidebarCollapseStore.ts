@@ -17,10 +17,19 @@ export type CollapseKey = 'text' | 'voice' | 'active' | `c${number}`;
 
 type Folded = Record<string, string[]>;
 
+// What could not be written: quota full, blocked site data, a private window. The fold then lasts until
+// reload, held here, and is what every read answers with.
+let unsaved: string | null = null;
+
+function stored(): string | null {
+    if (unsaved !== null) return unsaved;
+    try { return localStorage.getItem(COLLAPSED_KEY); } catch { return null; }
+}
+
 function read(): Folded {
     try {
-        const stored = localStorage.getItem(COLLAPSED_KEY);
-        const parsed: unknown = stored ? JSON.parse(stored) : {};
+        const stored_ = stored();
+        const parsed: unknown = stored_ ? JSON.parse(stored_) : {};
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
         const out: Folded = {};
         for (const [serverId, keys] of Object.entries(parsed as Record<string, unknown>)) {
@@ -55,7 +64,8 @@ export function toggleCollapsed(serverId: string, key: CollapseKey): boolean {
     const next = !keys.has(key);
     if (next) keys.add(key); else keys.delete(key);
     if (keys.size > 0) all[serverId] = [...keys]; else delete all[serverId];
-    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify(all)); } catch { /* storage full or blocked: the fold lasts until reload */ }
+    const raw = JSON.stringify(all);
+    try { localStorage.setItem(COLLAPSED_KEY, raw); unsaved = null; } catch { unsaved = raw; }
     window.dispatchEvent(new CustomEvent(CHANGED, { detail: { serverId, key, collapsed: next } }));
     return next;
 }
@@ -71,7 +81,7 @@ function subscribe(callback: () => void): () => void {
 }
 
 function snapshot(): string {
-    try { return localStorage.getItem(COLLAPSED_KEY) ?? ''; } catch { return ''; }
+    return stored() ?? '';
 }
 
 /** The folded keys of one server, live: another tab's fold and this tab's both re-render the caller. */

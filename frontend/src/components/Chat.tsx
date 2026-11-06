@@ -1963,7 +1963,7 @@ export function Chat({ onLogout }: ChatProps) {
     }, []);
     // The other servers' calls: read once and then kept right (activeServers.ts). The open
     // server's are Chat's own, above.
-    useActiveInServers({
+    const activeReadStatus = useActiveInServers({
         enabled: activeInServersOn,
         servers,
         currentServerId: currentServer?.id,
@@ -4625,8 +4625,12 @@ export function Chat({ onLogout }: ChatProps) {
         revealVoiceRef.current = { channelId, until: Date.now() + 5000 };
         if (server.id !== currentServer?.id) switchServer(server);
         if (isMobile) setMobilePanel('channels');
+        // Already the open server: nothing re-renders to run the effect below, so look now.
+        revealVoiceRow();
     };
-    useEffect(() => {
+    // Scroll to the row and mark it for a moment. Not focused: a focused voice row joins on Enter or
+    // Space, and the next key after a press on the panel must never join a call with the microphone open.
+    const revealVoiceRow = () => {
         const wanted = revealVoiceRef.current;
         if (!wanted) return;
         if (Date.now() > wanted.until) { revealVoiceRef.current = null; return; }
@@ -4634,8 +4638,10 @@ export function Chat({ onLogout }: ChatProps) {
         if (!row) return;
         revealVoiceRef.current = null;
         row.scrollIntoView({ block: 'nearest' });
-        row.focus({ preventScroll: true });
-    });
+        row.setAttribute('data-revealed', '');
+        window.setTimeout(() => row.removeAttribute('data-revealed'), 2500);
+    };
+    useEffect(() => { revealVoiceRow(); });
 
     const voiceGamesGate = gamesGate({
         feature: callActivity.feature,
@@ -5957,7 +5963,9 @@ export function Chat({ onLogout }: ChatProps) {
                                         tabIndex={0}
                                         aria-label={`${channel.name}, ${voiceUsers.length === 0 ? 'empty' : `${voiceUsers.length} in the channel`}`}
                                         onKeyDown={(e) => {
-                                            if (e.target !== e.currentTarget || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+                                            // A push-to-talk or mute key on Space or Enter is taken by the hotkeys first (api/hotkeys.ts
+                                            // preventDefaults it), and a control's own handler has to ask.
+                                            if (e.defaultPrevented || e.target !== e.currentTarget || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
                                             if (e.key === 'Enter' || e.key === ' ') {
                                                 e.preventDefault();
                                                 handleChannelClick(channel);
@@ -7421,11 +7429,12 @@ export function Chat({ onLogout }: ChatProps) {
                     </div>
                 )}
 
-                {/* Pinned to the bottom of the column: who is in a voice channel in ANY of your
+                {/* Last in the column, at the bottom of a short list: who is in a voice channel in ANY of your
                     servers, not only this one (components/ActiveInServers.tsx). */}
                 {activeInServersOn && (
                     <ActiveInServers
                         view={activeView}
+                        status={activeReadStatus}
                         collapsed={activePanelFolded}
                         onToggle={() => toggleCollapsed(ALL_SERVERS, 'active')}
                         onGo={goToActiveRoom}

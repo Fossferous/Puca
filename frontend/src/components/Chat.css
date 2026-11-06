@@ -277,7 +277,8 @@
 
 .section-toggle:focus-visible,
 .collection-toggle:focus-visible,
-.voice-channel:focus-visible {
+.voice-channel:focus-visible,
+.voice-channel[data-revealed] {
     outline: 2px solid var(--text-normal);
     outline-offset: -2px;
 }

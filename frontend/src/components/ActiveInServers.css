@@ -1,16 +1,14 @@
-/* The member list's "Active in your servers" panel (ActiveInServers.tsx): pinned to the bottom of the
-   right column, under the members, whatever their number. */
+/* The member list's "Active in your servers" panel (ActiveInServers.tsx): the last thing in the right
+   column, under the members. The column is a flex column (Chat.css), and the auto top margin pushes the
+   panel to the bottom of a short list; under a long one it follows the last member. It is not stuck over
+   the list: a footer laid over the scrolling members covers the rows under it, which then cannot be
+   clicked where they are drawn. */
 .active-panel {
-    position: sticky;
-    bottom: -1rem;
     margin: auto -0.5rem -1rem;
     padding: 0.5rem 0.5rem 1rem;
     flex: none;
-    max-height: 45%;
-    overflow-y: auto;
     background: var(--bg-primary);
     border-top: 1px solid var(--border-separator);
-    z-index: 1;
 }
 
 .active-panel .member-section-title.active-panel-title {

@@ -73,6 +73,17 @@ describe('ActiveInServers', () => {
         expect(host!.querySelector('.active-panel-count')).toBeNull();
     });
 
+    it('does not say nobody about what it has not seen', async () => {
+        await mount({ view: [], status: 'loading' });
+        expect(host!.textContent).toContain('Looking for calls');
+        expect(host!.textContent).not.toContain('Nobody');
+        await act(async () => { root!.unmount(); });
+        host!.remove();
+        await mount({ view: [], status: 'partial' });
+        expect(host!.textContent).toContain('could not be read');
+        expect(host!.textContent).not.toContain('Nobody');
+    });
+
     it('folds to its heading, which is a button that says whether it is open', async () => {
         const { onToggle } = await mount();
         const toggle = host!.querySelector('.active-panel-toggle') as HTMLButtonElement;

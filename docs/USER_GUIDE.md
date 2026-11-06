@@ -75,10 +75,11 @@ empty.
 ### Active in your servers
 Under the member list, **Active in your servers** shows every voice channel with someone in it in
 any server you belong to, not only the one you have open, grouped by server, with who is in each.
-Press a row to go to that server; it takes you to the room and does **not** join the call (joining
-opens your microphone, so it is the room's own row you press). Rest the mouse on a row for everyone in
-the room. It only ever lists servers you are a member of and channels you are allowed to see. The arrow
-folds it. To turn it off, untick **Settings → Appearance → Active in Your Servers**; it then stops
+Press a row to go to that server; its voice row is scrolled into view and outlined for a moment, and
+the call is **not** joined (joining opens your microphone, so it is the room's own row you press). Rest
+the mouse on a row for everyone in the room. It only ever lists servers you are a member of and
+channels you are allowed to see. While it is still looking, or could not read a server, it says that
+instead of saying nobody is there. The arrow folds it. To turn it off, untick **Settings → Appearance → Active in Your Servers**; it then stops
 looking at your other servers' calls too.
 
 ---

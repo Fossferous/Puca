@@ -48,6 +48,22 @@ describe('the folds of the channel list, per server and per device', () => {
         expect(seen).toHaveBeenCalledTimes(1);
     });
 
+    it('still fold when storage cannot be written (quota, blocked site data), until reload', () => {
+        (localStorage.setItem as Mock).mockImplementation(() => { throw new Error('QuotaExceededError'); });
+        const seen = vi.fn();
+        window.addEventListener('sidebarCollapseChanged', seen);
+        expect(toggleCollapsed('s1', 'text')).toBe(true);
+        expect(isCollapsed('s1', 'text')).toBe(true);
+        expect(seen).toHaveBeenCalledTimes(1);
+        expect(toggleCollapsed('s1', 'text')).toBe(false);
+        expect(isCollapsed('s1', 'text')).toBe(false);
+        window.removeEventListener('sidebarCollapseChanged', seen);
+        // Writable again: the next toggle is stored, and the held copy is let go.
+        (localStorage.setItem as Mock).mockImplementation((k: string, v: string) => { store.set(k, String(v)); });
+        expect(toggleCollapsed('s1', 'voice')).toBe(true);
+        expect(store.get('puca_sidebar_collapsed')).toContain('voice');
+    });
+
     it('survive storage that holds rubbish', () => {
         localStorage.setItem('puca_sidebar_collapsed', '[1,2');
         expect(isCollapsed('s1', 'text')).toBe(false);

@@ -9,7 +9,7 @@
 // the socket was down, or before this client started, was never known for any other server. This
 // reads it for the rest, and `reconcileRoster` keeps the shared roster (voiceState's
 // globalVoiceUsers) right, exactly as Chat does for the open server.
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { fetchVoiceUsers, listChannels, type Channel, type Server } from '../api/servers';
 import { keys } from '../hooks/queries';
@@ -40,7 +40,7 @@ export interface ActiveServer {
 }
 
 /**
- * What the panel lists: each server, in the rail's order, that has a voice room with somebody in
+ * What the panel lists: each server, in the order the server list comes in, that has a voice room with somebody in
  * it. A room is named by its channel list, so one whose list is not here yet is left out rather
  * than shown under a guess. The AFK room is a holding pen, not activity, and is left out.
  */
@@ -105,8 +105,14 @@ function voiceRoomIds(channels: readonly Pick<Channel, 'id' | 'channel_type'>[] 
     return (channels ?? []).filter(c => c.channel_type === 1).map(c => `voice_${c.id}`);
 }
 
+/** Whether the reading of the other servers has happened, and whether all of it did. */
+export type ActiveReadStatus = 'loading' | 'ok' | 'partial';
+
 /**
- * Keeps the shared roster right for every server but the open one, while the panel is on.
+ * Keeps the shared roster right for every server but the open one, while the panel is on, and says
+ * whether that has been read yet and all of it (so the panel never says "nobody" about what it has not
+ * been able to see). One read runs at a time: a trigger that comes while one is running makes it run
+ * once more afterwards, not alongside.
  * `eventSeq` is Chat's counter of roster events: a snapshot read while one arrived is dropped (the
  * next read heals it), as Chat does for the open server, because the event is newer than it.
  * `onChange` is called when something here changed what the panel would draw.
@@ -120,8 +126,9 @@ export function useActiveInServers(opts: {
      *  people it has not heard the server announce yet, so this leaves that one room alone. */
     callRoomId?: string | null;
     onChange: () => void;
-}): void {
+}): ActiveReadStatus {
     const queryClient = useQueryClient();
+    const [status, setStatus] = useState<ActiveReadStatus>('loading');
     // The rooms each server's snapshot has named so far: pruned when it stops naming them.
     const seeded = useRef(new Map<string, Set<string>>());
     const latest = useRef(opts);
@@ -132,76 +139,104 @@ export function useActiveInServers(opts: {
     useEffect(() => {
         if (!opts.enabled) return;
         let cancelled = false;
-        let retry: number | undefined;
-        const run = async (attempt = 0) => {
-            if (document.visibilityState === 'hidden') return;
+        let running = false;
+        let again = false;
+        // The one timer that asks for a read later: a retry, or a call heard of in a room not yet named.
+        let laterTimer: number | undefined;
+        const later = (ms: number) => {
+            window.clearTimeout(laterTimer);
+            laterTimer = window.setTimeout(() => { void run(); }, ms);
+        };
+        const run = async (attempt = 0): Promise<void> => {
+            if (cancelled || document.visibilityState === 'hidden') return;
+            if (running) { again = true; return; }
+            running = true;
             let dropped = false;
-            const { servers, currentServerId, eventSeq, onChange, callRoomId } = latest.current;
+            let failed = false;
             let changed = false;
-            await Promise.all(servers.filter(s => s.id !== currentServerId).map(async server => {
-                const seqAtFetch = eventSeq();
-                let snapshot: Awaited<ReturnType<typeof fetchVoiceUsers>>;
-                try {
-                    snapshot = await fetchVoiceUsers(server.id);
-                } catch {
-                    return; // no longer a member, or the server is unreachable: the next read tries again
-                }
-                if (cancelled) return;
-                if (eventSeq() !== seqAtFetch) { dropped = true; return; }
-                const before = seeded.current.get(server.id) ?? new Set<string>();
-                // A server with somebody in voice, or one that had: its channel list names the rooms.
-                const cached = queryClient.getQueryData<Channel[]>(keys.channels(server.id));
-                let channels = cached;
-                if (snapshot.voice_users.length > 0 || before.size > 0) {
+            const { servers, currentServerId, eventSeq, onChange } = latest.current;
+            try {
+                await Promise.all(servers.filter(s => s.id !== currentServerId).map(async server => {
+                    const seqAtFetch = eventSeq();
+                    let occupants: Awaited<ReturnType<typeof fetchVoiceUsers>>['voice_users'];
                     try {
-                        channels = await fetchChannelNames(queryClient, server.id);
-                    } catch { /* keep any cached list */ }
+                        // An answer that is not the list it should be is the same as none: nothing is changed by it.
+                        const answer = await fetchVoiceUsers(server.id);
+                        if (!Array.isArray(answer?.voice_users)) { failed = true; return; }
+                        occupants = answer.voice_users;
+                    } catch {
+                        failed = true; // no longer a member, or the server is unreachable: the next read tries again
+                        return;
+                    }
                     if (cancelled) return;
                     if (eventSeq() !== seqAtFetch) { dropped = true; return; }
-                    // The panel names a room by this list: a list it did not have, or a newer one, is a change
-                    // even when nobody moved (a call heard of by its event before the server's list was here).
-                    if (channels !== cached) changed = true;
-                }
-                const prune = new Set<string>([...before, ...voiceRoomIds(channels)]);
-                if (callRoomId) prune.delete(callRoomId);
-                const next = reconcileRoster(globalVoiceUsers, snapshot.voice_users.filter(v => v.room_id !== callRoomId), prune);
-                const nowSeeded = new Set<string>();
-                for (const [roomId, users] of next) {
-                    const was = globalVoiceUsers.get(roomId);
-                    if (users.size > 0) nowSeeded.add(roomId);
-                    if (!sameRoster(was, users)) changed = true;
-                    if (users.size > 0 || was) globalVoiceUsers.set(roomId, users);
-                }
-                seeded.current.set(server.id, nowSeeded);
-            }));
-            if (changed && !cancelled) onChange();
+                    const before = seeded.current.get(server.id) ?? new Set<string>();
+                    // A server with somebody in voice, or one that had: its channel list names the rooms.
+                    const cached = queryClient.getQueryData<Channel[]>(keys.channels(server.id));
+                    let channels = cached;
+                    if (occupants.length > 0 || before.size > 0) {
+                        try {
+                            channels = await fetchChannelNames(queryClient, server.id);
+                        } catch {
+                            if (!cached) failed = true; // rooms it cannot name are rooms the panel cannot show
+                        }
+                        if (cancelled) return;
+                        if (eventSeq() !== seqAtFetch) { dropped = true; return; }
+                        // The panel names a room by this list: a list it did not have, or a newer one, is a change
+                        // even when nobody moved (a call heard of by its event before the server's list was here).
+                        if (channels !== cached) changed = true;
+                    }
+                    // Read now, not when the read began: a call joined meanwhile is the call's own to write.
+                    const callRoomId = latest.current.callRoomId;
+                    const prune = new Set<string>([...before, ...voiceRoomIds(channels)]);
+                    if (callRoomId) prune.delete(callRoomId);
+                    const next = reconcileRoster(globalVoiceUsers, occupants.filter(v => v.room_id !== callRoomId), prune);
+                    const nowSeeded = new Set<string>();
+                    for (const [roomId, users] of next) {
+                        const was = globalVoiceUsers.get(roomId);
+                        if (users.size > 0) nowSeeded.add(roomId);
+                        if (!sameRoster(was, users)) changed = true;
+                        if (users.size > 0 || was) globalVoiceUsers.set(roomId, users);
+                    }
+                    seeded.current.set(server.id, nowSeeded);
+                }));
+            } finally {
+                running = false;
+            }
+            if (cancelled) return;
+            setStatus(failed || dropped ? 'partial' : 'ok');
+            if (changed) onChange();
             // A roster event arrived while a snapshot was in flight, so the snapshot was dropped as
-            // older than it: read again shortly, a few times at most.
-            if (dropped && !cancelled && attempt < 3) retry = window.setTimeout(() => { void run(attempt + 1); }, 2_000);
+            // older than it: read again shortly, a few times at most. Else a trigger that came while
+            // this ran is answered once, now.
+            if (dropped && attempt < 3) later(2_000);
+            else if (again) { again = false; void run(); }
         };
         void run();
         const timer = window.setInterval(() => { void run(); }, OTHER_SERVERS_POLL_MS);
         const onConnected = () => { void run(); };
         // A call began in a room no channel list here names yet (a server never opened, a new room):
-        // the event carries no server, so read the snapshots to find which one it is.
+        // the event carries no server, so read the snapshots to find which one it is. A burst of these
+        // is one read, a moment after the last.
         const onStarted = (msg: ServerMessage) => {
             const roomId = (msg.payload as { room_id?: string } | undefined)?.room_id;
             if (!roomId || !latest.current.servers.some(s => s.id !== latest.current.currentServerId)) return;
             const named = latest.current.servers.some(s => voiceRoomIds(queryClient.getQueryData<Channel[]>(keys.channels(s.id))).includes(roomId));
-            if (!named) window.setTimeout(() => { if (!cancelled) void run(); }, 500);
+            if (!named) later(500);
         };
         window.addEventListener('wsConnected', onConnected);
         document.addEventListener('visibilitychange', onConnected);
         wsClient.on('StreamStarted', onStarted);
         return () => {
             cancelled = true;
-            window.clearTimeout(retry);
+            window.clearTimeout(laterTimer);
             wsClient.off('StreamStarted', onStarted);
             window.clearInterval(timer);
             window.removeEventListener('wsConnected', onConnected);
             document.removeEventListener('visibilitychange', onConnected);
         };
     }, [opts.enabled, serversKey, opts.currentServerId, queryClient]);
+    return status;
 }
 
 async function fetchChannelNames(queryClient: QueryClient, serverId: string): Promise<Channel[]> {

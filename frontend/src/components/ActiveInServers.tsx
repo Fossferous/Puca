@@ -9,14 +9,16 @@
  */
 import { ChevronDownIcon, ChevronRightIcon, SpeakerIcon } from './Icons';
 import { VoiceRosterTip, type RosterPerson } from './VoiceRosterCard';
-import { activePeople, type ActiveServer } from './activeServers';
+import { activePeople, type ActiveReadStatus, type ActiveServer } from './activeServers';
 import './ActiveInServers.css';
 
 /** The names a row shows before it says "+ n more". */
 const NAMES_SHOWN = 2;
 
-export function ActiveInServers({ view, collapsed, onToggle, onGo, nameOf, personOf }: {
+export function ActiveInServers({ view, status = 'ok', collapsed, onToggle, onGo, nameOf, personOf }: {
     view: readonly ActiveServer[];
+    /** Whether the other servers have been read yet, and all of them: "nobody" is only said of what was seen. */
+    status?: ActiveReadStatus;
     collapsed: boolean;
     onToggle: () => void;
     onGo: (serverId: string, channelId: number) => void;
@@ -44,7 +46,11 @@ export function ActiveInServers({ view, collapsed, onToggle, onGo, nameOf, perso
             {!collapsed && (
                 <div id="active-panel-body" className="active-panel-body">
                     {view.length === 0 ? (
-                        <p className="active-panel-empty">Nobody is in a voice channel in any of your servers.</p>
+                        <p className="active-panel-empty" data-status={status}>
+                            {status === 'loading' ? 'Looking for calls in your servers…'
+                                : status === 'partial' ? 'No calls seen. Some of your servers could not be read just now.'
+                                    : 'Nobody is in a voice channel in any of your servers.'}
+                        </p>
                     ) : (
                         <ul className="active-servers">
                             {view.map(server => (

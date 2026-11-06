@@ -119,6 +119,20 @@ describe('VoiceRosterTip', () => {
         expect(card()).toBeNull();
     });
 
+    it('follows the row when what holds it scrolls, and ignores a scroll elsewhere', async () => {
+        const row = await mount([{ id: 1, name: 'Ana' }]);
+        const elsewhere = document.createElement('div');
+        document.body.appendChild(elsewhere);
+        await act(async () => { row.focus(); });
+        expect(card()).not.toBeNull();
+        await act(async () => { elsewhere.dispatchEvent(new Event('scroll')); });
+        expect(card()).not.toBeNull();
+        // The row is moved by a scroll of the page: the card is still there, and follows.
+        await act(async () => { document.dispatchEvent(new Event('scroll')); });
+        expect(card()).not.toBeNull();
+        elsewhere.remove();
+    });
+
     it('is a tooltip that takes no pointer events, so the row stays what a press lands on', async () => {
         const row = await mount([{ id: 1, name: 'Ana' }]);
         await act(async () => { row.focus(); });

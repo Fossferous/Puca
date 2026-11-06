@@ -385,9 +385,25 @@ try {
     // Enter on a focused row does what a click does, and nothing else.
     await A.locator('[title="Disconnect"]').first().click().catch(() => {});
     await until(async () => (await inCall(A)) === 0, 8000);
+    // A push-to-talk or mute key on Space or Enter is taken by the hotkeys first (they preventDefault in the
+    // capture phase), and a voice row must not also join on it. Stand in for the hotkeys with a capture listener.
+    await quietRow.focus();
+    await A.evaluate(() => {
+        window.__spaceTaken = (e) => { if (e.key === ' ' || e.key === 'Enter') e.preventDefault(); };
+        window.addEventListener('keydown', window.__spaceTaken, true);
+    });
+    await A.keyboard.press('Space');
+    await A.keyboard.press('Enter');
+    await sleep(1500);
+    check('a Space or Enter that a hotkey took does not also join the focused voice row', (await inCall(A)) === 0);
+    await A.evaluate(() => window.removeEventListener('keydown', window.__spaceTaken, true));
+    await A.keyboard.press('Space');
+    check('Space on a focused voice row joins it, as a click does', !!await until(async () => (await inCall(A)) > 0, 25000));
+    await A.locator('[title="Disconnect"]').first().click().catch(() => {});
+    await until(async () => (await inCall(A)) === 0, 8000);
     await quietRow.focus();
     await A.keyboard.press('Enter');
-    check('Enter on a focused voice row joins it, as a click does', !!await until(async () => (await inCall(A)) > 0, 25000));
+    check('and so does Enter', !!await until(async () => (await inCall(A)) > 0, 25000));
     await A.locator('[title="Disconnect"]').first().click().catch(() => {});
     await until(async () => (await inCall(A)) === 0, 8000);
     // The fold does not take the card away from a row it keeps.
@@ -424,7 +440,7 @@ try {
         const last = [...document.querySelectorAll('.member-section')].pop().getBoundingClientRect();
         return { sideBottom: side.bottom, panBottom: pan.bottom, panTop: pan.top, membersBottom: last.bottom, right: pan.right, sideRight: side.right };
     });
-    check('pinned to the bottom of the right column, below the members', Math.abs(geometry.panBottom - geometry.sideBottom) <= 2 && geometry.panTop >= geometry.membersBottom - 1, geometry);
+    check('at the bottom of the right column, below the members (a short list: it sits on the floor of the column)', Math.abs(geometry.panBottom - geometry.sideBottom) <= 2 && geometry.panTop >= geometry.membersBottom - 1, geometry);
     check('with no calls in the other servers it says so', (await panelRooms(A)).every(s => s.server === s1Name), await panelRooms(A));
     check('the open server\'s own call is listed, and marked as this server', (await panelRooms(A)).some(s => s.server === s1Name && s.rooms.some(r => r.name === 'Lounge' && r.who.includes('fhc_'))) && (await A.locator('.active-server-here').count()) === 1, await panelRooms(A));
 
@@ -470,8 +486,20 @@ try {
     // A row goes to the room's server and joins nothing.
     await A.locator('.active-room', { hasText: 'Arena' }).click();
     check('a row goes to its server', !!await until(async () => (await A.locator('.server-name').innerText()) === s2Name, 8000));
-    check('and the voice row is there to see, with the focus on it', !!await until(async () => A.evaluate((id) => document.activeElement?.getAttribute('data-channel-id') === String(id), arena.id), 4000));
+    check('and the voice row is there to see, marked for a moment', !!await until(async () => voiceRow(A, arena.id).evaluate(el => el.hasAttribute('data-revealed')), 4000));
+    check('without the focus on it: the next Space or Enter must not join a call', await A.evaluate(() => document.activeElement?.getAttribute('data-testid') !== 'voice-channel'));
     check('and joined no call', (await inCall(A)) === 0);
+    await A.locator(`.server-icon[title="${s1Name}"]`).click();
+    await until(async () => (await A.locator('.server-name').innerText()) === s1Name, 8000);
+
+    // The same press when the room is in the OPEN server: nothing re-renders, and it still shows where the room is.
+    await A.locator(`.server-icon[title="${s2Name}"]`).click();
+    await until(async () => (await A.locator('.server-name').innerText()) === s2Name, 8000);
+    await until(async () => (await A.locator('.active-room', { hasText: 'Arena' }).count()) > 0, 8000);
+    await A.locator('.active-room', { hasText: 'Arena' }).click();
+    check('a row for a room in the open server marks the room at once, too', !!await until(async () => voiceRow(A, arena.id).evaluate(el => el.hasAttribute('data-revealed')), 1500));
+    await sleep(2800);
+    check('and the mark goes by itself', !(await voiceRow(A, arena.id).evaluate(el => el.hasAttribute('data-revealed'))));
     await A.locator(`.server-icon[title="${s1Name}"]`).click();
     await until(async () => (await A.locator('.server-name').innerText()) === s1Name, 8000);
 
