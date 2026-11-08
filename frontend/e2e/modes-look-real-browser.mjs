@@ -277,7 +277,16 @@ function serve(csp) {
     });
 }
 
-const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--mute-audio'] });
+// HTTPS-First off. Chromium now turns "Always Use Secure Connections" on by default (Edge 157 on
+// this machine, updated 2026-11-08): the browser itself rewrites a navigation to an http:// address
+// into https:// before anything is asked, so the link checks below read what EDGE does to the
+// address instead of what Púca hands it (and the rewritten request missed the local answer).
+// Measured with a probe that answers every request locally: no flag, HttpsUpgrades alone or any one
+// HttpsFirst* alone still landed on https://; this whole set lands on http://. Unknown names are
+// ignored by Chromium, so the set stays safe on an older Edge.
+const NO_HTTPS_FIRST = '--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,HttpsFirstModeV2ForTypicallySecureUsers,'
+    + 'HttpsFirstModeIncognito,HttpsFirstBalancedMode,HttpsFirstModeV2ForEngagedSites,HttpsFirstModeForAdvancedProtectionUsers';
+const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--mute-audio', NO_HTTPS_FIRST] });
 
 /** Read a screenshot's pixels in the page. */
 const pixelsOf = (page, png) => page.evaluate(async (b64) => {

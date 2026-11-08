@@ -501,7 +501,16 @@ function buildRelaunchHarness(withMacro) {
 function relaunchArgs(exe, commandLine) {
     const out = join(dir, 'relaunch.txt');
     rmSync(out, { force: true });
-    execFileSync(exe, [commandLine], { cwd: dir, windowsVerbatimArguments: true, stdio: 'ignore', timeout: 60_000 });
+    try {
+        execFileSync(exe, [commandLine], { cwd: dir, windowsVerbatimArguments: true, stdio: 'ignore', timeout: 60_000 });
+    } catch (e) {
+        // Windows refuses to start a file its antivirus has just caught (ERROR_VIRUS_INFECTED, which
+        // node reports as UNKNOWN): the test installer never ran, so there is nothing to compare.
+        // Only a detection NAMED in Defender's own log for this very file turns that into a skip.
+        const blocked = ['UNKNOWN', 'EPERM', 'EACCES'].includes(e.code) ? antivirusDetection(exe) : null;
+        if (blocked) throw new AntivirusBlocked(blocked);
+        throw e;
+    }
     if (!existsSync(out)) {
         console.error(`FAIL: the relaunch test installer wrote nothing for "${commandLine}" — .onInstSuccess did not run`);
         process.exit(1);
@@ -533,12 +542,47 @@ const RELAUNCH_CASES = [
         '/P /UPDATE /ARGS --hidden', null, null],
 ];
 
+/** A test installer the antivirus caught before it could run. */
+class AntivirusBlocked extends Error {}
+
+/**
+ * The name Windows Defender gave `exe` when it caught it, read from its own
+ * Operational log (events 1116 detected / 1117 acted), or null. Defender logs the
+ * detection a few seconds after it refuses the start, so this looks for up to
+ * 20 s. Read only: nothing here changes a setting or touches the quarantine.
+ */
+function antivirusDetection(exe) {
+    if (process.platform !== 'win32') return null;
+    const ps = [
+        "$e = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1116,1117; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue",
+        `| Where-Object { $_.Message -like ('*' + '${exe.replace(/'/g, "''")}' + '*') } | Select-Object -First 1;`,
+        "if ($e) { ($e.Message -split \"`r?`n\" | Where-Object { $_ -match '^\\s*Name:' } | Select-Object -First 1).Trim() }",
+    ].join(' ');
+    for (let i = 0; i < 10; i++) {
+        let out = '';
+        try {
+            out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }).trim();
+        } catch { /* no log to read: not a detection we can name */ }
+        if (out) return out.replace(/^Name:\s*/, '');
+        execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 2'], { stdio: 'ignore' });
+    }
+    return null;
+}
+
 const asIs = buildRelaunchHarness(false);
 const fixed = buildRelaunchHarness(true);
 const show = (v) => (v === null ? 'starts nothing' : `starts the app with [${v}]`);
 let relaunchFailed = false;
+let relaunchSkipped = null;
 for (const [what, cmd, before, after] of RELAUNCH_CASES) {
-    const got = { before: relaunchArgs(asIs, cmd), after: relaunchArgs(fixed, cmd) };
+    let got;
+    try {
+        got = { before: relaunchArgs(asIs, cmd), after: relaunchArgs(fixed, cmd) };
+    } catch (e) {
+        if (!(e instanceof AntivirusBlocked)) throw e;
+        relaunchSkipped = e.message;
+        break;
+    }
     // The first column is the control: the template as it is must show the
     // bug (--hidden handed to the new app), or the harness sees nothing.
     for (const [column, want] of [['before', before], ['after', after]]) {
@@ -550,8 +594,18 @@ for (const [what, cmd, before, after] of RELAUNCH_CASES) {
     }
 }
 if (relaunchFailed) process.exit(1);
-console.log(`  ok  relaunch: the template alone starts a --hidden app hidden; with installer-relaunch.nsh a passive update starts it with its window, `
-    + `and a silent one (a PC updating itself runs /P ... /S), an invite link and a bare /R are unchanged (${RELAUNCH_CASES.length} installer command lines, each run twice)`);
+if (relaunchSkipped) {
+    // Loud, and only for a detection Defender itself named: the compile checks above and the
+    // preprocessed-script check below still run, and src/tests/installerRelaunchVisible.test.ts
+    // pins the same wiring. Running these test installers needs a machine whose antivirus lets
+    // them start; nothing here asks it to.
+    console.log(`  SKIP relaunch RUN: Windows Defender caught the stand-alone test installer before it could start (${relaunchSkipped}),`
+        + ' so its 8 command lines were not run on this machine. The real installers are a different file: scan them');
+    console.log('       (MpCmdRun -Scan -ScanType 3 -File <installer> -DisableRemediation) before shipping. Nothing was excluded or changed in Defender.');
+} else {
+    console.log(`  ok  relaunch: the template alone starts a --hidden app hidden; with installer-relaunch.nsh a passive update starts it with its window, `
+        + `and a silent one (a PC updating itself runs /P ... /S), an invite link and a bare /R are unchanged (${RELAUNCH_CASES.length} installer command lines, each run twice)`);
+}
 
 /**
  * Both hook files must actually insert the macro in the Install section (and
