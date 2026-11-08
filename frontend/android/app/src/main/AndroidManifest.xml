@@ -166,6 +166,14 @@
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
+        <!-- A press on a key button of the remote-control notification
+             (ShadeKeyReceiver.java, ShadeKeys.java). NOT exported: only the
+             app's own immutable PendingIntents reach it, and every button
+             needs the phone unlocked. -->
+        <receiver
+            android:name=".ShadeKeyReceiver"
+            android:exported="false" />
+
         <!-- Home-screen shortcuts (Friends / Tasks / Devices / Settings).
              Exported because the launcher's APPWIDGET_UPDATE broadcast must
              reach it; that action is a protected broadcast only the system

@@ -31,6 +31,9 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(SovereignLocationPlugin.class);
         registerPlugin(SovereignDownloadsPlugin.class);
         registerPlugin(SovereignScreenSharePlugin.class);
+        // Keys on the remote-control notification. Not in Lite, which has no
+        // remote control: there the page finds no plugin and offers none.
+        if (!KeepAliveService.isLite()) registerPlugin(SovereignShadeKeysPlugin.class);
         super.onCreate(savedInstanceState);
     }
 

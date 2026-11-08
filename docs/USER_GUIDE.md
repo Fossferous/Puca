@@ -792,7 +792,7 @@ The bar above the picture:
 |---------|--------|
 | **Screen** | Pick which screen to see, or **All displays**. **Fit the picture to this window (less lag)** asks for no more pixels than you can see. **Fullscreen** fills your monitor (also **Ctrl+Alt+Enter**). **Zoom** in and out (or **Ctrl**+wheel over the picture), **Fit** to go back; zoomed in, push the pointer against an edge of the picture to move along it. **Show stats** puts the live numbers over the picture. **Privacy mode (blank that computer's screen)**, and the display power actions: **Turn displays off**, **Turn displays off, keep primary**, **Turn displays on**, **Disable other displays**, **Re-enable displays** |
 | **Quality** | From **Max (15Mbps, 60fps)** down to **Low (1Mbps, 15fps)**. The tick is what that computer confirmed |
-| **Keyboard** | Keys your own computer would keep for itself: **Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, **Esc**, **Windows key**, **Windows + D (show the desktop)**, **Ctrl + Shift + Esc (Task Manager)**, **Print Screen**. **Type text…** types what you write or paste there as characters, so an emoji, an accented letter or a password from a manager arrives exactly as it is, whatever keyboard layout that computer uses; new lines press Enter, and invisible control characters (a pasted text can hold some) are left out, with a note saying how many. **Type this computer's clipboard** opens it with your clipboard in it. **Send the clipboard (paste it over there)** puts your clipboard on that computer, for Ctrl+V there |
+| **Keyboard** | Keys your own computer would keep for itself: **Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, **Esc**, **Windows key**, **Windows + D (show the desktop)**, **Ctrl + Shift + Esc (Task Manager)**, **Print Screen**. **Pinned keys…** puts keys of your choice on the screen as buttons (see *Pinned keys* below). **Type text…** types what you write or paste there as characters, so an emoji, an accented letter or a password from a manager arrives exactly as it is, whatever keyboard layout that computer uses; new lines press Enter, and invisible control characters (a pasted text can hold some) are left out, with a note saying how many. **Type this computer's clipboard** opens it with your clipboard in it. **Send the clipboard (paste it over there)** puts your clipboard on that computer, for Ctrl+V there |
 | **Mouse** | **Draw the pointer here (no delay)** (on by default): your own mouse pointer is drawn over the picture, so it moves with no delay at all, and it takes that computer's pointer shape — the text cursor over a field, the hand over a link, nothing while a game hides it; a marker shows where it was left while your mouse is off the picture. With an older Púca on that computer, which cannot tell this computer its pointer shape, that computer draws its own pointer as before. **Game mode (send mouse movement, for games)**: click the picture to capture your mouse, Esc lets it go. **Sensitivity** for Game mode |
 | **Files** | Browse, download from and upload to that computer |
 | **More** | **Lock**, **Shut down…** (asks first), **Copy diagnostics** (five seconds of numbers while you keep using it, for a problem report; if a step gets no answer — a clipboard prompt you cannot see, say — it says which instead of waiting), **Back to Púca (keep the session)** |
@@ -849,11 +849,66 @@ screen is a trackpad — or **Touch mode** — the pointer goes where you tap;
 **Show virtual mouse** for left, middle and right buttons and scrolling;
 **Follow the cursor while zoomed**; **Zoom to the text cursor while typing**;
 **Open the keyboard when a text box is tapped**; **Copy diagnostics**),
-**More** (**Browse files**, **Send clipboard**, **Insert Ctrl + Alt + Del**,
-**Alt + Tab**, **Alt + F4**, the display power actions, **Lock**,
-**Shut down…**), **Chat**, **Collapse** and **Close**. In **Mouse mode**: tap
-to click, long-tap to right-click, double-tap and move to drag, move three
-fingers up or down to scroll, two fingers to move the picture, pinch to zoom.
+**More** (**Pinned keys…**, **Browse files**, **Send clipboard**, **Insert
+Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, the display power actions,
+**Lock**, **Shut down…**), **Chat**, **Collapse** and **Close**. In **Mouse
+mode**: tap to click, long-tap to right-click, double-tap and move to drag,
+move three fingers up or down to scroll, two fingers to move the picture,
+pinch to zoom.
+
+### Pinned keys
+**Pinned keys…** (in **More** on a phone, in **Keyboard** on a computer) puts
+keys you choose on the screen as buttons, in a row like the virtual mouse's,
+in both Mouse and Touch mode. Pick a key — any letter or digit, **F1** to
+**F24**, the arrows, **Enter**, **Esc**, **Tab**, **Space**, **Backspace**,
+**Delete**, **Home**, **End**, **Page Up**, **Page Down**, **Insert**, the
+number pad, **Print Screen**, **Menu**, the lock keys, a modifier on its own,
+or **Ctrl + Alt + Del** — tick any of **Win**, **Ctrl**, **Alt** and
+**Shift** to hold with it, and press **Pin it**. Up to twelve. Ctrl + Alt +
+Delete chosen that way is pinned as **Ctrl + Alt + Del**, the only form of it
+Windows acts on; **Win + L** cannot be pinned, because Windows does not lock
+for it from another device (use **Lock** in **More**).
+
+- A button presses its key while your finger (or mouse button) is down and
+  lets go when you lift it, like a real key: tap it for a keystroke, hold it
+  to hold the key. A held **Ctrl** (or any modifier) pin works with the
+  keyboard bar too: hold it and type **c** for Ctrl + C. **Ctrl + Alt + Del** is sent when you let go, through the
+  Púca service on that computer, as in the **More** menu.
+- In the list, the arrows move a key up or down, the bin unpins it, and
+  **Show pinned keys on the screen** hides the row without unpinning. Drag
+  the row by its grip to where your thumb wants it.
+- The keys stay pinned in that phone or browser, for every computer you
+  control from it. They are hidden while control is paused and on a screen
+  you were only invited to watch.
+- **Media and volume keys** (play, pause, next, mute, volume) and **Pause /
+  Break** cannot be pinned: Púca on the computer cannot press them yet.
+  Symbols are sent by their place on a US keyboard, as the keyboard bar's
+  are. On a **Linux** computer, Print Screen, Scroll Lock, Num Lock and Menu
+  do nothing.
+
+**In the notification (Android app).** Tick **In the notification** on up to
+three pinned keys. While you control a computer, Púca's notification
+(**Device session active**) has them as buttons, so you can press them from
+any app — or with Púca in the background — without opening it. The
+notification then says what the last press sent (**Last sent: F5**).
+
+- They work only with the phone unlocked. A button pressed on the lock screen
+  sends nothing while the phone stays locked: on Android 12 and later,
+  Android asks you to unlock first and sends the key once you have; on older
+  versions it waits two seconds for you to unlock, and otherwise sends
+  nothing (unlock and press it again). If your lock screen hides sensitive
+  notification content, the buttons do not appear there at all.
+- They come off the notification while control is paused, and go away when
+  the session ends. The notification itself goes too, unless Púca keeps it
+  for another reason (**Connected** for background notifications, **In a
+  voice call**).
+- On Android 14 and later you can swipe the notification away; its buttons
+  come back the next time you open Púca.
+- If Púca's notifications are turned off in Android Settings the buttons
+  cannot show; the list in **Pinned keys…** says so. Turning off only the
+  **Remote control keys** notification category hides them too.
+- This needs an Android app from after 0.9.859; with an older one the list
+  has no **In the notification** boxes.
 
 ---
 

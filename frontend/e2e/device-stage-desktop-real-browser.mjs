@@ -131,7 +131,21 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
         ck(`${label}: ${name} — every row inside the window and hit`, count > 0 && bad.length === 0, bad.length ? bad.join('; ') : `${count} rows`);
         if (name === 'Screen' && w === 1280) await page.screenshot({ path: join(outdir, `menu-screen-${w}.png`) });
         await clearSent(page);
-        await page.mouse.click(video.x + video.width * 0.5, video.y + video.height * 0.8);
+        // A point on the picture OUTSIDE the open menu. It was always the
+        // middle at 80% down, until the Keyboard menu grew a row (Pinned
+        // keys…) and, at 900x700, reached down over that point: the press
+        // landed on the menu itself and "outside" was no longer outside.
+        const outside = await page.evaluate(({ x, y, w, h }) => {
+            const menu = document.querySelector('.dsb-menu');
+            for (const [fx, fy] of [[0.5, 0.8], [0.15, 0.8], [0.85, 0.8], [0.5, 0.92], [0.15, 0.92]]) {
+                const px = x + w * fx, py = y + h * fy;
+                const hit = document.elementFromPoint(px, py);
+                if (!menu || !hit || !menu.contains(hit)) return { x: px, y: py };
+            }
+            return null;
+        }, { x: video.x, y: video.y, w: video.width, h: video.height });
+        if (!outside) ck(`${label}: ${name} — found a point on the picture outside the open menu`, false);
+        await page.mouse.click(outside?.x ?? video.x + video.width * 0.5, outside?.y ?? video.y + video.height * 0.8);
         await page.waitForTimeout(150);
         const leaked = (await sentOf(page, 'down')).length + (await sentOf(page, 'up')).length;
         const closed = await page.evaluate(() => !document.querySelector('.dsb-menu'));

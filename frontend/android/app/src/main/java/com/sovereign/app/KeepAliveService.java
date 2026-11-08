@@ -20,6 +20,9 @@ import android.os.PowerManager;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.drawable.IconCompat;
+
+import java.util.List;
 
 /**
  * Keeps the app's process — and with it the WebView, the WebSocket and any
@@ -55,6 +58,11 @@ import androidx.core.content.ContextCompat;
 public class KeepAliveService extends Service {
 
     public static final String CHANNEL_ID = "sovereign_background";
+    /** The same notification while it carries KEY BUTTONS (ShadeKeys): a
+     *  silent DEFAULT channel, because the background channel is LOW, and a
+     *  low notification sits collapsed in "Silent" with its buttons hidden
+     *  behind an expand (ScreenShareService found the same for its Stop). */
+    public static final String KEYS_CHANNEL_ID = "sovereign_control_keys";
     public static final int NOTIFICATION_ID = 4712;
 
     /** Desired state, sent complete on every start. A start carrying these
@@ -147,6 +155,74 @@ public class KeepAliveService extends Service {
     private final GeofenceEngine engine = new GeofenceEngine();
     private LocationListener fixListener;
     private long currentIntervalMs;
+
+    // --- keys on the notification (ShadeKeys; main thread for the repost) ---
+
+    /** What the page last declared. Process-scoped like {@link #reasons}: it
+     *  dies with the process, and is drawn only while CONTROL holds. Written
+     *  on the MAIN thread only (setShadeKeys posts there), so a press's
+     *  read-modify-write in onShadePress cannot overwrite a newer list the
+     *  page sent from Capacitor's plugin thread. */
+    private static volatile ShadeKeys shade = ShadeKeys.NONE;
+
+    /** Lite has no remote control: never a key button there, whatever a page
+     *  asks (MainActivity does not even register the plugin in Lite). */
+    static boolean isLite() {
+        return "lite".equals(BuildConfig.PUCA_VARIANT);
+    }
+
+    /** The page declared the notification's keys. Any thread: applied on the
+     *  main thread, in the order declared. */
+    static void setShadeKeys(ShadeKeys next) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            shade = next;
+            repostLive();
+        });
+    }
+
+    /**
+     * A key button was pressed (ShadeKeyReceiver, main thread). Decided by
+     * {@link ShadeKeys#decide}; only a SEND reaches the page, and a page that
+     * cannot take it (gone, or not listening) takes the buttons down with it.
+     */
+    static void onShadePress(String id, boolean keyguardLocked) {
+        KeepAliveService s = live;
+        boolean control = s != null && s.reasons.control;
+        ShadeKeys.Outcome outcome = shade.decide(id, control, keyguardLocked, isLite());
+        // The pin's id and the outcome only: no key, nothing typed.
+        android.util.Log.i("ShadeKeys", "press " + id + " locked=" + keyguardLocked + " -> " + outcome);
+        switch (outcome) {
+            case SEND:
+                if (!SovereignShadeKeysPlugin.deliver(id)) {
+                    shade = shade.withoutKeys();
+                    repostLive();
+                }
+                break;
+            case LOCKED:
+                shade = shade.withStatus(ShadeKeys.STATUS_LOCKED);
+                repostLive();
+                break;
+            case NOT_LIVE:
+                // A button with no session behind it should not be there at
+                // all: draw again (without it, since shown() is empty).
+                repostLive();
+                break;
+            case UNKNOWN:
+            default:
+                break;
+        }
+    }
+
+    /** Draw the running service's notification again with the current keys. */
+    private static void repostLive() {
+        KeepAliveService s = live;
+        if (s == null) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (live != s || !s.inForeground || !s.reasons.any()) return;
+            NotificationManager nm = (NotificationManager) s.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.notify(NOTIFICATION_ID, s.buildNotification(s.reasons.title(), s.reasons.text()));
+        });
+    }
 
     /** Live instance so SovereignLocationPlugin.setFences can poke a running
      *  service without an intent round-trip (whose extra-less intent the
@@ -364,6 +440,9 @@ public class KeepAliveService extends Service {
      */
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        // The keys' page (and the session they type through) died with the
+        // task: no button may outlive it, whatever survives below.
+        shade = ShadeKeys.NONE;
         // Credentials must EXIST and not be provably expired: the JWT's exp is
         // readable without a network call, and "Connected" over a token the
         // server will refuse is the lie the paused notice exists to retire. A
@@ -637,16 +716,67 @@ public class KeepAliveService extends Service {
                 this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        ShadeKeys keys = shade;
+        List<ShadeKeys.Key> buttons = keys.shown(reasons.control, isLite());
+        boolean withKeys = !buttons.isEmpty();
+        if (withKeys) createKeysChannel();
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, withKeys ? KEYS_CHANNEL_ID : CHANNEL_ID)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentIntent(pi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(withKeys ? NotificationCompat.PRIORITY_DEFAULT : NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE);
+        if (!withKeys) return b.build();
+
+        // PRIVATE on the lock screen: where the person hides notification
+        // content, the lock screen shows this public copy (title and text,
+        // no buttons, no "Last sent"). Where they show all content, the
+        // buttons may be visible there, and every one still needs the phone
+        // unlocked (setAuthenticationRequired on 12+, the receiver's keyguard
+        // check on every version).
+        b.setSilent(true);
+        b.setVisibility(NotificationCompat.VISIBILITY_PRIVATE);
+        b.setPublicVersion(new NotificationCompat.Builder(this, KEYS_CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+                .setSilent(true)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .build();
+                .build());
+        String status = keys.statusShown(reasons.control, isLite());
+        if (status != null) b.setSubText(status);
+        for (int i = 0; i < buttons.size(); i++) {
+            ShadeKeys.Key k = buttons.get(i);
+            Intent press = new Intent(this, ShadeKeyReceiver.class)
+                    .setAction(ShadeKeyReceiver.ACTION)
+                    // The id in the DATA, so each pin's button is its own
+                    // PendingIntent (extras are not part of its identity).
+                    .setData(android.net.Uri.parse("puca-shade-key:" + k.id))
+                    .putExtra(ShadeKeyReceiver.EXTRA_ID, k.id);
+            PendingIntent ppi = PendingIntent.getBroadcast(this, ShadeKeys.requestCode(i), press,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            b.addAction(new NotificationCompat.Action.Builder((IconCompat) null, k.label, ppi)
+                    .setAuthenticationRequired(true)
+                    .build());
+        }
+        return b.build();
+    }
+
+    private void createKeysChannel() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null || nm.getNotificationChannel(KEYS_CHANNEL_ID) != null) return;
+        NotificationChannel ch = new NotificationChannel(
+                KEYS_CHANNEL_ID, "Remote control keys", NotificationManager.IMPORTANCE_DEFAULT);
+        ch.setDescription("The keys you chose to press from here while you control a computer.");
+        ch.setShowBadge(false);
+        ch.setSound(null, null);
+        ch.enableVibration(false);
+        ch.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+        nm.createNotificationChannel(ch);
     }
 
     private void createChannel() {

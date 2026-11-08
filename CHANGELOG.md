@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+
+- **Pin any key to the remote-control screen, and press it from the notification.** In **My Devices**, **More → Pinned keys…** on a phone (**Keyboard → Pinned keys…** on a computer) puts a key or a shortcut on the screen as a button beside the virtual mouse: any letter or digit, F1 to F24, the arrows, Enter, Esc, Tab, Space, Backspace, Delete, Home, End, Page Up and Down, Insert, the number pad, Print Screen and the other system keys, held with any of Ctrl, Alt, Shift and Win, and Ctrl + Alt + Del (sent through the Púca service, as in the More menu). Hold a button to hold the key. Move them up and down, unpin them, drag the row by its grip; they stay pinned on that phone or browser for every computer. In the Android app, mark up to three **In the notification**: while you control a computer they are buttons on Púca's notification, so you can press them from any app without opening Púca. They need the phone unlocked (a press on the lock screen sends nothing while it stays locked; on Android 12 and later it asks you to unlock and then sends), they come off while control is paused, and they go away with the session. Media and volume keys cannot be pinned yet: Púca on the computer cannot press them. The notification buttons need the new Android app (APK); the rest arrives as an ordinary update.
+
 ## 0.9.859 — 2026-11-06
 
 Fold the channel lists, see who is in a voice channel and which calls run in all your servers, a collection's deny now holds on the server, and Púca reopens with its window after an update

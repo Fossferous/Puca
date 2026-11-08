@@ -18,6 +18,12 @@
  * Everything the driver needs is on `window.__stage`.
  */
 import type { CaretReport, DeviceControlSession } from '../../src/api/devices/session';
+// The session layer declares the CONTROL keep-alive while a session lives
+// (session.ts, setControlKeepAlive); the stand-in does the same, so the stage
+// loaded into a debug APK raises the real "Device session active"
+// notification, key buttons and all (android-shade-keys-live.mjs). In a
+// browser it is a no-op.
+import { setControlKeepAlive } from '../../src/api/mobileApp';
 
 export const ALL_DISPLAYS = 255;
 export type { CaretReport, DeviceControlSession };
@@ -318,7 +324,14 @@ function transform(): { scale: number; x: number; y: number } | null {
 
 (window as unknown as Record<string, unknown>).__stage = {
     knobs, state, log, inputs, viewSizes, monitorRequests, encodedSizes, MONITORS,
-    start(): void { ensureStream(); emit(); },
+    start(): void { ensureStream(); setControlKeepAlive(true); emit(); },
+    /** The session ends, as the host hanging up does: the stage shows why,
+     *  and the keep-alive's CONTROL reason goes, as session.ts lets it go. */
+    end(why = 'the other side ended the session'): void {
+        state.endedWith = why;
+        setControlKeepAlive(false);
+        emit();
+    },
     emit, pushCaret, transform,
     /** Force a capture as the host would after the passphrase (no confirm lag). */
     setActive(m: number): void { state.activeMonitor = m; state.capturing = m; state.step = null; emit(); },

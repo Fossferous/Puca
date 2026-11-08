@@ -510,6 +510,27 @@
     height: 24px;
 }
 
+/* THE PINNED KEYS (DeviceStagePinnedKeys.tsx): a third cluster on the same
+   rules — grip leading a row of 46px buttons, parked above the mouse buttons
+   by default, dragged and remembered like them. Past about six keys the row
+   wraps rather than laying a band across a phone's whole width; the grip
+   stretches down the rows it leads. Labels, not glyphs, except the arrows. */
+.vm-cluster-pins {
+    left: 12px;
+    bottom: 260px;
+}
+.vm-pin-keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-width: min(312px, calc(100vw - 72px));
+}
+.vm-btn.vm-pin {
+    padding: 0 8px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
 .device-stage-minimized {
     position: fixed;
     bottom: 20px;

@@ -644,6 +644,103 @@
 }
 .device-stage-typetext-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+/* THE PINNED-KEYS EDITOR (DeviceStagePinnedKeys.tsx): the Type text dialog's
+   surface and words (the app's theme tokens), raised over the stage's own
+   clusters, which sit at 460 — on a phone the editor must cover the keys it
+   edits. Scrolls inside itself on a short screen; every control is 44px tall
+   so a finger lands on it. */
+.device-stage-typetext-backdrop.dspk-backdrop { z-index: 700; }
+.dspk-editor {
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+.dspk-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    cursor: pointer;
+}
+.dspk-check input {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    flex: none;
+}
+.dspk-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.dspk-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--background-modifier-accent, #3f4147);
+}
+.dspk-name {
+    flex: 1 1 120px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.dspk-row-actions {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+}
+.dspk-icon {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+.dspk-add {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    /* A fieldset's min-width is its content's by default, and the key
+       <select> is as wide as its longest option: on a phone that pushed the
+       whole group past the dialog's edge. */
+    min-width: 0;
+    margin: 0;
+    padding: 6px 12px 12px;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 6px;
+}
+.dspk-add legend { font-weight: 600; padding: 0 4px; }
+.dspk-mods {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 16px;
+}
+.dspk-add select {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    min-height: 44px;
+    padding: 0 8px;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 4px;
+    background: var(--background-secondary, #2b2d31);
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+}
+.dspk-add-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.dspk-preview { font-weight: 600; overflow-wrap: anywhere; }
+.dspk-editor .device-stage-btn { min-height: 44px; }
+
 /* The panel's one control: the before-and-after comparison. It alone takes
    the pointer (the panel does not), and stops its own presses there. */
 .device-stage-stats-compare {

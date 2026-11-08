@@ -37,7 +37,7 @@ import { FPS_SENS_MAX, FPS_SENS_MIN, FPS_SENS_STEP, fmtSens } from '../utils/fps
 import {
     ActivityIcon, ChatIcon, ChevronDownIcon, CopyIcon, CrosshairIcon, DisconnectIcon, FolderIcon, ForwardIcon,
     FullscreenExitIcon, FullscreenIcon, KeyboardIcon, LiveDotIcon, LockIcon, MinusIcon, MonitorIcon,
-    MoreIcon, MouseIcon, PauseIcon, PlayIcon, PlusIcon, PowerIcon, SlidersIcon,
+    MoreIcon, MouseIcon, PauseIcon, PinIcon, PlayIcon, PlusIcon, PowerIcon, SlidersIcon,
 } from './Icons';
 
 type MenuId = 'screen' | 'quality' | 'keys' | 'mouse' | 'more';
@@ -74,6 +74,8 @@ export interface DesktopBarProps {
     clipboardBusy: boolean;
     onTypeText: () => void;
     onTypeClipboard: () => void;
+    /** Open the pinned-keys editor (DeviceStagePinnedKeys.tsx). */
+    onPinnedKeys: () => void;
     /** A moment's feedback for an action, shown in the bar's note slot. */
     onNotice: (message: string) => void;
     /** A menu opened or closed: the stage stops forwarding keys meanwhile. */
@@ -341,6 +343,7 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
                             <Item label="Windows + D (show the desktop)" onClick={chord(['MetaLeft'], 'KeyD', 'Windows+D')} />
                             <Item label="Ctrl + Shift + Esc (Task Manager)" onClick={chord(['ControlLeft', 'ShiftLeft'], 'Escape', 'Ctrl+Shift+Esc')} />
                             <Item label="Print Screen" onClick={chord([], 'PrintScreen', 'Print Screen')} />
+                            <Item icon={<PinIcon />} label="Pinned keys…" onClick={act(p.onPinnedKeys)} />
                             <Sep />
                             <Item icon={<KeyboardIcon />} label="Type text…" onClick={act(p.onTypeText)} />
                             <Item icon={<CopyIcon />} label="Type this computer's clipboard" onClick={act(p.onTypeClipboard)} />

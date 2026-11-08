@@ -74,6 +74,9 @@ import { MobileToolbar, MobileToolbarToggle } from './DeviceStageMobileToolbar';
 import { MoreMenu, MonitorMenu, MouseMenu } from './DeviceStageMobileMenus';
 import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
+import { DeviceStagePinnedKeys, DeviceStagePinnedKeysEditor } from './DeviceStagePinnedKeys';
+import { readPins, readShowPins, writePins, writeShowPins, type PinnedKey } from '../api/devices/pinnedKeys';
+import { decideShadePress, onShadeKeyPress, repushShadeKeys, setShadeKeys, shadeButtons } from '../api/devices/shadeKeys';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
 import { olderHostMessage } from '../api/devices/olderHost';
@@ -517,6 +520,13 @@ export function DeviceStage() {
     const isMouseModeRef = useRef(isMouseMode);
     useEffect(() => { isMouseModeRef.current = isMouseMode; }, [isMouseMode]);
     const [showVirtualMouse, setShowVirtualMouse] = useState(readVirtualMousePreference);
+    /** PINNED KEYS (pinnedKeys.ts): the list, whether the cluster shows, and
+     *  the editor. One list for this browser, like the mouse pad's switch. */
+    const [pins, setPins] = useState<PinnedKey[]>(readPins);
+    const [showPins, setShowPins] = useState(readShowPins);
+    const [pinsEditorOpen, setPinsEditorOpen] = useState(false);
+    const updatePins = useCallback((next: PinnedKey[]) => { setPins(next); writePins(next); }, []);
+    const setShowPinsRemembered = useCallback((on: boolean) => { setShowPins(on); writeShowPins(on); }, []);
     /** Where THIS end draws the pointer, in picture-relative coordinates —
      *  the same numbers that steer the camera, written in the same frame. */
     const [virtualCursor, setVirtualCursor] = useState({ x: 0.5, y: 0.5 });
@@ -699,6 +709,9 @@ export function DeviceStage() {
     if (session && session.id !== armedFor) {
         setArmedFor(session.id);
         setControlEnabled(true);
+        // The pinned-keys editor belongs to the session it was opened in; a
+        // new one must not start with it up (and the keys held back by it).
+        setPinsEditorOpen(false);
     }
 
     const sessionActiveId = session?.id ?? null;
@@ -748,6 +761,11 @@ export function DeviceStage() {
     /** Buttons the virtual mouse pad holds down — same treatment as held
      *  keys: blur, hide and session end release them on the host. */
     const padPressedRef = useRef<Set<number>>(new Set());
+    /** Key codes the PINNED KEYS hold down — their own record beside
+     *  heldKeysRef, because the keyboard bar's latch can hold the same
+     *  modifier: a pin letting go of Ctrl must not lift the latch's Ctrl over
+     *  there, nor the latch the pin's. The release-everything path frees both. */
+    const pinHeldRef = useRef<Set<string>>(new Set());
     const sessionIdRef = useRef<string | null>(null);
     useEffect(() => { sessionIdRef.current = sessionActiveId; }, [sessionActiveId]);
 
@@ -827,6 +845,23 @@ export function DeviceStage() {
             sendRef.current({ t: 'key', code, down: true });
         } else {
             heldKeysRef.current.delete(code);
+            if (pinHeldRef.current.has(code)) return; // a pinned key still holds it
+            if (sessionIdRef.current) sendInput(sessionIdRef.current, { t: 'key', code, down: false });
+        }
+    }, []);
+
+    /** What the pinned keys hold right now, for the keyboard bar's typing. */
+    const pinHeldCodes = useCallback((): ReadonlySet<string> => pinHeldRef.current, []);
+    /** A pinned key's code down or up: overlayHoldKey's rule exactly (downs
+     *  through the gated send, releases straight to the transport so a key
+     *  held before "Pause control" still lifts), in its own record. */
+    const pinKey = useCallback((code: string, down: boolean) => {
+        if (down) {
+            pinHeldRef.current.add(code);
+            sendRef.current({ t: 'key', code, down: true });
+        } else {
+            pinHeldRef.current.delete(code);
+            if (heldKeysRef.current.has(code)) return; // the keyboard bar's latch still holds it
             if (sessionIdRef.current) sendInput(sessionIdRef.current, { t: 'key', code, down: false });
         }
     }, []);
@@ -882,6 +917,8 @@ export function DeviceStage() {
             padPressedRef.current.clear();
             for (const code of heldKeysRef.current) sendRef.current({ t: 'key', code, down: false });
             heldKeysRef.current.clear();
+            for (const code of pinHeldRef.current) sendRef.current({ t: 'key', code, down: false });
+            pinHeldRef.current.clear();
             // THE TRACKPAD MACHINE TOO. A gesture interrupted by the app going
             // away never gets its pointerup, and the machine keeps its own map
             // of fingers: one left behind mid-pinch meant every later
@@ -2689,6 +2726,65 @@ export function DeviceStage() {
         return () => clearTimeout(t);
     }, [clipboardNote, diagBusy]);
 
+    /** The Ctrl+Alt+Del pin: the More menu's frame and the same honest note.
+     *  Declared below the note state it writes (see copyDiagnostics). */
+    const pinSas = useCallback(() => {
+        if (!session || !controlEnabled || session.viewOnly) return;
+        if (!sendInput(session.id, { t: 'sas' })) setClipboardNote('Not connected — Ctrl+Alt+Del was not sent');
+        else setClipboardNote('Ctrl+Alt+Del sent');
+    }, [session, controlEnabled]);
+
+    // KEYS IN THE NOTIFICATION (shadeKeys.ts). The page decides what the
+    // notification offers: the pins marked for it, and only while input can
+    // really land — a live session, not a view-only share, control not paused.
+    // The status line says what the last press did, so a press from the shade
+    // is never a button that looks as if it did nothing.
+    // Keyed by the session it is about, so a new session starts with no
+    // "Last sent" from the previous one without an effect to clear it.
+    // `n` counts presses: the notification is told again after EVERY press,
+    // even one whose words match the last ("Last sent: F5" twice), because the
+    // native side may have written its own line in between (a press refused
+    // on a locked phone) that only the next push replaces.
+    const [shadeNote, setShadeNote] = useState<{ sid: string; text: string; n: number } | null>(null);
+    const shadeStatus = shadeNote && shadeNote.sid === sessionActiveId ? shadeNote.text : null;
+    const shadePresses = shadeNote?.n ?? 0;
+    // A session still connecting (or waiting for the other side's consent)
+    // has nowhere for a key to go: no buttons until it is active.
+    const shadeLive = session !== null && session.phase === 'active';
+    const shadeCanInput = session !== null && !session.viewOnly;
+    useEffect(() => {
+        const keys = shadeButtons(pins, { live: shadeLive, canInput: shadeCanInput, controlEnabled });
+        setShadeKeys(keys, keys.length > 0 ? shadeStatus : null, shadePresses);
+    }, [pins, shadeLive, shadeCanInput, controlEnabled, shadeStatus, shadePresses]);
+    // Back in the foreground: post the notification's keys afresh, in case the
+    // person swiped it away (Android 14+ lets them) — it returns with them.
+    useEffect(() => {
+        const onVisible = () => { if (!document.hidden) repushShadeKeys(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => document.removeEventListener('visibilitychange', onVisible);
+    }, []);
+    /** What a press from the notification needs, read when it arrives. */
+    const shadePressRef = useRef<(id: string) => void>(() => { /* no stage yet */ });
+    useEffect(() => {
+        shadePressRef.current = (id: string) => {
+            const d = decideShadePress(pins, id, { live: shadeLive, canInput: shadeCanInput, controlEnabled });
+            // A button from a moment ago (unpinned, paused, the session gone)
+            // sends nothing and says nothing: the buttons are already coming
+            // off, and a "paused" line would only be seen after Resume, when
+            // it was no longer true.
+            if (!d.send) return;
+            const sid = sessionIdRef.current;
+            let queued = sid !== null;
+            // A complete tap, every frame through the transport in order:
+            // nothing is held afterwards, so a phone that goes back to sleep
+            // strands no key on the computer.
+            if (!sid) return;
+            for (const frame of d.frames) queued = sendInput(sid, frame) && queued;
+            setShadeNote(prev => ({ sid, text: queued ? `Last sent: ${d.label}` : `Not sent: not connected (${d.label})`, n: (prev?.n ?? 0) + 1 }));
+        };
+    }, [pins, shadeLive, shadeCanInput, controlEnabled]);
+    useEffect(() => onShadeKeyPress(id => shadePressRef.current(id)), []);
+
     /**
      * The stage's own numbers, onto the clipboard.
      *
@@ -3330,7 +3426,8 @@ export function DeviceStage() {
                 if (!heldKeysRef.current.has(e.code)) return; // never forwarded down
                 heldKeysRef.current.delete(e.code);
                 e.preventDefault();
-                sendInput(session.id, { t: 'key', code: e.code, down: false });
+                // A pinned key holding the same code keeps it down over there.
+                if (!pinHeldRef.current.has(e.code)) sendInput(session.id, { t: 'key', code: e.code, down: false });
                 return;
             }
             // MINIMISED: the stage is out of sight and the keys are the app's
@@ -3373,7 +3470,7 @@ export function DeviceStage() {
             // to the page — none of it is for the machine over there. Nor is what
             // answers one of the app's own questions (api/appDialogs.ts), which
             // this listener hears first.
-            if (barMenuOpenRef.current || typeTextOpen || appQuestionOpen()) return;
+            if (barMenuOpenRef.current || typeTextOpen || pinsEditorOpen || appQuestionOpen()) return;
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
             // typed every character into the controlled PC as well. The
@@ -3399,7 +3496,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, isMinimized]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, pinsEditorOpen, isMinimized]);
 
 
     if (!session) {
@@ -3473,6 +3570,7 @@ export function DeviceStage() {
                     onSendClipboard={sendClipboardNow}
                     clipboardBusy={clipboardBusy}
                     onTypeText={() => setTypeText('')}
+                    onPinnedKeys={() => setPinsEditorOpen(true)}
                     onTypeClipboard={() => void typeClipboard()}
                     onNotice={setClipboardNote}
                     onMenuOpenChange={onBarMenuOpenChange}
@@ -3860,6 +3958,24 @@ export function DeviceStage() {
                 <DeviceStageVirtualMouse onButton={padButton} onWheel={padWheel} />
             )}
 
+            {/* The pinned keys: on a phone in either mode, and on a desktop
+                too (keys its own computer keeps for itself, a shortcut held
+                with one hand). Not on a view-only share or a paused session,
+                where nothing they press would land. */}
+            {showPins && controlEnabled && !session.viewOnly && (
+                <DeviceStagePinnedKeys pins={pins} onKey={pinKey} onSas={pinSas} />
+            )}
+            {pinsEditorOpen && (
+                <DeviceStagePinnedKeysEditor
+                    pins={pins}
+                    onChange={updatePins}
+                    show={showPins}
+                    onShow={setShowPinsRemembered}
+                    peerName={session.peerName}
+                    onClose={() => setPinsEditorOpen(false)}
+                />
+            )}
+
             {/* Errors on mobile too. All three render inside the DESKTOP
                 toolbar, which is behind `!isMobile` — so a phone changing
                 quality got no feedback at all, on the surface where the quality
@@ -3937,6 +4053,7 @@ export function DeviceStage() {
                     session={session}
                     onClose={() => setActiveMobileMenu(null)}
                     onOpenFiles={() => setShowFiles(true)}
+                    onOpenPins={() => setPinsEditorOpen(true)}
                     onNotice={setClipboardNote}
                     controlEnabled={controlEnabled}
                 />
@@ -3987,6 +4104,7 @@ export function DeviceStage() {
                     // exactly the APKs without the native show, which would
                     // make the fallback that exists for them unreachable.
                     imeVisible={kbInset.visible && kbInset.source !== 'assumed'}
+                    heldElsewhere={pinHeldCodes}
                 />
             )}
             

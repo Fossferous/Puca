@@ -17,10 +17,13 @@ import {
     type IconName,
 } from './Icons';
 
-export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabled = true }: {
+export function MoreMenu({ session, onClose, onOpenFiles, onOpenPins, onNotice, controlEnabled = true }: {
     session: DeviceControlSession,
     onClose: () => void,
     onOpenFiles: () => void,
+    /** Pinned keys: pin, unpin, reorder, and choose the notification's keys.
+     *  Optional so a caller without the editor offers no entry for it. */
+    onOpenPins?: () => void,
     /** Report an action's outcome — the menu closes immediately, so an action
      *  that reports failure as a returned string has nowhere else to say it. */
     onNotice: (message: string) => void,
@@ -67,6 +70,16 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
                 onClose();
             }
         },
+        ...(onOpenPins ? [{
+            // Not input itself (it edits a list on this phone), so it stays on
+            // offer while control is paused or the share is view-only.
+            label: 'Pinned keys…',
+            icon: 'pin' as const,
+            action: () => {
+                onOpenPins();
+                onClose();
+            },
+        }] : []),
         {
             // Same feature as the desktop bar's button, which had no caller at
             // all until now. Phones are where this earns its keep: typing a

@@ -246,6 +246,9 @@ const GATES = [
         ['e2e-video-controls', 'video-controls-real-browser.mjs'],
         ['e2e-heic', 'heic-real-browser.mjs'],
         ['e2e-device-stage-desktop', 'device-stage-desktop-real-browser.mjs'],
+        // Pinned keys on the stage, phone and desktop. Rebuilds the same
+        // device-stage harness as the two above (one at a time here).
+        ['e2e-device-stage-pinned-keys', 'device-stage-pinned-keys-real-browser.mjs'],
         // Needs WebKit installed once per machine (npx playwright install webkit); it
         // fails, saying so, when it is not. Screenshots go to the ignored e2e-artifacts.
         ['e2e-ios-web-app', 'ios-web-app-real-browser.mjs e2e-artifacts/ios-web-app-shots'],
@@ -272,6 +275,7 @@ const GATES = [
 // Never run by this script; printed in every summary.
 const NOT_RUN_HERE = [
     'connectedDebugAndroidTest (notes-app, headless emulator)',
+    'e2e/android-shade-keys-live.mjs, android-share-live.mjs (headless emulator)',
     'e2e/feature-flows.mjs, games-live, games-walk, modes-walk, sidebar-toggles-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
     'e2e/poker-table-real-browser.mjs, user-context-menu-reach.mjs (vite dev server)',
     'e2e-live-verify, batch7-permbits-live, the two-peer voice suites (throwaway stack)',

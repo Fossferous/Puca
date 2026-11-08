@@ -160,6 +160,44 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   another screen... switch to that screen") there too; harmless, but not quite
   right until it is updated.
 
+## Pinned keys and the notification's keys
+
+Pinned keys (docs/USER_GUIDE.md, *Pinned keys*) are ordinary key frames, the
+same `{t:'key', code, down}` the keyboard bar sends, so they reach exactly what
+the host's `code_to_vk` maps (crates/puca-input) and nothing more: the picker
+offers only those codes, and `pinnedKeys.test.ts` reads that Rust function to
+keep it so. Media and volume keys are not mapped there, so they cannot be
+pinned; nor can Pause, which is mapped but refused at injection ("no scan code
+for Pause"). Ctrl + Alt + Del is the `{t:'sas'}` frame, as in the More menu,
+and Ctrl + Alt + Delete chosen as a key with modifiers becomes that pin. Win + L
+is refused: Windows does not lock for an injected Win + L, and the menu's Lock
+calls the lock itself. A Linux host maps fewer keys (no Print Screen, Scroll
+Lock, Num Lock or Menu), which the editor says.
+
+Up to three can be buttons on the Android app's session notification
+(`ShadeKeys.java`). What keeps that safe:
+
+- **A press is an id, never a key.** The button carries the pin's id; the
+  page looks it up in the pins it holds now and sends that pin's frames
+  through the stage, so the pause, a view-only share and an ended session
+  refuse it exactly as they refuse the keyboard. A stale button sends nothing.
+- **A locked phone never types.** Every button is authentication-required
+  (Android 12+ asks for the unlock and delivers the press only after it), and
+  the receiver decides only once the keyguard is down, refusing a press if it
+  stays up for 2 s, on every Android version. The lock screen shows a public
+  copy without the buttons where sensitive content is hidden.
+- **Nothing outlives the session.** The buttons are drawn only while the
+  keep-alive's CONTROL reason holds; a press that finds the page no longer
+  listening takes them down, and so do the task being swiped away and the
+  process ending.
+- **Who can press them.** The receiver is not exported and the PendingIntents
+  are immutable broadcasts — no activity is started, so the Android 12
+  trampoline rule is never in play. Besides the person at the shade, an app
+  the person has given **notification access** (Android Settings) can press
+  any notification's buttons, these included; even then the receiver's
+  keyguard rule holds, so a locked phone still does not type. Lite registers
+  no plugin and draws no buttons.
+
 ## A laptop with its lid closed
 
 A laptop with its lid shut and no monitor plugged in has **no active display**,
