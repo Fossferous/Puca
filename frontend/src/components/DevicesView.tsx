@@ -122,6 +122,37 @@ import { DeviceAudioHubPanel } from './DeviceAudioHubPanel';
 import { BanIcon, CloseIcon, Icon, MonitorIcon, SettingsIcon, ShieldCheckIcon, TrashIcon, WarningIcon, type IconName } from './Icons';
 import './DevicesView.css';
 import { askConfirm } from '../api/appDialogs';
+import {
+    powerOffDevice,
+    powerOffOffered,
+    powerOffQuestion,
+    refusalText as powerOffRefusalText,
+    type PowerOffOutcome,
+    type PowerOffTarget,
+} from '../api/devices/powerOff';
+
+/** A card's Power off line (see `powerOffs`). */
+interface PowerOffLine {
+    running: boolean;
+    kind: PowerOffOutcome['kind'] | null;
+    text: string;
+}
+
+/** The step a card's Power off is on, or how it ended, under its buttons —
+ *  the wake line's look, since it is the same kind of news. The live region
+ *  is mounted with the button, EMPTY, so the first step is announced too (a
+ *  region inserted together with its text usually is not). */
+function PowerOffStatus({ line }: { line: PowerOffLine | null }) {
+    return (
+        <div role="status" className="device-power-live">
+            {line && (
+                <div className={`device-wake-status device-power-status${line.kind === 'refused' ? ' device-wake-status-failed' : ''}`}>
+                    {line.text}
+                </div>
+            )}
+        </div>
+    );
+}
 
 /** How often the list re-checks presence while the view is open. Same cadence
  *  as FriendsPanel, for the same reason: online/offline flips have no WS push
@@ -385,6 +416,11 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     const [confirmId, setConfirmId] = useState<string | null>(null);
     /** The machine card whose Audio Hub panel is open (by primary row id). */
     const [audioHubId, setAudioHubId] = useState<string | null>(null);
+    /** Each card's Power off line: running (with the step it is on), or how
+     *  it ended. Keyed by card: a machine's primary row id, or `share-<id>`. */
+    const [powerOffs, setPowerOffs] = useState<ReadonlyMap<string, PowerOffLine>>(new Map());
+    /** Cards with a Power off between the press and its outcome. */
+    const powerOffInFlight = useRef(new Set<string>());
     const [autostart, setAutostartState] = useState<boolean | null>(null);
     const [forwarding, setForwardingState] = useState<boolean | null>(null);
     const [unattended, setUnattendedState] = useState<boolean | null>(null);
@@ -1089,6 +1125,70 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         }
     };
 
+    const setPowerOffLine = (key: string, line: PowerOffLine | null): void => {
+        setPowerOffs(prev => {
+            const next = new Map(prev);
+            if (line) next.set(key, line);
+            else next.delete(key);
+            return next;
+        });
+    };
+
+    /**
+     * POWER OFF, forcibly (api/devices/powerOff.ts). Asked first, in the
+     * app's own question, naming the PC and the unsaved work; then the card
+     * says each step and how it ended — offline, an older Púca there, not
+     * allowed, nobody let it in, Windows refusing — never nothing.
+     *
+     * `resolveRow` is the row to reach, decided NOW (the painted card can be
+     * 15 s old, the same reason Control re-reads it). Null: it is offline.
+     */
+    const startPowerOff = async (
+        key: string,
+        name: string,
+        resolveRow: () => Promise<{ id: string; signIn: boolean } | null>,
+        share?: PowerOffTarget['share'],
+    ) => {
+        // A REF, set before the question: two quick presses both read the
+        // last render's state, and the second would start a second flow.
+        if (powerOffInFlight.current.has(key) || powerOffs.get(key)?.running) return;
+        powerOffInFlight.current.add(key);
+        try {
+            await runPowerOff(key, name, resolveRow, share);
+        } finally {
+            powerOffInFlight.current.delete(key);
+        }
+    };
+
+    const runPowerOff = async (
+        key: string,
+        name: string,
+        resolveRow: () => Promise<{ id: string; signIn: boolean } | null>,
+        share?: PowerOffTarget['share'],
+    ) => {
+        if (!(await askConfirm(powerOffQuestion(name)))) return;
+        setPowerOffLine(key, { running: true, kind: null, text: `Connecting to ${name}…` });
+        let outcome: PowerOffOutcome;
+        try {
+            const row = await resolveRow();
+            outcome = row
+                ? await powerOffDevice(
+                    { hostDevice: row.id, name, signIn: row.signIn, ...(share ? { share } : {}) },
+                    text => setPowerOffLine(key, { running: true, kind: null, text }),
+                )
+                : { kind: 'refused', text: powerOffRefusalText(name, 'that device isn\'t online') };
+        } catch (e) {
+            // Never left on "Connecting…": whatever broke is said.
+            outcome = {
+                kind: 'refused',
+                text: `${name} was not powered off: ${e instanceof Error ? e.message : String(e)}`,
+            };
+        }
+        setPowerOffLine(key, { running: false, kind: outcome.kind, text: outcome.text });
+        // Going: the list then shows it go offline without waiting on the poll.
+        if (outcome.kind !== 'refused') void refresh(true);
+    };
+
     const custody = deviceKeyCustody();
     // COUNTS MACHINES, not rows: a PC with sign-in-screen access enrolled is
     // two rows, and reporting "3 devices" for two computers and a phone was the
@@ -1275,6 +1375,15 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         && r.verified && r.online && r.platform === 'windows',
                                 ) ?? null;
                                 const audioHubOpen = audioHubId === device.id && audioHubRow !== null;
+                                // POWER OFF: on the same terms as Control (an
+                                // online, verified PC that is not this one),
+                                // and only a Windows one — every other host
+                                // refuses power actions. The owner's own card
+                                // carries no share, so nothing more to check.
+                                const canPowerOff = canReach
+                                    && powerOffOffered((machine.onlineRow ?? device).platform);
+                                const powerOffLine = powerOffs.get(device.id) ?? null;
+                                const poweringOff = powerOffLine?.running === true;
                                 return (
                                     <div
                                         key={device.id}
@@ -1351,7 +1460,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                             {canReach && editingId !== device.id && (
                                                 <button
                                                     className="device-btn device-btn-primary"
-                                                    disabled={busyId === device.id}
+                                                    disabled={busyId === device.id || poweringOff}
                                                     onClick={() => void startControl(machine)}
                                                 >
                                                     Control
@@ -1399,7 +1508,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                             {canReach && editingId !== device.id && (
                                                 <button
                                                     className="device-btn"
-                                                    disabled={busyId === device.id}
+                                                    disabled={busyId === device.id || poweringOff}
                                                     onClick={() => void startFileBrowse(machine)}
                                                     title="Browse this device's files without opening its screen"
                                                 >
@@ -1409,12 +1518,39 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                             {audioHubRow && editingId !== device.id && (
                                                 <button
                                                     className="device-btn"
-                                                    disabled={busyId === device.id}
+                                                    disabled={busyId === device.id || poweringOff}
                                                     aria-expanded={audioHubOpen}
                                                     onClick={() => setAudioHubId(audioHubOpen ? null : device.id)}
                                                     title="Hand your headphones between this PC and your phone"
                                                 >
                                                     Audio Hub
+                                                </button>
+                                            )}
+                                            {canPowerOff && editingId !== device.id && (
+                                                <button
+                                                    className="device-btn device-btn-with-icon"
+                                                    disabled={busyId === device.id || poweringOff}
+                                                    onClick={() => void startPowerOff(
+                                                        device.id,
+                                                        device.name,
+                                                        async () => {
+                                                            const row = await freshOnlineRow(machine);
+                                                            return row ? { id: row.id, signIn: row.id === machine.signInRow?.id } : null;
+                                                        },
+                                                    )}
+                                                    title={`Shut ${device.name} down now, closing its apps without saving`}
+                                                >
+                                                    <span className="device-btn-icon-glyph" aria-hidden="true"><Icon name="power" size={16} /></span>
+                                                    Power off
+                                                </button>
+                                            )}
+                                            {powerOffLine && !powerOffLine.running && (
+                                                <button
+                                                    className="device-btn"
+                                                    onClick={() => setPowerOffLine(device.id, null)}
+                                                    aria-label="Dismiss the Power off message"
+                                                >
+                                                    Dismiss
                                                 </button>
                                             )}
                                             {editingId !== device.id && (
@@ -1479,6 +1615,10 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                 machineName={device.name}
                                                 onClose={() => setAudioHubId(null)}
                                             />
+                                        )}
+
+                                        {(canPowerOff || powerOffLine) && (
+                                            <PowerOffStatus line={powerOffLine} />
                                         )}
 
                                         {/* Wake progress and, more importantly, wake
@@ -1561,6 +1701,14 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                             || sh.capabilities.includes('view_only');
                                         const canFiles = sh.capabilities.includes('files');
                                         const reachable = sh.ready && sh.online;
+                                        // A friend's PC: Power off only with
+                                        // control, as the stage's Lock and
+                                        // Shut down (its PC refuses it too).
+                                        const shareKey = `share-${sh.id}`;
+                                        const canPowerOff = reachable
+                                            && powerOffOffered(sh.host_platform, sh.capabilities);
+                                        const powerOffLine = powerOffs.get(shareKey) ?? null;
+                                        const poweringOff = powerOffLine?.running === true;
                                         return (
                                             <div key={sh.id} className="device-card device-row">
                                                 <div className="device-card-top">
@@ -1587,7 +1735,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                     {reachable && canScreen && (
                                                         <button
                                                             className="device-btn device-btn-primary"
-                                                            disabled={busyId === `share-${sh.id}`}
+                                                            disabled={busyId === `share-${sh.id}` || poweringOff}
                                                             onClick={() => void startShared(sh, false)}
                                                         >
                                                             {sh.capabilities.includes('control') ? 'Control' : 'View'}
@@ -1596,10 +1744,40 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                     {reachable && canFiles && (
                                                         <button
                                                             className="device-btn"
-                                                            disabled={busyId === `share-${sh.id}`}
+                                                            disabled={busyId === `share-${sh.id}` || poweringOff}
                                                             onClick={() => void startShared(sh, true)}
                                                         >
                                                             Files
+                                                        </button>
+                                                    )}
+                                                    {canPowerOff && (
+                                                        <button
+                                                            className="device-btn device-btn-with-icon"
+                                                            disabled={busyId === shareKey || poweringOff}
+                                                            onClick={() => void startPowerOff(
+                                                                shareKey,
+                                                                sh.host_device_name,
+                                                                async () => ({ id: sh.host_device, signIn: false }),
+                                                                {
+                                                                    inviteId: sh.id,
+                                                                    ownerUser: sh.owner_user,
+                                                                    ownerUsername: sh.owner_username,
+                                                                    capabilities: sh.capabilities,
+                                                                },
+                                                            )}
+                                                            title={`Shut ${sh.host_device_name} down now, closing its apps without saving`}
+                                                        >
+                                                            <span className="device-btn-icon-glyph" aria-hidden="true"><Icon name="power" size={16} /></span>
+                                                            Power off
+                                                        </button>
+                                                    )}
+                                                    {powerOffLine && !powerOffLine.running && (
+                                                        <button
+                                                            className="device-btn"
+                                                            onClick={() => setPowerOffLine(shareKey, null)}
+                                                            aria-label="Dismiss the Power off message"
+                                                        >
+                                                            Dismiss
                                                         </button>
                                                     )}
                                                     {removeShareId === sh.id ? (
@@ -1630,6 +1808,9 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                         </button>
                                                     )}
                                                 </div>
+                                                {(canPowerOff || powerOffLine) && (
+                                                    <PowerOffStatus line={powerOffLine} />
+                                                )}
                                             </div>
                                         );
                                     })}

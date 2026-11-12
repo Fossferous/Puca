@@ -198,6 +198,104 @@ Up to three can be buttons on the Android app's session notification
   keyguard rule holds, so a locked phone still does not type. Lite registers
   no plugin and draws no buttons.
 
+## Power off from the device list
+
+The device card's **Power off** (docs/USER_GUIDE.md, *Power off*) shuts a
+Windows PC down forcibly without opening its screen. What it is, end to end:
+
+- **No new route, nothing new the server can read.** The card opens a sealed
+  device session (`connectToDevice({ powerOff: true })`, marked files-only on
+  this side only) that sends **no offer at all** — nothing is captured, nothing
+  asks for files — and sends the `power` action `force_power_off` the moment it is
+  connected (`api/devices/powerOff.ts`, `FORCE_POWER_OFF_ACTION` in
+  `api/devices/session.ts`). No offer, because the sign-in-screen agent — the
+  way into a LOCKED PC (`machines.ts` prefers that row whenever it is up) —
+  ends a files-only offer outright. A Control or Files session already open to
+  that PC carries the request instead, because a host takes one session at a
+  time. The server relays it like every other sealed signal, and a power-off
+  session's own end tells it only "the session ended".
+- **Held by the host until the passphrase is proved.** The request arrives
+  while the passphrase is still being typed, exactly as an offer does, so both
+  hosts hold it (`heldPowerOff` in session.ts, `pending_power_off` in the
+  agent) and carry it out on the proof; a wrong or missing proof never does.
+  The host's answer vouches for a remembered passphrase (as an answer to an
+  offer does), so a power-off does not make the next Control ask for it again.
+  If somebody signs in at the locked PC first, the lock-screen service hands
+  over and the session ends: not powered off, and — unlike a Control session
+  — not followed to the desktop, which would open a session nobody asked for.
+- **The host is the gate.** An unproved controller gets nothing; a share
+  without `control` is refused — out loud, with `power-failed`, because the
+  card is waiting on an answer (the other power actions keep their silence
+  there). And it runs **only on a session nobody at the PC had to let in**:
+  the passphrase proved, or a share on an ARMED PC (the owner's standing,
+  host-signed grant). On an unarmed PC somebody there answered "a device wants
+  to connect to this screen"; they agreed to that, not to every app being
+  closed unasked, and they are the one who would lose the work. The host
+  refuses it (`POWER_OFF_ATTENDED_REASON`); Control's **More → Shut down…**,
+  which lets apps ask to save, is still there.
+- **The Windows call** (`frontend/src-tauri/src/power.rs` for the signed-in
+  host, `crates/puca-agent/src/power.rs` for the sign-in-screen host; kept in
+  step, and pinned against each other by a src-tauri test that reads the
+  agent's source): `InitiateShutdownW(NULL, NULL, 0, SHUTDOWN_FORCE_OTHERS |
+  SHUTDOWN_FORCE_SELF | SHUTDOWN_POWEROFF | SHUTDOWN_GRACE_OVERRIDE,
+  SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER |
+  SHTDN_REASON_FLAG_PLANNED)` after enabling `SeShutdownPrivilege`, which
+  every interactive user and LocalSystem hold. It is `shutdown /s /f /t 0`:
+  - not `ExitWindowsEx(EWX_FORCE)`, which Microsoft documents as having no
+    effect when terminal services are enabled — and Remote Desktop Services
+    runs on every current Windows;
+  - `SHUTDOWN_FORCE_SELF` logs the caller's own session off forcefully
+    (without it "a shutdown is not guaranteed even if the function returns
+    successfully"); `SHUTDOWN_FORCE_OTHERS` does the same to every other
+    signed-in account (without it the call fails with
+    `ERROR_SHUTDOWN_USERS_LOGGED_ON`); `SHUTDOWN_GRACE_OVERRIDE` with a grace of
+    0 means now, even over a shutdown someone scheduled;
+  - no `SHUTDOWN_HYBRID`: without it the call always does a full shutdown.
+    The Devices page tells people to turn Fast Startup off because a hybrid
+    shutdown usually cannot be woken, so a full one is what Wake & connect can
+    bring back. No `SHUTDOWN_INSTALL_UPDATES` either;
+  - `ERROR_NOT_READY` is documented for fast user switching with nobody
+    signed in; then it falls back to `ExitWindowsEx(EWX_SHUTDOWN |
+    EWX_POWEROFF | EWX_FORCE)`, the call the gentle Shutdown has always made
+    at the sign-in screen (with nobody signed in there is no unsaved work for
+    the force to fail to discard);
+  - `ERROR_SHUTDOWN_IN_PROGRESS` is said in words: a gentle shutdown held by
+    an app with unsaved work cannot be forced afterwards.
+- **The order on the signed-in host:** `power-ack` first, then — if the
+  session is still alive — the call, then the session's end with "the device
+  is shutting down". With every app closed unasked, the host's own process can
+  go before anything else leaves it; the ack has already left. A refusal after
+  the ack is `power-failed` with Windows' words (a Tauri command's error is a
+  bare string, which the host used to replace with "the power action failed"
+  for Lock and Shut down too). The sign-in-screen agent calls first and ends
+  the session with the same reason, as for Shut down.
+- **What the controller records** (`PowerOffProgress` on the session; the card
+  words it): sent, accepted, then `done` (ended with the reason, or went while
+  it had said it was going), `unknown` (the connection went between sending
+  and any answer, on a PC that could have carried it out: never called a
+  success), or `failed` with the reason (an end with the passphrase never
+  given or refused is a failure, not `unknown`: nothing was carried out). Its
+  deadlines: 8 s for an answer — paused while the passphrase is typed,
+  restarted when the proof is sent, and no verdict while the link is down, the
+  other end is reconnecting or the app is frozen in the background (the
+  session's own end decides then) — after which the PC's Púca is too old to
+  know the action (an older attended host drops it, an older armed one drops
+  any power frame before the proof, and an older sign-in agent answers "not
+  one this agent knows", read the same way); 15 s after the ack before it
+  stops waiting. A session opened only for this never leaves the stage's
+  failure banner; the card says what happened.
+- **Linux and others.** The button is offered for Windows PCs only. A Linux
+  desktop host answers every power action, this one included, with "power
+  actions are only implemented on Windows".
+- **Lite** compiles it out with the rest of remote control (`check-no-rc.mjs`
+  looks for `force_power_off`).
+- **Tested without a shutdown.** The OS calls sit behind a `ShutdownOs` seam in
+  both power.rs files; the tests hand `force_power_off` a recording stand-in
+  and check the exact flags, grace, reason and order, and the real
+  implementation panics in a test build before any call. No test hands it the
+  real one, even to watch that panic. `e2e/devices-power-real-browser.mjs`
+  walks the card against stand-in PCs. The real call is reviewed by reading.
+
 ## A laptop with its lid closed
 
 A laptop with its lid shut and no monitor plugged in has **no active display**,

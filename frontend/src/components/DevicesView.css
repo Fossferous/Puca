@@ -404,6 +404,26 @@
     height: 16px;
 }
 
+/* The card's Power off live region is mounted EMPTY with the button (so its
+   first step is announced); empty, it must not take a slot in the card's
+   flex gap. Out of the flow, still in the accessibility tree. */
+.device-power-live:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
+
+/* A labelled button with a glyph before its words (Power off): the glyph and
+   the label centred together, whatever the row stretches the button to. */
+.device-btn-with-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
 .device-btn-primary {
     background: var(--brand, #5865f2);
     color: #fff;
