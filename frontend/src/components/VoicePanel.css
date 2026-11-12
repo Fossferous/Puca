@@ -1344,10 +1344,18 @@
     /* Secondary controls live behind the expand chevron while collapsed.
        Clip buttons never render on phones (isTauri gate) but a coarse-pointer
        touch laptop under 1024px does reach here — hide them the same way. */
+    /* The share's own chevron (Stream settings / Stream quality) and its
+       audio sources go with Share: where sharing is offered on a phone-sized
+       touch screen (the Android app's own share, a touch laptop) the chevron
+       made a fifth button in a bar sized for four, the encryption badge slid
+       under Mute (18px at 390, 48px at 360) and the channel name went to
+       nothing. */
     .voice-panel-compact.vp-collapsed .voice-dropdown,
     .voice-panel-compact.vp-collapsed .vp-camera,
     .voice-panel-compact.vp-collapsed .vp-activities,
     .voice-panel-compact.vp-collapsed .vp-screenshare,
+    .voice-panel-compact.vp-collapsed .vp-share-options,
+    .voice-panel-compact.vp-collapsed .vp-stream-audio,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-arm,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-save {
         display: none;

@@ -22,6 +22,11 @@
 //   live       On a call, the camera tile of someone streaming keeps its LIVE badge clear of the
 //              fullscreen button (both were top-right; on a phone the button covered it). A mesh
 //              call between the owner on a desktop (fake camera, a canvas shared) and the phone.
+//              In the same call, nothing in the phone's one-row voice bar overlaps anything else
+//              and every control in it is on screen and hit. The phone here keeps Playwright's
+//              desktop user agent, so it is offered Share Screen like the Android app with its own
+//              share or a touch laptop: the share's chevron was a fifth button in a bar sized for
+//              four, and the encryption badge slid under Mute.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
 // locator.click(), which scrolls first and false-passes a covered control).
@@ -434,6 +439,31 @@ try {
                 check(`${size} live: the button is what a tap on it hits, and 44px`, m.buttonHit && (m.button.r - m.button.l) >= 43.5 && (m.button.b - m.button.t) >= 43.5, m.button);
                 check(`${size} live: the badge is inside the tile`, m.badge.l >= m.tile.l && m.badge.r <= m.tile.r, m);
                 await shot(P, `live-${size}`);
+            }
+            // The phone's own voice bar in that call: every control and the encryption badge on
+            // screen, apart, and what a tap at its middle hits.
+            const bar = await P.evaluate(() => {
+                const panel = document.querySelector('.voice-panel-compact');
+                if (!panel) return null;
+                const els = [...panel.querySelectorAll('button, [role="button"], .voice-e2ee, .voice-channel-name')]
+                    .filter((e) => { const cs = getComputedStyle(e); const r = e.getBoundingClientRect(); return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 1 && r.height > 1; })
+                    .filter((e, _i, all) => !all.some((o) => o !== e && o.contains(e)));
+                const items = els.map((e) => {
+                    const r = e.getBoundingClientRect();
+                    const h = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                    return { what: (e.getAttribute('aria-label') || e.getAttribute('title') || e.textContent || e.className).trim().slice(0, 40), l: r.left, r: r.right, t: r.top, b: r.bottom, hit: !!h && (h === e || e.contains(h)) };
+                });
+                const overlaps = [];
+                for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+                    const a = items[i], b = items[j];
+                    const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l), oy = Math.min(a.b, b.b) - Math.max(a.t, b.t);
+                    if (ox > 0.5 && oy > 0.5) overlaps.push(`${a.what} x ${b.what} (${Math.round(ox)}px)`);
+                }
+                return { vw: innerWidth, items, overlaps };
+            });
+            if (bar) {
+                check(`${size} live: nothing in the phone's voice bar overlaps anything else in it`, bar.overlaps.length === 0, { overlaps: bar.overlaps, items: bar.items.map((i) => `${i.what} ${Math.round(i.l)}-${Math.round(i.r)}`) });
+                check(`${size} live: every control in the voice bar is on screen and what a tap at its middle hits`, bar.items.every((i) => i.l >= 0 && i.r <= bar.vw && i.hit), bar.items.filter((i) => !(i.l >= 0 && i.r <= bar.vw && i.hit)));
             }
             await tap(P, P.locator('[data-testid="voice-leave"]').first()).catch(() => {});
             await sleep(800);
