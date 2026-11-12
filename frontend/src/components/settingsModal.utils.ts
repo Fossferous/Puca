@@ -96,7 +96,8 @@ const ROW_CONTROLS = 'input, select, textarea, button, a[href], [role="button"],
  * only where the meaning is unambiguous: a row holding exactly one control,
  * and that control an enabled checkbox; a press on any control, or on a label
  * the browser already ties to one, is left to the browser (it would toggle
- * twice otherwise). Returns whether it toggled.
+ * twice otherwise), and so is a press that ended selecting the row's words.
+ * Returns whether it toggled.
  */
 export function toggleSettingFromRow(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
@@ -105,6 +106,12 @@ export function toggleSettingFromRow(target: EventTarget | null): boolean {
     if (label instanceof HTMLLabelElement && label.control) return false;
     const row = target.closest('.settings-option');
     if (!row) return false;
+    // A press that ends a drag across the words is someone selecting them to
+    // copy, not choosing: a native <label> ignores that click too (Chromium's
+    // and Gecko's label activation both skip a click that made a selection).
+    // Without this, copying a phrase of a hint flipped and saved its setting.
+    const selection = target.ownerDocument.getSelection?.();
+    if (selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(row)) return false;
     const controls = row.querySelectorAll(ROW_CONTROLS);
     if (controls.length !== 1) return false;
     const box = controls[0];

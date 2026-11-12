@@ -77,6 +77,36 @@ describe('toggleSettingFromRow', () => {
         expect((host.querySelector('input') as HTMLInputElement).checked).toBe(false);
     });
 
+    it('a press that ended selecting the row\'s words is copying, not choosing: nothing toggles', () => {
+        const host = row(ONE);
+        const hint = host.querySelector('.option-hint') as HTMLElement;
+        const box = host.querySelector('input') as HTMLInputElement;
+        const range = document.createRange();
+        range.setStart(hint.firstChild as Text, 2);
+        range.setEnd(hint.firstChild as Text, 9);
+        const sel = document.getSelection() as Selection;
+        sel.removeAllRanges();
+        sel.addRange(range);
+        expect(toggleSettingFromRow(hint)).toBe(false);
+        expect(box.checked).toBe(false);
+        // CONTROL: the same press once the selection is gone does toggle.
+        sel.removeAllRanges();
+        expect(toggleSettingFromRow(hint)).toBe(true);
+        expect(box.checked).toBe(true);
+    });
+
+    it('a selection somewhere else on the page does not stop a press on this row', () => {
+        const host = row(`<p class="far">Words elsewhere on the page</p>${ONE}`);
+        const far = host.querySelector('.far') as HTMLElement;
+        const range = document.createRange();
+        range.selectNodeContents(far);
+        const sel = document.getSelection() as Selection;
+        sel.removeAllRanges();
+        sel.addRange(range);
+        expect(toggleSettingFromRow(host.querySelector('label'))).toBe(true);
+        sel.removeAllRanges();
+    });
+
     it('a press outside every row, or on nothing, does nothing', () => {
         const host = row(`<p class="loose">Not a row</p>${ONE}`);
         expect(toggleSettingFromRow(host.querySelector('.loose'))).toBe(false);

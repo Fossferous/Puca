@@ -215,6 +215,45 @@ try {
         check('live: the owner is in the call, sharing, with the camera on', ownerLive);
     }
 
+    // ── settings, on the owner's DESKTOP: a mouse drag across a setting's hint selects the words to
+    // copy and leaves the setting alone, as a native <label> does (review finding: the row-press
+    // helper flipped and saved it). CONTROL: a plain click on the same hint does toggle it.
+    if (want('settings')) {
+        // The server was made through the API: open it, so the channel list (and its cog) is drawn.
+        if (!ownerLive) {
+            await O.reload({ waitUntil: 'domcontentloaded' });
+            await sleep(2500);
+            await dismiss(O);
+            await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+            await sleep(1000);
+        }
+        await O.locator('.sidebar .user-action-btn[title="Settings"]').first().click();
+        await O.locator('.settings-nav-item', { hasText: 'Appearance' }).first().click();
+        await sleep(400);
+        const row = O.locator('.settings-option').filter({ has: O.locator('label:text-is("Compact Mode")') }).first();
+        const box = row.locator('input[type="checkbox"]');
+        const hint = row.locator('.option-hint');
+        const before = await box.isChecked();
+        const b = await hint.boundingBox();
+        await O.mouse.move(b.x + 3, b.y + b.height / 2);
+        await O.mouse.down();
+        await O.mouse.move(b.x + b.width * 0.6, b.y + b.height / 2, { steps: 8 });
+        await O.mouse.up();
+        await sleep(300);
+        const selected = await O.evaluate(() => String(getSelection()));
+        check('desktop settings: a drag across "Compact Mode"\'s hint selected its words', selected.trim().length > 3, selected);
+        check('desktop settings: ...and left the setting as it was', (await box.isChecked()) === before);
+        await O.evaluate(() => getSelection().removeAllRanges());
+        const preClick = await box.isChecked();
+        await O.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+        await sleep(300);
+        check('desktop settings: CONTROL - a plain click on the hint toggles it', (await box.isChecked()) !== preClick);
+        if ((await box.isChecked()) !== before) { await box.click(); await sleep(300); }
+        check('desktop settings: the setting is back as it was', (await box.isChecked()) === before);
+        await O.locator('.settings-close').first().click();
+        await sleep(300);
+    }
+
     for (const [w, h] of PHONES) {
         const size = `${w}x${h}`;
         const ctx = await phoneCtx(w, h);
