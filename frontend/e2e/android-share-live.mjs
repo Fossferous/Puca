@@ -94,8 +94,15 @@ const check = (name, ok, detail = '') => {
 
 /** Every on-screen node uiautomator sees: text, content-desc, resource id, centre. */
 function uiNodes() {
-    sh('uiautomator dump /sdcard/puca-ui.xml >/dev/null 2>&1');
-    const xml = sh('cat /sdcard/puca-ui.xml');
+    // A dump that fails (a loaded emulator whose screen never went idle) must
+    // neither throw nor leave the LAST file to be read back as this screen:
+    // the file is removed first, and a failed dump tried again.
+    let xml = '';
+    for (let i = 0; i < 4 && !xml.includes('<hierarchy'); i++) {
+        sh('rm -f /sdcard/puca-ui.xml; uiautomator dump /sdcard/puca-ui.xml >/dev/null 2>&1; true');
+        xml = sh('cat /sdcard/puca-ui.xml 2>/dev/null || true');
+        if (!xml.includes('<hierarchy')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
     const nodes = [];
     for (const m of xml.matchAll(/<node [^>]*>/g)) {
         const a = (k) => (new RegExp(`${k}="([^"]*)"`).exec(m[0]) || [])[1] || '';
