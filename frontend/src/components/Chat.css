@@ -3291,10 +3291,25 @@ body.voice-drag-active {
         min-height: 30px;
     }
 
+    /* The channel's name keeps its room in the header. At 360 px it was cut
+       to six letters ("announ…") behind a 120 px search box whose own words
+       were cut ("Search this c"); the box says "Search" on a phone now and
+       is that wide, and widens over the header when it takes the focus. The
+       name ellipsises, and never below four letters' room. */
+    .chat-header {
+        padding-left: 12px;
+        padding-right: 12px;
+    }
+
+    .chat-header h2 {
+        min-width: 4em;
+    }
+
     .search-bar input {
-        width: 120px;
+        width: 88px;
         max-width: 30vw;
         font-size: 16px;
+        text-overflow: ellipsis;
     }
 
     .search-bar input:focus {

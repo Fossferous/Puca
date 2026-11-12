@@ -330,6 +330,42 @@
     }
 }
 
+/* The call view's header on a phone: "2 people" sat beside the name and the
+   Invite and Back to Chat buttons took the rest, so the name was cut to
+   "Lou…" at 390 px and less at 360. The count goes under the name, and the
+   name takes what the buttons leave. */
+@media (pointer: coarse) and (max-width: 600px) {
+    .voice-stage-title {
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        column-gap: 0.5rem;
+        align-items: center;
+    }
+
+    .voice-stage-icon {
+        grid-row: span 2;
+    }
+
+    .voice-stage-name {
+        line-height: 1.2;
+    }
+
+    .voice-stage-count {
+        font-size: 0.75rem;
+        line-height: 1.2;
+    }
+
+    .voice-stage-controls {
+        gap: 2px;
+    }
+
+    .voice-stage-btn {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+    }
+}
+
 /* Fullscreen puts the TILE on the display, so the video must fill it rather
  * than keep the grid's 16/9 box in the middle of a black screen. */
 .voice-stage-tile:fullscreen {

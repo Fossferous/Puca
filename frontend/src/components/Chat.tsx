@@ -5080,7 +5080,7 @@ export function Chat({ onLogout }: ChatProps) {
         <div className="search-bar">
             <input
                 type="text"
-                placeholder="Search this conversation..."
+                placeholder={isMobile ? 'Search' : 'Search this conversation...'}
                 value={searchQuery}
                 onChange={(e) => handleSearch(e.target.value)}
             />

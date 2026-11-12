@@ -82,6 +82,7 @@ import { phonePanelQuery } from '../utils/phonePanel';
 import { isTouchDevice, screenShareOffered } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { useBackClose } from '../hooks/useBackClose';
+import { LockIcon, LockOpenIcon } from './Icons';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
 import { getClipProposalState } from '../api/clips/clipProposals';
@@ -3921,6 +3922,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     onFocus={() => setE2eeTipOpen(true)}
                                     onBlur={() => setE2eeTipOpen(false)}
                                 >
+                                    {/* The phone's one-row bar shows this alone (VoicePanel.css). */}
+                                    <span className="voice-e2ee-lock" aria-hidden="true">{e2eeBadge.cls === 'on' ? <LockIcon size={14} /> : <LockOpenIcon size={14} />}</span>
                                     <span className="voice-e2ee-label">{e2eeBadge.label}</span>
                                     <span className="e2ee-info" aria-hidden="true"><InfoIcon /></span>
                                 </span>
