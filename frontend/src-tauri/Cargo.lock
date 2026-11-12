@@ -96,8 +96,11 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tokio",
+ "url",
  "wasapi",
+ "webview2-com",
  "windows 0.58.0",
+ "windows 0.61.3",
  "windows-core 0.58.0",
  "x25519-dalek",
 ]

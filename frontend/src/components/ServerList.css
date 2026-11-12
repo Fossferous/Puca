@@ -153,6 +153,12 @@
     background: rgba(249, 226, 175, 0.85);
 }
 
+/* Discord's web app in a window of its own (api/discordWindow.ts): a plain
+   rail action, spaced like the others. */
+.server-icon.discord-window {
+    margin-bottom: 0.5rem;
+}
+
 /* Discover/Join server button */
 .server-icon.discover-server {
     margin-bottom: 0.5rem;

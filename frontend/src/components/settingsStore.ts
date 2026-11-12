@@ -407,6 +407,14 @@ export const defaultSettings = {
      */
     autoInstallUpdates: false,
     /**
+     * Show Discord in the server rail (the Windows desktop app only): it opens
+     * Discord's own web app in a window of its own, signed in on Discord's page,
+     * which Púca never reads (api/discordWindow.ts, src-tauri/src/discord_window.rs).
+     * Default OFF: Púca does not put another chat service in front of everyone
+     * who installs it; the person who wants it turns it on in Settings > Advanced.
+     */
+    showDiscordEntry: false,
+    /**
      * A PC set up for remote control (unattended access armed, or lock-screen
      * access installed) installs a newer desktop release BY ITSELF and
      * restarts — only while no device session is live or starting on it, no

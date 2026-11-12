@@ -57,7 +57,31 @@ fn emit_identifier() {
     println!("cargo:rustc-env=PUCA_IDENTIFIER={identifier}");
 }
 
+/// The Common-Controls v6 manifest, for TEST executables only.
+///
+/// WHY. discord_window.rs puts the compiled capability set through Tauri's own
+/// ACL on a mock app, and building any Tauri app links its menu and dialog code,
+/// which imports `TaskDialogIndirect` from comctl32 v6. Only a program carrying
+/// the Common-Controls v6 manifest can load that export: the shipped exe gets it
+/// from tauri-build's resource, which embed-resource links into BINS alone, so a
+/// test program without this one fails before main (STATUS_ENTRYPOINT_NOT_FOUND,
+/// 0xc0000139). Tauri's own build does the same for its own tests (tauri-2.x
+/// build.rs, `embed_manifest_for_tests`). `rustc-link-arg-tests` never reaches a
+/// bin, so the app's own manifest resource is not doubled.
+fn embed_test_manifest() {
+    let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !windows_msvc {
+        return;
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("common-controls-v6.manifest.xml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+}
+
 fn main() {
     emit_identifier();
+    embed_test_manifest();
     tauri_build::build()
 }

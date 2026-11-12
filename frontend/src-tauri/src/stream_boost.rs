@@ -121,9 +121,24 @@ pub fn descendants_named(rows: &[ProcRow], root: u32, name: &str) -> Vec<u32> {
 /// else's.
 ///
 /// Pure, so the composition is testable off Windows.
+///
+/// NOR THE DISCORD WINDOW'S. Another process of THIS executable started by this
+/// one is the Discord window (discord_window.rs): Discord's own page in a
+/// WebView2 of its own. Its browser, GPU and renderer processes are descendants
+/// of this one too, and a Púca share has no business raising them over the
+/// owner's game. Found by name (the same image as this process), so its whole
+/// subtree is left where Windows put it.
 #[cfg_attr(not(windows), allow(dead_code))] // exercised by tests + Windows imp
 pub fn boost_targets(rows: &[ProcRow], self_pid: u32, webview_exe: &str) -> Vec<u32> {
-    descendants_named(rows, self_pid, webview_exe)
+    let mut targets = descendants_named(rows, self_pid, webview_exe);
+    if let Some(own_image) = rows.iter().find(|r| r.pid == self_pid).map(|r| r.name.as_str()) {
+        let not_ours: std::collections::HashSet<u32> = descendants_named(rows, self_pid, own_image)
+            .into_iter()
+            .flat_map(|other| descendants_named(rows, other, webview_exe))
+            .collect();
+        targets.retain(|pid| !not_ours.contains(pid));
+    }
+    targets
 }
 
 /// What we changed for one pid, so release knows what to put back.
@@ -422,6 +437,27 @@ mod tests {
             "the app process must stay at NORMAL — a class boost sweeps up the clip capture thread: {targets:?}"
         );
         assert_eq!(targets, vec![200, 201]);
+    }
+
+    /// The Discord window is a second process of this executable with a WebView2
+    /// of its own (discord_window.rs). A share must not boost Discord's page.
+    #[test]
+    fn the_discord_windows_webview_is_never_a_boost_target() {
+        let rows = vec![
+            row(100, 1, "Puca.exe"),
+            row(200, 100, "msedgewebview2.exe"), // Púca's browser
+            row(201, 200, "msedgewebview2.exe"), // Púca's renderer
+            row(500, 100, "Puca.exe"),           // Puca.exe --discord-window
+            row(600, 500, "msedgewebview2.exe"), // Discord's browser
+            row(601, 600, "msedgewebview2.exe"), // Discord's renderer
+        ];
+        let mut targets = boost_targets(&rows, 100, "msedgewebview2.exe");
+        targets.sort_unstable();
+        assert_eq!(targets, vec![200, 201]);
+        // CONTROL: the walk itself does reach them.
+        let mut all = descendants_named(&rows, 100, "msedgewebview2.exe");
+        all.sort_unstable();
+        assert_eq!(all, vec![200, 201, 600, 601]);
     }
 
     /// A host with no webview children (nothing to boost) must yield an EMPTY

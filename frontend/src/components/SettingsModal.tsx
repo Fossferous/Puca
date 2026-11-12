@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getProfile, updateProfile } from '../api/profile';
 import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
+import { discordWindowAvailable } from '../api/discordWindow';
+import { DiscordWindowSettings } from './DiscordWindowSettings';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
@@ -3183,6 +3185,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                         onChange={(e) => void toggleAutostart(e.target.checked)}
                                                     />
                                                 </div>
+                                            )}
+                                            {discordWindowAvailable() && (
+                                                <DiscordWindowSettings
+                                                    on={settings.showDiscordEntry}
+                                                    onChange={(on) => updateSetting('showDiscordEntry', on)}
+                                                />
                                             )}
                                         </div>
                                     </>
