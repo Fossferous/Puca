@@ -350,6 +350,17 @@
         font-size: 16px;
     }
 
+    /* The composer is one line tall until you type, and "Message #<channel>"
+       is often longer than that line on a phone (136px of text box at 360):
+       it wrapped, and the second line was cut in half under the box's edge.
+       It stays on one line: an ellipsis where the engine draws one, clipped
+       at the box's edge where it does not (Chromium, for a textarea). */
+    .message-form .input-wrapper textarea::placeholder {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
     /* Compact buttons on mobile */
     .message-form button,
     .message-form .file-upload-btn,

@@ -4,7 +4,9 @@
 //
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
-//              description. CONTROL: a field forced to 15px must be caught.
+//              description. CONTROL: a field forced to 15px must be caught. The empty composer's
+//              "Message #channel" stays on one line (at 16px it wrapped at 360, the second line
+//              cut in half).
 //   nav        The bottom bar takes the theme's colours (it was navy on every theme, Light included)
 //              and every label, the chosen tab's too, reads at 4.5:1 on all eight themes with and
 //              without high contrast (the chosen one was 3.3-3.5:1 everywhere).
@@ -179,6 +181,8 @@ try {
     const srv = await api(O, 'POST', '/servers', { name: 'Sweep ' + stamp });
     const mk = (name, type) => api(O, 'POST', `/servers/${srv.id}/channels`, { name, channel_type: type });
     const general = await mk('general', 0);
+    const longName = 'announcements-and-updates';
+    await mk(longName, 0);
     const lounge = await mk('Lounge', 1);
     const inv = await api(O, 'POST', `/servers/${srv.id}/invites`, {});
     let ownerLive = false;
@@ -227,6 +231,17 @@ try {
         if (want('fields')) {
             const composer = P.locator(COMPOSER);
             check(`${size} fields: the composer is 16px or more`, (await fontPx(composer)) >= 16, `${await fontPx(composer)}px`);
+            // An empty composer's placeholder ("Message #channel") is one line: a second one is cut
+            // in half under the one-line box. Here and in a channel with a long name.
+            const oneLine = () => composer.evaluate((t) => ({ ph: t.placeholder, sh: t.scrollHeight, ch: t.clientHeight }));
+            await composer.fill('');
+            let ph = await oneLine();
+            check(`${size} fields: the empty composer's placeholder is on one line`, ph.sh <= ph.ch + 1, ph);
+            await openChannel(longName);
+            ph = await oneLine();
+            check(`${size} fields: ...in a channel with a long name too`, ph.ph.includes(longName) && ph.sh <= ph.ch + 1, ph);
+            await shot(P, `fields-placeholder-${size}`);
+            await openChannel(general.name);
             // CONTROL: the same measure must catch a field forced under 16px.
             await composer.evaluate((el) => { el.style.setProperty('font-size', '15px', 'important'); });
             check(`${size} fields: CONTROL - a composer forced to 15px is caught`, (await fontPx(composer)) < 16);
