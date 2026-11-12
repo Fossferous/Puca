@@ -27,7 +27,12 @@ const fake = {
     lastRecipients: [] as number[],
     publishes: 0,
     members: [] as Array<{ user_id: number; public_key: string }>,
+    /** Every GET of a channel's /keys, and whether the server answers them 429. */
+    keyGets: 0,
+    rateLimited: false,
     reset() {
+        this.keyGets = 0;
+        this.rateLimited = false;
         this.currentEpoch = 0;
         this.currentGeneration = 0;
         this.epochGeneration = 0;
@@ -40,9 +45,12 @@ const fake = {
 
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), currentUserIdFromToken: () => 1 }));
 vi.mock('../api/client', () => ({
+    statusOf: (e: unknown) => (e as { status?: number } | null)?.status,
     apiClient: {
         get: vi.fn(async (url: string) => {
             if (url.endsWith('/keys')) {
+                fake.keyGets++;
+                if (fake.rateLimited) throw Object.assign(new Error('Too Many Requests'), { status: 429 });
                 return {
                     current_epoch: fake.currentEpoch,
                     current_generation: fake.currentGeneration,
@@ -201,6 +209,36 @@ describe('a new member can speak', () => {
         const minted = await ensureChannelKey(CHANNEL);
         expect(minted?.epoch).toBe(1);
         expect(fake.publishes).toBe(1);
+    });
+
+    it('two rotations of one channel at once make ONE publish, and both callers get its key', async () => {
+        // The sign-in catch-up and a send (or the MemberJoined re-wrap and an
+        // SFU call's poll) read the same pre-rotation state. Both used to mint
+        // the next epoch; the server kept one and, before 0.9.861, told the
+        // other 200 with nothing written, so that caller sealed under a key no
+        // row holds (0.9.861 review). Queued per channel, the second caller
+        // finds the first one's epoch and publishes nothing.
+        const before = fake.publishes;
+        const [a, b] = await Promise.all([ensureChannelKey(CHANNEL), ensureChannelKey(CHANNEL)]);
+        expect(fake.publishes - before, 'one rotation, not two').toBe(1);
+        expect(a!.epoch).toBe(b!.epoch);
+        expect(Array.from(a!.key)).toEqual(Array.from(b!.key));
+    });
+
+    it('counts what it minted, not what a fresh page merely loaded', async () => {
+        await expect(rewrapForMembershipChange([CHANNEL])).resolves.toBe(1);
+        clearChannelKeyCache(); // a fresh page: nothing cached, the key already current
+        const before = fake.publishes;
+        await expect(rewrapForMembershipChange([CHANNEL])).resolves.toBe(0);
+        expect(fake.publishes).toBe(before);
+    });
+
+    it('a 429 ends the pass instead of asking for every remaining channel', async () => {
+        fake.rateLimited = true;
+        clearChannelKeyCache();
+        fake.keyGets = 0;
+        await expect(rewrapForMembershipChange([CHANNEL, 78, 79], { bootstrap: false })).resolves.toBe(0);
+        expect(fake.keyGets, 'stopped at the first refusal').toBe(1);
     });
 
     it('the newcomer can then read the key it was handed', async () => {

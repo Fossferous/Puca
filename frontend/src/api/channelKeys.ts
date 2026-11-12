@@ -633,6 +633,7 @@ async function mintEpoch(
             })),
         });
         rememberSelfMinted(channelId, epoch, channelKey);
+        mintCount++;
         return channelKey;
     } catch (e) {
         // 409 = another member established this epoch at the same instant. Adopt
@@ -746,6 +747,33 @@ function raiseEpochFloor(channelId: number, epoch: number): void {
  * mints it then.
  */
 export async function ensureChannelKey(
+    channelId: number,
+    opts?: { bootstrap?: boolean },
+): Promise<{ epoch: number; key: Uint8Array } | null> {
+    // ONE AT A TIME PER CHANNEL on this device. Two callers that read the same
+    // pre-rotation state (the sign-in catch-up and a send, the MemberJoined
+    // re-wrap and an SFU call's epoch poll) both minted epoch N+1; the server
+    // kept the first and, until 0.9.861, answered the second 200 with nothing
+    // written, so that caller sealed under a key no row holds (a message nobody
+    // can open, a call silent both ways). Queued, the second caller re-reads
+    // the state the first one left, finds the new epoch held at the current
+    // generation, and publishes nothing. The server now refuses that second
+    // publish too (409), for the case this cannot see: the same account's
+    // other device rotating at the same moment.
+    const before = keyQueue.get(channelId) ?? Promise.resolve();
+    const run = before.catch(() => undefined).then(() => ensureChannelKeyNow(channelId, opts));
+    keyQueue.set(channelId, run);
+    try {
+        return await run;
+    } finally {
+        if (keyQueue.get(channelId) === run) keyQueue.delete(channelId);
+    }
+}
+
+/** ensureChannelKey's queue: the last call still running for each channel. */
+const keyQueue = new Map<number, Promise<unknown>>();
+
+async function ensureChannelKeyNow(
     channelId: number,
     opts?: { bootstrap?: boolean },
 ): Promise<{ epoch: number; key: Uint8Array } | null> {
@@ -884,28 +912,42 @@ export async function ensureChannelKey(
  *
  * `bootstrap: false` (the catch-up in components/useChannelKeyUpkeep.ts)
  * leaves a channel with no keys yet alone rather than minting its first one.
+ * `paceMs` waits that long between channels (the catch-up walks a whole
+ * server), and a 429 from the server ends the walk rather than pressing on.
  */
 export async function rewrapForMembershipChange(
     channelIds: number[],
-    opts?: { bootstrap?: boolean },
+    opts?: { bootstrap?: boolean; paceMs?: number },
 ): Promise<number> {
     if (!getActiveIdentity() || channelIds.length === 0) return 0;
     // 0-1500ms. Cheap dispersion: with N members the expected number that get
     // as far as minting is ~1, and the rest cost one cached state read each.
     await new Promise(r => setTimeout(r, Math.floor(Math.random() * 1500)));
-    let rotated = 0;
-    for (const channelId of channelIds) {
+    // Counted by what was MINTED, not by the epoch seen: on a fresh page the
+    // cache is empty, so "an epoch above the cached one" counted every key
+    // this device merely loaded (the live walk saw "re-wrapped 5" from
+    // sign-ins that wrote nothing).
+    const mintsBefore = mintCount;
+    for (let i = 0; i < channelIds.length; i++) {
+        const channelId = channelIds[i];
+        if (i > 0 && opts?.paceMs) await new Promise(r => setTimeout(r, opts.paceMs));
         try {
-            const before = cache.get(channelId)?.currentEpoch ?? 0;
-            const got = await ensureChannelKey(channelId, opts);
-            if (got && got.epoch > before) rotated++;
+            await ensureChannelKey(channelId, { bootstrap: opts?.bootstrap });
         } catch (e) {
+            if (statusOf(e) === 429) {
+                console.debug('[e2ee] rewrapForMembershipChange: rate-limited, stopping this pass');
+                break;
+            }
             console.debug(`[e2ee] rewrapForMembershipChange(${channelId}) skipped:`, e);
         }
     }
+    const rotated = mintCount - mintsBefore;
     if (rotated > 0) console.log(`[e2ee] re-wrapped ${rotated} channel key(s) for the current members`);
     return rotated;
 }
+
+/** Epochs this device has published (mintEpoch), for rewrapForMembershipChange's count. */
+let mintCount = 0;
 
 /**
  * The channels whose messages, and calls, are sealed under a CHANNEL KEY:

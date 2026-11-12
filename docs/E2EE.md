@@ -229,7 +229,14 @@ Remaining limitations:
   each epoch under an advisory lock and answers the second publisher with
   409, and that client adopts the winner's key only if its wrapper is
   attributable and at or above the device's epoch floor (`mintEpoch`,
-  `frontend/src/api/channelKeys.ts`).
+  `frontend/src/api/channelKeys.ts`). Since 0.9.861 that holds for the SAME
+  identity too (`existing_epoch_conflict`, `src/key_handlers.rs`): two
+  rotations by one account (its desktop and its phone, or two callers on one
+  device) used to see the second publish write nothing and answer 200, so
+  that caller sealed messages, or joined a call, under a key no row holds.
+  On one device the rotations are also queued per channel, so the second
+  caller finds the first one's epoch and publishes nothing; and an SFU call
+  compares the key itself, not only the epoch number, when it refreshes.
 
 ## Cryptographic primitives
 

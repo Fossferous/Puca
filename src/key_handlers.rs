@@ -112,6 +112,28 @@ fn stamp_generation(client: i32, server: i32) -> i32 {
     client.clamp(0, server.max(0))
 }
 
+/// Whether a publish of an epoch that already has rows must be refused (409),
+/// and with what words. EVERY such publish is: an epoch is established once.
+///
+/// It used to be refused only when a DIFFERENT identity had established it. A
+/// second publish by the SAME identity (two rotations racing on one device,
+/// or the account's desktop and phone both rotating after one membership
+/// change) then went on, wrote nothing (every row is `ON CONFLICT DO NOTHING`)
+/// and answered 200, so that caller kept the key it had just generated, which
+/// no row holds: what it sealed next could never be opened by anyone, and an
+/// SFU call it joined under that key was silent both ways (0.9.861 review).
+/// A 409 sends it down mintEpoch's existing conflict path, which adopts the
+/// stored key; a row wrapped by the caller's own identity attributes as
+/// trusted. An honest retry of a POST that did go through lands the same way,
+/// on the very key it sent.
+fn existing_epoch_conflict(existing_sender: Option<&str>, this_sender: &str) -> Option<&'static str> {
+    match existing_sender {
+        None => None,
+        Some(owner) if owner != this_sender => Some("Epoch already published by another member"),
+        Some(_) => Some("Epoch already published by this identity: adopt the stored key"),
+    }
+}
+
 // --- Handlers ---
 
 /// Publish wrapped channel keys for a new (or rotated) epoch.
@@ -276,16 +298,9 @@ pub async fn publish_channel_keys(
     .fetch_optional(&mut *tx)
     .await
     .unwrap_or(None);
-    if let Some((owner,)) = existing_sender {
-        if owner != this_sender {
-            // Epoch already established by another member — don't write a rival key.
-            let _ = tx.rollback().await;
-            return (
-                StatusCode::CONFLICT,
-                "Epoch already published by another member",
-            )
-                .into_response();
-        }
+    if let Some(conflict) = existing_epoch_conflict(existing_sender.as_ref().map(|(o,)| o.as_str()), &this_sender) {
+        let _ = tx.rollback().await;
+        return (StatusCode::CONFLICT, conflict).into_response();
     }
 
     // The generation is CLIENT-supplied and was previously stored verbatim, so a
@@ -833,5 +848,24 @@ mod tests {
     fn negative_generation_never_reaches_the_column() {
         assert_eq!(stamp_generation(-1, 7), 0);
         assert_eq!(stamp_generation(-1, 0), 0);
+    }
+
+    // An epoch is established ONCE. A second publish of it is refused whoever
+    // sends it: by another identity (the rival key), and by the SAME identity,
+    // whose second publish used to write nothing and answer 200, leaving that
+    // caller on a key no row holds (lost messages, a silent call).
+    #[test]
+    fn a_new_epoch_is_accepted() {
+        assert_eq!(existing_epoch_conflict(None, "me"), None);
+    }
+
+    #[test]
+    fn another_identity_cannot_publish_an_established_epoch() {
+        assert!(existing_epoch_conflict(Some("them"), "me").is_some());
+    }
+
+    #[test]
+    fn the_same_identity_cannot_publish_an_established_epoch_twice() {
+        assert!(existing_epoch_conflict(Some("me"), "me").is_some());
     }
 }
