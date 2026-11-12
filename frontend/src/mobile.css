@@ -162,8 +162,14 @@
            desktop, a Safari tab), so nothing there changes. */
         height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
         padding-bottom: var(--safe-area-bottom);
-        background: linear-gradient(180deg, rgba(22, 33, 62, 0.98), rgba(15, 15, 26, 1));
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        /* The theme's own surface and words (§6). The bar was a navy gradient
+           and white-at-half labels from before the themes, so Light had a dark
+           bar under a light app and the chosen tab's brand blue was 3.3-3.5:1
+           on every theme, high contrast included (under 4.5 for its ~10px
+           label). The channel list's shade, which the server rail and channel
+           list share on every theme. */
+        background: var(--bg-secondary, #0d0e10);
+        border-top: 1px solid var(--border-separator, rgba(255, 255, 255, 0.1));
         z-index: 300;
         justify-content: space-around;
         align-items: center;
@@ -185,14 +191,16 @@
         padding: 8px 2px;
         background: transparent;
         border: none;
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--text-muted, #949ba4);
         font-size: 0.7rem;
         cursor: pointer;
         transition: color 0.2s ease;
     }
 
     .mobile-nav-btn.active {
-        color: #5865f2;
+        /* The brand colour as words (theme.css): --brand-primary is under
+           4.5:1 on a surface on every theme. */
+        color: var(--brand-text, #8b93f6);
     }
 
     .mobile-nav-btn .nav-icon {

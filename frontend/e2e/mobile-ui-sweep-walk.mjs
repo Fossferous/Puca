@@ -5,6 +5,9 @@
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
 //              description. CONTROL: a field forced to 15px must be caught.
+//   nav        The bottom bar takes the theme's colours (it was navy on every theme, Light included)
+//              and every label, the chosen tab's too, reads at 4.5:1 on all eight themes with and
+//              without high contrast (the chosen one was 3.3-3.5:1 everywhere).
 //   settings   A tap on a setting's name or hint toggles its checkbox (the labels named no control,
 //              so a phone had a lone 20px box), and a tap on the box still toggles it once.
 //   toggle     The chat header's checklist button has no background or border, like the pin button
@@ -214,6 +217,45 @@ try {
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
+        }
+
+        // ── nav: the bottom bar takes the theme, and every label reads at 4.5:1
+        if (want('nav')) {
+            const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
+            const bad = [];
+            let lightBar = null;
+            for (const theme of THEMES) for (const hc of [false, true]) {
+                await P.evaluate(([theme, hc]) => {
+                    document.documentElement.setAttribute('data-theme', theme);
+                    document.documentElement.setAttribute('data-contrast', hc ? 'high' : 'normal');
+                }, [theme, hc]);
+                await sleep(120);
+                const r = await P.evaluate(() => {
+                    const c = document.createElement('canvas'); c.width = c.height = 1;
+                    const g = c.getContext('2d', { willReadFrequently: true });
+                    const rgba = (s) => { g.clearRect(0, 0, 1, 1); g.fillStyle = 'rgba(0,0,0,0)'; g.fillStyle = s; g.fillRect(0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+                    const lin = (v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; };
+                    const lum = ([r, gr, b]) => 0.2126 * lin(r) + 0.7152 * lin(gr) + 0.0722 * lin(b);
+                    const ratio = (x, y) => { const [h, l] = [lum(x), lum(y)].sort((p, q) => q - p); return (h + 0.05) / (l + 0.05); };
+                    const over = (t, u) => [0, 1, 2].map((i) => t[i] * t[3] + u[i] * (1 - t[3]));
+                    const nav = document.querySelector('.mobile-bottom-nav');
+                    const cs = getComputedStyle(nav);
+                    // What the bar paints: its colour, or every stop of a gradient over the page.
+                    const page = rgba(getComputedStyle(document.body).backgroundColor);
+                    const stops = (cs.backgroundImage.match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}\b/gi) || []).map(rgba);
+                    const fills = (stops.length ? stops : [rgba(cs.backgroundColor)]).map((s) => over(s, page[3] ? page : [255, 255, 255, 1]));
+                    const labels = [...nav.querySelectorAll('.mobile-nav-btn')].map((b) => {
+                        const col = rgba(getComputedStyle(b.querySelector('.nav-label')).color);
+                        return { label: b.textContent.trim(), active: b.classList.contains('active'), worst: Math.min(...fills.map((f) => ratio(over(col, f), f))) };
+                    });
+                    return { barLum: Math.max(...fills.map(lum)), labels };
+                });
+                for (const l of r.labels) if (l.worst < 4.5) bad.push(`${theme}${hc ? '+hc' : ''} ${l.label}${l.active ? ' (chosen)' : ''} ${l.worst.toFixed(2)}`);
+                if (theme === 'light' && !hc) { lightBar = r.barLum; await shot(P, `nav-light-${size}`); }
+            }
+            await P.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
+            check(`${size} nav: every label (the chosen tab's too) reads at 4.5:1 on all eight themes, with and without high contrast`, bad.length === 0, bad.slice(0, 8));
+            check(`${size} nav: on Light the bar is light, like the rest of the app`, lightBar !== null && lightBar > 0.5, { luminance: lightBar });
         }
 
         // ── settings: a tap on a setting's name toggles its checkbox
