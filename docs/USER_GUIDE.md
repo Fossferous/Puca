@@ -1440,9 +1440,11 @@ background. Púca's own streams never carry the Discord window's sound.
 
 **Sign out and clear.** **Settings → Advanced → Desktop App → Sign out of
 Discord and clear its data on this PC** closes the Discord window and deletes
-everything Discord stored on this PC: your sign-in, cookies, cache and
-settings. Your Discord account is not touched, and you can sign in again later.
-Turning **Show Discord in the server rail** off offers the same.
+what Discord keeps in it on this PC: your sign-in, cookies, cache and settings.
+Files you downloaded stay where you saved them, and your Discord account is not
+touched; you can sign in again later. To end the sign-in at Discord as well, use
+**Log Out** in Discord first. Turning **Show Discord in the server rail** off
+offers the same.
 
 **Good to know.**
 

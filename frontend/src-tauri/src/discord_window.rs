@@ -77,10 +77,17 @@ const PROFILE_DIR: &str = "discord-profile";
 /// another user-data folder (Púca's own, say), or extra browser arguments, such
 /// as `--remote-debugging-port`, or a script-debugger pipe, either of which would
 /// let another program drive the browser holding the owner's Discord session.
-/// (`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` stays: it picks which WebView2 runs,
-/// the same one Púca's own window uses.)
-const SCRUBBED_ENV: &[&str] =
-    &["WEBVIEW2_USER_DATA_FOLDER", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER"];
+/// `SSLKEYLOGFILE` is the other: Chromium writes every TLS session key to the
+/// file it names, and with them anyone could read the window's traffic to
+/// Discord, sign-in included. Developer PCs often have it set for their own
+/// debugging. (`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` stays: it picks which
+/// WebView2 runs, the same one Púca's own window uses.)
+const SCRUBBED_ENV: &[&str] = &[
+    "WEBVIEW2_USER_DATA_FOLDER",
+    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
+    "SSLKEYLOGFILE",
+];
 
 // ---------------------------------------------------------------------------
 // Policy. Pure, so it is tested without a window.
@@ -675,6 +682,7 @@ mod tests {
         assert!(SCRUBBED_ENV.contains(&"WEBVIEW2_USER_DATA_FOLDER"));
         assert!(SCRUBBED_ENV.contains(&"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
         assert!(SCRUBBED_ENV.contains(&"WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER"));
+        assert!(SCRUBBED_ENV.contains(&"SSLKEYLOGFILE"));
     }
 
     #[test]

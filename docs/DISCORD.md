@@ -61,15 +61,18 @@ versions this app locks). In the Discord window:
 
 Two tests in `discord_host.rs` hold this:
 
-- `nothing_above_the_tests_can_put_anything_into_the_page` fails if the window's
-  code ever calls a WebView2 function that runs or adds a script, posts or
-  receives a web message, adds a host object, intercepts requests, maps a
-  folder, reads the page's title or cookies, or uses Tauri.
+- `nothing_above_the_tests_can_put_anything_into_the_page` lists every WebView2
+  call the window makes (`ALLOWED_CALLS`). Any other call fails it: one that
+  runs or adds a script, passes web messages, adds a host object, intercepts or
+  watches requests, reads the page, its title or cookies, or opens a debugging
+  channel. `webview2_is_used_in_this_file_alone` keeps such a call from hiding
+  in another file.
 - `the_page_sees_no_bridge` builds the window's real webview, hidden and on a
-  throwaway profile, and runs a page there. That page finds no Tauri globals.
-  A message it sends never reaches the host, host objects refuse it, and
-  nothing answers on `ipc.localhost` or `tauri.localhost`. The negative control
-  puts a bridge in on purpose, and the same page then finds it.
+  throwaway profile, and runs a page there. That page finds no Tauri globals,
+  a message it sends never reaches the host, and nothing answers on
+  `ipc.localhost` or `tauri.localhost`. The negative control puts a bridge in
+  on purpose (an injected script, web messaging on, both names intercepted the
+  way Tauri serves them), and the same page then finds each of them.
 
 **Púca's own window cannot reach it either.** Púca has two commands for it,
 `discord_window_open` (open the window or bring it forward) and
@@ -85,9 +88,11 @@ all.
 **Its own profile, held exclusively.** `profile_dir_from_env` is the only folder
 it uses. WebView2 opens it with exclusive access (`create_environment`), so no
 other program, Púca's own window included, can open a browser on Discord's data
-while the window is open. Three environment variables could point WebView2
-elsewhere or attach a debugger, and the window takes them out before WebView2
-starts (`SCRUBBED_ENV`).
+while the window is open. Four environment variables could point WebView2
+elsewhere, attach a debugger, or write its encryption keys to a file, and the
+window takes them out before WebView2 starts (`SCRUBBED_ENV`). A WebView2 too
+old to have the window's gates for external programs and screen sharing gets
+no Discord window at all, rather than one without them.
 
 **Discord's domains only.** A page may load in the window only from
 discord.com and its subdomains, discord.gg (invites) and discordapp.com (its
@@ -142,7 +147,8 @@ not its app:
 - No game activity and no overlay.
 - Púca's own streams never carry the Discord window's sound: when you share an
   app's audio in Púca, the Discord window counts as part of Púca and is not
-  offered.
+  offered, even after Púca has restarted while the window stayed open
+  (`is_pucas_own` in `frontend/src-tauri/src/audio_capture.rs`).
 
 ## Downloads
 
@@ -152,6 +158,10 @@ Nothing opens by itself, and nothing goes through Púca's own file handling. The
 window does not handle downloads at all.
 
 ## The risks that remain
+
+- **Another program running as you can reach the window.** It can do to this
+  window what it can do to any window on your desktop: send it keys and clicks,
+  or put a window of the same name in its place. That is part of the next point.
 
 - **Malware on your PC can read saved sign-ins.** Any program running as you can
   read any browser's or app's saved sign-in, this one included, just as it could
@@ -174,8 +184,17 @@ window does not handle downloads at all.
 this PC** closes the Discord window, waits for it to go, then deletes its folder,
 `%LOCALAPPDATA%\com.sovereign.chat\discord-profile`, and nothing else. That
 folder holds your Discord sign-in, cookies, cache and settings, and the window's
-size and place. Your Discord account itself is not touched, and you can sign in
-again later. Turning **Show Discord in the server rail** off offers the same.
+size and place. Turning **Show Discord in the server rail** off offers the same.
+
+What it leaves:
+
+- your Discord account, untouched; you can sign in again later;
+- files you downloaded, where you saved them;
+- Discord notifications already in Windows' notification centre;
+- the sign-in at Discord's end. Deleting the folder signs this PC out, but
+  Discord may count that sign-in as open until it expires. To end it, use
+  **Log Out** in Discord before clearing, or remove the device under Discord's
+  **User Settings → Devices**.
 
 Without Púca, the same is: close the Discord window, wait a few seconds, and
 delete that folder. **Log Out** in Discord's own settings signs you out too, but

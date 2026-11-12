@@ -444,9 +444,26 @@ mod mark_ancestry_tests {
     }
 }
 
+/// Is `pid` Púca's own: in this process's tree, or in the tree of another
+/// process of this same program (`same_program`)? That second one is the Discord
+/// window (discord_window.rs): a second Púca process with Discord's page and
+/// WebView2 under it. Started by Púca, it is in Púca's tree only until that Púca
+/// quits or restarts; it keeps running, and a call in it must not then become
+/// "an app making sound" that a Púca stream picks up, other people's Discord
+/// voices relayed to Púca viewers.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_pucas_own(
+    parent_of: &std::collections::HashMap<u32, u32>,
+    pid: u32,
+    own_pid: u32,
+    same_program: &[u32],
+) -> bool {
+    pid_in_tree(parent_of, pid, own_pid) || same_program.iter().any(|&root| pid_in_tree(parent_of, pid, root))
+}
+
 #[cfg(test)]
 mod pid_tree_tests {
-    use super::pid_in_tree;
+    use super::{is_pucas_own, pid_in_tree};
     use std::collections::HashMap;
 
     fn map(pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
@@ -467,6 +484,22 @@ mod pid_tree_tests {
         let m = map(&[(300, 200), (200, 100), (555, 444)]);
         assert!(!pid_in_tree(&m, 555, 100)); // different tree
         assert!(!pid_in_tree(&m, 444, 100)); // orphan root of another tree
+    }
+
+    /// The Discord window outliving the Púca that started it: no longer in the
+    /// new Púca's tree, still Púca's.
+    #[test]
+    fn the_discord_window_stays_pucas_after_a_restart() {
+        // New Púca 100 (with its WebView2 200). The Discord window 900, started
+        // by a Púca that is gone, with its WebView2 901 -> 902. A game 555.
+        let m = map(&[(200, 100), (901, 900), (902, 901), (555, 444)]);
+        // CONTROL: by the tree alone, the Discord window's audio is "another app".
+        assert!(!pid_in_tree(&m, 902, 100));
+        for pid in [100, 200, 900, 901, 902] {
+            assert!(is_pucas_own(&m, pid, 100, &[100, 900]), "{pid} is Púca's");
+        }
+        assert!(!is_pucas_own(&m, 555, 100, &[100, 900]), "the game is not");
+        assert!(!is_pucas_own(&m, 444, 100, &[100, 900]));
     }
 
     #[test]
@@ -666,6 +699,21 @@ pub mod windows_audio {
         Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png_data)))
     }
 
+    /// Every running process of THIS program (its exe path, or its name where the
+    /// path cannot be read): Púca itself and the Discord window.
+    fn same_program_pids(sys: &System) -> Vec<u32> {
+        let me = std::env::current_exe().ok();
+        let my_name = me.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
+        sys.processes()
+            .iter()
+            .filter(|(_, p)| match (p.exe(), &me) {
+                (Some(exe), Some(me)) => exe.to_string_lossy().eq_ignore_ascii_case(&me.to_string_lossy()),
+                _ => my_name.as_deref().is_some_and(|n| p.name().to_string_lossy().eq_ignore_ascii_case(n)),
+            })
+            .map(|(pid, _)| pid.as_u32())
+            .collect()
+    }
+
     /// Get list of running applications that may have audio.
     /// Only refresh the process list — `System::new_all()` also enumerates
     /// disks/network/CPU and took long enough to visibly stall the share dialog.
@@ -696,6 +744,9 @@ pub mod windows_audio {
             .iter()
             .filter_map(|(pid, p)| p.parent().map(|pp| (pid.as_u32(), pp.as_u32())))
             .collect();
+        // And every other process of this program (the Discord window), wherever
+        // it now sits in the tree: super::is_pucas_own.
+        let same_program = same_program_pids(&sys);
 
         // Which process trees are making sound RIGHT NOW (best-effort — an
         // enumeration failure just means every flag is false and auto-detect
@@ -711,7 +762,7 @@ pub mod windows_audio {
         for (pid, process) in sys.processes() {
             let name = process.name().to_string_lossy().to_string();
 
-            if super::pid_in_tree(&parent_of, pid.as_u32(), own_pid) {
+            if super::is_pucas_own(&parent_of, pid.as_u32(), own_pid, &same_program) {
                 continue;
             }
 
@@ -988,17 +1039,19 @@ pub mod windows_audio {
             let mut sys = System::new();
             // Parents are all this guard reads — skip the per-process
             // memory/CPU/disk queries the default refresh performs.
+            // Parents, and the exe path that tells another process of this
+            // program (the Discord window) apart.
             sys.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::All,
                 true,
-                sysinfo::ProcessRefreshKind::new(),
+                sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
             );
             let parent_of: std::collections::HashMap<u32, u32> = sys
                 .processes()
                 .iter()
                 .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
                 .collect();
-            if super::pid_in_tree(&parent_of, pid, own_pid) {
+            if super::is_pucas_own(&parent_of, pid, own_pid, &same_program_pids(&sys)) {
                 log::warn!(
                     "Refusing capture of PID {} — it is Puca's own process tree (own pid {})",
                     pid, own_pid

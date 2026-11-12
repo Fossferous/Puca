@@ -30,9 +30,10 @@ export function DiscordWindowSettings({ on, onChange }: { on: boolean; onChange:
 
     const CLEAR_QUESTION =
         'Sign out of Discord and clear its data on this PC?\n\n'
-        + 'This closes the Discord window and deletes everything Discord stored on this PC: '
-        + 'your sign-in, cookies, cache and settings. Your Discord account itself is not touched, '
-        + 'and you can sign in again later.';
+        + 'This closes the Discord window and deletes what Discord keeps in it on this PC: '
+        + 'your sign-in, cookies, cache and settings. Files you downloaded stay where you saved them. '
+        + 'Your Discord account itself is not touched, and you can sign in again later. '
+        + 'To end this sign-in at Discord as well, use Log Out in Discord first.';
 
     return (
         <>
@@ -67,8 +68,10 @@ export function DiscordWindowSettings({ on, onChange }: { on: boolean; onChange:
                 <div className="option-info">
                     <label>Sign out of Discord and clear its data on this PC</label>
                     <span className="option-hint">
-                        Closes the Discord window and deletes everything Discord stored on this PC (your
-                        sign-in, cookies, cache and settings). Your Discord account is not touched.
+                        Closes the Discord window and deletes what Discord keeps in it on this PC (your
+                        sign-in, cookies, cache and settings). Files you downloaded stay where you saved
+                        them, and your Discord account is not touched. Use Log Out in Discord first to
+                        end the sign-in at Discord as well.
                     </span>
                     {status && (
                         <span className="option-hint discord-clear-status" role="status">{status}</span>

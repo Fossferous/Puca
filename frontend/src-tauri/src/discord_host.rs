@@ -83,7 +83,10 @@ struct Host {
 thread_local! {
     // The UI thread's own: everything WebView2 hands this process lives on it.
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
-    static PENDING_QUESTION: RefCell<Option<(ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral)>> =
+    /// The request waiting for the owner's answer, and the one-time number its
+    /// answer must carry: another program on the PC posting "allowed" to this
+    /// window cannot know it.
+    static PENDING_QUESTION: RefCell<Option<(ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2Deferral, isize)>> =
         const { RefCell::new(None) };
     static PENDING_LOADS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static BROWSER_LIMITER: RefCell<BrowserOpenLimiter> = RefCell::new(BrowserOpenLimiter::default());
@@ -302,7 +305,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_APP_PERMISSION_ANSWER => {
-            answer_pending_question(wparam.0 == 1);
+            answer_pending_question(wparam.0 == 1, lparam.0);
             LRESULT(0)
         }
         WM_APP_LOAD_HERE => {
@@ -420,15 +423,24 @@ fn configure(webview: &ICoreWebView2, hwnd: HWND) -> Result<(), String> {
             .add_NavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(|_, args| {
                     let Some(args) = args else { return Ok(()) };
-                    let mut uri = PWSTR::null();
-                    args.Uri(&mut uri)?;
-                    let uri = take_pwstr(uri);
-                    let mut pressed = BOOL::default();
-                    args.IsUserInitiated(&mut pressed)?;
-                    // An address the URL standard cannot read is refused, never let through.
-                    let verdict = url::Url::parse(&uri)
-                        .map(|u| navigation_action(&u, pressed.as_bool()))
-                        .unwrap_or(Navigation::Refuse);
+                    // Fails closed: an address the URL standard cannot read, or a
+                    // question WebView2 cannot answer, is a refusal, never a pass.
+                    let read = || -> wv2_windows::core::Result<(String, bool)> {
+                        let mut uri = PWSTR::null();
+                        args.Uri(&mut uri)?;
+                        let mut pressed = BOOL::default();
+                        args.IsUserInitiated(&mut pressed)?;
+                        Ok((take_pwstr(uri), pressed.as_bool()))
+                    };
+                    let (uri, verdict) = match read() {
+                        Ok((uri, pressed)) => {
+                            let verdict = url::Url::parse(&uri)
+                                .map(|u| navigation_action(&u, pressed))
+                                .unwrap_or(Navigation::Refuse);
+                            (uri, verdict)
+                        }
+                        Err(_) => (String::new(), Navigation::Refuse),
+                    };
                     if verdict != Navigation::Stay {
                         args.SetCancel(true)?;
                     }
@@ -476,42 +488,44 @@ fn configure(webview: &ICoreWebView2, hwnd: HWND) -> Result<(), String> {
             )
             .map_err(fail)?;
 
+        // A WebView2 too old for either gate below gets no Discord window, rather
+        // than one without them (Windows keeps the runtime current with Edge).
+        let too_old = |_| "WebView2 on this PC is too old for the Discord window. Update Microsoft Edge, then try again.".to_string();
+
         // A link to another program (`ms-msdt:`, `search-ms:`, `steam:`, ...) from
         // any frame: WebView2 would ask "Open app?", with an "always" box. Never.
-        if let Ok(w18) = webview.cast::<ICoreWebView2_18>() {
-            w18.add_LaunchingExternalUriScheme(
-                &LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
-                    if let Some(args) = args {
-                        args.SetCancel(true)?;
-                    }
-                    Ok(())
-                })),
-                &mut token,
-            )
-            .map_err(fail)?;
-        }
+        let w18 = webview.cast::<ICoreWebView2_18>().map_err(too_old)?;
+        w18.add_LaunchingExternalUriScheme(
+            &LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
+                if let Some(args) = args {
+                    args.SetCancel(true)?;
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+        .map_err(fail)?;
 
         // Screen sharing (WebView2's own picker): only Discord's app may start it.
-        if let Ok(w27) = webview.cast::<ICoreWebView2_27>() {
-            let _ = w27.add_ScreenCaptureStarting(
-                &ScreenCaptureStartingEventHandler::create(Box::new(|_, args| {
-                    let Some(args) = args else { return Ok(()) };
+        let w27 = webview.cast::<ICoreWebView2_27>().map_err(too_old)?;
+        w27.add_ScreenCaptureStarting(
+            &ScreenCaptureStartingEventHandler::create(Box::new(|_, args| {
+                let Some(args) = args else { return Ok(()) };
+                // Fails closed: a frame whose address cannot be read may not share.
+                let origin = (|| -> wv2_windows::core::Result<String> {
                     let mut source = PWSTR::null();
-                    let origin = match args.OriginalSourceFrameInfo() {
-                        Ok(frame) => {
-                            frame.Source(&mut source)?;
-                            take_pwstr(source)
-                        }
-                        Err(_) => String::new(),
-                    };
-                    if !screen_capture_allowed(&origin) {
-                        args.SetCancel(true)?;
-                    }
-                    Ok(())
-                })),
-                &mut token,
-            );
-        }
+                    args.OriginalSourceFrameInfo()?.Source(&mut source)?;
+                    Ok(take_pwstr(source))
+                })()
+                .unwrap_or_default();
+                if !screen_capture_allowed(&origin) {
+                    args.SetCancel(true)?;
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+        .map_err(fail)?;
 
         // The title bar says where the window is: the host, from the address,
         // on every navigation (never the page's own title).
@@ -574,14 +588,22 @@ unsafe fn refuse(args: &ICoreWebView2PermissionRequestedEventArgs) {
 }
 
 unsafe fn on_permission_requested(args: ICoreWebView2PermissionRequestedEventArgs, owner: isize) -> wv2_windows::core::Result<()> {
-    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
-    args.PermissionKind(&mut kind)?;
-    let mut uri = PWSTR::null();
-    args.Uri(&mut uri)?;
-    let origin = take_pwstr(uri);
-    let mut user_initiated = BOOL::default();
-    args.IsUserInitiated(&mut user_initiated)?;
-    match permission_decision(kind_of(kind), &origin, user_initiated.as_bool()) {
+    // Fails closed: a request WebView2 cannot describe is refused, never left
+    // at its default (which would be WebView2's question, for any site).
+    let read = || -> wv2_windows::core::Result<(COREWEBVIEW2_PERMISSION_KIND, String, bool)> {
+        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+        args.PermissionKind(&mut kind)?;
+        let mut uri = PWSTR::null();
+        args.Uri(&mut uri)?;
+        let mut user_initiated = BOOL::default();
+        args.IsUserInitiated(&mut user_initiated)?;
+        Ok((kind, take_pwstr(uri), user_initiated.as_bool()))
+    };
+    let Ok((kind, origin, user_initiated)) = read() else {
+        refuse(&args);
+        return Ok(());
+    };
+    match permission_decision(kind_of(kind), &origin, user_initiated) {
         // Left at its default state: WebView2 shows its own question (and
         // Windows its own, for the microphone and camera).
         PermissionAction::WebView2Prompt => Ok(()),
@@ -603,7 +625,8 @@ unsafe fn on_permission_requested(args: ICoreWebView2PermissionRequestedEventArg
                 return Ok(());
             };
             ASKING.store(true, Ordering::SeqCst);
-            PENDING_QUESTION.with(|p| *p.borrow_mut() = Some((args, deferral)));
+            let nonce = rand::random::<i64>() as isize;
+            PENDING_QUESTION.with(|p| *p.borrow_mut() = Some((args, deferral, nonce)));
             let spawned = std::thread::Builder::new().name("discord-notification-question".into()).spawn(move || {
                 let allowed = ask_owner(owner);
                 // SAFETY: posting to a window handle; a stale one fails harmlessly.
@@ -612,32 +635,38 @@ unsafe fn on_permission_requested(args: ICoreWebView2PermissionRequestedEventArg
                         Some(HWND(owner as *mut core::ffi::c_void)),
                         WM_APP_PERMISSION_ANSWER,
                         WPARAM(allowed as usize),
-                        LPARAM(0),
+                        LPARAM(nonce),
                     )
                 };
             });
             if spawned.is_err() {
-                answer_pending_question(false);
+                answer_pending_question(false, nonce);
             }
             Ok(())
         }
     }
 }
 
-/// On the UI thread: apply the owner's answer to the request that is waiting.
-fn answer_pending_question(allowed: bool) {
-    let pending = PENDING_QUESTION.with(|p| p.borrow_mut().take());
-    if let Some((args, deferral)) = pending {
-        // SAFETY: on the UI thread that received these objects.
-        unsafe {
-            if allowed {
-                // Remembered in Discord's profile: he said yes.
-                let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
-            } else {
-                refuse(&args);
-            }
-            let _ = deferral.Complete();
+/// On the UI thread: apply the owner's answer to the request that is waiting,
+/// if `nonce` is the one its question was given. Any other message is ignored.
+fn answer_pending_question(allowed: bool, nonce: isize) {
+    let pending = PENDING_QUESTION.with(|p| {
+        let mut p = p.borrow_mut();
+        match p.as_ref() {
+            Some((_, _, expected)) if *expected == nonce => p.take(),
+            _ => None,
         }
+    });
+    let Some((args, deferral, _)) = pending else { return };
+    // SAFETY: on the UI thread that received these objects.
+    unsafe {
+        if allowed {
+            // Remembered in Discord's profile: he said yes.
+            let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+        } else {
+            refuse(&args);
+        }
+        let _ = deferral.Complete();
     }
     ASKING.store(false, Ordering::SeqCst);
 }
@@ -845,34 +874,104 @@ mod tests {
         &all[..end]
     }
 
+    /// Every WebView2 call the window makes. A call not on this list fails the
+    /// scan below, whatever it is: one that runs or adds a script, passes web
+    /// messages, adds a host object, intercepts or watches requests (their
+    /// headers carry Discord's sign-in), reads the page, its title or cookies,
+    /// captures it, or opens a debugging channel. Adding one means saying here
+    /// why the page cannot use it.
+    const ALLOWED_CALLS: &[&str] = &[
+        // controller
+        "SetIsVisible", "MoveFocus", "SetBounds", "NotifyParentWindowPositionChanged", "Close", "CoreWebView2",
+        // environment
+        "CreateCoreWebView2Controller",
+        // the webview: going to Discord, and the events the window answers
+        "Navigate", "Settings", "Source", "add_NavigationStarting", "add_NewWindowRequested",
+        "add_PermissionRequested", "add_LaunchingExternalUriScheme", "add_ScreenCaptureStarting",
+        "add_SourceChanged", "add_ProcessFailed",
+        // settings, all of them switching something OFF or keeping a browser's own part
+        "SetIsWebMessageEnabled", "SetAreHostObjectsAllowed", "SetAreDevToolsEnabled", "SetIsStatusBarEnabled",
+        "SetAreDefaultContextMenusEnabled", "SetIsZoomControlEnabled", "SetAreDefaultScriptDialogsEnabled",
+        "SetIsPasswordAutosaveEnabled", "SetIsGeneralAutofillEnabled", "SetIsReputationCheckingRequired",
+        // event arguments: reading the address, kind and press, answering
+        "Uri", "IsUserInitiated", "SetCancel", "SetHandled", "PermissionKind", "SetState", "SetSavesInProfile",
+        "GetDeferral", "Complete", "OriginalSourceFrameInfo", "ProcessFailedKind",
+        // environment options (webview2-com's setters)
+        "set_are_browser_extensions_enabled", "set_allow_single_sign_on_using_os_primary_account",
+        "set_exclusive_user_data_folder_access",
+    ];
+
+    /// The names called as `.Name(` that look like COM methods (a capital, or
+    /// webview2-com's `add_` / `remove_` / `set_`), in order of appearance.
+    fn com_calls(source: &str) -> Vec<String> {
+        let bytes = source.as_bytes();
+        let mut calls = Vec::new();
+        for (i, _) in source.match_indices('.') {
+            let rest = &source[i + 1..];
+            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if name.is_empty() || bytes.get(i + 1 + name.len()) != Some(&b'(') {
+                continue;
+            }
+            let com_like = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                || name.starts_with("add_")
+                || name.starts_with("remove_")
+                || name.starts_with("set_");
+            if com_like {
+                calls.push(name);
+            }
+        }
+        calls
+    }
+
     #[test]
     fn nothing_above_the_tests_can_put_anything_into_the_page() {
         let source = window_source();
-        for forbidden in [
-            "ExecuteScript",
-            "AddScriptToExecuteOnDocumentCreated",
-            "AddHostObjectToScript",
-            "PostWebMessage",
-            "add_WebMessageReceived",
-            "AddWebResourceRequestedFilter",
-            "add_WebResourceRequested",
-            "SetVirtualHostNameToFolderMapping",
-            "DocumentTitle",
-            "CookieManager",
-            "OpenDevToolsWindow",
-            "CallDevToolsProtocolMethod",
-            "SetIsWebMessageEnabled(true)",
-            "SetAreHostObjectsAllowed(true)",
-            "SetAreDevToolsEnabled(true)",
-            "set_additional_browser_arguments",
-            "tauri::",
-            "eval(",
-        ] {
-            assert!(!source.contains(forbidden), "discord_host.rs calls {forbidden}");
+        let calls = com_calls(source);
+        assert!(calls.len() > 30, "the scan found the window's calls: {calls:?}");
+        for call in &calls {
+            assert!(ALLOWED_CALLS.contains(&call.as_str()), "discord_host.rs calls {call}, which is not on ALLOWED_CALLS");
         }
         for required in ["SetIsWebMessageEnabled(false)", "SetAreHostObjectsAllowed(false)", "SetAreDevToolsEnabled(false)"] {
             assert!(source.contains(required), "discord_host.rs no longer says {required}");
         }
+        for forbidden in ["set_additional_browser_arguments", "tauri::", "eval("] {
+            assert!(!source.contains(forbidden), "discord_host.rs has {forbidden}");
+        }
+        // NEGATIVE CONTROL: the scan sees the calls that matter.
+        for injected in [
+            "webview.ExecuteScript(&x, &h)",
+            "webview.add_WebResourceResponseReceived(&h, &mut t)",
+            "webview.AddScriptToExecuteOnDocumentCreated(&x, &h)",
+            "options.set_additional_browser_arguments(x)",
+        ] {
+            let found = com_calls(injected);
+            assert!(found.iter().any(|c| !ALLOWED_CALLS.contains(&c.as_str())), "the scan misses {injected}");
+        }
+    }
+
+    /// No other source file can host a call on that webview: WebView2 itself is
+    /// named in this file alone.
+    #[test]
+    fn webview2_is_used_in_this_file_alone() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            seen += 1;
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            if name == "discord_host.rs" {
+                assert!(text.contains("webview2_com"), "the control: this file is found and does use it");
+                continue;
+            }
+            for needle in ["webview2_com", "ICoreWebView2"] {
+                assert!(!text.contains(needle), "{name} names {needle}: WebView2 calls belong in discord_host.rs");
+            }
+        }
+        assert!(seen > 30, "src/ was read ({seen} files)");
     }
 
     /// What the test asks of the page: what can it see of a host? Run in the
@@ -884,11 +983,8 @@ mod tests {
   r.isTauri = typeof window.isTauri;
   r.ipc = typeof window.ipc;
   const cw = window.chrome && window.chrome.webview;
-  r.postMessage = typeof (cw && cw.postMessage);
-  r.hostObjects = typeof (cw && cw.hostObjects);
   // A message to the host: whether it ARRIVES is what the test counts.
   try { cw.postMessage('probe'); } catch (e) { }
-  try { const h = cw.hostObjects.sync.anything; r.hostObjectCall = 'got:' + typeof h; } catch (e) { r.hostObjectCall = 'refused'; }
   async function probe(url, init) {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), 4000);
@@ -915,11 +1011,11 @@ mod tests {
     /// window's rules let load without the network (NavigateToString is a
     /// `data:` address, which they refuse, as they should), with the probe run
     /// in it once it has loaded.
-    fn load_probe(env: &ICoreWebView2Environment, extra: impl FnOnce(&ICoreWebView2)) -> Probe {
+    fn load_probe(env: &ICoreWebView2Environment, extra: impl FnOnce(&ICoreWebView2Environment, &ICoreWebView2)) -> Probe {
         let hwnd = create_window().expect("hidden window");
         let (controller, webview) = create_controller(env, hwnd).expect("WebView2 controller");
         configure(&webview, hwnd).expect("the window's own set-up");
-        extra(&webview);
+        extra(env, &webview);
         let title: Rc<RefCell<String>> = Rc::default();
         let uris: Rc<RefCell<Vec<String>>> = Rc::default();
         let messages: Rc<RefCell<usize>> = Rc::default();
@@ -1036,15 +1132,20 @@ mod tests {
         let profile = std::env::temp_dir().join(format!("puca-discord-probe-{}", std::process::id()));
         let env = create_environment(&profile).expect("WebView2 runtime (Windows has it)");
 
-        let plain = load_probe(&env, |_| {});
+        let plain = load_probe(&env, |_, _| {});
         let seen = &plain.seen;
         for key in ["internals", "tauri", "isTauri", "ipc"] {
             assert_eq!(seen[key], "undefined", "the page sees {key}: {seen}");
         }
         // WebView2's own `chrome.webview` object is in every WebView2 page; with
-        // web messaging and host objects off it carries nothing anywhere.
+        // web messaging off, nothing the page posts reaches the host.
         assert_eq!(*plain.messages.borrow(), 0, "a web message reached the host: {seen}");
-        assert_eq!(seen["hostObjectCall"], "refused", "host objects answered: {seen}");
+        // Nothing answers on Tauri's IPC or asset names: no bridge, no Púca files.
+        // (A web server of your own on this PC's port 80 would answer here and
+        // fail this; nothing of Púca's ever listens there.)
+        for key in ["ipcFetch", "assetFetch"] {
+            assert_eq!(seen[key], "error", "{key} was answered: {seen}");
+        }
 
         // Where the page may send things, in the real webview. `.invalid` names
         // nothing, should anything slip, and in a test the browser hand-off only
@@ -1082,19 +1183,37 @@ mod tests {
         wait(7500);
         assert_eq!(source(), "about:blank", "the page left for another site");
         OPENED.with(|o| assert!(o.borrow().is_empty(), "handed to the browser with no press: {:?}", o.borrow()));
-        for key in ["ipcFetch", "assetFetch"] {
-            let outcome = seen[key].as_str().unwrap_or_default();
-            assert!(
-                outcome == "error" || outcome.starts_with("answered::"),
-                "{key} was answered by a Tauri bridge: {outcome}"
-            );
-        }
 
         // NEGATIVE CONTROL: what the probe reports when there IS a bridge.
         // (Both windows stay until the end: destroying one posts WM_QUIT.)
-        let bridged = load_probe(&env, |webview| unsafe {
+        let bridged = load_probe(&env, |env, webview| unsafe {
             let settings = webview.Settings().unwrap();
             settings.SetIsWebMessageEnabled(true).unwrap();
+            // Tauri's way of serving its IPC and its files: intercept the two names.
+            for name in ["http://ipc.localhost/*", "http://tauri.localhost/*"] {
+                webview.AddWebResourceRequestedFilter(&HSTRING::from(name), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL).unwrap();
+            }
+            let env = env.clone();
+            let mut token = Default::default();
+            webview
+                .add_WebResourceRequested(
+                    &webview2_com::WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+                        if let Some(args) = args {
+                            let response = env.CreateWebResourceResponse(
+                                None,
+                                200,
+                                &HSTRING::from("OK"),
+                                &HSTRING::from(
+                                    "Tauri-Response: ok\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Tauri-Response",
+                                ),
+                            )?;
+                            args.SetResponse(&response)?;
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .unwrap();
             let (tx, rx) = mpsc::channel();
             webview
                 .AddScriptToExecuteOnDocumentCreated(
@@ -1110,6 +1229,9 @@ mod tests {
         let seen = &bridged.seen;
         assert_eq!(seen["internals"], "object", "control: an injected bridge is seen: {seen}");
         assert!(*bridged.messages.borrow() >= 1, "control: with web messaging on, the message arrives: {seen}");
+        for key in ["ipcFetch", "assetFetch"] {
+            assert_eq!(seen[key], "answered:ok:200", "control: an intercepting bridge is seen ({key}): {seen}");
+        }
         drop(bridged);
         drop(plain);
 
