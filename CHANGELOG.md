@@ -8,7 +8,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
-- **A picture sent with words is drawn above them, not beside them.** A message with a picture and a few words put the picture to the right of the words, with the words sitting on its bottom edge (on a phone, the picture went under them). The picture now has its own line at the top of the message and the words follow it across the full width. The same goes for several pictures (in the order they were sent), a video, a spoilered picture (still covered until you press it) and a picture from another site. Files and audio stay where they were, after the words, and a message that is only a picture looks as it did. It is how the app draws messages, so it applies to every message already sent too, in channels and in DMs; nothing changes in what is sent.
+- **A picture sent with words is drawn above them, not beside them.** A message with a picture and a few words put the picture to the right of the words, with the words sitting on its bottom edge (on a phone, the picture went under them). The picture now has its own line at the top of the message and the words follow it across the full width. The same goes for several pictures (in the order they were sent), a video, a spoilered picture (still covered until you press it) and a picture from another site. Files and audio stay where they were, after the words, and a message that is only pictures and files (spoilered or not) looks as it did. Pictures put on separate lines stay one above the other, and the words keep their line breaks, paragraph breaks and punctuation. It is how the app draws messages, so it applies to every message already sent too, in channels and in DMs; nothing changes in what is sent.
 
 ## 0.9.860 — 2026-11-08
 

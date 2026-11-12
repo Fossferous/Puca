@@ -17,8 +17,10 @@
 //      and wholly ABOVE the first line of the words, starting at the column's
 //      left edge; the words start at the column's left too, and a long message
 //      runs across the column (its full width, nothing beside it);
-//   2. several pictures keep the order they were sent in; a file chip sent
-//      with a picture stays after the words, as before;
+//   2. several pictures keep the order they were sent in, and pictures the
+//      sender put on separate lines are still stacked; a blank line between
+//      two paragraphs around a picture on its own line is still a blank line;
+//      a file chip sent with a picture stays after the words, as before;
 //   3. a spoilered picture is still covered (blurred, SPOILER) until a real
 //      click or tap reveals it, and is still above the words after;
 //   4. CONTROLS that must not change: a picture with no words, and words with
@@ -251,6 +253,8 @@ const messagesFrom = (f) => [
     { id: 'owner', content: `${WORDS} ${f.square}`, media: 1 },
     { id: 'long', content: `${LONG} ${f.wide}`, media: 1, long: true },
     { id: 'two', content: `two of them ${f.a} ${f.b}`, media: 2 },
+    { id: 'stacked', content: `one above the other\n${f.a}\n${f.b}`, media: 2, stacked: true },
+    { id: 'para', content: `first paragraph\n\n${f.a}\n\nsecond paragraph`, media: 1, para: true },
     { id: 'spoiler', content: `careful, spoilers ||${f.square}||`, media: 1, spoiler: true },
     { id: 'video', content: `look at this ${f.video}`, media: 1, video: true },
     { id: 'file', content: `here you go ${f.wide} ${f.file}`, media: 1, chip: true },
@@ -349,7 +353,7 @@ for (const size of SIZES) {
         await page.evaluate(() => document.querySelector('[data-msg="owner"]').scrollIntoView({ block: 'start' }));
         await page.screenshot({ path: path.join(outdir, `before-${size.name}.png`) });
         await page.locator('[data-msg="owner"]').screenshot({ path: path.join(outdir, `before-${size.name}-owner.png`) });
-        for (const id of ['two', 'spoiler', 'video', 'file']) await page.locator(`[data-msg="${id}"]`).screenshot({ path: path.join(outdir, `before-${size.name}-${id}.png`) });
+        for (const id of ['two', 'stacked', 'para', 'spoiler', 'video', 'file']) await page.locator(`[data-msg="${id}"]`).screenshot({ path: path.join(outdir, `before-${size.name}-${id}.png`) });
         await ctx.close();
     }
 
@@ -393,6 +397,18 @@ for (const size of SIZES) {
                     const inOrder = p && q && (p.name === 'first.png' && q.name === 'second.png') && (q.left > p.left + 1 || q.top > p.top + 1);
                     if (!inOrder) bad.push(`two: not in the order sent (${g.media.map((x) => x.name).join(', ')})`);
                 }
+                if (m.stacked) {
+                    // On separate lines as sent: the second wholly under the first, at the same left.
+                    const [p, q] = g.media;
+                    const stacked = p && q && p.name === 'first.png' && q.name === 'second.png' && q.top >= p.bottom - 0.5 && Math.abs(q.left - p.left) <= 1;
+                    if (!stacked) bad.push(`stacked: not one above the other (${g.media.map((x) => `${x.name} ${x.left.toFixed(0)},${x.top.toFixed(0)}-${x.bottom.toFixed(0)}`).join('; ')})`);
+                }
+                if (m.para) {
+                    // Two lines of words with an empty line between them (more than half a line apart).
+                    const ls = [...g.lines].sort((a, b) => a.top - b.top);
+                    const gap = ls.length === 2 ? ls[1].top - ls[0].bottom : NaN;
+                    if (!(gap > 0.5 * (ls[0]?.height ?? Infinity))) bad.push(`para: the paragraphs are not a blank line apart (${ls.length} lines, gap ${gap.toFixed?.(1)} px)`);
+                }
                 if (m.chip) {
                     // After the words: beside the end of their last line, or below it; and under the picture.
                     const last = g.lines.reduce((a, l) => (l.top > a.top ? l : a));
@@ -417,7 +433,7 @@ for (const size of SIZES) {
     });
     await page.screenshot({ path: path.join(outdir, `after-${size.name}.png`) });
     await page.locator('[data-msg="owner"]').screenshot({ path: path.join(outdir, `after-${size.name}-owner.png`) });
-    for (const id of ['two', 'spoiler', 'video', 'file']) await page.locator(`[data-msg="${id}"]`).screenshot({ path: path.join(outdir, `after-${size.name}-${id}.png`) });
+    for (const id of ['two', 'stacked', 'para', 'spoiler', 'video', 'file']) await page.locator(`[data-msg="${id}"]`).screenshot({ path: path.join(outdir, `after-${size.name}-${id}.png`) });
 
     // ---- the spoiler: a real click (or tap) reveals it, still above the words
     const sp = msgs.find((m) => m.id === 'spoiler');
