@@ -19,6 +19,9 @@
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
 //              in an ellipsis and nothing scrolling sideways.
+//   live       On a call, the camera tile of someone streaming keeps its LIVE badge clear of the
+//              fullscreen button (both were top-right; on a phone the button covered it). A mesh
+//              call between the owner on a desktop (fake camera, a canvas shared) and the phone.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
 // locator.click(), which scrolls first and false-passes a covered control).
@@ -150,13 +153,44 @@ const fontPx = (loc) => loc.evaluate((el) => parseFloat(getComputedStyle(el).fon
 try {
     // ── Fixture: an owner on a desktop, a phone account with a name as long as one can be (32).
     const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    // The owner's "screen" is a canvas (getDisplayMedia replaced, as an automation would).
+    await desktop.addInitScript(() => {
+        navigator.mediaDevices.getDisplayMedia = async () => {
+            const c = document.createElement('canvas');
+            c.width = 640; c.height = 360;
+            const g = c.getContext('2d');
+            let i = 0;
+            setInterval(() => { g.fillStyle = `hsl(${(i += 4) % 360},60%,40%)`; g.fillRect(0, 0, 640, 360); }, 50);
+            return c.captureStream(20);
+        };
+    });
     const ownerName = 'swo_' + stamp;
     const phoneName = ('phone_with_a_long_name_' + stamp + '_xxxxxxxx').slice(0, 32);
     const O = await signIn(desktop, ownerName, 'owner', true);
     const srv = await api(O, 'POST', '/servers', { name: 'Sweep ' + stamp });
     const mk = (name, type) => api(O, 'POST', `/servers/${srv.id}/channels`, { name, channel_type: type });
     const general = await mk('general', 0);
+    const lounge = await mk('Lounge', 1);
     const inv = await api(O, 'POST', `/servers/${srv.id}/invites`, {});
+    let ownerLive = false;
+    if (want('live')) {
+        // The owner in Lounge with a camera on and sharing: the tile the phone looks at.
+        await O.reload({ waitUntil: 'domcontentloaded' });
+        await sleep(2500);
+        await dismiss(O);
+        await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+        await sleep(1000);
+        await O.locator(`[data-testid="voice-channel"][data-channel-id="${lounge.id}"]`).click();
+        const inCall = await until(() => O.locator('[data-testid="voice-connected"]').count(), 20000);
+        await O.locator('button[title="Turn On Camera"]').first().click().catch(() => {});
+        await sleep(1500);
+        await O.locator('[data-testid="voice-share-screen"]').click().catch(() => {});
+        await sleep(1200);
+        const go = O.getByRole('button', { name: /^(Share|Go Live|Start)/ });
+        if (await go.count()) await go.first().click().catch(() => {});
+        ownerLive = !!inCall && !!await until(() => O.locator('[data-testid="voice-stop-share"]').count(), 15000);
+        check('live: the owner is in the call, sharing, with the camera on', ownerLive);
+    }
 
     for (const [w, h] of PHONES) {
         const size = `${w}x${h}`;
@@ -372,6 +406,37 @@ try {
                 check(`${size} mention: the tap put the name in the box`, v.startsWith('@' + phoneName), v);
             }
             await box.fill('');
+        }
+
+        // ── live: a streaming member's camera tile keeps its LIVE badge clear of the fullscreen button
+        if (want('live') && ownerLive) {
+            await nav(P, 'Channels');
+            await tap(P, P.locator(`[data-testid="voice-channel"][data-channel-id="${lounge.id}"]`));
+            check(`${size} live: the phone joined the call`, !!await until(() => P.locator('[data-testid="voice-connected"]').count(), 20000));
+            // The room's row again, once in it, opens the call's view.
+            await nav(P, 'Channels');
+            await tap(P, P.locator(`[data-testid="voice-channel"][data-channel-id="${lounge.id}"]`));
+            await sleep(1200);
+            const tile = P.locator('.voice-stage-tile').filter({ has: P.locator('.vs-live-badge') }).filter({ has: P.locator('.vs-fullscreen-btn') }).first();
+            check(`${size} live: the owner's tile has the LIVE badge and the fullscreen button`, !!await until(() => tile.count(), 20000));
+            if (await tile.count()) {
+                await sleep(800);
+                const m = await tile.evaluate((t) => {
+                    const box = (el) => { const r = el.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+                    const badge = t.querySelector('.vs-live-badge'), btn = t.querySelector('.vs-fullscreen-btn');
+                    const a = box(badge), b = box(btn);
+                    const overlap = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l)) * Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+                    const hits = (el, r) => { const h = document.elementFromPoint((r.l + r.r) / 2, (r.t + r.b) / 2); return !!h && (h === el || el.contains(h)); };
+                    return { badge: a, button: b, overlap, badgeSeen: hits(badge, a), buttonHit: hits(btn, b), tile: box(t) };
+                });
+                check(`${size} live: the LIVE badge and the fullscreen button do not overlap`, m.overlap === 0, m);
+                check(`${size} live: the middle of the badge is the badge, not the button over it`, m.badgeSeen, m);
+                check(`${size} live: the button is what a tap on it hits, and 44px`, m.buttonHit && (m.button.r - m.button.l) >= 43.5 && (m.button.b - m.button.t) >= 43.5, m.button);
+                check(`${size} live: the badge is inside the tile`, m.badge.l >= m.tile.l && m.badge.r <= m.tile.r, m);
+                await shot(P, `live-${size}`);
+            }
+            await tap(P, P.locator('[data-testid="voice-leave"]').first()).catch(() => {});
+            await sleep(800);
         }
 
         await ctx.close();
