@@ -2966,7 +2966,8 @@ export function Chat({ onLogout }: ChatProps) {
                             isOwn: false,
                             isMuted: false,     // the mute rules for a mention are the ones just checked
                             notifyKey: `chan:${serverId}`,
-                            onActivate: () => openChannelRef.current(channelId, serverId),
+                            // A click lands through the 'channel:<server>:<id>'
+                            // target its key names, the opener's own door.
                             onlyIfGrouped: true,
                             group: {
                                 key: channelGroupKey(serverId, channelId),
