@@ -24,7 +24,8 @@
 //   link       A long address's card (built in the app from the address alone, so nothing is
 //              fetched) wraps it inside the card (it was cut off sideways mid-path).
 //   tasks      The Tasks view's empty-state sentence keeps 12px from the screen's edges (it ran
-//              flush from edge to edge). Chat in the bottom bar then goes back to the channel
+//              flush from edge to edge), while Trash, drawn in the same box, keeps its rows' own
+//              alignment and width. Chat in the bottom bar then goes back to the channel
 //              (it left the Tasks view on screen: the tap did nothing).
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
@@ -510,13 +511,32 @@ try {
             const empty = P.locator('.tasks-editor-empty').first();
             check(`${size} tasks: the Tasks view opened on its empty state`, !!await until(() => empty.count(), 6000));
             if (await empty.count()) {
+                // The glyphs only: a Range over the whole box also returns each element's own box.
                 const m = await empty.evaluate((e) => {
-                    const r = document.createRange(); r.selectNodeContents(e);
-                    const rects = [...r.getClientRects()].filter((x) => x.width > 1);
-                    return { vw: innerWidth, l: Math.min(...rects.map((x) => x.left)), r: Math.max(...rects.map((x) => x.right)) };
+                    const rects = [];
+                    const walker = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
+                    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+                        if (!n.textContent.trim()) continue;
+                        const r = document.createRange(); r.selectNodeContents(n);
+                        rects.push(...[...r.getClientRects()].filter((x) => x.width > 1));
+                    }
+                    return { vw: innerWidth, lines: rects.length, l: Math.min(...rects.map((x) => x.left)), r: Math.max(...rects.map((x) => x.right)) };
                 });
                 check(`${size} tasks: its words keep at least 12px from both edges of the screen`, m.l >= 12 && m.r <= m.vw - 12, m);
                 await shot(P, `tasks-${size}`);
+                // Trash (TasksTrash) is drawn in the same box when something is in it: its rows keep
+                // their own alignment and width (review finding: a centred, padded box reached them).
+                // TasksTrash's own markup, put where TasksView puts it, through the real stylesheet.
+                const t = await empty.evaluate((e) => {
+                    const trash = document.createElement('div');
+                    trash.className = 'tasks-trash';
+                    trash.innerHTML = '<div class="tasks-trash-copy">Lists in Trash</div><ul class="tasks-trash-list"><li class="tasks-trash-row"><span class="tasks-trash-title">A trashed list</span></li></ul>';
+                    e.appendChild(trash);
+                    const out = { copy: getComputedStyle(trash.querySelector('.tasks-trash-copy')).textAlign, title: getComputedStyle(trash.querySelector('.tasks-trash-title')).textAlign, boxPadding: getComputedStyle(e).paddingLeft };
+                    trash.remove();
+                    return out;
+                });
+                check(`${size} tasks: Trash under the empty state keeps its rows' own alignment and the box no side padding`, t.copy !== 'center' && t.title !== 'center' && t.boxPadding === '0px', t);
             }
             // The bottom bar's Chat leaves the Tasks view for the channel under it.
             await nav(P, 'Chat');
