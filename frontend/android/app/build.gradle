@@ -124,6 +124,15 @@ android {
             }
         }
     }
+    // The one file that differs between the variants' Java: ControlRegistrar,
+    // which registers the phone-control plugin in the full build and nothing
+    // in Lite. main/ never names the :phone-control module, so Lite compiles
+    // without it.
+    sourceSets {
+        main {
+            java.srcDirs += (isLite ? 'src/lite/java' : 'src/full/java')
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
@@ -167,6 +176,11 @@ dependencies {
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
+    // Control of this phone from a call (an AccessibilityService): FULL only.
+    // Left out of Lite as a whole module, so Lite's merged manifest never
+    // declares the service and its dex never carries a class of it
+    // (docs/REMOTE_CONTROL.md, "Controlling a phone").
+    if (!isLite) implementation project(':phone-control')
 }
 
 apply from: 'capacitor.build.gradle'

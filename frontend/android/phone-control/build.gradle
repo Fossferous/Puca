@@ -1,0 +1,27 @@
+// Control of this phone from a call (docs/REMOTE_CONTROL.md, "Controlling a
+// phone"): an AccessibilityService and the plugin the page drives it with.
+//
+// A module of its own so that Lite can leave it out WHOLE: app/build.gradle
+// depends on it only when PUCA_LITE is not 1, so Lite's merged manifest never
+// declares the service and Lite's dex never carries a class of it. A runtime
+// flag would have shipped both and only hidden them.
+apply plugin: 'com.android.library'
+
+android {
+    namespace = "com.sovereign.app.control"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        minSdkVersion rootProject.ext.minSdkVersion
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+}
+
+dependencies {
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    // Real org.json for the unit tests (the android.jar stub throws), as in :app.
+    testImplementation 'org.json:json:20240303'
+}

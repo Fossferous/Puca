@@ -1,4 +1,7 @@
 include ':app'
+// Control of this phone from a call: a dependency of the FULL app only
+// (app/build.gradle), so Lite never carries it.
+include ':phone-control'
 include ':capacitor-cordova-android-plugins'
 project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
 

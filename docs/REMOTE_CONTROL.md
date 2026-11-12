@@ -23,12 +23,17 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   so. The unattended sampler (desktop only) now prints the lane
   (`lane=mesh-dc|sfu-data|relay`) for every live session, and `[p2p-input]
   peer N: no P2P lane after 2 s` is logged when a session stays on the relay.
-- **Injection:** only the **Windows desktop app** can inject input, via Win32
-  `SendInput` (`src-tauri/src/remote_control.rs`). Keys are injected by hardware
-  **scan code** (many games ignore virtual-key input). Web/mobile hosts cannot
-  inject and auto-deny requests.
-- **Roles:** the controller (viewer) can be on any platform; only the host must
-  be the Windows desktop app.
+- **Injection:** two kinds of host can inject input. The **Windows desktop
+  app**, via Win32 `SendInput` (`src-tauri/src/remote_control.rs`); keys are
+  injected by hardware **scan code** (many games ignore virtual-key input).
+  And the **Android app** while it shares its whole screen, through its own
+  AccessibilityService (see [Controlling a phone](#controlling-a-phone)).
+  Browser hosts, the iPhone and an Android app without the control module
+  auto-deny requests. A Lite host does not answer at all, so the viewer gives
+  up by itself after `VIEWER_REQUEST_TIMEOUT_MS` (135 s), and can cancel a
+  pending request from its tile before that.
+- **Roles:** the controller (viewer) can be on any platform; the host must be
+  the Windows desktop app or the full Android app.
 
 ## Safety model
 
@@ -159,6 +164,122 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   controller from before the All Displays check shows its only wording ("on
   another screen... switch to that screen") there too; harmless, but not quite
   right until it is updated.
+
+## Controlling a phone
+
+A viewer of a phone's screen share (the Android app, docs/USER_GUIDE.md *From
+the Android app*) can be let in to tap, swipe and type on that phone. It is
+the same request, prompt, session key and input lanes as a desktop host; what
+differs is how the input lands and what keeps it in bounds.
+
+**How input lands.** A non-root Android app can put input into other apps
+only through an AccessibilityService. `frontend/android/phone-control/`
+holds Púca's (`PhoneControlService`, label *Púca remote control*): taps,
+swipes and long presses with `dispatchGesture`, Back / Home / Recents with
+global actions, and typing by setting the focused field's text
+(`ACTION_SET_TEXT`; it cannot press keys). Its config asks for gestures and
+for window content, the latter only so `findFocus` can find the field a
+viewer types into; `onAccessibilityEvent` is empty, and nothing on the screen
+is read out, logged or sent.
+
+- **Live presses** (`TouchPlanner.java`): a press is played as it happens, not
+  replayed on release. The finger goes down when the viewer's button does (a
+  stroke marked `willContinue`), each batch of movement is a continued stroke
+  played over the time it took, and the release lifts it. A long press is
+  held for real and a swipe keeps its speed, so a list flings. One dispatch at
+  a time (a new one cancels the one in progress), in the order the viewer
+  acted; typing waits 150 ms after a touch for the focus to move. A press the
+  person at the phone interrupts (their own touch cancels an injected one) is
+  over: the rest of it is dropped up to the viewer's release. A finger is
+  lifted after 5 s with no word from the viewer, and at 55 s whatever happens.
+- **What a viewer's events mean on a phone.** `move` is a point on the
+  picture (fractions of it), `down`/`up` of button 0 a touch, button 2 a long
+  press (700 ms), `wheel` a short swipe the other way round (a notch is 12% of
+  the screen). `key`: Escape is Back, Enter / Backspace / Delete edit the
+  field, printable keys type (US layout, read from the code). Two events are a
+  phone's own: `nav {a: back|home|recents}` and `text {s}` (at most 64 UTF-16
+  units). A viewer sends them only to a host that said it is a phone; an
+  older host's `validEvent` drops them, and a desktop host ignores them before
+  its batch injector, which would refuse the whole batch over one of them.
+- **Where a point lands** (`ScreenMap.java`): by its fractions of the screen as
+  it is turned now, and only while the share is of the WHOLE screen (Android
+  14+ "Share one app" is refused: its window can be anywhere), what it
+  captures is visible (one app shared and another in front: dropped), and the
+  picture has settled for 1 s after the screen turned (the viewer is looking
+  at a picture a network trip old). A press that began before the picture
+  last changed shape is abandoned.
+- **HostInfo.** The phone tells its viewer it is a phone (so the viewer offers
+  Back, Home and Recents and sends typed characters as text) in a sealed
+  `ControlInput` the other way, `{n, i: {kind: 'phone'}}`, under the session
+  key. The server relays `ControlInput` both ways between people in a room
+  already, so nothing changed there. Its counter is `n`, never `s`: an info
+  frame reflected back at the host (same key) is dropped by the host's input
+  handler before it touches the input sequence. An older viewer ignores a
+  `ControlInput` from a host it is not hosting, and treats the phone as a
+  desktop (taps, drags, keys and the wheel still work).
+
+**What keeps it in bounds** (`PhoneControl.java`, `ControlGate.java`):
+
+- Nothing is injected outside a session, and a session starts only when the
+  person at the phone presses **Allow** for that one viewer, in Púca, with the
+  service switched on and the whole screen shared. Every request is asked
+  again; an offer (the phone's person offering control) counts as their
+  consent, as on a desktop. The prompt says what control of a phone means
+  and, with the service off, how to switch it on (with Android 13+'s *Allow
+  restricted settings* for an APK installed from outside a store), and Allow
+  stays disabled until the phone says it can. Opening the settings from the
+  prompt extends its deadline to 120 s.
+- A request reaches a phone that is showing another app as a notification
+  (*X wants to control this phone*), one at a time under one key (a new one
+  replaces the last); the denial ladder throttles repeat requests before they
+  get that far, as it does on a desktop.
+- A viewer who withdraws while the phone is still starting its native
+  session (after Allow) gets no grant: the phone takes the session down
+  again rather than grant it to nobody.
+- While it lasts, an orange frame round the whole screen and "X is
+  controlling this phone" with a red **Stop** beside it sit over every app
+  (accessibility overlays, so they are in the shared picture too), the
+  share's notification says who and has **Stop control**, and Púca's own
+  banner has **Stop control**. The frame and the words let every touch
+  through; only Stop takes one (the first version was one pill that took
+  every touch on it, and blocked whatever sat under it at the top of the
+  screen, Settings' search bar on the emulator). No overlay, no session: if
+  Android refuses it, Allow starts nothing.
+- It ends at once, natively, on: either Stop, the phone locking or its screen
+  going off, the service switched off in Android's settings, the share ending
+  or no longer being of the whole screen; and from the page on everything that
+  ends a desktop session (the viewer stopping, leaving the call, the 90 s
+  inactivity timeout, the socket dropping). A native end tells the page, which
+  tells the viewer. Control never resumes by itself: after an unlock the
+  viewer asks again and the person answers again.
+- **The service taken away for a moment is a pause, not an end.** Anything
+  using UiAutomation (test tools, uiautomator, some automation apps) makes
+  Android unbind every other accessibility service while it runs. With the
+  person's switch still ON, that pauses the session: the frame and pill go
+  (they belong to the service), nothing lands, and when Android binds the
+  service again the frame and pill are shown again before any input does; no
+  rebind within 60 s ends it. With the switch OFF, it ends at once. Found by
+  the emulator walk, whose own `uiautomator dump` ended every session.
+- Locked, nothing works: input is refused while the keyguard is up, and the
+  session ends with it. A password field is never typed into (its text cannot
+  be read back, so it could only be replaced whole).
+
+**Full APK only.** The module is a dependency of the full build alone
+(`app/build.gradle`: `if (!isLite)`), and the app reaches it only through a
+one-class `ControlRegistrar` that Lite compiles as a no-op
+(`app/src/lite/java`). So Lite's merged manifest never declares the service
+and its dex carries none of it; `frontend/scripts/check-apk-control.mjs`
+proves that from built APKs (every detector must fire on the full APK and
+stay silent on Lite). The page side, `api/phoneControl.ts`, is imported only by
+`remoteControl.ts`, which Lite aliases away; `RC_MODULE_PATTERNS` and
+`check-no-rc.mjs` back that up.
+
+**Not covered.** Android 7 (API 24/25) cannot continue a stroke and is not
+supported. Typing is text, not keys: shortcuts, Tab and the arrows do nothing,
+and an app that reads only key events (some games, terminals) gets nothing.
+Media keys, volume and the power button are not offered. My Devices does not
+control a phone yet (`api/devices/hostCapacitor.ts`); this is control from a
+call only.
 
 ## Pinned keys and the notification's keys
 

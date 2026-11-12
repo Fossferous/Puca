@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Control of this phone from a call: FULL APK ONLY.
+
+     This module is a dependency of the full build alone
+     (frontend/android/app/build.gradle: `if (!isLite)`), so nothing below is
+     in Lite's merged manifest and none of its classes are in Lite's dex. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- An AccessibilityService: the one way a non-root app can put taps,
+             swipes and text into OTHER apps. The person switches it on in
+             Android's Accessibility settings; it still does nothing until they
+             press Allow on this phone for one person in a call, during a share
+             of the whole screen (PhoneControl.java). BIND_ACCESSIBILITY_SERVICE:
+             only the system can bind it. Not exported. -->
+        <service
+            android:name=".PhoneControlService"
+            android:label="@string/phone_control_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/phone_control_service" />
+        </service>
+
+        <!-- "Stop control" on the share's notification. Not exported: only the
+             module's own immutable PendingIntent reaches it. -->
+        <receiver
+            android:name=".StopControlReceiver"
+            android:exported="false" />
+    </application>
+</manifest>
