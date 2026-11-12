@@ -74,7 +74,8 @@ export interface NotifyInput {
 interface NotifyLogEntry {
     at: string;
     kind: 'message' | 'task';
-    /** 'chan:<serverId>' / 'dm:<conversationId>' / 'tasks-due' — ids only. */
+    /** 'chan:<serverId>:<channelId>' (grouped) or 'chan:<serverId>',
+     *  'dm:<conversationId>', 'join:<serverId>', 'tasks-due' — ids only. */
     key: string;
     /** 'fired' (shown, popping up), 'updated' (its conversation's
      *  notification changed where it is, no pop-up), 'duplicate' (a message
@@ -243,6 +244,9 @@ function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' 
             n.close();
         };
         n.onclose = () => { if (webLive.get(key) === n) webLive.delete(key); };
+        // The browser could not show it: there is nothing to update, so the
+        // next quiet message is not quiet either.
+        n.onerror = () => { if (webLive.get(key) === n) webLive.delete(key); };
         return true;
     } catch {
         // As below: construction can fail with permission granted.
@@ -273,7 +277,8 @@ export function resetConversationNotificationsForTests(): void {
  *    suppressing everything.
  *  - `outcome: 'muted'` → that server/channel is muted, or set to "mentions
  *    only" (which also silences OS notifications, since the cross-channel
- *    frame carries no mention marker).
+ *    frame carries no mention marker; with grouping on, a mention the OPEN
+ *    channel decrypts still pops, through its own report).
  *  - `outcome: 'fired'` but nothing in the shade → the failure is below this
  *    layer: the native plugin or the OS.
  *  - `outcome: 'updated'` → grouped into a conversation whose notification

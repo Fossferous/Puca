@@ -961,6 +961,7 @@ const cacheDbs = () => page.evaluate(async () => (await indexedDB.databases()).m
 const dbsBefore = await cacheDbs();
 control('"no sealed Notes cache on this device" answers false while signed in', dbsBefore.length === 0, JSON.stringify(dbsBefore));
 
+const callsBeforeSignOut = await page.evaluate(() => window.__shell.calls.length);
 await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 }).catch(() => {});
 await page.locator('.notes-menu').getByRole('button', { name: 'Sign out', exact: true }).click();
@@ -979,7 +980,7 @@ ck('sign-out: Notes\' sealed on-device cache is deleted', dbsAfter.length === 0,
 ck('sign-out: no Notes prefs left in storage', await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('pucaNotesPrefs')).length === 0));
 // No conversation's notification outlives the session (api/desktopNotify.ts).
 ck('sign-out: every message notification is taken out of the notification centre',
-    await page.evaluate(() => window.__shell.calls.includes('toast_clear_all')));
+    await page.evaluate((from) => window.__shell.calls.slice(from).includes('toast_clear_all'), callsBeforeSignOut));
 
 const shellFinal = await page.evaluate(() => ({ calls: [...new Set(window.__shell.calls)], unknown: [...new Set(window.__shell.unknown)], notes: window.__shell.notifications.length }));
 console.log(`INFO  commands the app sent the shell: ${shellFinal.calls.join(', ')}`);

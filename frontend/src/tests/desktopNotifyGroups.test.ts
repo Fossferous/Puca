@@ -119,6 +119,7 @@ class FakeNotification {
     static popups = 0;
     onclick: (() => void) | null = null;
     onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
     closed = false;
     title: string;
     tag: string;
@@ -421,6 +422,16 @@ describe('the web app', () => {
         channelMessage('carol', 'c');
         expect(FakeNotification.made).toHaveLength(3);
         expect(FakeNotification.popups).toBe(2);
+    });
+
+    it('a notification the browser failed to show is not one to update quietly', () => {
+        channelMessage('alice', 'a');
+        const n = FakeNotification.list.get('chan:s1:7')!;
+        n.onerror!();   // the browser's own refusal, after construction
+        vi.advanceTimersByTime(2_000);
+        // Nothing to update: shown nothing, and not quiet to the caller.
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+        expect(FakeNotification.made).toHaveLength(1);
     });
 
     it('a click focuses the app, opens the conversation and closes it', () => {

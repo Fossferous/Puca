@@ -1,6 +1,6 @@
 /**
  * One notification per conversation, updated in place, instead of one per
- * message (docs/USER_GUIDE.md, Notifications).
+ * message (docs/USER_GUIDE.md, Message notifications on a computer).
  *
  * The owner's report: "windows notifications are spammed if theres a
  * conversation happening". Every message raised its own Windows toast, because
