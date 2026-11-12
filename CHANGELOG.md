@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Someone new to a server can join its voice channels.** When a person joined a server, the members' apps handed them the keys of its text channels but not of its voice channels, so every voice channel that had been used before they arrived refused them with "Channel encryption key unavailable — cannot join encrypted call" until somebody who had been in that channel joined it again. Voice channels now get the same treatment as text channels. And someone who joined while nobody else was online is handed their keys the next time a member who holds them opens that server (until now their messages in a quiet channel were refused until a member wrote there). It is the members already in the server whose apps hand the keys over, so it takes effect as their apps update; until then, a member who has been in the voice channel before joining it once lets everyone in.
+
 ## 0.9.860 — 2026-11-08
 
 Pin any key beside the virtual mouse in remote control, and press up to three from the Android notification

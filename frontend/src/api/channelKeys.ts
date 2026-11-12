@@ -738,9 +738,16 @@ function raiseEpochFloor(channelId: number, epoch: number): void {
  * key. If the channel has no keys yet, bootstrap epoch 1 by generating a key and
  * wrapping it for every member. Returns null if E2EE can't be used (no identity,
  * or we're a new member nobody has wrapped the current key for yet).
+ *
+ * `bootstrap: false` returns null for a channel with no keys yet instead of
+ * minting its first epoch: the upkeep that re-wraps keys for members who
+ * arrived while nobody was online (rewrapForMembershipChange) has no reason
+ * to write a key for a channel nobody has used, and whoever uses it first
+ * mints it then.
  */
 export async function ensureChannelKey(
-    channelId: number
+    channelId: number,
+    opts?: { bootstrap?: boolean },
 ): Promise<{ epoch: number; key: Uint8Array } | null> {
     const identity = getActiveIdentity();
     if (!identity) return null;
@@ -754,6 +761,7 @@ export async function ensureChannelKey(
 
     // No keys yet: bootstrap epoch 1 for the current member generation.
     if (state.currentEpoch === 0) {
+        if (opts?.bootstrap === false) return null;
         const key = await mintEpoch(channelId, 1, state.currentGeneration);
         if (!key) return null;
         raiseEpochFloor(channelId, 1);
@@ -873,8 +881,14 @@ export async function ensureChannelKey(
  * Best-effort by construction: a channel this member cannot rotate (no key,
  * no permission, offline) is skipped silently — the send path still refuses
  * safely, exactly as before. Returns how many channels were rotated.
+ *
+ * `bootstrap: false` (the catch-up in components/useChannelKeyUpkeep.ts)
+ * leaves a channel with no keys yet alone rather than minting its first one.
  */
-export async function rewrapForMembershipChange(channelIds: number[]): Promise<number> {
+export async function rewrapForMembershipChange(
+    channelIds: number[],
+    opts?: { bootstrap?: boolean },
+): Promise<number> {
     if (!getActiveIdentity() || channelIds.length === 0) return 0;
     // 0-1500ms. Cheap dispersion: with N members the expected number that get
     // as far as minting is ~1, and the rest cost one cached state read each.
@@ -883,14 +897,33 @@ export async function rewrapForMembershipChange(channelIds: number[]): Promise<n
     for (const channelId of channelIds) {
         try {
             const before = cache.get(channelId)?.currentEpoch ?? 0;
-            const got = await ensureChannelKey(channelId);
+            const got = await ensureChannelKey(channelId, opts);
             if (got && got.epoch > before) rotated++;
         } catch (e) {
             console.debug(`[e2ee] rewrapForMembershipChange(${channelId}) skipped:`, e);
         }
     }
-    if (rotated > 0) console.log(`[e2ee] re-wrapped ${rotated} channel key(s) for the new member`);
+    if (rotated > 0) console.log(`[e2ee] re-wrapped ${rotated} channel key(s) for the current members`);
     return rotated;
+}
+
+/**
+ * The channels whose messages, and calls, are sealed under a CHANNEL KEY:
+ * text channels and voice channels. A voice channel's key is its SFU call's
+ * (sfuManager.ts derives the call's media key from it, and refuses to join
+ * without it: "Channel encryption key unavailable — cannot join encrypted
+ * call") and its own chat's. A collection (channel_type 2) holds no messages
+ * and has no key.
+ *
+ * THE BUG THIS NAMES (0.9.861). The re-wrap on MemberJoined passed only text
+ * channels (channel_type 0), so a member who joined a server got every text
+ * key from whoever was online and NO voice key: every SFU voice room whose key
+ * was minted before they joined refused them until somebody holding its key
+ * happened to join that room. It surfaced as a newcomer on Firefox who could
+ * not join any voice channel; nothing about it was Firefox's.
+ */
+export function keyedChannelIds(channels: ReadonlyArray<{ id: number; channel_type: number }>): number[] {
+    return channels.filter(c => c.channel_type === 0 || c.channel_type === 1).map(c => c.id);
 }
 
 /**

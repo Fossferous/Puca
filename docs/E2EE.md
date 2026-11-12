@@ -209,6 +209,16 @@ a per-server **member generation**:
   it as `epoch + 1`. A removed member — whose keys were deleted and who is not in
   the new wrap set — cannot read anything from the new epoch (forward secrecy).
   Continuing members keep the old epoch keys, so history stays readable.
+- A NEW member holds nothing until a holder rotates, so holders do it for them
+  without waiting for a send (`frontend/src/components/useChannelKeyUpkeep.ts`):
+  on `MemberJoined`, and once per server per sign-in when a holder's device
+  first loads that server's channels (for anyone who joined while no holder
+  was online). Both cover text AND voice channels: a voice channel's key is
+  its SFU call's media key and its own chat's, and an SFU join refuses without
+  it. Until 0.9.861 only text channels were re-wrapped, so a newcomer could
+  join no SFU voice room whose key predated them until a holder joined that
+  room. The catch-up rotates only where the generation has moved and mints no
+  first key for a channel nobody has used.
 
 Remaining limitations:
 
