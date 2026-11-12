@@ -89,3 +89,13 @@
     overflow: hidden;
 }
 
+/* A card for a site Púca has no preview for shows the address itself as its
+   description, and an address has nowhere to break: the line ran past the
+   card and was cut sideways mid-path ("…/path/that/mi"), the next line
+   picking up after a "?" further on. Breaking anywhere lets the two-line
+   clamp end it in an ellipsis instead. */
+.link-preview-title,
+.link-preview-description {
+    overflow-wrap: anywhere;
+}
+

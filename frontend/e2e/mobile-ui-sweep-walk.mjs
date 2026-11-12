@@ -16,6 +16,8 @@
 //   header     A message from a 32-character name: its time is whole, on one line, inside the
 //              message and the window (it was "Today / at / 17:54" down the edge at 390, and off
 //              the screen at 360).
+//   link       A long address's card (built in the app from the address alone, so nothing is
+//              fetched) wraps it inside the card (it was cut off sideways mid-path).
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
 //              in an ellipsis and nothing scrolling sideways.
@@ -374,6 +376,26 @@ try {
             check(`${size} header: the time is inside the window and the message`, h.time.r <= h.vw && h.time.r <= h.body.r + 1 && h.time.l >= h.body.l - 1, h);
             check(`${size} header: the name is inside the message`, h.author.r <= h.body.r + 1, h);
             await shot(P, `header-${size}`);
+        }
+
+        // ── link: a long address's card (built in the app from the address: nothing is fetched)
+        if (want('link')) {
+            const url = `https://example.org/a/very/long/path/that/does/not/wrap/on/a/phone/screen/${size}?with=query&and=more`;
+            check(`${size} link: posted a long address`, await say(P, url));
+            const card = P.locator('.messages-container > .message').last().locator('.link-preview-card');
+            check(`${size} link: its card is drawn`, !!await until(() => card.count(), 6000));
+            if (await card.count()) {
+                const m = await card.first().evaluate((c) => {
+                    const d = c.querySelector('.link-preview-description');
+                    const cr = c.getBoundingClientRect();
+                    const lines = (() => { const r = document.createRange(); r.selectNodeContents(d); return [...r.getClientRects()].map((x) => ({ l: x.left, r: x.right })); })();
+                    return { sw: d.scrollWidth, cw: d.clientWidth, card: { l: cr.left, r: cr.right }, lines };
+                });
+                check(`${size} link: the address in the card is not cut off sideways`, m.sw <= m.cw + 1, { scrollWidth: m.sw, clientWidth: m.cw });
+                check(`${size} link: every line of it is inside the card`, m.lines.length > 0 && m.lines.every((l) => l.r <= m.card.r + 1), m);
+                await card.first().scrollIntoViewIfNeeded();
+                await shot(P, `link-${size}`);
+            }
         }
 
         // ── mention: the @member list
