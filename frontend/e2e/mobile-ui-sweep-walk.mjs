@@ -2,9 +2,9 @@
 // which need fixed and improved", came with no list; an audit of the BUILT bundle as a coarse-pointer
 // phone found these, and each section below fails on the bundle from before its fix:
 //
-//   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
-//              that): the composer, the sign-in password, the emoji search, Server Settings'
-//              description. CONTROL: a field forced to 15px must be caught. The empty composer's
+//   fields     The fields found under 16px are 16px or more (iOS zooms the page on focus below
+//              that): the composer, the sign-in password and its recovery code box, the emoji
+//              search, Server Settings' description. CONTROL: a field forced to 15px must be caught. The empty composer's
 //              "Message #channel" stays on one line (at 16px it wrapped at 360, the second line
 //              cut in half).
 //   nav        The bottom bar takes the theme's colours (it was navy on every theme, Light included)
@@ -323,6 +323,14 @@ try {
             for (const [label, sel] of [['username', '#username'], ['password', '#password']]) {
                 const f = L.locator(sel);
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
+            }
+            // The recovery form behind "Forgot your password?": its username and its 12-word box.
+            await tap(L, L.locator('.forgot-password-link'));
+            const rec = L.locator('#rec-code');
+            check(`${size} fields: the recovery form opened`, !!await until(() => rec.count(), 6000));
+            for (const [label, sel] of [['recovery username', '#rec-username'], ['recovery code box', '#rec-code']]) {
+                const f = L.locator(sel);
+                if (await f.count()) check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
         }
