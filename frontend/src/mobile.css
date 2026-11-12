@@ -175,6 +175,19 @@
         align-items: center;
     }
 
+    /* While the soft keyboard is up for a text field (api/keyboardUp.ts) the
+       bar steps aside, and every panel that stops above it (the chat and its
+       message box, the lists, the voice bar: all of them measure from
+       --mobile-nav-height) comes down to the keyboard. It stayed on top of
+       the keyboard before, 60 px of the ~470 px left while typing. */
+    :root[data-keyboard-up] {
+        --mobile-nav-height: 0px;
+    }
+
+    :root[data-keyboard-up] .mobile-bottom-nav {
+        display: none !important;
+    }
+
     .mobile-nav-btn {
         display: flex;
         flex-direction: column;
