@@ -7,6 +7,7 @@
  */
 import React, { useContext, useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
+import { liftMediaAbove } from './messageMediaFirst';
 import { isImageUrl } from '../api/linkPreview';
 import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
 import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, prefetchAttachmentUrl, noteAttachmentInterest, attachmentPictureSize, noteAttachmentPictureSize, attachmentPlainBytes, videoMimeFor, audioMimeFor, isPlaylistBlobUrl, type AttachmentHold } from '../api/attachments';
@@ -760,5 +761,17 @@ interface MessageContentProps {
 
 export function MessageContent({ content, members, channels = [], onChannelClick, clipConsent }: MessageContentProps) {
     const nodes = parseMessage(content);
-    return <>{renderNodes(nodes, { members, channels, onChannelClick, clipConsent })}</>;
+    const ctx = { members, channels, onChannelClick, clipConsent };
+    // A message's pictures and videos go on their own line above its words,
+    // never beside them (components/messageMediaFirst.ts says why).
+    const split = liftMediaAbove(nodes);
+    if (split) {
+        return (
+            <>
+                <span className="message-media">{renderNodes(split.media, ctx, 'm')}</span>
+                {renderNodes(split.words, ctx)}
+            </>
+        );
+    }
+    return <>{renderNodes(nodes, ctx)}</>;
 }

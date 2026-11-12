@@ -66,10 +66,14 @@ describe('a spoilered file after a stray `[`, in the message list', () => {
         expect(host.innerHTML).not.toContain(KEY);
     });
 
-    it('the words before it are the words, outside the spoiler, and not its name', async () => {
+    it('the words with it are the words, outside the spoiler, and not its name', async () => {
         await render(`ugh :[ ||${PICTURE}||`);
-        const outside = Array.from(host.childNodes).filter(n => !(n instanceof HTMLElement && n.classList.contains('spoiler')));
-        expect(outside.map(n => n.textContent).join('')).toBe('ugh :[ ');
+        // The spoilered picture is drawn above the words, in .message-media
+        // (components/messageMediaFirst.ts), and the space that only separated
+        // the words from it goes with it: the words are exactly what was typed.
+        const outside = Array.from(host.childNodes).filter(n => !(n instanceof HTMLElement && (n.classList.contains('spoiler') || n.classList.contains('message-media'))));
+        expect(outside.map(n => n.textContent).join('')).toBe('ugh :[');
+        expect(host.querySelector('.message-media .spoiler')).not.toBeNull();
         expect(host.querySelector('.spoiler-body')?.textContent).not.toContain('ugh');
     });
 
@@ -79,10 +83,11 @@ describe('a spoilered file after a stray `[`, in the message list', () => {
         expect(host.querySelectorAll('.spoiler').length).toBe(1);
     });
 
-    it('CONTROL: a file that is not spoilered is drawn, after the same words', async () => {
+    it('CONTROL: a file that is not spoilered is drawn, with the same words', async () => {
         await render(`ugh :[ ${PICTURE}`);
         expect(attachments().length).toBeGreaterThan(0);
         expect(host.querySelectorAll('.spoiler').length).toBe(0);
-        expect(host.textContent).toContain('ugh :[ ');
+        // Drawn above the words now (components/messageMediaFirst.ts); the words whole.
+        expect(host.textContent).toContain('ugh :[');
     });
 });

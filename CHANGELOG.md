@@ -8,6 +8,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
+- **A picture sent with words is drawn above them, not beside them.** A message with a picture and a few words put the picture to the right of the words, with the words sitting on its bottom edge (on a phone, the picture went under them). The picture now has its own line at the top of the message and the words follow it across the full width. The same goes for several pictures (in the order they were sent), a video, a spoilered picture (still covered until you press it) and a picture from another site. Files and audio stay where they were, after the words, and a message that is only a picture looks as it did. It is how the app draws messages, so it applies to every message already sent too, in channels and in DMs; nothing changes in what is sent.
 - **Púca Notes' search works on Android phones again, deleting included.** On a phone the search box was squeezed to a sliver between the Notes name and the buttons. Once it held a letter, the keyboard put each new letter at the start ("milk" went in as "klmi"), and Backspace deleted nothing, so the results stayed filtered until you pressed the X. While you search on a phone, the box now takes the top bar: the Notes name, Refresh and the grid/list switch step aside, and the menu and your account button stay. They come back when you clear the search. Arrives as an ordinary update of the Púca Notes app and the Notes web page.
 
 ## 0.9.860 — 2026-11-08
