@@ -322,6 +322,25 @@ try {
             await P.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
             check(`${size} nav: every label (the chosen tab's too) reads at 4.5:1 on all eight themes, with and without high contrast`, bad.length === 0, bad.slice(0, 8));
             check(`${size} nav: on Light the bar is light, like the rest of the app`, lightBar !== null && lightBar > 0.5, { luminance: lightBar });
+            // A tapped tab keeps a sticky :hover on touch: the line along the bar's top must stay
+            // whole above it. Read from the screen: one row of pixels at the bar's top edge.
+            await tap(P, P.locator('.mobile-nav-btn', { hasText: 'Chat' }).first());
+            await sleep(300);
+            const navTop = await P.evaluate(() => document.querySelector('.mobile-bottom-nav').getBoundingClientRect().top);
+            const row = await P.screenshot({ clip: { x: 0, y: navTop, width: w, height: 1 } });
+            const line = await P.evaluate(async (b64) => {
+                const img = new Image();
+                img.src = 'data:image/png;base64,' + b64;
+                await img.decode();
+                const c = document.createElement('canvas'); c.width = img.width; c.height = 1;
+                const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+                const d = g.getImageData(0, 0, img.width, 1).data;
+                const ref = [d[8], d[9], d[10]];
+                let off = 0;
+                for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - ref[0]) + Math.abs(d[i + 1] - ref[1]) + Math.abs(d[i + 2] - ref[2]) > 24) off++;
+                return { pixels: d.length / 4, off };
+            }, row.toString('base64'));
+            check(`${size} nav: the line along the bar's top is whole above the tab just tapped`, line.off === 0, line);
         }
 
         // ── settings: a tap on a setting's name toggles its checkbox

@@ -203,6 +203,14 @@
         color: var(--brand-text, #8b93f6);
     }
 
+    /* A tapped tab keeps a sticky :hover on touch, and the touch block below
+       gives every hovered button `background-color: inherit`: now that the
+       bar has a solid colour, the tab inherited it and painted it over the
+       bar's top border, a gap in the line above the tab just pressed. */
+    .mobile-nav-btn:hover {
+        background-color: transparent;
+    }
+
     .mobile-nav-btn .nav-icon {
         font-size: 1.4rem;
     }
