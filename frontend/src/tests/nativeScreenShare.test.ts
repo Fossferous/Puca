@@ -509,8 +509,12 @@ const source = (rel: string) => readFileSync(join(here, '..', rel), 'utf8').repl
 describe('the Share button and the sharing settings follow nativeScreenShareAvailable', () => {
     const vp = source('components/VoicePanel.tsx');
     const settings = source('components/SettingsModal.tsx');
+    // The panel decides through shareAvailability (its own tests cover what
+    // it answers for each device); here: the native share is what it is
+    // handed, and both buttons sit behind its answer.
     const panelOffers = (c: string) => c.includes('const nativeShare = nativeScreenShareAvailable();')
-        && c.includes('const isMobile = !screenShareOffered() && !nativeShare;')
+        && c.includes('const shareHere = shareAvailability(currentShareEnv(nativeShare, ')
+        && c.includes('const isMobile = !shareHere.canShare;')
         && (c.match(/\{!isMobile && shareAvailable && \(/g) ?? []).length === 2;
     const settingsOffer = (c: string) => c.includes('{(screenShareOffered() || nativeScreenShareAvailable()) && (');
 
@@ -519,7 +523,7 @@ describe('the Share button and the sharing settings follow nativeScreenShareAvai
         expect(settingsOffer(settings)).toBe(true);
     });
     it.each([
-        ['the phone gate back to the user agent alone', (c: string) => c.replace('!screenShareOffered() && !nativeShare', '!screenShareOffered()')],
+        ['the native share no longer handed to the gate', (c: string) => c.replace('currentShareEnv(nativeShare, ', 'currentShareEnv(false, ')],
         ['the arrow no longer behind the gate', (c: string) => c.replace('{!isMobile && shareAvailable && (', '{shareAvailable && (')],
     ])('the panel pin goes red when %s', (_l, mutate) => {
         expect(panelOffers(mutate(vp))).toBe(false);
