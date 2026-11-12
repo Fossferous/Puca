@@ -81,3 +81,34 @@ const ALL_SETTINGS_SECTIONS: readonly SettingsSection[] = [
 export function settingsSections(opts: { mobile: boolean }): SettingsSection[] {
     return ALL_SETTINGS_SECTIONS.filter(s => !(opts.mobile && s.id === 'keybinds'));
 }
+
+/** What a press inside a settings row can mean already, without this helper. */
+const ROW_CONTROLS = 'input, select, textarea, button, a[href], [role="button"], [role="switch"], [contenteditable="true"]';
+
+/**
+ * A press on a setting's name or hint toggles its checkbox.
+ *
+ * Nearly every on/off setting is a `.settings-option` row: a `<label>` with
+ * the name, a hint under it, and a bare checkbox. The label names no control
+ * (66 of them in SettingsModal), so only the 20px box answered a press, and on
+ * a phone the row stacks into a column with the box alone under the hint:
+ * a 20px target, under §5's 44. This makes the whole row the target. It acts
+ * only where the meaning is unambiguous: a row holding exactly one control,
+ * and that control an enabled checkbox; a press on any control, or on a label
+ * the browser already ties to one, is left to the browser (it would toggle
+ * twice otherwise). Returns whether it toggled.
+ */
+export function toggleSettingFromRow(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    if (target.closest(ROW_CONTROLS)) return false;
+    const label = target.closest('label');
+    if (label instanceof HTMLLabelElement && label.control) return false;
+    const row = target.closest('.settings-option');
+    if (!row) return false;
+    const controls = row.querySelectorAll(ROW_CONTROLS);
+    if (controls.length !== 1) return false;
+    const box = controls[0];
+    if (!(box instanceof HTMLInputElement) || box.type !== 'checkbox' || box.disabled) return false;
+    box.click();
+    return true;
+}

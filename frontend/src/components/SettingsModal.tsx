@@ -24,7 +24,7 @@ import { markKeySpentByCapture, setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
-import { isTouchDevice, screenShareOffered, settingsSections } from './settingsModal.utils';
+import { isTouchDevice, screenShareOffered, settingsSections, toggleSettingFromRow } from './settingsModal.utils';
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { sendTestNotification } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
@@ -1352,7 +1352,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                         </button>
                     </div>
 
-                    <div className="settings-body">
+                    {/* A press on a setting's words toggles its checkbox: the
+                        labels name no control, so the 20px box alone answered
+                        (settingsModal.utils' toggleSettingFromRow). */}
+                    <div className="settings-body" onClick={(e) => { toggleSettingFromRow(e.target); }}>
                         {/* My Account */}
                         {activeSection === 'account' && (
                             <div className="settings-section">

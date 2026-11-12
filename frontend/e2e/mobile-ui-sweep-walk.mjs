@@ -5,6 +5,8 @@
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
 //              description. CONTROL: a field forced to 15px must be caught.
+//   settings   A tap on a setting's name or hint toggles its checkbox (the labels named no control,
+//              so a phone had a lone 20px box), and a tap on the box still toggles it once.
 //   toggle     The chat header's checklist button has no background or border, like the pin button
 //              beside it (it was the browser's own grey button on every theme). CONTROL: an
 //              unstyled button in the same header must be caught.
@@ -212,6 +214,40 @@ try {
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
+        }
+
+        // ── settings: a tap on a setting's name toggles its checkbox
+        if (want('settings')) {
+            await nav(P, 'Channels');
+            await tap(P, P.locator('.user-action-btn[title="Settings"]').first());
+            const tab = P.locator('.settings-nav-item', { hasText: 'Appearance' }).first();
+            check(`${size} settings: Settings opened`, !!await until(() => tab.count(), 6000));
+            await tap(P, tab);
+            await sleep(400);
+            const rowOf = (name) => P.locator('.settings-option').filter({ has: P.locator(`label:text-is("${name}")`) }).first();
+            const compact = rowOf('Compact Mode');
+            const box = compact.locator('input[type="checkbox"]');
+            const before = await box.isChecked();
+            const boxSize = await box.boundingBox();
+            check(`${size} settings: the checkbox alone is under 44px (why the row must answer)`, !!boxSize && Math.min(boxSize.width, boxSize.height) < 44, boxSize);
+            check(`${size} settings: a tap on "Compact Mode" lands on its name`, await tap(P, compact.locator('label')));
+            await sleep(300);
+            const afterName = await box.isChecked();
+            check(`${size} settings: ...and toggles it`, afterName !== before);
+            await tap(P, compact.locator('.option-hint'));
+            await sleep(300);
+            check(`${size} settings: a tap on its hint toggles it again`, (await box.isChecked()) !== afterName);
+            if ((await box.isChecked()) !== before) { await tap(P, box); await sleep(300); }
+            await tap(P, box);
+            await sleep(300);
+            check(`${size} settings: a tap on the box itself toggles it once`, (await box.isChecked()) !== before);
+            await tap(P, box);
+            await sleep(300);
+            check(`${size} settings: the setting is back as it was`, (await box.isChecked()) === before);
+            await shot(P, `settings-${size}`);
+            await tap(P, P.locator('.settings-close').first());
+            await sleep(400);
+            await nav(P, 'Chat');
         }
 
         // ── toggle: the chat header's checklist button is drawn like the pin button beside it
