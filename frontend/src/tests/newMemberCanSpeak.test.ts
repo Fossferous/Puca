@@ -179,6 +179,30 @@ describe('a new member can speak', () => {
         expect(fake.publishes).toBe(before);
     });
 
+    it('the catch-up (bootstrap: false) still re-wraps a keyed channel whose membership moved', async () => {
+        // components/useChannelKeyUpkeep.ts runs this once per server per
+        // sign-in, for members who joined while nobody holding keys was online.
+        const rotated = await rewrapForMembershipChange([CHANNEL], { bootstrap: false });
+        expect(rotated).toBe(1);
+        expect(fake.lastRecipients).toContain(newcomerId);
+    });
+
+    it('the catch-up mints nothing for a channel nobody has a key for yet', async () => {
+        // Whoever uses an empty channel first mints its key; an upkeep pass
+        // over every channel of a server must not write one for each.
+        fake.reset();
+        fake.members = [{ user_id: 1, public_key: (await testIdentity(...ME)).publicKeyEncoded }];
+        clearChannelKeyCache();
+        await expect(rewrapForMembershipChange([CHANNEL], { bootstrap: false })).resolves.toBe(0);
+        expect(fake.publishes, 'no first epoch minted by the catch-up').toBe(0);
+        await expect(ensureChannelKey(CHANNEL, { bootstrap: false })).resolves.toBeNull();
+        expect(fake.publishes).toBe(0);
+        // CONTROL: the ordinary path (a send, a join) does mint it.
+        const minted = await ensureChannelKey(CHANNEL);
+        expect(minted?.epoch).toBe(1);
+        expect(fake.publishes).toBe(1);
+    });
+
     it('the newcomer can then read the key it was handed', async () => {
         await rewrapForMembershipChange([CHANNEL]);
         // Re-run as the NEWCOMER: their client loads the wraps addressed to
