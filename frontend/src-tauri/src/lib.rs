@@ -38,7 +38,8 @@ mod heif;
 mod rc_leftovers;
 mod hotkeys;
 mod ll_hook;
-#[cfg(feature = "remote-control")]
+// NOT gated: toasts.rs (message notifications, both variants) runs on it.
+// The Lite build (--no-default-features) failed to compile while it was.
 mod ordered_worker;
 #[cfg(feature = "remote-control")]
 mod lan;
@@ -87,6 +88,9 @@ mod service_cmd;
 mod service_link;
 #[cfg(feature = "remote-control")]
 mod wol;
+// Message notifications that replace one another per conversation instead of
+// stacking one per message (Windows toasts with a Tag and a Group).
+mod toasts;
 // Keeps the owner's per-app GPU pin on the WebView2 runtime that does the
 // share capture and encode — the pin is keyed by exe path and the runtime's
 // path changes with every auto-update. Registry + loader + process APIs, so
@@ -1824,6 +1828,9 @@ pub fn run() {
             list_anticheat_processes,
             attention_main_window,
             release_attention_topmost,
+            toasts::toast_show,
+            toasts::toast_clear,
+            toasts::toast_clear_all,
             #[cfg(feature = "remote-control")]
             start_control_guard,
             #[cfg(feature = "remote-control")]

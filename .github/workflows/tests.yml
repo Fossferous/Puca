@@ -285,6 +285,14 @@ jobs:
         run: node scripts/build-agent.mjs
       - name: Desktop shell tests (frontend/src-tauri)
         run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
+      # The Lite app is the same shell built WITHOUT the remote-control
+      # feature (tauri:build:lite passes --no-default-features), and nothing
+      # compiled it that way before a release: an ungated module reaching a
+      # gated one (toasts.rs on ordered_worker, caught in review) fails only
+      # here, with E0433. `check`, as the Linux job above: the tests that
+      # differ are feature-gated out.
+      - name: Desktop shell compiles as the Lite app (no remote-control)
+        run: cargo check --manifest-path frontend/src-tauri/Cargo.toml --locked --no-default-features
 
   backend:
     runs-on: ubuntu-latest

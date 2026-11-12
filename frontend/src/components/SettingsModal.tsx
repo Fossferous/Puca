@@ -2146,6 +2146,28 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         />
                                     </div>
                                     )}
+                                    {/* One notification per conversation
+                                        (api/notifyGroups.ts). Not for an
+                                        embedding host, which shows its own. */}
+                                    {!isMobile() && !hostShowsNotifications() && (
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="settings-group-notifications">Group notifications by conversation</label>
+                                            <span className="option-hint">
+                                                One notification per channel or DM, which keeps count and
+                                                updates without popping up again while the conversation
+                                                goes on. Off: one notification for every message.
+                                            </span>
+                                        </div>
+                                        <input
+                                            id="settings-group-notifications"
+                                            type="checkbox"
+                                            checked={settings.groupNotifications}
+                                            disabled={!settings.desktopNotifications}
+                                            onChange={(e) => updateSetting('groupNotifications', e.target.checked)}
+                                        />
+                                    </div>
+                                    )}
                                     {/* The web app's notifications while it is
                                         CLOSED (Web Push). Renders nothing in the
                                         desktop and Android apps, which notify their

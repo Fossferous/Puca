@@ -55,6 +55,11 @@ export const defaultSettings = {
 
     // Notifications
     desktopNotifications: true,
+    /** One notification per conversation that updates in place and pops up
+     *  only when a conversation starts again (api/notifyGroups.ts), in the
+     *  desktop and web apps. Off: one notification per message, as before.
+     *  Android groups by its own notification key either way. */
+    groupNotifications: true,
     /** Android: OS notifications for messages, fired locally from this
      *  device's own WebSocket while the app is running (foreground app =
      *  suppressed, like desktop). There is no push service — nothing can

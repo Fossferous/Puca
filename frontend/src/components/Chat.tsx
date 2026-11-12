@@ -210,7 +210,8 @@ import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedC
 import { playMessageSound, playMentionSound } from '../utils/audioFeedback';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { loadSettings } from './settingsStore';
-import { notifyNewMessage } from '../api/desktopNotify';
+import { clearAllConversationNotifications, endConversationBursts, notifyNewMessage, seeConversation } from '../api/desktopNotify';
+import { channelGroupKey, channelWhere, dmGroupKey, joinGroupKey } from '../api/notifyGroups';
 import { startTaskReminders } from '../api/taskReminders';
 import { requestTasksTab } from '../api/tasksViewIntent';
 import {
@@ -2572,16 +2573,26 @@ export function Chat({ onLogout }: ChatProps) {
             // it is not. (self-gates on the `message` setting.)
             if (payload.sender.id !== currentUserId) {
                 // Same rule as channels: notify on FOCUS, ping on what is open.
-                notifyNewMessage({
+                const notified = notifyNewMessage({
                     title: `${payload.sender.display_name || payload.sender.username} sent you a message`,
                     isOwn: false,
                     isMuted: false,     // DMs have no per-conversation mute yet
                     // Android: one notification per conversation, tap lands in it.
                     notifyKey: `dm:${payload.conversation_id}`,
                     nav: `dm:${payload.conversation_id}`,
+                    // Desktop and web: the same, keeping count (api/notifyGroups.ts).
+                    group: {
+                        key: dmGroupKey(payload.conversation_id),
+                        kind: 'dm',
+                        where: payload.sender.display_name || payload.sender.username,
+                        author: payload.sender.display_name || payload.sender.username,
+                        messageId: payload.message_id,
+                    },
                 });
                 if (!(currentDM && payload.conversation_id === currentDM.id && messageListSeenRef.current)) {
-                    playMessageSound();
+                    // Quiet: it only updated the conversation's notification
+                    // while you are away (see the channel path).
+                    if (!(notified.fire && notified.quiet)) playMessageSound();
                     // In-app shade, WITH the decrypted body — a DM's plaintext
                     // is available here (pairwise key = the sender), unlike
                     // the content-free channel notification.
@@ -2941,6 +2952,33 @@ export function Chat({ onLogout }: ChatProps) {
                     // it, and unblocking reveals it without a refetch.
                     && !isBlocked(payload.sender.id)) {
                     playMentionSound();
+                    // Away from the window: the channel's notification pops
+                    // for this one even mid-conversation (api/notifyGroups.ts).
+                    // Counted once with the cross-channel report of the same
+                    // message, by its id; says nothing where notifications are
+                    // not grouped, since that report did everything there.
+                    if (payload.message_id && currentChannel.server_id) {
+                        const serverId = currentChannel.server_id;
+                        const channelId = currentChannel.id;
+                        const server = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === serverId);
+                        notifyNewMessage({
+                            title: `${payload.sender.username} sent a message`,
+                            isOwn: false,
+                            isMuted: false,     // the mute rules for a mention are the ones just checked
+                            notifyKey: `chan:${serverId}`,
+                            // A click lands through the 'channel:<server>:<id>'
+                            // target its key names, the opener's own door.
+                            onlyIfGrouped: true,
+                            group: {
+                                key: channelGroupKey(serverId, channelId),
+                                kind: 'channel',
+                                where: channelWhere(currentChannel.name, server?.name),
+                                author: payload.sender.username,
+                                messageId: payload.message_id,
+                                important: true,
+                            },
+                        });
+                    }
                 }
                 // Prefer the persisted DB id (REST-created messages) so
                 // reactions/edits/pins key to the real message; fall back to a
@@ -3354,20 +3392,26 @@ export function Chat({ onLogout }: ChatProps) {
             // is judged on window focus rather than on which channel is open —
             // and it is content-free, because messages are E2EE and a toast is
             // rendered by the OS on a lock screen.
-            notifyNewMessage({
+            const cachedChannels = queryClient.getQueryData<Channel[]>(keys.channels(p.server_id));
+            const server = queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === p.server_id);
+            const notified = notifyNewMessage({
                 title: `${p.author.username} sent a message`,
                 isOwn: false,           // already returned above if it were ours
                 isMuted: muted,
                 // Android: collapse per server, tap lands on that server (or on the
                 // channel, when a mode leaves no row for it there).
                 notifyKey: `chan:${p.server_id}`,
-                nav: notificationNav(
-                    p.server_id,
-                    p.channel_id,
-                    queryClient.getQueryData<Channel[]>(keys.channels(p.server_id)),
-                    queryClient.getQueryData<Server[]>(keys.servers)?.find(s => s.id === p.server_id)?.active_mode_id,
-                ),
+                nav: notificationNav(p.server_id, p.channel_id, cachedChannels, server?.active_mode_id),
                 onActivate: () => openChannelRef.current(p.channel_id, p.server_id),
+                // Desktop and web: one notification per CHANNEL that keeps
+                // count (api/notifyGroups.ts).
+                group: {
+                    key: channelGroupKey(p.server_id, p.channel_id),
+                    kind: 'channel',
+                    where: channelWhere(cachedChannels?.find(c => c.id === p.channel_id)?.name, server?.name),
+                    author: p.author.username,
+                    messageId: p.message_id,
+                },
             });
             if (chatOnScreen && currentChannel?.id === p.channel_id) return;
             // Rail bubble: live nudge for anything not on screen. Deliberately
@@ -3375,7 +3419,10 @@ export function Chat({ onLogout }: ChatProps) {
             // so unmuting shows the truth without a refetch.
             bumpServerUnread(p.server_id, p.channel_id);
             if (muted) return;
-            playMessageSound();
+            // A message that only updated its conversation's notification, in
+            // a conversation that is going on while you are away, makes no
+            // sound either: the burst's first one did.
+            if (!(notified.fire && notified.quiet)) playMessageSound();
             // In-app shade — the OS notification's complement (it fires only
             // UNfocused). Content-free by design: messages are E2EE and this
             // cross-channel frame carries none.
@@ -3411,6 +3458,13 @@ export function Chat({ onLogout }: ChatProps) {
                 isMuted: isServerQuiet(p.server_id),
                 notifyKey: `join:${p.server_id}`,
                 nav: `server:${p.server_id}`,
+                // A wave of arrivals is one notification per server, too.
+                group: {
+                    key: joinGroupKey(p.server_id),
+                    kind: 'join',
+                    where: serverName || 'A server',
+                    author: p.user.username,
+                },
             });
         };
         wsClient.on('MemberJoined', handleMemberJoined);
@@ -3435,12 +3489,19 @@ export function Chat({ onLogout }: ChatProps) {
     // channel's read cursor: whatever arrived while away is on screen now.
     // Scrolled-up readers keep their badge (they haven't seen the tail). The
     // channel comes via the ref so this effect keeps its one-shot [] deps.
+    // Sees the conversation on screen (the effect below keeps it current).
+    const seeOnScreenRef = useRef<() => void>(() => { });
     useEffect(() => {
         const clear = () => {
             setUnreadBadge(false);
             // Android: the tray of message notifications is the badge's
             // sibling latch — you are looking at the app now.
             void clearMobileNotifications();
+            // Desktop and web: the conversation on screen is seen, so its
+            // notification goes (and its count starts again), and every
+            // conversation's next message after you leave again pops.
+            seeOnScreenRef.current();
+            endConversationBursts();
             const activeId = currentChannelIdRef.current;
             // Message list on screen AND pinned at the bottom: what arrived
             // while away is visible now. A covered chat (voice view, Notes
@@ -3458,9 +3519,33 @@ export function Chat({ onLogout }: ChatProps) {
             window.removeEventListener('focus', clear);
             document.removeEventListener('visibilitychange', onVisibility);
             setUnreadBadge(false);
+            // Signed out: no conversation's notification outlives the session.
+            clearAllConversationNotifications();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- markReadNow is stable; refs carry the live channel
     }, []);
+
+    // The conversations on screen, as the notification keys name them
+    // (api/notifyGroups.ts): the open channel or DM while the chat shows it,
+    // and the open server for its join notifications. Seen whenever the
+    // window is focused with them in front of you: on every switch here, and
+    // on coming back (the listener above). What the window shows behind a
+    // game is not seen: that is what the notification is for.
+    const onScreenDmId = currentDM?.id ?? null;
+    const onScreenChannelId = currentChannel?.id ?? null;
+    const onScreenChannelServerId = currentChannel?.server_id ?? null;
+    const onScreenServerId = currentServer?.id ?? null;
+    useEffect(() => {
+        const keysOnScreen: string[] = [];
+        const chatView = viewMode === 'chat' && !showFriendsPanel && !showAllChecklists && !notesOnScreen && !showDevicesView;
+        if (chatView && onScreenDmId) keysOnScreen.push(dmGroupKey(onScreenDmId));
+        else if (chatView && onScreenChannelServerId && onScreenChannelId !== null) {
+            keysOnScreen.push(channelGroupKey(onScreenChannelServerId, onScreenChannelId));
+        }
+        if (onScreenServerId && !onScreenDmId && !showFriendsPanel && !showDevicesView) keysOnScreen.push(joinGroupKey(onScreenServerId));
+        seeOnScreenRef.current = () => { for (const k of keysOnScreen) seeConversation(k); };
+        if (appIsForeground()) seeOnScreenRef.current();
+    }, [onScreenDmId, onScreenChannelId, onScreenChannelServerId, onScreenServerId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen, showDevicesView]);
 
     // Conversation switch: forget the previous tail so the first page lands
     // pinned to the bottom, and drop a stale pill. MUST be declared above the
