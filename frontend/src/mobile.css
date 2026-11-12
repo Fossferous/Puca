@@ -322,6 +322,26 @@
         padding: 10px 16px;
     }
 
+    /* Every field a phone types into is 16px or more, or iOS zooms the page
+       in on focus and the fixed panel layout does not come back (§5). The
+       rules above lost that fight: this file is in the first bundle, and the
+       stylesheets of the lazily loaded chunks arrive after it, so their equal
+       -specificity rules win - Chat.css's `.input-wrapper textarea` (0.95rem)
+       and `.form-group input` (0.95rem), Modal.css's `.form-group textarea`
+       (14px) and EmojiPicker.css's search (0.875rem). The composer, the
+       sign-in password, the emoji search and Server Settings' description
+       measured 14-15.2px at 390x844. One more class than each of them, so
+       the order they load in no longer matters (e2e/mobile-ui-sweep-walk.mjs,
+       "fields"). */
+    .message-form .input-wrapper textarea,
+    .message-form .input-wrapper input,
+    .login-container .form-group input,
+    .emoji-picker .emoji-search input,
+    .server-settings-container .form-group input,
+    .server-settings-container .form-group textarea {
+        font-size: 16px;
+    }
+
     /* Compact buttons on mobile */
     .message-form button,
     .message-form .file-upload-btn,
