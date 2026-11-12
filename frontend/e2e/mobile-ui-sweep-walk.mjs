@@ -18,6 +18,8 @@
 //              the screen at 360).
 //   link       A long address's card (built in the app from the address alone, so nothing is
 //              fetched) wraps it inside the card (it was cut off sideways mid-path).
+//   tasks      The Tasks view's empty-state sentence keeps 12px from the screen's edges (it ran
+//              flush from edge to edge).
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
 //              in an ellipsis and nothing scrolling sideways.
@@ -396,6 +398,23 @@ try {
                 await card.first().scrollIntoViewIfNeeded();
                 await shot(P, `link-${size}`);
             }
+        }
+
+        // ── tasks: the Tasks view's empty state
+        if (want('tasks')) {
+            await nav(P, 'Tasks');
+            const empty = P.locator('.tasks-editor-empty').first();
+            check(`${size} tasks: the Tasks view opened on its empty state`, !!await until(() => empty.count(), 6000));
+            if (await empty.count()) {
+                const m = await empty.evaluate((e) => {
+                    const r = document.createRange(); r.selectNodeContents(e);
+                    const rects = [...r.getClientRects()].filter((x) => x.width > 1);
+                    return { vw: innerWidth, l: Math.min(...rects.map((x) => x.left)), r: Math.max(...rects.map((x) => x.right)) };
+                });
+                check(`${size} tasks: its words keep at least 12px from both edges of the screen`, m.l >= 12 && m.r <= m.vw - 12, m);
+                await shot(P, `tasks-${size}`);
+            }
+            await nav(P, 'Chat');
         }
 
         // ── mention: the @member list

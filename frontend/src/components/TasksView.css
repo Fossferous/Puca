@@ -296,6 +296,8 @@
 
 .tasks-editor .task-tree { padding: 4px 8px; }
 
+/* Padded and centred: with neither, the sentence under the icon ran from the
+   screen's left edge to its right on a phone, flush with both. */
 .tasks-editor-empty {
     flex: 1;
     display: flex;
@@ -304,6 +306,8 @@
     justify-content: center;
     color: var(--text-secondary, #949ba4);
     gap: 8px;
+    padding: 24px 20px;
+    text-align: center;
 }
 
 .tasks-empty-icon { font-size: 40px; }
