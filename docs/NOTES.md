@@ -110,7 +110,13 @@ Púca's reminders. Anything you do in one is what you see in the other.
   grid/list switch step aside, and the menu and the account button stay.
   Squeezed between them, the box was 20 px wide, and Android's keyboard in a
   field under ~36 px puts every letter at the start, so Backspace deleted
-  nothing (NotesTopBar.tsx has the measurement).
+  nothing (NotesTopBar.tsx has the measurement). A press anywhere on the box,
+  its magnifier included, focuses the field (unfocused, the input is only
+  ~20 px of it at 360 px wide). The X keeps the caret in the field only if
+  the caret was there when it was pressed, so a desktop click or a phone
+  whose keyboard is down gets no caret and no keyboard back; Android's Back
+  takes the keyboard down WITHOUT leaving the field, so after Back the X
+  still brings it up.
   Each "also matched" line is windowed around its own match: the row is a
   single ellipsised line, and the match is the only thing it exists to show.
 - **Reminders** — everything with a time, grouped Overdue / Today /

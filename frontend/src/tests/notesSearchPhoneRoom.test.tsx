@@ -27,9 +27,15 @@
  *    bar: while searching it hides exactly the mark, Refresh and the view
  *    switch, and never the menu, the field, its Clear button or the account
  *    button; while not searching it hides nothing;
- *  - Clear keeps the field focused, so the bar does not collapse under the
- *    finger and put the grid/list switch where Clear was; Escape clears and
- *    leaves, and the bar is whole again;
+ *  - Clear keeps the field focused when the press began with the caret in
+ *    it, so the bar does not collapse under the finger and put the grid/list
+ *    switch where Clear was; pressed with the field NOT focused it leaves the
+ *    focus alone (no caret for single-key shortcuts to type into, no keyboard
+ *    popping up); Escape clears and leaves, and the bar is whole again;
+ *  - a press anywhere on the pill focuses the field: unfocused, the input is
+ *    only ~17 px of the pill on a 360 px phone (0 at 330 px), so a tap on the
+ *    magnifier or the padding used to focus nothing; a press on Clear stays
+ *    Clear's;
  *  - the field driven with the events an Android keyboard sends (keyCode 229
  *    keydowns, `beforeinput`/`input` insertText, a composition, Backspace as
  *    `deleteContentBackward`, select-all then delete): typing filters, and
@@ -198,6 +204,10 @@ function imeBackspace(el: HTMLInputElement, code = 8) {
         key(el, 'keyup', code === 229 ? 'Unidentified' : 'Backspace', code);
     });
 }
+/** A pointer or mouse press on `el`; false when a handler prevented its default. */
+function press(el: Element, type: 'pointerdown' | 'mousedown') {
+    return el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+}
 /** A word typed as a composition (Gboard with suggestions on, Samsung's keyboard). */
 function imeCompose(el: HTMLInputElement, word: string) {
     act(() => {
@@ -299,8 +309,9 @@ describe('Notes search on a phone has the room an Android keyboard needs', () =>
         act(() => { field().focus(); });
         for (const ch of 'milk') imeLetter(field(), ch);
         const clear = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
-        // A tap: the button takes the focus first (the field blurs), then the click.
-        act(() => { clear.focus(); });
+        // A tap with the caret in the field: pointerdown while the field still
+        // has it, then the button takes the focus (the field blurs), then the click.
+        act(() => { press(clear, 'pointerdown'); clear.focus(); });
         expect(bar().classList.contains('searching')).toBe(true);
         act(() => { clear.click(); });
         expect(field().value).toBe('');
@@ -313,6 +324,50 @@ describe('Notes search on a phone has the room an Android keyboard needs', () =>
         expect(document.activeElement).not.toBe(field());
         expect(bar().classList.contains('searching')).toBe(false);
         expect(shownTitles()).toEqual(ALL);
+    });
+
+    it('Clear pressed with the field NOT focused leaves the focus alone (no caret, no keyboard, the shortcuts keep working)', async () => {
+        mount();
+        await settle();
+        act(() => { field().focus(); });
+        for (const ch of 'milk') imeLetter(field(), ch);
+        // Left with its text in (a desktop click elsewhere, or a phone whose keyboard went down).
+        act(() => { field().blur(); });
+        expect(bar().classList.contains('searching')).toBe(true);
+        const clear = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
+        act(() => { press(clear, 'pointerdown'); clear.focus(); });
+        act(() => { clear.click(); });
+        expect(field().value).toBe('');
+        expect(shownTitles()).toEqual(ALL);
+        expect(document.activeElement).not.toBe(field());
+        expect(bar().classList.contains('searching')).toBe(false);
+    });
+
+    it('a press anywhere on the pill (the magnifier, the padding) focuses the field; a press on Clear or the field itself is left alone', async () => {
+        mount();
+        await settle();
+        const pill = bar().querySelector<HTMLElement>('.notes-search')!;
+        const magnifier = pill.querySelector('svg')!;
+        expect(document.activeElement).not.toBe(field());
+        let allowed = true;
+        act(() => { allowed = press(magnifier, 'mousedown'); });
+        expect(document.activeElement).toBe(field());
+        expect(allowed).toBe(false); // prevented: the press must not blur what it just focused
+        expect(bar().classList.contains('searching')).toBe(true);
+        act(() => { field().blur(); });
+        act(() => { allowed = press(pill, 'mousedown'); });
+        expect(document.activeElement).toBe(field());
+        expect(allowed).toBe(false);
+        // On the field itself the browser places the caret: nothing is prevented.
+        act(() => { allowed = press(field(), 'mousedown'); });
+        expect(allowed).toBe(true);
+        // On Clear the press is the button's: not prevented, and the pill does not take it.
+        for (const ch of 'milk') imeLetter(field(), ch);
+        act(() => { field().blur(); });
+        const clear = pill.querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
+        act(() => { allowed = press(clear.querySelector('svg') ?? clear, 'mousedown'); });
+        expect(allowed).toBe(true);
+        expect(document.activeElement).not.toBe(field());
     });
 
     it('Android-shaped typing filters, and deleting letter by letter brings the whole list back', async () => {
