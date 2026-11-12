@@ -108,8 +108,34 @@ describe('everything else is drawn as before (no block)', () => {
         ['a file with words', `read ${FILE}`],
         ['a picture in a quote', `> look ${PIC}`],
         ['a spoiler holding words and a picture', `||secret ${PIC}||`],
+        ['a picture and a spoilered file', `${PIC} ||${FILE}||`],
     ])('%s', async (_, content) => {
         await render(content);
         expect(host.querySelector('.message-media')).toBeNull();
+    });
+});
+
+/** The message's text outside the block: the words as drawn. */
+const outside = () => Array.from(host.childNodes)
+    .filter(n => !(n instanceof HTMLElement && n.classList.contains('message-media')))
+    .map(n => n.textContent).join('');
+
+describe('the words and the pictures keep the layout the sender typed (release review)', () => {
+    it('punctuation glued to the picture stays on its word', async () => {
+        await render(`look ${PIC}.`);
+        expect(host.querySelector('.message-media')).not.toBeNull();
+        expect(outside()).toBe('look.');
+    });
+
+    it('a paragraph break around a picture on its own line', async () => {
+        await render(`first\n\n${PIC}\n\nsecond`);
+        expect(outside()).toBe('first\n\nsecond');
+    });
+
+    it('pictures on separate lines are still on separate lines in the block', async () => {
+        await render(`caption\n${PIC}\n${PIC2}`);
+        const block = host.querySelector('.message-media')!;
+        expect(block.children.length).toBe(2);
+        expect(Array.from(block.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent)).toEqual(['\n']);
     });
 });

@@ -42,7 +42,13 @@ function shape(content: string): { media: string[]; words: string } | null {
         if (n.type === 'strong') return `**${words(n.children)}**`;
         return name(n);
     }).join('');
-    return { media: split.media.filter(n => !(n.type === 'text' && n.value === ' ')).map(name), words: words(split.words) };
+    return { media: split.media.filter(n => !(n.type === 'text' && n.value.trim() === '')).map(name), words: words(split.words) };
+}
+
+/** The whitespace kept between the pictures in the block, in order. */
+function gaps(content: string): string[] {
+    const split = liftMediaAbove(parseMessage(content))!;
+    return split.media.filter(n => n.type === 'text').map(n => (n as { value: string }).value);
 }
 
 describe('what the composer sends: words, then the pictures', () => {
@@ -145,5 +151,65 @@ describe('the whitespace the picture leaves behind', () => {
 
     it('the words as typed are otherwise untouched (leading spaces, runs of spaces)', () => {
         expect(shape(`  two  spaces ${PIC}`)).toEqual({ media: ['[pic shot.png]'], words: '  two  spaces' });
+    });
+});
+
+// The release review of 0d0fe39a (2026-11-12) found four ways the split laid
+// a message out other than the sender did. Each case below failed there.
+describe('punctuation glued to a picture goes with its words, no space', () => {
+    it('closing punctuation after the picture joins the word before it', () => {
+        expect(shape('this https://example.org/cat.png, right?')).toEqual({ media: ['[url https://example.org/cat.png]'], words: 'this, right?' });
+        expect(shape(`(see ${PIC})`)).toEqual({ media: ['[pic shot.png]'], words: '(see)' });
+        expect(shape(`look ${PIC}.`)).toEqual({ media: ['[pic shot.png]'], words: 'look.' });
+    });
+
+    it('opening punctuation before the picture joins the word after it', () => {
+        expect(shape(`(${PIC} see)`)).toEqual({ media: ['[pic shot.png]'], words: '(see)' });
+    });
+
+    it('CONTROL: punctuation the sender spaced off keeps its space', () => {
+        expect(shape(`look ${PIC} .`)).toEqual({ media: ['[pic shot.png]'], words: 'look .' });
+        expect(shape(`well ${PIC}then`)).toEqual({ media: ['[pic shot.png]'], words: 'well then' });
+    });
+});
+
+describe('a paragraph break around a picture on its own line is kept', () => {
+    it('a blank line on both sides: the two paragraphs stay apart', () => {
+        expect(shape('first paragraph\n\nhttps://example.org/cat.gif\n\nsecond paragraph'))
+            .toEqual({ media: ['[url https://example.org/cat.gif]'], words: 'first paragraph\n\nsecond paragraph' });
+    });
+
+    it('a blank line on one side: the wider break is the one between the paragraphs', () => {
+        expect(shape(`first\n\n${PIC}\nsecond`)!.words).toBe('first\n\nsecond');
+        expect(shape(`first\n${PIC}\n\nsecond`)!.words).toBe('first\n\nsecond');
+    });
+});
+
+describe('pictures keep the whitespace that stood between them', () => {
+    it('on separate lines: still stacked', () => {
+        expect(gaps(`caption\n${PIC}\n${PIC2}`)).toEqual(['\n']);
+        expect(gaps(`${PIC}\n\n${PIC2}\ncaption`)).toEqual(['\n\n']);
+        expect(shape(`caption\n${PIC}\n${PIC2}`)!.words).toBe('caption');
+    });
+
+    it('touching: still touching, no space added', () => {
+        const split = liftMediaAbove(parseMessage(`${PIC}${PIC2} caption`))!;
+        expect(split.media.map(n => n.type)).toEqual(['image', 'image']);
+    });
+
+    it('words between them, on other lines: stacked; on the same line: side by side', () => {
+        expect(gaps(`${PIC}\nand\n${PIC2}`)).toEqual(['\n']);
+        expect(gaps(`${PIC} and ${PIC2}`)).toEqual([' ']);
+    });
+});
+
+describe('a spoilered file is a file', () => {
+    it('a picture and a spoilered file, no words: drawn as it always was', () => {
+        expect(shape(`${PIC} ||${FILE}||`)).toBeNull();
+        expect(shape(`${PIC} ||${FILE} ${PIC2}||`)).toBeNull();
+    });
+
+    it('CONTROL: with words, the picture goes up and the spoilered file stays with the words', () => {
+        expect(shape(`${PIC} ||${FILE}|| thanks`)).toEqual({ media: ['[pic shot.png]'], words: '||[att notes.pdf]|| thanks' });
     });
 });
