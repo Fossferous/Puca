@@ -27,7 +27,13 @@ import { logRtcEvent } from '../api/rtc/rtcEventLog';
 import {
     sampleShareEncode, applyShareQuality, liveShareOffer, liveShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT,
 } from '../api/rtc/shareHealthLive';
-import { ContextMenu } from './ContextMenu';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { useLocalCamera } from './useLocalCamera';
+import { cameraDisplayName, flipLabel, listCameras, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
+import type { CameraSwitch } from '../api/rtc/media';
+
+/** Which control opened the camera menu (its aria-expanded). */
+type CameraMenuOpener = 'self-view' | 'panel' | 'fullscreen';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
 import { useShareStarting } from './useShareStarting';
@@ -368,10 +374,17 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Camera PiP (Picture-in-Picture) state for mobile
     const [pipPosition, setPipPosition] = useState({ x: 20, y: 100 });
     const [isDragging, setIsDragging] = useState(false);
-    const [showPipOptions, setShowPipOptions] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const dragStartRef = useRef({ x: 0, y: 0, startX: 0, startY: 0 });
+    /** Whether the press on the self-view has moved far enough to be a drag
+     *  (then its click is not a tap). A ref: the click reads it at once. */
+    const pipMovedRef = useRef(false);
     const pipRef = useRef<HTMLDivElement>(null);
+    // The camera this device has on, and the camera menu (api/rtc/cameraChoice.ts).
+    const ownCamera = useLocalCamera();
+    const [cameraMenu, setCameraMenu] = useState<{ at: { x: number; y: number }; opener: HTMLElement; fromKeyboard: boolean; from: CameraMenuOpener } | null>(null);
+    const [cameraSwitching, setCameraSwitching] = useState(false);
+    const cameraSwitchingRef = useRef(false);
 
     // Track which users are currently speaking
     // Mic-health warning (silent capture / dead noise-suppression graph): the
@@ -2797,22 +2810,26 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [roomId]);
 
-    // Bind camera stream to preview when camera is on
+    // Bind the camera to the self-view when it is on: again when the self-view
+    // goes full screen or back (another <video>), and when the camera is
+    // switched (a new track; a fresh stream, so the element takes it).
     useEffect(() => {
         if (isCameraOn && cameraPreviewRef.current) {
             // Use a small delay to allow toggleVideo to complete first
             // The localStream already has the video track added by toggleVideo
             const timer = setTimeout(() => {
-                const stream = webrtcManager.getVideoStreamForPreview();
-                if (cameraPreviewRef.current && stream) {
-                    cameraPreviewRef.current.srcObject = stream;
+                const el = cameraPreviewRef.current;
+                const track = webrtcManager.getVideoStreamForPreview()?.getVideoTracks().find(t => t.readyState === 'live');
+                if (el && track && (el.srcObject as MediaStream | null)?.getVideoTracks()[0] !== track) {
+                    el.srcObject = new MediaStream([track]);
+                    void el.play().catch(() => { /* autoplay retries */ });
                 }
             }, 100);
             return () => clearTimeout(timer);
         } else if (!isCameraOn && cameraPreviewRef.current) {
             cameraPreviewRef.current.srcObject = null;
         }
-    }, [isCameraOn]);
+    }, [isCameraOn, isFullscreen, ownCamera.deviceId]);
 
     // Handle mute toggle
     const toggleMute = useCallback(() => {
@@ -3134,6 +3151,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown, isScreenSharing]);
 
     // PiP drag handlers (touch for mobile)
+    // The self-view drags. A press becomes a drag only once it has moved
+    // PIP_DRAG_SLOP px; short of that it is a tap, and a tap on the picture
+    // opens the camera menu. Every press used to start a drag at once (the
+    // mouse half of a touch too, which set `isDragging` again after touchend
+    // cleared it, its mouseup listener added only by an effect), and the
+    // click was dropped while `isDragging` was still set: on the Android
+    // emulator, real taps on the self-view opened its options once in
+    // thirteen, so Flip, behind them, was hardly reachable at all.
+    const PIP_DRAG_SLOP = 8;
+    const placePip = useCallback((x: number, y: number) => {
+        setPipPosition({
+            x: Math.max(0, Math.min(window.innerWidth - 150, x)),
+            y: Math.max(0, Math.min(window.innerHeight - 200, y)),
+        });
+    }, []);
+
     const handlePipTouchStart = useCallback((e: React.TouchEvent) => {
         const touch = e.touches[0];
         dragStartRef.current = {
@@ -3142,100 +3175,66 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             startX: pipPosition.x,
             startY: pipPosition.y
         };
-        setIsDragging(true);
+        pipMovedRef.current = false;
     }, [pipPosition]);
 
     const handlePipTouchMove = useCallback((e: React.TouchEvent) => {
-        if (!isDragging) return;
-        e.preventDefault();
         const touch = e.touches[0];
         const deltaX = touch.clientX - dragStartRef.current.x;
         const deltaY = touch.clientY - dragStartRef.current.y;
-
-        const newX = Math.max(0, Math.min(window.innerWidth - 150, dragStartRef.current.startX + deltaX));
-        const newY = Math.max(0, Math.min(window.innerHeight - 200, dragStartRef.current.startY + deltaY));
-
-        setPipPosition({ x: newX, y: newY });
-    }, [isDragging]);
+        if (!pipMovedRef.current && Math.hypot(deltaX, deltaY) < PIP_DRAG_SLOP) return;
+        pipMovedRef.current = true;
+        setIsDragging(true);
+        placePip(dragStartRef.current.startX + deltaX, dragStartRef.current.startY + deltaY);
+    }, [placePip]);
 
     const handlePipTouchEnd = useCallback(() => {
         setIsDragging(false);
     }, []);
 
-    // PiP drag handlers (mouse for desktop)
+    // PiP drag handlers (mouse for desktop): the listeners go on with the
+    // press itself, not from an effect after the next render.
     const handlePipMouseDown = useCallback((e: React.MouseEvent) => {
+        if (e.button !== 0) return;
         e.preventDefault();
-        dragStartRef.current = {
-            x: e.clientX,
-            y: e.clientY,
-            startX: pipPosition.x,
-            startY: pipPosition.y
+        const start = { x: e.clientX, y: e.clientY, startX: pipPosition.x, startY: pipPosition.y };
+        dragStartRef.current = start;
+        pipMovedRef.current = false;
+        const move = (ev: MouseEvent) => {
+            const deltaX = ev.clientX - start.x;
+            const deltaY = ev.clientY - start.y;
+            if (!pipMovedRef.current && Math.hypot(deltaX, deltaY) < PIP_DRAG_SLOP) return;
+            pipMovedRef.current = true;
+            setIsDragging(true);
+            placePip(start.startX + deltaX, start.startY + deltaY);
         };
-        setIsDragging(true);
-    }, [pipPosition]);
-
-    useEffect(() => {
-        if (!isDragging) return;
-
-        const handleMouseMove = (e: MouseEvent) => {
-            const deltaX = e.clientX - dragStartRef.current.x;
-            const deltaY = e.clientY - dragStartRef.current.y;
-
-            const newX = Math.max(0, Math.min(window.innerWidth - 150, dragStartRef.current.startX + deltaX));
-            const newY = Math.max(0, Math.min(window.innerHeight - 200, dragStartRef.current.startY + deltaY));
-
-            setPipPosition({ x: newX, y: newY });
-        };
-
-        const handleMouseUp = () => {
+        const up = () => {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
             setIsDragging(false);
         };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+    }, [pipPosition, placePip]);
 
-        document.addEventListener('mousemove', handleMouseMove);
-        document.addEventListener('mouseup', handleMouseUp);
+    /** The camera menu, under the control that opened it (ContextMenu: a key's
+     *  menu takes the focus to its first row and gives it back). The list is
+     *  looked at again as it opens: a webcam plugged in since shows up. */
+    const openCameraMenu = useCallback((opener: HTMLElement, fromKeyboard: boolean, from: CameraMenuOpener) => {
+        const box = opener.getBoundingClientRect();
+        setCameraMenu({ at: { x: box.left, y: box.bottom + 4 }, opener, fromKeyboard, from });
+        void listCameras().then(cameras => { if (cameras.length > 0) setLocalCameraState({ cameras }); });
+    }, []);
+    const closeCameraMenu = useCallback(() => setCameraMenu(null), []);
 
-        return () => {
-            document.removeEventListener('mousemove', handleMouseMove);
-            document.removeEventListener('mouseup', handleMouseUp);
-        };
-    }, [isDragging]);
-
-    const handlePipClick = useCallback(() => {
-        if (isDragging) return; // Don't handle click if we were dragging
-
-        if (showPipOptions) {
-            // Second click - go fullscreen
-            setIsFullscreen(true);
-            setShowPipOptions(false);
-        } else {
-            // First click - show options
-            setShowPipOptions(true);
-            // Auto-hide options after 3 seconds
-            setTimeout(() => setShowPipOptions(false), 3000);
+    const handlePipTap = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+        // The click that ends a drag is not a tap.
+        if (pipMovedRef.current) {
+            pipMovedRef.current = false;
+            return;
         }
-    }, [isDragging, showPipOptions]);
-
-    const handleFlipCamera = useCallback(async () => {
-        try {
-            await webrtcManager.switchCamera('environment'); // Toggle facing mode
-            // switchCamera stops the old video track (mesh-only replaceTrack); on
-            // an SFU call, re-publish the new camera track so it doesn't go dark.
-            if (sfuMode && sfuManager.connected) {
-                const newCam = webrtcManager.getVideoStreamForPreview()?.getVideoTracks()[0];
-                if (newCam) await sfuManager.replaceCameraTrack(newCam);
-            }
-            setShowPipOptions(false);
-            // Keep the stage tile on the live stream (switchCamera may mint a
-            // fresh MediaStream object for the new facing mode).
-            const fresh = webrtcManager.getVideoStreamForPreview();
-            if (fresh && globalCameraStreams.get(currentUserId) !== fresh) {
-                globalCameraStreams.set(currentUserId, fresh);
-                notifyStreamStateChange();
-            }
-        } catch (err) {
-            console.error('Failed to flip camera:', err);
-        }
-    }, [sfuMode, currentUserId]);
+        openCameraMenu(e.currentTarget, e.detail === 0, 'self-view');
+    }, [openCameraMenu]);
 
     /**
      * The ONE on/off path for the local camera. The main toggle, the PiP
@@ -3318,6 +3317,91 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // Notify sidebar/stage to update camera icons + tiles
         notifyStreamStateChange();
     }, [sfuMode, roomId, currentUserId, currentUsername]);
+
+    /**
+     * A camera switch (Flip, or a camera from the menu), carried to the rest
+     * of the call: the SFU publication (sfuManager.replaceCameraTrack; mesh
+     * peers were given it by webrtcManager already), every surface that shows
+     * your own camera, and a line when it did not go as asked. One at a time:
+     * a phone cannot open two cameras, so a second press waits.
+     */
+    const applyCameraSwitch = useCallback(async (run: () => Promise<CameraSwitch>) => {
+        if (cameraSwitchingRef.current) return;
+        cameraSwitchingRef.current = true;
+        setCameraSwitching(true);
+        let result: CameraSwitch;
+        try {
+            result = await run();
+        } catch (err) {
+            console.error('Failed to switch camera:', err);
+            setError('Could not switch camera.');
+            return;
+        } finally {
+            cameraSwitchingRef.current = false;
+            setCameraSwitching(false);
+        }
+        if (!isInVoiceRef.current) return;
+        // Nothing changed (one camera), or the camera went off meanwhile.
+        if (!result.ok && (result.reason === 'only-one' || result.reason === 'no-camera')) return;
+        const live = result.track;
+        if (live && sfuMode && sfuManager.connected) {
+            try {
+                await sfuManager.replaceCameraTrack(live);
+            } catch (err) {
+                console.error('[VoicePanel] could not put the new camera on the SFU:', err);
+            }
+        }
+        if (live) {
+            // A fresh stream object, so every <video> showing your camera
+            // binds the new track rather than keep the stopped one.
+            globalCameraStreams.set(currentUserId, new MediaStream([live]));
+            notifyStreamStateChange();
+        }
+        if (result.ok) return;
+        if (!live) {
+            setError('Your camera could not be opened again, so it is off.');
+            await setCameraEnabled(false).catch(err => console.error('Failed to stop camera:', err));
+            return;
+        }
+        setError(result.reason === 'denied'
+            ? 'Púca is not allowed to use that camera.'
+            : 'That camera could not be opened, so you are still on the one you had.');
+    }, [sfuMode, currentUserId, setCameraEnabled]);
+
+    const flipCamera = useCallback(() => applyCameraSwitch(() => webrtcManager.flipCamera()), [applyCameraSwitch]);
+    const chooseCamera = useCallback((deviceId: string) => applyCameraSwitch(() => webrtcManager.switchCamera({ deviceId })), [applyCameraSwitch]);
+
+    /** The camera menu: every camera by name (the one on ticked), Flip, Full
+     *  screen and Turn off. */
+    const cameraMenuItems = (): ContextMenuItem[] => {
+        const cams = ownCamera.cameras;
+        const items: ContextMenuItem[] = cams.map(c => ({
+            id: `camera-${c.deviceId}`,
+            label: cameraDisplayName(c, cams),
+            checked: c.deviceId === ownCamera.deviceId,
+            testId: 'camera-option',
+            value: c.deviceId,
+            onClick: () => { if (c.deviceId !== ownCamera.deviceId) void chooseCamera(c.deviceId); },
+        }));
+        if (cams.length > 0) items.push({ id: 'camera-sep', label: '', separator: true });
+        if (cams.length > 1) {
+            items.push({ id: 'camera-flip', label: flipLabel(ownCamera.facing), icon: 'flip-camera', testId: 'camera-menu-flip', onClick: () => { void flipCamera(); } });
+        }
+        if (!isFullscreen) {
+            items.push({ id: 'camera-fullscreen', label: 'Full screen', icon: 'fullscreen', onClick: () => setIsFullscreen(true) });
+        }
+        items.push({
+            id: 'camera-off',
+            label: 'Turn off camera',
+            icon: 'camera-off',
+            danger: true,
+            onClick: () => {
+                setIsFullscreen(false);
+                void setCameraEnabled(false).catch(err => console.error('Failed to stop camera:', err));
+            },
+        });
+        return items;
+    };
 
     // Function to stop own screen sharing - callable from StreamStage via global callback.
     // Also the manager's onScreenShareEnded: the picture ending while a share is
@@ -3662,6 +3746,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         {/* Why a mute toggle refused (deafened) — Toast portals to <body>, so
             it is visible however the panel is clipped. */}
         {muteNotice && <Toast message={muteNotice} onDismiss={() => setMuteNotice(null)} />}
+        {/* The camera menu (Flip, every camera, Full screen, Turn off): on
+            <body>, above the full-screen self-view and outside the panel's
+            right-click diagnostics menu. */}
+        {cameraMenu && isCameraOn && createPortal(
+            <ContextMenu
+                items={cameraMenuItems()}
+                position={cameraMenu.at}
+                onClose={closeCameraMenu}
+                opener={cameraMenu.opener}
+                fromKeyboard={cameraMenu.fromKeyboard}
+                label="Camera"
+                className="camera-menu"
+            />,
+            document.body
+        )}
         {/* E2EE badge tooltip — portaled to <body> (same anti-clipping pattern
             as the reaction emoji picker): the sidebar is overflow:hidden and
             only ~240px wide, so the old in-place absolute tooltip was chopped
@@ -4002,6 +4101,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         >
                             {isCameraOn ? <CameraIcon size={18} /> : <CameraOffIcon size={18} />}
                         </button>
+                        {/* The camera split button's other half: which camera
+                            (every one the device has), Flip, Full screen. Only
+                            with the camera on and more than one to choose. */}
+                        {isCameraOn && ownCamera.cameras.length > 1 && (
+                            <button
+                                className="voice-btn vp-camera-options"
+                                data-testid="camera-options"
+                                aria-haspopup="menu"
+                                aria-expanded={cameraMenu?.from === 'panel'}
+                                onClick={(e) => openCameraMenu(e.currentTarget, e.detail === 0, 'panel')}
+                                title="Camera: choose which camera"
+                                aria-label="Choose a camera"
+                            >
+                                <ChevronDownIcon size={14} />
+                            </button>
+                        )}
                         {/* Activities (docs/GAMES.md): the rocket beside the
                             camera and screen share, as in Discord. On a phone,
                             behind the chevron with the camera (.vp-collapsed);
@@ -4149,11 +4264,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     </div>
                     <ClipStatusRow policy={clipPolicy} />
 
-                    {/* Camera Preview (when camera is on) - Draggable PiP */}
+                    {/* Camera Preview (when camera is on) - Draggable PiP.
+                        A tap on the picture opens the camera menu; the corner
+                        button flips; a drag moves it. Mirrored only while the
+                        camera faces you (cameraChoice.selfViewMirrored). */}
                     {isCameraOn && !isFullscreen && (
                         <div
                             ref={pipRef}
                             className={`camera-preview-mini pip-draggable ${isDragging ? 'dragging' : ''}`}
+                            data-testid="camera-self-view"
                             style={{
                                 position: 'fixed',
                                 left: pipPosition.x,
@@ -4166,48 +4285,40 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             onTouchMove={handlePipTouchMove}
                             onTouchEnd={handlePipTouchEnd}
                             onMouseDown={handlePipMouseDown}
-                            onClick={handlePipClick}
                         >
                             <video
                                 ref={cameraPreviewRef}
+                                className={selfViewMirrored(ownCamera.facing) ? 'mirrored' : undefined}
                                 autoPlay
                                 playsInline
                                 muted
                             />
                             <span className="camera-label">You (Camera)</span>
-
-                            {/* Quick options overlay (shows on first tap) */}
-                            {showPipOptions && (
-                                <div className="pip-options-overlay">
-                                    <button
-                                        className="pip-option-btn"
-                                        onClick={(e) => { e.stopPropagation(); handleFlipCamera(); }}
-                                    >
-                                        <FlipCameraIcon size={16} /> Flip
-                                    </button>
-                                    <button
-                                        className="pip-option-btn"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            setIsFullscreen(true);
-                                            setShowPipOptions(false);
-                                        }}
-                                    >
-                                        <FullscreenIcon size={16} /> Fullscreen
-                                    </button>
-                                    <button
-                                        className="pip-option-btn close-btn"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            // Full stop path: unpublishes from the SFU and
-                                            // notifies peers (used to skip both — ghost camera).
-                                            void setCameraEnabled(false).catch(err =>
-                                                console.error('Failed to stop camera:', err));
-                                        }}
-                                    >
-                                        <CloseIcon size={16} /> Close
-                                    </button>
-                                </div>
+                            <button
+                                type="button"
+                                className="pip-open-menu"
+                                data-testid="camera-self-view-menu"
+                                aria-haspopup="menu"
+                                aria-expanded={cameraMenu?.from === 'self-view'}
+                                aria-label="Your camera: cameras, full screen, turn off"
+                                title="Your camera: tap for cameras, full screen and turning it off; drag to move it"
+                                onClick={handlePipTap}
+                            />
+                            {ownCamera.cameras.length > 1 && (
+                                <button
+                                    type="button"
+                                    className="pip-flip-btn"
+                                    data-testid="camera-flip"
+                                    aria-label={flipLabel(ownCamera.facing)}
+                                    title={flipLabel(ownCamera.facing)}
+                                    aria-busy={cameraSwitching}
+                                    // Its own press: no drag, no menu.
+                                    onTouchStart={(e) => e.stopPropagation()}
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => { e.stopPropagation(); void flipCamera(); }}
+                                >
+                                    <FlipCameraIcon size={20} />
+                                </button>
                             )}
                         </div>
                     )}
@@ -4217,25 +4328,47 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         <div className="camera-fullscreen">
                             <video
                                 ref={cameraPreviewRef}
+                                className={selfViewMirrored(ownCamera.facing) ? 'mirrored' : undefined}
                                 autoPlay
                                 playsInline
                                 muted
                             />
                             <div className="camera-fullscreen-controls">
-                                <button
-                                    className="fullscreen-btn"
-                                    onClick={handleFlipCamera}
-                                >
-                                    <FlipCameraIcon size={18} /> Flip Camera
-                                </button>
+                                {ownCamera.cameras.length > 1 && (
+                                    <button
+                                        className="fullscreen-btn"
+                                        data-testid="camera-flip"
+                                        aria-label={flipLabel(ownCamera.facing)}
+                                        aria-busy={cameraSwitching}
+                                        onClick={() => { void flipCamera(); }}
+                                    >
+                                        <FlipCameraIcon size={18} /> Flip Camera
+                                    </button>
+                                )}
+                                {ownCamera.cameras.length > 1 && (
+                                    <button
+                                        className="fullscreen-btn"
+                                        data-testid="camera-choose"
+                                        aria-haspopup="menu"
+                                        aria-expanded={cameraMenu?.from === 'fullscreen'}
+                                        onClick={(e) => openCameraMenu(e.currentTarget, e.detail === 0, 'fullscreen')}
+                                    >
+                                        <CameraIcon size={18} /> Cameras
+                                    </button>
+                                )}
                                 <button
                                     className="fullscreen-btn exit-btn"
                                     onClick={() => setIsFullscreen(false)}
                                 >
                                     <FullscreenIcon size={18} /> Exit Fullscreen
                                 </button>
+                                {/* Not `close-btn`: that class is a round 32 px X
+                                    elsewhere in the app (FriendsPanel.css,
+                                    ServerSettingsModal.css), and it squeezed this
+                                    button into a red circle with its words
+                                    spilling out of it. */}
                                 <button
-                                    className="fullscreen-btn close-btn"
+                                    className="fullscreen-btn cam-off-btn"
                                     onClick={() => {
                                         setIsFullscreen(false);
                                         // Full stop path: unpublishes from the SFU and

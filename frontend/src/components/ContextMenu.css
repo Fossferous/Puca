@@ -102,4 +102,10 @@
     margin: 6px 4px;
 }
 
-
+/* The camera menu (VoicePanel.tsx): rows a thumb can hit on a touchscreen,
+   over a call's own controls. */
+@media (pointer: coarse) {
+    .camera-menu .context-menu-item {
+        min-height: 44px;
+    }
+}

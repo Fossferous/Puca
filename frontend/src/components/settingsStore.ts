@@ -2,6 +2,7 @@ import { isTauri } from '../api/platform';
 import { mediaTransformApi } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
 import type { ShareLadderMode } from '../api/rtc/shareLadder';
+import type { RememberedCamera } from '../api/rtc/cameraChoice';
 // App settings persisted in localStorage. Extracted from SettingsModal so that
 // component file only exports a component (keeps React Fast Refresh working).
 
@@ -196,6 +197,14 @@ export const defaultSettings = {
     // Voice
     inputDeviceId: 'default',
     outputDeviceId: 'default',
+    /**
+     * The camera a call opens (api/rtc/cameraChoice.ts): the one last picked
+     * in the camera menu, by Flip, or in Settings > Voice & Video. null = the
+     * default (the front camera on a phone). Kept with its name and the way
+     * it faced, so it is found again when the browser hands out new ids.
+     * Per device, like the microphone.
+     */
+    camera: null as RememberedCamera | null,
     inputVolume: 100,
     outputVolume: 100,
     noiseSuppression: true,
@@ -997,6 +1006,22 @@ export function outputGain(): number {
  * settings panel's own level-meter math and Manual Gain was read by nothing —
  * the same disease outputGain() was written to cure on the output side.
  */
+/** The camera a call should open (Settings' `camera`), or null for the default. */
+export function rememberedCamera(): RememberedCamera | null {
+    const c = loadSettings().camera;
+    return c && typeof c === 'object' && typeof c.deviceId === 'string' ? c : null;
+}
+
+/** Keep `camera` as the one to open next time (null: back to the default). */
+export function rememberCamera(camera: RememberedCamera | null): void {
+    const s = loadSettings();
+    const same = (s.camera?.deviceId ?? null) === (camera?.deviceId ?? null)
+        && (s.camera?.label ?? null) === (camera?.label ?? null)
+        && (s.camera?.facing ?? null) === (camera?.facing ?? null);
+    if (same) return;
+    try { saveSettings({ ...s, camera }); } catch { /* storage full or blocked: this call still uses it */ }
+}
+
 export function inputGain(): number {
     const s = loadSettings();
     const vol = typeof s.inputVolume === 'number' ? s.inputVolume : 100;

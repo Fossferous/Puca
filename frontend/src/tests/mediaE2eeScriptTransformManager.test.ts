@@ -858,8 +858,8 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         media.toggleVideo = async () => cam;
         mgr.publishCameraTrack(cam as unknown as MediaStreamTrack);
         await mgr.toggleVideo(true);
-        media.switchCamera = async () => cam2;
-        await mgr.switchCamera('user');
+        media.switchCamera = async () => ({ ok: true, track: cam2 });
+        await mgr.switchCamera({ facing: 'environment' });
         media.getScreenShareStreamSync = () => streamOf('screen', [screen]);
         await mgr.addScreenShareToPeers();
         media.reacquireAudioTrack = async () => ({ oldTrack: mic, newTrack: mic2 });
@@ -964,8 +964,8 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
         const oldStand = camSender.track as FakeTrack;
         local[1] = cam2;
-        media.switchCamera = async () => cam2;
-        await mgr.switchCamera('user');
+        media.switchCamera = async () => ({ ok: true, track: cam2 });
+        await mgr.switchCamera({ facing: 'environment' });
         await settle();
         expect((camSender.track as FakeTrack).id, 'the new camera went on before anything was sealed').toBe('cam2+stand');
         expect(oldStand.readyState, 'the stand-in of the camera switched away from kept running').toBe('ended');

@@ -63,7 +63,7 @@ type MediaStub = {
     getLocalStreamSync: () => unknown;
     getScreenShareStreamSync: () => unknown;
     toggleVideo: (on: boolean) => Promise<unknown>;
-    switchCamera: (mode: string) => Promise<unknown>;
+    switchCamera: (request: unknown) => Promise<unknown>;
 };
 
 const cameraTrack = { kind: 'video', id: 'v1', enabled: true, readyState: 'live', stop: () => {} };
@@ -83,7 +83,7 @@ function rig(opts: { supported: boolean; required: boolean }) {
     media.getLocalStreamSync = () => stream;
     media.getScreenShareStreamSync = () => screen;
     media.toggleVideo = async () => cameraTrack;
-    media.switchCamera = async () => cameraTrack;
+    media.switchCamera = async () => ({ ok: true, track: cameraTrack });
     return mgr;
 }
 
@@ -120,7 +120,7 @@ describe('camera and screen share fail closed without Encoded Transform', () => 
 
     it('SECURITY: switchCamera publishes nothing when encryption is required and unsupported', async () => {
         const mgr = await joined({ supported: false, required: true });
-        await mgr.switchCamera('user');
+        await mgr.switchCamera({ facing: 'environment' });
         expect(addedTracks).toEqual([]);
     });
 

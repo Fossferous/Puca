@@ -16,6 +16,7 @@ import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
+import { cameraDisplayName, camerasOf, type CameraInfo } from '../api/rtc/cameraChoice';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
@@ -284,6 +285,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         inputs: [],
         outputs: [],
     });
+    /** The cameras, for the Camera choice (named once the camera was allowed). */
+    const [cameraList, setCameraList] = useState<CameraInfo[]>([]);
     const [username, setUsername] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [email, setEmail] = useState('');
@@ -835,6 +838,18 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                 })
                 .catch(console.error);
         }
+    }, [isOpen, activeSection]);
+
+    // The cameras, for the Camera choice: listed whatever became of the
+    // microphone (refused, or supplied by an embedding host). Named only once
+    // the camera has been allowed; until then "Camera 1" and so on.
+    useEffect(() => {
+        if (!isOpen || activeSection !== 'voice') return;
+        let live = true;
+        navigator.mediaDevices?.enumerateDevices?.()
+            .then(devices => { if (live) setCameraList(camerasOf(devices).filter(c => c.deviceId)); })
+            .catch(() => { /* no device list in this browser: Default only */ });
+        return () => { live = false; };
     }, [isOpen, activeSection]);
 
     /** rAF meter loop on an analyser: average byte magnitude → 0..100. */
@@ -2560,6 +2575,43 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     {device.label || `Speaker ${device.deviceId.slice(0, 8)}`}
                                                 </option>
                                             ))}
+                                        </select>
+                                    </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="camera-device">Camera</label>
+                                            <span className="option-hint">
+                                                The camera your calls open. In a call, Flip on your own picture
+                                                switches between the front and rear cameras, and the menu beside the
+                                                camera button (or a tap on your picture) lists every camera; the one
+                                                you pick there is kept here too. Names show once Púca has been allowed
+                                                to use the camera.
+                                            </span>
+                                        </div>
+                                        <select
+                                            id="camera-device"
+                                            data-testid="settings-camera"
+                                            value={settings.camera?.deviceId || 'default'}
+                                            onChange={(e) => {
+                                                const picked = cameraList.find(c => c.deviceId === e.target.value);
+                                                updateSetting('camera', picked
+                                                    ? { deviceId: picked.deviceId, label: picked.label, facing: picked.facing }
+                                                    : null);
+                                            }}
+                                        >
+                                            <option value="default">Default (the front camera on a phone)</option>
+                                            {cameraList.map(camera => (
+                                                <option key={camera.deviceId} value={camera.deviceId}>
+                                                    {cameraDisplayName(camera, cameraList)}
+                                                </option>
+                                            ))}
+                                            {/* Chosen before, and not in today's list (unplugged,
+                                                or not named yet): still shown as the choice. */}
+                                            {settings.camera?.deviceId && !cameraList.some(c => c.deviceId === settings.camera?.deviceId) && (
+                                                <option value={settings.camera.deviceId}>
+                                                    {settings.camera.label ? cameraDisplayName(settings.camera, []) : 'The camera chosen before'}
+                                                </option>
+                                            )}
                                         </select>
                                     </div>
                                     <div className="settings-option">

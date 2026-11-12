@@ -936,12 +936,35 @@ export class SfuManager {
         this.micPub = null;
     }
 
-    /** Swap the published camera track (mid-call camera flip). No-op if no camera. */
+    /**
+     * Swap the published camera track (Flip, or another camera from the
+     * menu). No-op if no camera is published.
+     *
+     * On the SAME publication, through LiveKit's own replaceTrack: its sender
+     * stays, so the E2EE transform LiveKit put on that sender keeps sealing
+     * the new camera, viewers keep their subscription (no tile dropping out
+     * and coming back), and LiveKit refits the simulcast layers to the new
+     * camera's size (a rear camera's picture is rarely the front one's).
+     * `true`: the track is ours; LiveKit must not stop it. The old track was
+     * stopped already (media.switchCamera: a phone cannot open two). Only
+     * with no live publication to swap on (a reconnect detached it) is the
+     * new camera published afresh.
+     */
     async replaceCameraTrack(newTrack: MediaStreamTrack): Promise<void> {
         if (!this.room || !this.cameraPub) return;
-        for (const pub of this.localPubs(Track.Source.Camera)) {
-            if (pub.track) {
-                await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, true);
+        const pubs = this.localPubs(Track.Source.Camera).filter(p => p.track);
+        const [keep, ...extra] = pubs;
+        for (const pub of extra) {
+            await this.room.localParticipant.unpublishTrack(pub.track!.mediaStreamTrack, true);
+        }
+        if (keep?.track) {
+            try {
+                await keep.track.replaceTrack(newTrack, true);
+                this.cameraPub = keep;
+                return;
+            } catch (err) {
+                console.warn('[sfu] camera replaceTrack failed; publishing the new camera afresh:', err);
+                await this.room.localParticipant.unpublishTrack(keep.track.mediaStreamTrack, true).catch(() => { /* already gone */ });
             }
         }
         this.cameraPub = await this.room.localParticipant.publishTrack(newTrack, {
