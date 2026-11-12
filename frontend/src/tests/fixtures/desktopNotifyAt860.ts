@@ -1,0 +1,482 @@
+/**
+ * api/desktopNotify.ts as it was at 0.9.860 (1a1abf90), frozen, for one
+ * control: e2e/notify-coalesce-real-browser.mjs plays the same conversation
+ * through it and through today's module, and this one must FAIL the "one
+ * notification per conversation" checks (one per message reached the
+ * notification layer: the desktop app's plugin with no tag, the web app's
+ * Notification tagged by its title). Only the import paths differ from the
+ * original; nothing in the app imports this file.
+ */
+/**
+ * Desktop notifications for messages that arrive while you are not looking.
+ *
+ * The `desktopNotifications` setting asked for browser permission and then
+ * nothing ever called `new Notification()` — so the toggle, and the permission
+ * the user granted, did nothing at all.
+ *
+ * DELIBERATELY CONTENT-FREE. Messages are end-to-end encrypted: the server
+ * cannot read them, and `MessageNotification` carries only the author and the
+ * channel. Even for a DM, where this process *can* decrypt, the body stays
+ * generic — a notification is rendered by the OS, survives in a notification
+ * centre, and is visible on a lock screen. "New message" leaks nothing there.
+ */
+import { loadSettings, saveSettings } from '../../components/settingsStore';
+import { appIsForeground, isMobile, isTauri } from '../../api/platform';
+import { isBadgeWorthy, setUnreadBadge } from '../../api/unreadBadge';
+import {
+    type DueReminder, mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission,
+} from '../../api/mobileApp';
+import { currentUserIdFromToken } from '../../api/auth';
+import { API_BASE_URL } from '../../api/config';
+import { hostSaysForeground, hostShowsNotifications, notifyHost } from '../../api/embedHost';
+
+export type NotifyDecision =
+    | { fire: true }
+    | { fire: false; reason: 'setting-off' | 'no-permission' | 'own-message' | 'muted' | 'focused' | 'mobile' };
+
+export interface NotifyInput {
+    /** The message is from this client's own user. */
+    isOwn: boolean;
+    /** Server or channel muted by the user. */
+    isMuted: boolean;
+    /** Does this app window currently have focus? */
+    hasFocus: boolean;
+    permission: NotificationPermission | 'unsupported';
+    setting: boolean;
+    mobile: boolean;
+    /** A native notification path exists on this mobile platform — the
+     *  Android SovereignApp plugin (APKs from 0.8.33). Without it, mobile
+     *  stays blocked exactly as before the plugin existed. */
+    mobileNative: boolean;
+}
+
+// --- Diagnostics --------------------------------------------------------
+//
+// Every suppression in this file is SILENT: `notifyNewMessage` returns a
+// decision explaining exactly why nothing appeared and both call sites discard
+// it, so "I get no notifications" has been undiagnosable without a debugger
+// attached at the right moment. On Android that is the whole ballgame — there
+// is no way to tell "the gate said no" apart from "the WebSocket frame never
+// arrived", and those have completely different fixes.
+//
+// So: a ring buffer of recent decisions, readable live via
+// `__pucaNotifyDiag()` in DevTools (chrome://inspect on Android), matching
+// the `__pucaVoiceDiag()` idiom. Ids only, never message text or
+// usernames — this is printed to a console and the rest of the file is
+// content-free for good reasons.
+
+interface NotifyLogEntry {
+    at: string;
+    kind: 'message' | 'task';
+    /** 'chan:<serverId>' / 'dm:<conversationId>' / 'tasks-due' — ids only. */
+    key: string;
+    /** 'fired', or the reason it was suppressed. */
+    outcome: string;
+    inputs?: NotifyInput;
+}
+
+const NOTIFY_LOG_MAX = 40;
+const notifyLog: NotifyLogEntry[] = [];
+
+function recordNotify(entry: NotifyLogEntry): void {
+    notifyLog.push(entry);
+    if (notifyLog.length > NOTIFY_LOG_MAX) notifyLog.shift();
+}
+
+/**
+ * Live notification diagnostics. Read it from DevTools WHILE the problem is
+ * happening — the gate inputs are sampled at call time.
+ *
+ * Reading the result:
+ *  - `recent` EMPTY after someone messages you  → nothing ever reached this
+ *    module: the WebSocket frame did not arrive (backgrounded WebView, Doze,
+ *    a dead keep-alive) or an earlier gate in Chat dropped it (blocked user,
+ *    own message). The notification code is not the problem.
+ *  - entries with `outcome: 'focused'` while the app is in the BACKGROUND →
+ *    `document.hasFocus()` is lying in this WebView; the focus gate is
+ *    suppressing everything.
+ *  - `outcome: 'muted'` → that server/channel is muted, or set to "mentions
+ *    only" (which also silences OS notifications, since the cross-channel
+ *    frame carries no mention marker).
+ *  - `outcome: 'fired'` but nothing in the shade → the failure is below this
+ *    layer: the native plugin or the OS.
+ */
+export function notifyDiag() {
+    return {
+        now: new Date().toISOString(),
+        live: {
+            isMobile: isMobile(),
+            mobileNative: isMobile() && mobileAppAvailable(),
+            isTauri: isTauri(),
+            // Both, deliberately: on mobile these DISAGREE, and seeing the
+            // disagreement is what identifies the fault.
+            foreground: appIsForeground(),
+            rawHasFocus: typeof document !== 'undefined' && document.hasFocus(),
+            visibility: typeof document !== 'undefined' ? document.visibilityState : 'n/a',
+            permission: notificationPermission(),
+            mobileNotifications: loadSettings().mobileNotifications,
+            desktopNotifications: loadSettings().desktopNotifications,
+            mobileBackgroundDelivery: loadSettings().mobileBackgroundDelivery,
+        },
+        recent: [...notifyLog],
+    };
+}
+
+if (typeof window !== 'undefined') {
+    (window as unknown as Record<string, unknown>).__pucaNotifyDiagAt860 = notifyDiag;
+}
+
+/**
+ * Pure so every suppression rule is testable without a browser.
+ *
+ * The focus rule is evaluated FRESH at fire time by the caller rather than
+ * tracked in a `focused` flag kept up to date by listeners: a sticky flag that
+ * misses a blur (alt-tab into a game, a Tauri window event that never lands) is
+ * how you end up either silently dropping every notification or firing them
+ * while the user is looking at the message.
+ */
+export function shouldNotify(i: NotifyInput): NotifyDecision {
+    // Mobile WITHOUT a native path (iOS, web-mobile, an old Android APK) is
+    // blocked outright, exactly as before the Android plugin existed. WITH
+    // one, mobile runs the same gates as everywhere else.
+    if (i.mobile && !i.mobileNative) return { fire: false, reason: 'mobile' };
+    if (!i.setting) return { fire: false, reason: 'setting-off' };
+    if (i.permission !== 'granted') return { fire: false, reason: 'no-permission' };
+    if (i.isOwn) return { fire: false, reason: 'own-message' };
+    if (i.isMuted) return { fire: false, reason: 'muted' };
+    // You are already looking at the app: the in-app sound and unread state are
+    // enough, and an OS toast over the window you are using is just noise.
+    if (i.hasFocus) return { fire: false, reason: 'focused' };
+    return { fire: true };
+}
+
+/** Current permission, or 'unsupported' where the API does not exist. */
+export function notificationPermission(): NotificationPermission | 'unsupported' {
+    if (typeof Notification === 'undefined') return 'unsupported';
+    return Notification.permission;
+}
+
+/**
+ * Whether a due item will raise a notification on DESKTOP, for Púca Notes'
+ * Reminders banner when Notes runs inside the desktop app. Púca's own setting
+ * is the whole answer. NOT `Notification.permission`: inside the Tauri
+ * webview that is the notification plugin's stand-in, which reads "denied"
+ * until something first asks — so the banner said notifications were blocked
+ * "for this site in the browser" on a desktop that shows them. The OS side is
+ * granted on desktop, and notifyTasksDue asks again at fire time regardless.
+ */
+export function desktopNotificationState(): 'granted' | 'default' {
+    return loadSettings().desktopNotifications ? 'granted' : 'default';
+}
+
+/**
+ * Turn desktop notifications on the way Settings' toggle does: ask the OS
+ * through the Tauri plugin (never the webview) and store the answer in the
+ * same setting. Resolves with the new desktopNotificationState().
+ */
+export async function enableDesktopNotifications(): Promise<'granted' | 'default'> {
+    let granted = true;
+    try {
+        const { isPermissionGranted, requestPermission } = await import('@tauri-apps/plugin-notification');
+        granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
+    } catch {
+        // Plugin unavailable: still switch it on, as Settings does, rather
+        // than refuse in silence.
+    }
+    saveSettings({ ...loadSettings(), desktopNotifications: granted });
+    return desktopNotificationState();
+}
+
+/**
+ * Raise the app window. On desktop this is the existing native command — the
+ * webview's own `window.focus()` cannot raise a minimised Tauri window, and the
+ * window ACL does not grant `setFocus`.
+ */
+async function focusApp(): Promise<void> {
+    if (isTauri()) {
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('attention_main_window');
+            return;
+        } catch {
+            // fall through to the web behaviour
+        }
+    }
+    try { window.focus(); } catch { /* nothing else to try */ }
+}
+
+/**
+ * Show a notification for a new message, if every rule allows it.
+ * Returns the decision so callers (and tests) can see WHY nothing appeared.
+ */
+export function notifyNewMessage(opts: {
+    title: string;
+    isOwn: boolean;
+    isMuted: boolean;
+    /** Stable key for replacement on Android — 'dm:<conversationId>',
+     *  'chan:<serverId>' — so a burst from one conversation updates a single
+     *  notification instead of stacking. Falls back to the title. */
+    notifyKey?: string;
+    /** Where a tap lands on Android: 'friends', 'dm:<conversationId>',
+     *  'server:<serverId>', … (see mobileApp.ts). */
+    nav?: string;
+    /** Called when the user clicks the notification, after focusing the app. */
+    onActivate?: () => void;
+}): NotifyDecision {
+    const mobileNative = isMobile() && mobileAppAvailable();
+    const settings = loadSettings();
+    // An embedding host (embedHost.ts) shows them itself: Púca for Steam
+    // Deck as Steam toasts. Like the desktop app's, its path has no browser
+    // permission to ask, and only it can say whether the app is on screen —
+    // a hidden Steam browser view reports focus all the time.
+    const host = hostShowsNotifications();
+    const inputs: NotifyInput = {
+        isOwn: opts.isOwn,
+        isMuted: opts.isMuted,
+        // Read at fire time — never from a cached flag. Platform-aware: on
+        // mobile this is visibilityState, because document.hasFocus() stays
+        // TRUE in a backgrounded Android WebView and silently suppressed every
+        // message notification. See appIsForeground.
+        hasFocus: (host ? hostSaysForeground() : null) ?? appIsForeground(),
+        // On desktop the WEBVIEW's permission is irrelevant — the notification
+        // goes through the OS via Tauri, which asks for its own permission.
+        // Leaving the webview check in place would gate the native path behind
+        // a 'default'/'denied' that means nothing there, and silently suppress
+        // every notification on the platform this feature exists for.
+        // Android's native path likewise manages POST_NOTIFICATIONS itself
+        // (unposted notifications are dropped by the OS, not errored).
+        permission: isTauri() || mobileNative || host ? 'granted' : notificationPermission(),
+        setting: isMobile() ? settings.mobileNotifications : settings.desktopNotifications,
+        mobile: isMobile(),
+        mobileNative,
+    };
+    const decision = shouldNotify(inputs);
+    recordNotify({
+        at: new Date().toISOString(),
+        kind: 'message',
+        key: opts.notifyKey ?? '(no key)',
+        outcome: decision.fire ? 'fired' : decision.reason,
+        inputs,
+    });
+    // Taskbar/tray unread badge: judged from the RAW inputs (never the
+    // decision's short-circuited reason), wider than the toast — a message
+    // that only failed the toast gates (setting off / no OS permission) is
+    // still unseen. Cleared by Chat's window-focus listener.
+    if (isBadgeWorthy(inputs)) setUnreadBadge(true);
+    if (!decision.fire) return decision;
+
+    if (host) {
+        notifyHost({ title: opts.title, body: 'New message', key: opts.notifyKey ?? opts.title, kind: 'message' }, opts.onActivate);
+        return decision;
+    }
+
+    // ANDROID: through the SovereignApp plugin — `new Notification()` in a
+    // Capacitor WebView reaches nothing, same disease as WebView2 below. The
+    // body stays content-free for the same lock-screen reason as everywhere
+    // else; the tap target rides the notification as a nav intent instead of
+    // an onActivate closure (the process may be long past this closure's
+    // lifetime when the tap happens).
+    if (inputs.mobile && inputs.mobileNative) {
+        void postMobileNotification(
+            opts.notifyKey ?? opts.title, opts.title, 'New message', opts.nav,
+        );
+        return decision;
+    }
+
+    // DESKTOP: go through the OS via Tauri, not the webview.
+    //
+    // `new Notification()` inside WebView2 does NOT reach the Windows
+    // notification centre — WebView2 only surfaces it if the host app handles
+    // CoreWebView2.NotificationReceived, and Tauri does not. So on the platform
+    // most people run this on, the branch below was very likely doing nothing
+    // at all while reporting success. The plugin calls the OS API from Rust and
+    // sidesteps the webview entirely.
+    if (isTauri()) {
+        void (async () => {
+            try {
+                const { isPermissionGranted, requestPermission, sendNotification } =
+                    await import('@tauri-apps/plugin-notification');
+                let granted = await isPermissionGranted();
+                if (!granted) granted = (await requestPermission()) === 'granted';
+                if (!granted) return;
+                sendNotification({ title: opts.title, body: 'New message' });
+            } catch (err) {
+                console.warn('[notify] native notification failed:', err);
+            }
+        })();
+        return decision;
+    }
+
+    try {
+        const n = new Notification(opts.title, {
+            body: 'New message',
+            // Collapses repeats from the same conversation instead of stacking
+            // one toast per message during a burst.
+            tag: opts.title,
+            silent: true, // the app plays its own sound; two is jarring
+        });
+        n.onclick = () => {
+            void focusApp();
+            opts.onActivate?.();
+            n.close();
+        };
+    } catch {
+        // A platform can refuse construction even with permission granted
+        // (notifications disabled at OS level). Never let that break message
+        // handling.
+    }
+    return decision;
+}
+
+/**
+ * Due-task reminder toast. Content-free like everything else here (task text
+ * is E2EE and a toast survives on lock screens): only a count. Rides the same
+ * setting as message notifications — a new setting would need its own UI.
+ *
+ * Deliberately does NOT suppress on focus, unlike a message: a message left
+ * unread has badges and the channel list; a deadline that passes silently has
+ * no other surface, and it is the one notification whose timing is the point.
+ * Clicking it (web path) raises the app and opens the Tasks view on its
+ * Reminders tab — the grouped list of what is due — via the
+ * `sovereign:open-reminders` event Chat listens for. The event carries the
+ * due ids, and Púca Notes opens that one item's note when exactly one is due
+ * (notes/native/useNativeReminders, which also carries the merge note about
+ * this event's name). Drop the detail and that tap quietly stops working.
+ */
+export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
+    if (count <= 0) return;
+    const mobileNative = isMobile() && mobileAppAvailable();
+    const settings = loadSettings();
+    const setting = isMobile() ? settings.mobileNotifications : settings.desktopNotifications;
+    // Logged on the same buffer as messages, and that comparison is the point:
+    // a task entry beside NO message entries proves the two paths diverge
+    // before this module, not inside it.
+    const record = (outcome: string) => recordNotify({ at: new Date().toISOString(), kind: 'task', key: 'tasks-due', outcome });
+    if (isMobile() && !mobileNative) { record('mobile'); return; }
+    if (!setting) { record('setting-off'); return; }
+
+    const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
+
+    if (hostShowsNotifications()) {
+        record('fired');
+        notifyHost({ title: 'Púca Tasks', body, key: 'tasks-due', kind: 'tasks' }, () => {
+            // Chat.tsx ignores `detail`; Púca Notes reads the ids (above).
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
+        });
+        return;
+    }
+
+    if (isMobile() && mobileNative) {
+        void (async () => {
+            // Púca Notes on this phone AND able to deliver THESE (its own
+            // answer: same account on the same server, keeping up,
+            // notifications on, alarm set, every one of `due` armed under
+            // the same mark): it owns them, so Púca stays quiet and one due
+            // item is one notification. Anything else — no, not installed, an
+            // older Notes or an older Púca APK that cannot ask, an item Notes
+            // has not fetched yet — Púca notifies. ONE diagnostics entry,
+            // written once the gate has answered, so the buffer never says
+            // 'fired' for something that was not posted.
+            const uid = currentUserIdFromToken();
+            const account = uid === null ? null : String(uid);
+            if (await notesOwnsDueReminders({ account, server: API_BASE_URL, due }) === true) {
+                record('notes-app-owns');
+                return;
+            }
+            record('fired');
+            // 'reminders' = the Tasks view's Reminders tab. Java passes nav
+            // through as an opaque string, so an older APK needs no change.
+            await postMobileNotification('tasks-due', 'Púca Tasks', body, 'reminders');
+        })();
+        return;
+    }
+    record('fired');
+
+    if (isTauri()) {
+        void (async () => {
+            try {
+                const { isPermissionGranted, requestPermission, sendNotification } =
+                    await import('@tauri-apps/plugin-notification');
+                let granted = await isPermissionGranted();
+                if (!granted) granted = (await requestPermission()) === 'granted';
+                if (!granted) return;
+                sendNotification({ title: 'Púca Tasks', body });
+            } catch (err) {
+                console.warn('[notify] task reminder failed:', err);
+            }
+        })();
+        return;
+    }
+
+    if (notificationPermission() !== 'granted') return;
+    try {
+        // No `silent`: there is no in-app sound for reminders, so the OS
+        // default chime is the only audible cue.
+        const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
+        n.onclick = () => {
+            void focusApp();
+            // The ids it already holds ride along: Púca Notes opens the
+            // one item when exactly one is due (Chat.tsx ignores `detail`).
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
+            n.close();
+        };
+    } catch {
+        // Construction can fail with permission granted (OS-level disable).
+    }
+}
+
+/**
+ * Fire one notification right now, for the Settings "Send test" button.
+ *
+ * Deliberately goes through the SAME native path a real message uses, so it
+ * exercises permission, the plugin, the capability ACL and the OS toast — the
+ * whole chain except the WebSocket delivery. Without this you need a second
+ * person online to find out whether notifications work at all, which is what
+ * made this feature impossible to verify.
+ *
+ * Returns what happened so the caller can say something useful instead of
+ * failing silently — the failure mode this whole area suffered from.
+ */
+export async function sendTestNotification(): Promise<{ ok: boolean; reason?: string }> {
+    if (notifyHost({ title: 'Púca', body: 'Test notification — this is what a new message looks like.', key: 'test', kind: 'test' })) {
+        return { ok: true };
+    }
+    if (isMobile()) {
+        if (!mobileAppAvailable()) {
+            return { ok: false, reason: 'this APK is too old for notifications — install the current one' };
+        }
+        const granted = await requestMobileNotificationPermission();
+        if (!granted) return { ok: false, reason: 'permission denied by Android' };
+        await postMobileNotification(
+            'test', 'Púca',
+            'Test notification — this is what a new message looks like.',
+        );
+        return { ok: true };
+    }
+    if (!isTauri()) {
+        if (notificationPermission() !== 'granted') {
+            const perm = await Notification.requestPermission();
+            if (perm !== 'granted') return { ok: false, reason: 'permission denied' };
+        }
+        try {
+            new Notification('Púca', { body: 'Test notification — this is what a new message looks like.' });
+            return { ok: true };
+        } catch (err) {
+            return { ok: false, reason: String(err) };
+        }
+    }
+    try {
+        const { isPermissionGranted, requestPermission, sendNotification } =
+            await import('@tauri-apps/plugin-notification');
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === 'granted';
+        if (!granted) return { ok: false, reason: 'permission denied by the OS' };
+        sendNotification({
+            title: 'Púca',
+            body: 'Test notification — this is what a new message looks like.',
+        });
+        return { ok: true };
+    } catch (err) {
+        return { ok: false, reason: String(err) };
+    }
+}

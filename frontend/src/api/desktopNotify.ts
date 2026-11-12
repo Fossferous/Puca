@@ -10,19 +10,34 @@
  * channel. Even for a DM, where this process *can* decrypt, the body stays
  * generic — a notification is rendered by the OS, survives in a notification
  * centre, and is visible on a lock screen. "New message" leaks nothing there.
+ *
+ * ONE PER CONVERSATION (api/notifyGroups.ts). A message that names its
+ * conversation (`group`) does not raise a notification of its own: it updates
+ * that conversation's one notification, which pops up for the first message of
+ * a burst and otherwise changes where it is, quietly. In the desktop app that
+ * is a Windows toast with a Tag and a Group (src-tauri/src/toasts.rs: the
+ * plugin's toasts carried neither, so Windows stacked one per message); in the
+ * web app a Notification tagged by the conversation. Reading the conversation
+ * in the app takes its notification away (`seeConversation`). The
+ * "Group notifications by conversation" setting off brings back the old
+ * behaviour exactly.
  */
 import { loadSettings, saveSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
 import {
     type DueReminder, mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission,
+    requestNavigation,
 } from './mobileApp';
 import { currentUserIdFromToken } from './auth';
 import { API_BASE_URL } from './config';
 import { hostSaysForeground, hostShowsNotifications, notifyHost } from './embedHost';
+import { NotifyGroups, navForGroupKey, type GroupMessage, type GroupStep } from './notifyGroups';
 
 export type NotifyDecision =
-    | { fire: true }
+    /** `quiet`: it only updated its conversation's notification where it
+     *  is: no pop-up, so the caller plays no sound for it either. */
+    | { fire: true; quiet?: true }
     | { fire: false; reason: 'setting-off' | 'no-permission' | 'own-message' | 'muted' | 'focused' | 'mobile' };
 
 export interface NotifyInput {
@@ -61,7 +76,9 @@ interface NotifyLogEntry {
     kind: 'message' | 'task';
     /** 'chan:<serverId>' / 'dm:<conversationId>' / 'tasks-due' — ids only. */
     key: string;
-    /** 'fired', or the reason it was suppressed. */
+    /** 'fired' (shown, popping up), 'updated' (its conversation's
+     *  notification changed where it is, no pop-up), 'duplicate' (a message
+     *  counted already), or the reason it was suppressed. */
     outcome: string;
     inputs?: NotifyInput;
 }
@@ -72,6 +89,165 @@ const notifyLog: NotifyLogEntry[] = [];
 function recordNotify(entry: NotifyLogEntry): void {
     notifyLog.push(entry);
     if (notifyLog.length > NOTIFY_LOG_MAX) notifyLog.shift();
+}
+
+// --- One notification per conversation ----------------------------------
+
+/** Every conversation's count and names, until it is seen. */
+const groups = new NotifyGroups();
+/** What a click on a conversation's notification does: the newest caller's. */
+const activations = new Map<string, () => void>();
+/** The web app's notification per conversation, while it exists. */
+const webLive = new Map<string, Notification>();
+/** Did the desktop app's own toasts (src-tauri/src/toasts.rs) answer?
+ *  'no' where the shell refuses them: a build for anything but Windows. (The
+ *  page ships inside the installer with its shell, so a Windows app always
+ *  has them.) */
+let nativeToasts: 'unknown' | 'yes' | 'no' = 'unknown';
+let activationListener: Promise<void> | null = null;
+/** Every toast command goes through here, ONE at a time: Tauri does not
+ *  promise to deliver two separate invokes in the order they were made
+ *  (ordered_worker.rs), and a quiet update overtaking the pop-up it updates
+ *  would pop the older words. Each command returns as soon as the shell has
+ *  queued it, so waiting for the one before costs a round trip, no more. */
+let nativeQueue: Promise<unknown> = Promise.resolve();
+function nativeCall(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+    const call = nativeQueue.then(async () => {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke(cmd, args);
+    });
+    nativeQueue = call.catch(() => undefined);
+    return call;
+}
+
+/** "Group notifications by conversation" (Settings → Notifications). On by
+ *  default; off is the behaviour before it, exactly. */
+function groupingOn(): boolean {
+    return loadSettings().groupNotifications !== false;
+}
+
+/**
+ * A click on a conversation's notification: it is about to be seen, so its
+ * count goes, and the conversation opens. The caller's own action when this
+ * page still has it; otherwise (a toast left from before a reload) the place
+ * its key names.
+ */
+export function activateConversation(key: string): void {
+    const act = activations.get(key);
+    seeConversation(key);
+    if (act) { act(); return; }
+    const nav = navForGroupKey(key);
+    if (nav) requestNavigation(nav);
+}
+
+/** The desktop app tells the page which toast was clicked (toasts.rs raises
+ *  the window itself). Listened for from the start, so a toast left in the
+ *  notification centre from before a reload still opens its conversation. */
+function listenForToastClicks(): void {
+    if (activationListener || !isTauri()) return;
+    activationListener = (async () => {
+        try {
+            const { listen } = await import('@tauri-apps/api/event');
+            await listen<string>('toast-activated', e => activateConversation(String(e.payload)));
+        } catch {
+            activationListener = null;
+        }
+    })();
+}
+listenForToastClicks();
+
+/**
+ * The conversation is on screen with the window focused: whatever its
+ * notification said is in front of the user now. Its count starts again, and
+ * its notification leaves the notification centre. Cheap when there is none,
+ * and asked of the desktop app even then: a toast can outlive the page that
+ * counted it (a reload, a restart), and only the shell can find it by key.
+ */
+export function seeConversation(key: string): void {
+    groups.seen(key);
+    activations.delete(key);
+    const n = webLive.get(key);
+    if (n) {
+        webLive.delete(key);
+        try { n.close(); } catch { /* already gone */ }
+    }
+    if (isTauri() && nativeToasts !== 'no') {
+        nativeCall('toast_clear', { key }).catch(() => { nativeToasts = 'no'; });
+    }
+}
+
+/** Sign-out: every conversation's notification goes, and every count. */
+export function clearAllConversationNotifications(): void {
+    groups.clear();
+    activations.clear();
+    for (const n of webLive.values()) {
+        try { n.close(); } catch { /* already gone */ }
+    }
+    webLive.clear();
+    if (isTauri() && nativeToasts !== 'no') {
+        nativeCall('toast_clear_all').catch(() => { nativeToasts = 'no'; });
+    }
+}
+
+/** The desktop app's toast for one conversation. Where the shell refuses
+ *  `toast_show` (see nativeToasts) the plugin raises one when the rule says
+ *  pop, and nothing when it says update: it can neither replace nor update. */
+async function showNativeToast(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): Promise<void> {
+    if (nativeToasts !== 'no') {
+        try {
+            await nativeCall('toast_show', { key, title: step.title, body: step.body, popup: step.pop });
+            nativeToasts = 'yes';
+            listenForToastClicks();
+            return;
+        } catch (err) {
+            nativeToasts = 'no';
+            console.warn('[notify] toasts that replace each other are unavailable here:', err);
+        }
+    }
+    if (!step.pop) return;
+    try {
+        const { sendNotification } = await import('@tauri-apps/plugin-notification');
+        sendNotification({ title: step.title, body: step.body });
+    } catch (err) {
+        console.warn('[notify] native notification failed:', err);
+    }
+}
+
+/** The web app's notification for one conversation: tagged by it, so the
+ *  browser replaces rather than adds; `renotify` only when it should pop. A
+ *  quiet update with no notification left (the user closed it) shows
+ *  nothing: a browser cannot add one without popping it. */
+function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): void {
+    const prev = webLive.get(key);
+    if (!step.pop && !prev) return;
+    try {
+        // `renotify` is in the spec and in Chromium, not in TypeScript's DOM types.
+        const options: NotificationOptions & { renotify?: boolean } = {
+            body: step.body,
+            tag: key,
+            silent: true, // the app plays its own sound; two is jarring
+            renotify: step.pop,
+        };
+        const n = new Notification(step.title, options);
+        webLive.set(key, n);
+        n.onclick = () => {
+            void focusApp();
+            activateConversation(key);
+            n.close();
+        };
+        n.onclose = () => { if (webLive.get(key) === n) webLive.delete(key); };
+    } catch {
+        // As below: construction can fail with permission granted.
+    }
+}
+
+/** For tests: forget every conversation and what the shell answered. */
+export function resetConversationNotificationsForTests(): void {
+    groups.clear();
+    activations.clear();
+    webLive.clear();
+    nativeToasts = 'unknown';
+    nativeQueue = Promise.resolve();
 }
 
 /**
@@ -91,6 +267,11 @@ function recordNotify(entry: NotifyLogEntry): void {
  *    frame carries no mention marker).
  *  - `outcome: 'fired'` but nothing in the shade → the failure is below this
  *    layer: the native plugin or the OS.
+ *  - `outcome: 'updated'` → grouped into a conversation whose notification
+ *    already popped in this burst: it changed in place, deliberately without
+ *    popping up. `live.groups` says how many each conversation holds and
+ *    `live.nativeToasts` whether the desktop app's own toasts answered
+ *    ('no': a shell without them, so the plugin's toasts, one per burst).
  */
 export function notifyDiag() {
     return {
@@ -108,6 +289,10 @@ export function notifyDiag() {
             mobileNotifications: loadSettings().mobileNotifications,
             desktopNotifications: loadSettings().desktopNotifications,
             mobileBackgroundDelivery: loadSettings().mobileBackgroundDelivery,
+            groupNotifications: groupingOn(),
+            nativeToasts,
+            // Keys (ids only) and counts. Never the names the toast shows.
+            groups: groups.keys().map(key => ({ key, count: groups.get(key)?.count ?? 0 })),
         },
         recent: [...notifyLog],
     };
@@ -213,6 +398,17 @@ export function notifyNewMessage(opts: {
     nav?: string;
     /** Called when the user clicks the notification, after focusing the app. */
     onActivate?: () => void;
+    /** The conversation this message belongs to (api/notifyGroups.ts). With
+     *  it, and the setting on, this updates that conversation's one
+     *  notification instead of raising one of its own, in the desktop and web
+     *  apps (Android and an embedding host keep `notifyKey`, which already
+     *  replaces there). `title` is then what Android and the host show. */
+    group?: GroupMessage;
+    /** This report exists only to tell its conversation's notification
+     *  something (an open channel's mention); anywhere notifications are not
+     *  grouped it shows nothing, because another report of the same message
+     *  already did everything there. */
+    onlyIfGrouped?: boolean;
 }): NotifyDecision {
     const mobileNative = isMobile() && mobileAppAvailable();
     const settings = loadSettings();
@@ -242,13 +438,23 @@ export function notifyNewMessage(opts: {
         mobileNative,
     };
     const decision = shouldNotify(inputs);
+    // Grouped only where this module draws the notification itself: Android's
+    // plugin and an embedding host already replace by notifyKey, and are left
+    // exactly as they were.
+    const group = decision.fire && !host && !(inputs.mobile && inputs.mobileNative) && opts.group && groupingOn()
+        ? opts.group : null;
+    const step = group ? groups.record(group) : null;
     recordNotify({
         at: new Date().toISOString(),
         kind: 'message',
-        key: opts.notifyKey ?? '(no key)',
-        outcome: decision.fire ? 'fired' : decision.reason,
+        key: group?.key ?? opts.notifyKey ?? '(no key)',
+        outcome: !decision.fire ? decision.reason
+            : !group ? (opts.onlyIfGrouped ? 'not-grouped' : 'fired')
+                : !step ? 'duplicate'
+                    : step.pop ? 'fired' : 'updated',
         inputs,
     });
+    if (opts.onlyIfGrouped && !group) return decision.fire ? { fire: true, quiet: true } : decision;
     // Taskbar/tray unread badge: judged from the RAW inputs (never the
     // decision's short-circuited reason), wider than the toast — a message
     // that only failed the toast gates (setting off / no OS permission) is
@@ -272,6 +478,30 @@ export function notifyNewMessage(opts: {
             opts.notifyKey ?? opts.title, opts.title, 'New message', opts.nav,
         );
         return decision;
+    }
+
+    // ONE PER CONVERSATION (see the header). A message counted already (the
+    // open channel and the cross-channel frame both report it) shows nothing
+    // more, and neither does an update: both are quiet to the caller too.
+    if (group) {
+        if (!step) return { fire: true, quiet: true };
+        const nav = opts.nav;
+        // Re-inserted, so the Map's order is least recently notified first,
+        // and bounded like the counts (a click on a forgotten one still opens
+        // the place its key names).
+        activations.delete(group.key);
+        activations.set(group.key, opts.onActivate ?? (nav ? () => requestNavigation(nav) : () => {
+            const fromKey = navForGroupKey(group.key);
+            if (fromKey) requestNavigation(fromKey);
+        }));
+        while (activations.size > 200) {
+            const oldest = activations.keys().next().value;
+            if (oldest === undefined) break;
+            activations.delete(oldest);
+        }
+        if (isTauri()) void showNativeToast(group.key, step);
+        else showWebNotification(group.key, step);
+        return step.pop ? decision : { fire: true, quiet: true };
     }
 
     // DESKTOP: go through the OS via Tauri, not the webview.
@@ -454,6 +684,21 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
             return { ok: true };
         } catch (err) {
             return { ok: false, reason: String(err) };
+        }
+    }
+    // The desktop app's own toast, as a grouped message uses (toasts.rs):
+    // a second press replaces the first rather than adding one.
+    if (groupingOn() && nativeToasts !== 'no') {
+        try {
+            await nativeCall('toast_show', {
+                key: 'test', title: 'Púca', body: 'Test notification — this is what a new message looks like.', popup: true,
+            });
+            nativeToasts = 'yes';
+            listenForToastClicks();
+            return { ok: true };
+        } catch {
+            nativeToasts = 'no';
+            // A shell without them: the plugin below, as before.
         }
     }
     try {

@@ -940,3 +940,14 @@ export function consumePendingNav(): string | null {
 export function deferNav(target: string): void {
     pendingNav = target;
 }
+
+/**
+ * Go to a target from anywhere in the app, through the same door an Android
+ * notification tap uses: a clicked desktop or web notification
+ * (api/desktopNotify.ts) names its conversation this way, and Chat applies
+ * it, waiting for the data it needs exactly as it does for a tap.
+ */
+export function requestNavigation(target: string): void {
+    pendingNav = target;
+    try { window.dispatchEvent(new CustomEvent('sovereign-navigate')); } catch { /* non-DOM env */ }
+}

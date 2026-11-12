@@ -1355,6 +1355,41 @@ turns this off for you: you then show as plain online while connected.
 **Show online status** off hides all of it — you appear offline. Voice
 channels' AFK move (**Server Settings**) is separate and unchanged.
 
+### Message notifications on a computer
+In the **desktop app** (full and Lite) and in the **web app** while it is
+open, a message that arrives while you are not using Púca (another window has
+the focus, a game say) shows a notification: **Settings → Notifications →
+Enable Desktop Notifications**. It names who wrote and where, never what they
+wrote. While you are using Púca nothing shows; the in-app pop-ups do that job.
+
+A conversation is **one notification that keeps count**, not one per message,
+for each channel and each DM: *#general · Lads*, *alice and 2 others: 5 new
+messages*.
+
+- The first message pops it up. While the conversation goes on, each new
+  message changes the same notification where it is, without popping it up
+  again and without a sound (Púca's own message sound plays for the first one
+  only, too).
+- After a quiet minute, the next message pops the same notification up again,
+  still counting.
+- A DM pops up for its first message and then at most once a minute while it
+  goes on. An @mention of you pops up even in the middle of a conversation
+  when that channel is the one you have open in Púca. In another channel Púca
+  cannot tell: its messages stay encrypted until you open it.
+- Reading the conversation in Púca (opening it with the window in front)
+  takes its notification out of the notification centre, and the count starts
+  again. Clicking the notification while it is on screen opens that
+  conversation; clicking one in Windows' notification centre brings Púca to
+  the front.
+- People joining a server are one notification per server in the same way.
+- Muted servers and channels (including **Only @mentions**, except for a
+  mention in the channel you have open) and people you blocked still do not
+  notify.
+- **Group notifications by conversation**, under the same setting, is on by
+  default. Off, every message has a notification of its own, as before.
+- In the web app it is your browser that draws the notification, so how a
+  replaced one looks is up to it.
+
 ### Notifications while Púca is closed
 In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in
 Chrome, Edge, Firefox or Safari on a computer or an Android phone —
