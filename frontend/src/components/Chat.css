@@ -3133,8 +3133,11 @@ body.voice-drag-active {
     background: var(--brand-primary, #5865f2); flex-shrink: 0;
 }
 .ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
-.ac-name { font-weight: 500; }
-.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; }
+/* A name too long for the row ends in an ellipsis on its own line, never mid-letter under the
+   edge with the row scrolling sideways (a 32-character username did both). */
+.ac-name, .ac-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-name { font-weight: 500; flex: 0 1 auto; }
+.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; flex: 0 10 auto; padding-left: 4px; }
 .autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75); }
 
 /* ---- Empty channel welcome ---- */
@@ -3213,6 +3216,25 @@ body.voice-drag-active {
 
     .emoji-picker-anchor .emoji-picker {
         width: 100%;
+    }
+
+    /* The @member / #channel list. Anchored to the text box it was as wide as
+       the box is on a phone - 164px at 390, 134px at 360, between the attach
+       and task buttons and the emoji and send ones - so a name was cut after a
+       dozen letters. It spans the composer instead (.message-form is sticky,
+       so it is the containing block once the box stops being one), and its
+       rows are a finger's 44px. */
+    .message-form .input-wrapper {
+        position: static;
+    }
+
+    .message-form .composer-autocomplete {
+        left: 8px;
+        right: 8px;
+    }
+
+    .message-form .autocomplete-item {
+        min-height: 44px;
     }
 
     /* Sticky-hover on tap otherwise floats the toolbar above the message,

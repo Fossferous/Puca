@@ -5,6 +5,9 @@
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
 //              description. CONTROL: a field forced to 15px must be caught.
+//   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
+//              inside the window, with 44px rows that a tap lands on, a 32-character name ending
+//              in an ellipsis and nothing scrolling sideways.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
 // locator.click(), which scrolls first and false-passes a covered control).
@@ -203,6 +206,43 @@ try {
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
+        }
+
+        // ── mention: the @member list
+        if (want('mention')) {
+            const box = P.locator(COMPOSER);
+            await tap(P, box);
+            await box.fill('@' + phoneName.slice(0, 6));
+            const pop = P.locator('.composer-autocomplete');
+            check(`${size} mention: the list opens`, !!await until(() => pop.count(), 4000));
+            if (await pop.count()) {
+                await shot(P, `mention-${size}`);
+                const m = await P.evaluate(() => {
+                    const pop = document.querySelector('.composer-autocomplete');
+                    const form = document.querySelector('form.message-form');
+                    const pr = pop.getBoundingClientRect(), fr = form.getBoundingClientRect();
+                    const items = [...pop.querySelectorAll('.autocomplete-item')].map((i) => {
+                        const r = i.getBoundingClientRect();
+                        return {
+                            h: r.height,
+                            over: i.scrollWidth > i.clientWidth + 1,
+                            names: [...i.querySelectorAll('.ac-name, .ac-sub')].map((n) => ({ cut: n.scrollWidth > n.clientWidth + 1, ellipsis: getComputedStyle(n).textOverflow === 'ellipsis' && getComputedStyle(n).overflow !== 'visible' })),
+                        };
+                    });
+                    return { pop: { l: pr.left, r: pr.right, t: pr.top, b: pr.bottom, w: pr.width, sw: pop.scrollWidth, cw: pop.clientWidth }, form: { t: fr.top, w: fr.width }, vw: innerWidth, items };
+                });
+                check(`${size} mention: the list is as wide as the composer`, m.pop.w >= m.form.w - 24, { list: Math.round(m.pop.w), composer: Math.round(m.form.w) });
+                check(`${size} mention: the list is inside the window and above the composer`, m.pop.l >= 0 && m.pop.r <= m.vw && m.pop.t >= 0 && m.pop.b <= m.form.t + 1, m.pop);
+                check(`${size} mention: nothing in it scrolls sideways`, m.pop.sw <= m.pop.cw + 1 && m.items.every((i) => !i.over), { list: [m.pop.sw, m.pop.cw], rows: m.items.map((i) => i.over) });
+                check(`${size} mention: a name too long for its row ends in an ellipsis`, m.items.length > 0 && m.items.every((i) => i.names.every((n) => !n.cut || n.ellipsis)), m.items);
+                check(`${size} mention: every row is 44px tall`, m.items.length > 0 && m.items.every((i) => i.h >= 43.5), m.items.map((i) => Math.round(i.h)));
+                const row = pop.locator('.autocomplete-item').first();
+                check(`${size} mention: a tap on the row lands on it`, await tap(P, row));
+                await sleep(300);
+                const v = await box.inputValue();
+                check(`${size} mention: the tap put the name in the box`, v.startsWith('@' + phoneName), v);
+            }
+            await box.fill('');
         }
 
         await ctx.close();
