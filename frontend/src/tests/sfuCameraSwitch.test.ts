@@ -206,6 +206,18 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(src.slice(guard, call), 'held back while LiveKit is not Connected (a reconnect) the publication kept the stopped camera').not.toMatch(/\.connected/);
     });
 
+    it('a camera that ENDED under LiveKit (unplugged) and was muted by it: the camera switched to goes out unmuted and enabled', async () => {
+        const { sfu, pub, sender } = await rig();
+        // LocalParticipant.handleTrackEnded mutes a track we supplied.
+        await pub.track!.mute();
+        expect(pub.track!.isMuted).toBe(true);
+        const other = new FakeCamTrack('cam-usb');
+        await sfu.replaceCameraTrack(other as unknown as MediaStreamTrack);
+        expect(sender.track).toBe(other);
+        expect(other.enabled, 'the new camera went out disabled: black for everyone, and for ourselves').toBe(true);
+        expect(pub.track!.isMuted, 'the publication stayed muted').toBe(false);
+    });
+
     it('no camera published: nothing happens', async () => {
         const { sfu, s, lp } = await rig();
         s.cameraPub = null;

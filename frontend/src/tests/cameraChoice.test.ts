@@ -155,9 +155,21 @@ describe('where Flip goes', () => {
     });
 
     it('says what it will do', () => {
-        expect(flipLabel('user')).toBe('Switch to the rear camera');
-        expect(flipLabel('environment')).toBe('Switch to the front camera');
-        expect(flipLabel(null)).toBe('Switch camera');
+        expect(flipLabel({ cameras: ANDROID, deviceId: 'a-front', facing: 'user' })).toBe('Switch to the rear camera');
+        expect(flipLabel({ cameras: ANDROID, deviceId: 'a-back', facing: 'environment' })).toBe('Switch to the front camera');
+        expect(flipLabel({ cameras: DESKTOP, deviceId: 'd-1', facing: null })).toBe('Switch camera');
+        // Localised names: the engine is asked for the other way.
+        expect(flipLabel({ cameras: [{ deviceId: 'f1', label: 'Caméra avant', facing: null }, { deviceId: 'f2', label: 'Caméra arrière', facing: null }],
+            deviceId: 'f1', facing: 'user' })).toBe('Switch to the rear camera');
+    });
+
+    it('it says where it actually goes: a laptop camera that faces the user flips to a USB webcam, not "to the rear camera"', () => {
+        const laptop: CameraInfo[] = [
+            { deviceId: 'm1', label: 'Integrated Camera', facing: 'user' },
+            { deviceId: 'm2', label: 'Logitech C920', facing: null },
+        ];
+        expect(flipTarget(laptop, { deviceId: 'm1', facing: 'user' })).toEqual({ deviceId: 'm2' });
+        expect(flipLabel({ cameras: laptop, deviceId: 'm1', facing: 'user' })).toBe('Switch camera');
     });
 });
 
@@ -176,11 +188,12 @@ describe('the constraints that open it', () => {
         expect(cameraConstraints(null).deviceId).toBeUndefined();
     });
 
-    it('the size and rate the call has always asked for', () => {
-        const c = cameraConstraints({ deviceId: 'x' });
-        expect(c.width).toEqual({ ideal: 1280, max: 1920 });
-        expect(c.height).toEqual({ ideal: 720, max: 1080 });
-        expect(c.frameRate).toEqual({ ideal: 30, max: 30 });
+    it('the size and rate are preferences, never limits (a max a camera cannot meet refuses to open it)', () => {
+        for (const c of [cameraConstraints({ deviceId: 'x' }), cameraConstraints({ facing: 'environment' }), cameraConstraints(null)]) {
+            expect(c.width).toEqual({ ideal: 1280 });
+            expect(c.height).toEqual({ ideal: 720 });
+            expect(c.frameRate).toEqual({ ideal: 30 });
+        }
     });
 });
 
@@ -241,6 +254,35 @@ describe('the names the menu shows', () => {
         expect(cameraDisplayName(ANDROID[1], ANDROID)).toBe('Back camera');
         const three = [...ANDROID, { deviceId: 'a-wide', label: 'camera2 2, facing back', facing: 'environment' as const }];
         expect(three.map(c => cameraDisplayName(c, three))).toEqual(['Front camera', 'Back camera 1', 'Back camera 2']);
+    });
+
+    it("Chromium's own Android order: the main rear camera (camera2 0) is Back camera 1 and where Flip goes, though it is listed last", () => {
+        // video_capture_device_factory_android.cc GetDevicesInfo walks the
+        // indices DOWNWARDS, putting front cameras first and appending the rest:
+        // ids 0 (main rear), 1 (front), 2 (ultra wide) come out 1, 2, 0.
+        const listed = camerasOf([
+            { kind: 'videoinput', deviceId: 'id1', label: 'camera2 1, facing front' },
+            { kind: 'videoinput', deviceId: 'id2', label: 'camera2 2, facing back' },
+            { kind: 'videoinput', deviceId: 'id0', label: 'camera2 0, facing back' },
+        ]);
+        expect(listed.map(c => c.deviceId), 'the menu and the cycle follow the camera service').toEqual(['id1', 'id0', 'id2']);
+        expect(flipTarget(listed, { deviceId: 'id1', facing: 'user' }), 'Flip opened the secondary lens').toEqual({ deviceId: 'id0' });
+        expect(mainCamera(listed, 'environment')?.deviceId).toBe('id0');
+        expect(listed.map(c => cameraDisplayName(c, listed))).toEqual(['Front camera', 'Back camera 1', 'Back camera 2']);
+        // Straight from the browser's order too (mainCamera sorts on its own).
+        const raw: CameraInfo[] = [
+            { deviceId: 'id1', label: 'camera2 1, facing front', facing: 'user' },
+            { deviceId: 'id2', label: 'camera2 2, facing back', facing: 'environment' },
+            { deviceId: 'id0', label: 'camera2 0, facing back', facing: 'environment' },
+        ];
+        expect(flipTarget(raw, { deviceId: 'id1', facing: 'user' })).toEqual({ deviceId: 'id0' });
+        expect(cameraDisplayName(raw[2], raw)).toBe('Back camera 1');
+        // A list with any other name is the browser's order, untouched.
+        const mixed = camerasOf([
+            { kind: 'videoinput', deviceId: 'b', label: 'camera2 2, facing back' },
+            { kind: 'videoinput', deviceId: 'u', label: 'USB Camera' },
+        ]);
+        expect(mixed.map(c => c.deviceId)).toEqual(['b', 'u']);
     });
 
     it("iOS's names as they are; a webcam's USB id dropped", () => {

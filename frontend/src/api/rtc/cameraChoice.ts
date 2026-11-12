@@ -79,11 +79,33 @@ export function facingOfSettings(settings: { facingMode?: string } | null | unde
 /** The video inputs of an enumerateDevices() list, named and faced. */
 export function camerasOf(devices: ReadonlyArray<{ kind: string; deviceId: string; label: string; getCapabilities?: () => { facingMode?: string[] } }>): CameraInfo[] {
     const videos = devices.filter(d => d.kind === 'videoinput');
-    return videos.map((d, i) => ({
+    return androidOrder(videos.map((d, i) => ({
         deviceId: d.deviceId,
         label: d.label || `Camera ${i + 1}`,
         facing: facingOf(d),
-    }));
+    })));
+}
+
+/** The camera service's number in an Android name ("camera2 2, facing back"
+ *  -> 2), or null for any other name. */
+function androidIndex(label: string): number | null {
+    const m = /^camera2? (\d+), facing (?:front|back)$/i.exec(label.trim());
+    return m ? Number(m[1]) : null;
+}
+
+/**
+ * Android's cameras in the camera service's own order: front ones first, then
+ * the rest by their number, 0 (the main rear camera, by Android's convention)
+ * first. Chromium lists them otherwise: its GetDevicesInfo walks the indices
+ * DOWNWARDS, putting front cameras at the start and appending the rest, so a
+ * phone exposing "camera2 0" (main) and "camera2 2" (ultra wide, or depth)
+ * listed camera2 2 first, and Flip opened it. Any list with a name that is
+ * not Android's is left as the browser gave it.
+ */
+function androidOrder(cameras: CameraInfo[]): CameraInfo[] {
+    if (cameras.length < 2 || cameras.some(c => androidIndex(c.label) === null)) return cameras;
+    return [...cameras].sort((a, b) => ((a.facing === 'user' ? 0 : 1) - (b.facing === 'user' ? 0 : 1))
+        || (androidIndex(a.label)! - androidIndex(b.label)!));
 }
 
 /** Every camera the browser lists now ([] when it will not say). Names and
@@ -101,10 +123,10 @@ export async function listCameras(): Promise<CameraInfo[]> {
 const AUXILIARY = /ultra|wide|tele|macro|depth|dual|triple|zoom|infrared|\bir\b/i;
 
 /** The camera of `facing` a person means by "the rear camera": the first
- *  plain one in the browser's order (iOS "Back Camera", Android "camera2 0"),
+ *  plain one (iOS "Back Camera"; on Android the lowest number, "camera2 0"),
  *  else the first of any. */
 export function mainCamera(cameras: CameraInfo[], facing: 'user' | 'environment'): CameraInfo | null {
-    const of = cameras.filter(c => c.facing === facing);
+    const of = androidOrder(cameras).filter(c => c.facing === facing);
     return of.find(c => !AUXILIARY.test(c.label)) ?? of[0] ?? null;
 }
 
@@ -163,7 +185,7 @@ export function cameraDisplayName(camera: CameraInfo, all: CameraInfo[]): string
     const m = ANDROID_NAME.exec(camera.label.trim());
     if (m) {
         const front = m[1].toLowerCase() === 'front';
-        const same = all.filter(c => {
+        const same = androidOrder(all).filter(c => {
             const o = ANDROID_NAME.exec(c.label.trim());
             return o && (o[1].toLowerCase() === 'front') === front;
         });
@@ -173,17 +195,28 @@ export function cameraDisplayName(camera: CameraInfo, all: CameraInfo[]): string
     return camera.label.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '') || camera.label;
 }
 
-/** What the Flip control says it will do. */
-export function flipLabel(facing: Facing): string {
-    return facing === 'user' ? 'Switch to the rear camera'
-        : facing === 'environment' ? 'Switch to the front camera'
+/** What the Flip control says it will do: by where it actually goes. A
+ *  laptop camera that says it faces the user, with a USB webcam that says
+ *  nothing beside it, flips to the webcam: "Switch camera", not "to the rear
+ *  camera". */
+export function flipLabel(state: { cameras: CameraInfo[]; deviceId: string | null; facing: Facing }): string {
+    const target = flipTarget(state.cameras, { deviceId: state.deviceId, facing: state.facing });
+    const to = !target ? null
+        : 'facing' in target ? target.facing
+            : state.cameras.find(c => c.deviceId === target.deviceId)?.facing ?? null;
+    return to === 'environment' ? 'Switch to the rear camera'
+        : to === 'user' ? 'Switch to the front camera'
             : 'Switch camera';
 }
 
+/** What every camera is asked for: preferences, never limits. A `max` is a
+ *  requirement, and a camera that cannot meet one (a capture device with only
+ *  a 60 fps mode, in an engine that will not decimate) refuses to open at all;
+ *  the camera used to open with ideal sizes only. */
 const BASE: MediaTrackConstraints = {
-    width: { ideal: 1280, max: 1920 },
-    height: { ideal: 720, max: 1080 },
-    frameRate: { ideal: 30, max: 30 },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30 },
 };
 
 /**

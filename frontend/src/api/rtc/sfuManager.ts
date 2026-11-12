@@ -970,6 +970,13 @@ export class SfuManager {
         if (keep?.track) {
             try {
                 await keep.track.replaceTrack(newTrack, true);
+                // A camera that ENDED under LiveKit (unplugged, taken by
+                // another app) was muted by it (LocalParticipant.handleTrackEnded
+                // mutes a track we supplied), and replaceTrack hands the new
+                // camera over disabled to match: black for everyone, and for
+                // ourselves. Nothing here mutes a camera on purpose, so the
+                // new one goes out unmuted.
+                if (keep.track.isMuted && current()) await keep.track.unmute();
                 // Turned off meanwhile: unpublishCamera took the publication
                 // off; do not hand it back.
                 if (current() && this.cameraPub) this.cameraPub = keep;

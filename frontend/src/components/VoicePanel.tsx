@@ -3319,7 +3319,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         }));
         if (cams.length > 0) items.push({ id: 'camera-sep', label: '', separator: true });
         if (canFlip(ownCamera)) {
-            items.push({ id: 'camera-flip', label: flipLabel(ownCamera.facing), icon: 'flip-camera', testId: 'camera-menu-flip', onClick: () => { void flipCamera(); } });
+            items.push({ id: 'camera-flip', label: flipLabel(ownCamera), icon: 'flip-camera', testId: 'camera-menu-flip', onClick: () => { void flipCamera(); } });
         }
         if (!isFullscreen) {
             items.push({ id: 'camera-fullscreen', label: 'Full screen', icon: 'fullscreen', onClick: () => setIsFullscreen(true) });
@@ -4240,8 +4240,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     type="button"
                                     className="pip-flip-btn"
                                     data-testid="camera-flip"
-                                    aria-label={flipLabel(ownCamera.facing)}
-                                    title={flipLabel(ownCamera.facing)}
+                                    aria-label={flipLabel(ownCamera)}
+                                    title={flipLabel(ownCamera)}
                                     aria-busy={cameraSwitching}
                                     // Its own press: no drag, no menu.
                                     onTouchStart={(e) => e.stopPropagation()}
@@ -4273,7 +4273,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                         data-testid="camera-flip"
                                         // The words on it are its name (what voice control
                                         // says to press); what it does is the description.
-                                        title={flipLabel(ownCamera.facing)}
+                                        title={flipLabel(ownCamera)}
                                         aria-busy={cameraSwitching}
                                         onClick={() => { void flipCamera(); }}
                                     >
