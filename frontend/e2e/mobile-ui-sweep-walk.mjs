@@ -11,7 +11,8 @@
 //              and every label, the chosen tab's too, reads at 4.5:1 on all eight themes with and
 //              without high contrast (the chosen one was 3.3-3.5:1 everywhere).
 //   settings   A tap on a setting's name or hint toggles its checkbox (the labels named no control,
-//              so a phone had a lone 20px box), and a tap on the box still toggles it once.
+//              so a phone had a lone 20px box), and a tap on the box still toggles it once. No
+//              "ESC" key hint on the phone's close button.
 //   toggle     The chat header's checklist button has no background or border, like the pin button
 //              beside it (it was the browser's own grey button on every theme). CONTROL: an
 //              unstyled button in the same header must be caught.
@@ -345,6 +346,8 @@ try {
             await sleep(300);
             check(`${size} settings: the setting is back as it was`, (await box.isChecked()) === before);
             await shot(P, `settings-${size}`);
+            const esc = await P.evaluate(() => [...document.querySelectorAll('.settings-close *')].filter((e) => e.children.length === 0 && /^\s*esc\s*$/i.test(e.textContent) && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0).length);
+            check(`${size} settings: no "ESC" key hint on a phone's close button`, esc === 0, { shown: esc });
             await tap(P, P.locator('.settings-close').first());
             await sleep(400);
             await nav(P, 'Chat');
