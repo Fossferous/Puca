@@ -30,7 +30,8 @@ export function discordWindowAvailable(): boolean {
 
 /** Is the rail's Discord entry shown? Available here, and switched on in
  *  Settings > Advanced > Desktop App (off by default: Púca does not put another
- *  service in front of everyone who installs it). */
+ *  service in front of everyone who installs it, and nobody gets a window they
+ *  did not ask for). */
 export function discordEntryShown(settings: { showDiscordEntry?: boolean }): boolean {
     return settings.showDiscordEntry === true && discordWindowAvailable();
 }
@@ -39,4 +40,15 @@ export function discordEntryShown(settings: { showDiscordEntry?: boolean }): boo
 export async function openDiscordWindow(): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('discord_window_open');
+}
+
+/** What "Sign out of Discord and clear its data on this PC" did: `cleared`, or
+ *  `nothing` when Discord had stored nothing here. */
+export type DiscordClearResult = 'cleared' | 'nothing';
+
+/** Close the Discord window and delete its WebView2 profile folder (its sign-in,
+ *  cookies, cache, settings). The shell refuses with a sentence for people. */
+export async function clearDiscordData(): Promise<DiscordClearResult> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<DiscordClearResult>('discord_window_clear_data');
 }

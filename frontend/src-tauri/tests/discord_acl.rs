@@ -1,8 +1,10 @@
-//! The capability set this BUILD compiled in, put through Tauri's own ACL
-//! (src/discord_window.rs says why the Discord window must get nothing): a
-//! window labelled `discord` on Discord's address is refused every command, a
-//! plugin's and an app's alike, while Púca's own window, the control, gets past
-//! the ACL with commands its capability grants.
+//! The capability set this BUILD compiled in, put through Tauri's own ACL. A
+//! BACKSTOP: the Discord window is not a Tauri window at all (discord_host.rs
+//! hosts WebView2 with no Tauri in its process), so nothing Tauri grants can
+//! reach it. Should a Tauri webview ever carry the name reserved for it, or open
+//! Discord's address, it is still refused every command, a plugin's and an
+//! app's alike, while Púca's own window, the control, gets past the ACL with
+//! commands its capability grants.
 //!
 //! An integration test, not a unit test, for one reason: building a Tauri app,
 //! even a mock one, links Tauri's menu and dialog code, which imports

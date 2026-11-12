@@ -1869,3 +1869,23 @@ a 404. Since 0.9.5 `/dm-keys` also refuses a pair in which either has blocked
 the other — `POST /dms` already did, and the key list did not.
 
 None of this changes §2: the operator still sees all of it.
+
+---
+
+## 13. Discord in a window of its own (Windows desktop app, off by default)
+
+The desktop app can open Discord's own website in a window of its own
+(**Settings → Advanced → Desktop App → Show Discord in the server rail**). That
+window is a separate process with no Tauri and nothing of Púca in it: no script
+of Púca's in the page, no message channel, no host objects, no interception of
+its requests, its own WebView2 profile held exclusively, top-level pages pinned
+to Discord's own domains, and no permission granted to any other site or without
+a question. Púca's own window can only open it, bring it forward, and close it
+to delete its profile ("Sign out of Discord and clear its data on this PC").
+Your Púca server never sees any of it. [DISCORD.md](DISCORD.md) names the code
+that enforces each part (`frontend/src-tauri/src/discord_host.rs`,
+`frontend/src-tauri/src/discord_window.rs`), the tests that hold it, and what
+remains: malware on the PC can read its saved sign-in as it could any browser's;
+a malicious Púca update would be trusted like any installed app's, which signed
+updates and the public source mitigate; and WebView2's own security updates come
+from Microsoft, with Edge's.

@@ -3,6 +3,7 @@ import { getProfile, updateProfile } from '../api/profile';
 import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { discordWindowAvailable } from '../api/discordWindow';
+import { DiscordWindowSettings } from './DiscordWindowSettings';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
@@ -3161,23 +3162,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 </div>
                                             )}
                                             {discordWindowAvailable() && (
-                                                <div className="settings-option">
-                                                    <div className="option-info">
-                                                        <label htmlFor="settings-show-discord">Show Discord in the server rail</label>
-                                                        <span className="option-hint">
-                                                            Adds a Discord button that opens Discord's own website in a
-                                                            window of its own. You sign in on Discord's page, and Púca
-                                                            does not see, keep or send anything in that window. Links
-                                                            to other sites open in your browser. Off by default.
-                                                        </span>
-                                                    </div>
-                                                    <input
-                                                        id="settings-show-discord"
-                                                        type="checkbox"
-                                                        checked={settings.showDiscordEntry}
-                                                        onChange={(e) => updateSetting('showDiscordEntry', e.target.checked)}
-                                                    />
-                                                </div>
+                                                <DiscordWindowSettings
+                                                    on={settings.showDiscordEntry}
+                                                    onChange={(on) => updateSetting('showDiscordEntry', on)}
+                                                />
                                             )}
                                         </div>
                                     </>

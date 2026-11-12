@@ -24,10 +24,13 @@ mod device_key;
 // NOT gated: `puca://invite/...` links from outside the app (the web invite
 // page's "Open in the Púca app", registered by the installer in both builds).
 mod deep_link;
-// NOT gated: Discord's own web app in a window of its own, run as a second
-// process of this executable with none of Púca in it (both builds). Public
-// for tests/discord_acl.rs, which needs its label and address.
+// NOT gated: Discord's own web app in a window of its own (docs/DISCORD.md),
+// run as a second process of this executable with no Tauri and nothing of Púca
+// in it (both builds). Public for tests/discord_acl.rs, which needs its name.
 pub mod discord_window;
+// That process on Windows: a plain Win32 window hosting WebView2 directly.
+#[cfg(windows)]
+mod discord_host;
 // A PC set up for remote control updating ITSELF (the page decides when):
 // quiet install, hidden relaunch, its records on disk. Hosts are RC-only.
 #[cfg(feature = "remote-control")]
@@ -1335,15 +1338,11 @@ fn started_hidden() -> bool {
 }
 
 pub fn run() {
-    // Generated once, for whichever app this process turns out to be: a second
-    // expansion would embed the frontend twice.
-    let context = tauri::generate_context!();
-
     // `Puca.exe --discord-window` is the Discord window's own process
-    // (discord_window.rs): none of what follows, no plugin of this app's, no
-    // command. Decided before anything else here touches WebView2 or the disk.
+    // (discord_window.rs, discord_host.rs): none of what follows, no Tauri, no
+    // plugin, no command. Decided before anything here touches WebView2 or the disk.
     if discord_window::is_window_launch(std::env::args_os()) {
-        discord_window::run_window_process(context);
+        discord_window::run_window_process();
         return;
     }
 
@@ -1856,6 +1855,7 @@ pub fn run() {
             open_external,
             deep_link::deep_link_take,
             discord_window::discord_window_open,
+            discord_window::discord_window_clear_data,
             set_unread_badge,
             get_idle_seconds,
             clear_webview_permissions,
@@ -1871,7 +1871,7 @@ pub fn run() {
             #[cfg(feature = "remote-control")]
             file_transfer::shareable_folders,
         ])
-        .build(context)
+        .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|handle, event| {
             // On exit, release any keys/buttons a control session left held so a

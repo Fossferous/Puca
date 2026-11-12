@@ -3,7 +3,10 @@
  * src-tauri/src/discord_window.rs): offered only in the Windows desktop app, in
  * the full build AND the Lite build, only once Settings turns it on, live with
  * no reload; a press asks the shell for `discord_window_open` and nothing else;
- * the Settings checkbox is where it is said to be, and nowhere on the web.
+ * the Settings checkbox is where it is said to be, says plainly what Púca can and
+ * cannot see, and nowhere on the web; "Sign out of Discord and clear its data on
+ * this PC" asks first, then asks the shell for `discord_window_clear_data` and says
+ * how it went; turning the switch off offers it too.
  *
  * Mounted with raw `react-dom/client` + `act`, as the repo's other component
  * tests are.
@@ -20,6 +23,9 @@ const env = vi.hoisted(() => ({
     mobile: false,
     rc: true,
     invoke: vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined),
+    /** The in-page question's answer, and what it was asked. */
+    confirm: true,
+    asked: [] as string[],
 }));
 
 vi.mock('../api/platform', async (importOriginal) => {
@@ -34,6 +40,10 @@ vi.mock('../api/platform', async (importOriginal) => {
 vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@tauri-apps/api/core')>()),
     invoke: (cmd: string, args?: unknown) => env.invoke(cmd, args),
+}));
+vi.mock('../api/appDialogs', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/appDialogs')>()),
+    askConfirm: async (message: string) => { env.asked.push(message); return env.confirm; },
 }));
 vi.mock('../hooks/queries', () => ({
     useServers: () => ({ data: [{ id: 's1', name: 'Mine', owner_id: 9, created_at: '' }], isLoading: false }),
@@ -107,7 +117,9 @@ beforeEach(() => {
     env.mobile = false;
     env.rc = true;
     env.invoke.mockReset();
-    env.invoke.mockImplementation(async () => undefined);
+    env.invoke.mockImplementation(async (cmd: string) => (cmd === 'discord_window_clear_data' ? 'cleared' : undefined));
+    env.confirm = true;
+    env.asked.length = 0;
     errors.length = 0;
     setUserAgent(WINDOWS_UA);
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -231,10 +243,90 @@ describe('the setting', () => {
         expect(loadSettings().showDiscordEntry).toBe(false);
     });
 
+    it('says plainly what Púca can and cannot see', async () => {
+        const box = await openAdvanced();
+        const hint = box!.closest('.settings-option')!.textContent!.replace(/\s+/g, ' ');
+        for (const claim of [
+            "Púca's code never runs in that window",
+            'Púca cannot read the page, your messages or your Discord sign-in',
+            'Your Púca server never sees any of it: the window talks to Discord directly',
+            'Your Discord sign-in is kept in a separate store on this PC',
+            'Off by default',
+        ]) {
+            expect(hint, claim).toContain(claim);
+        }
+    });
+
+    const clearCalls = () => env.invoke.mock.calls.filter(([cmd]) => cmd === 'discord_window_clear_data');
+    const clearButton = () => [...container.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Sign out and clear');
+    const statusText = () => container.querySelector('.discord-clear-status')?.textContent ?? '';
+
+    it.each([
+        ['the full build', true],
+        ['the Lite build', false],
+    ])('"Sign out of Discord and clear its data on this PC" asks, clears and says so, in %s', async (_build, rc) => {
+        env.rc = rc;
+        await openAdvanced();
+        expect(container.textContent).toContain('Sign out of Discord and clear its data on this PC');
+        const button = clearButton();
+        expect(button, 'the button is there, beside the switch').toBeTruthy();
+        expect(button!.closest('.settings-card')?.querySelector('#settings-show-discord')).not.toBeNull();
+
+        // Asked first, and Cancel clears nothing.
+        env.confirm = false;
+        await act(async () => { button!.click(); });
+        await settle();
+        expect(env.asked).toHaveLength(1);
+        expect(env.asked[0]).toMatch(/Sign out of Discord and clear its data on this PC\?/);
+        expect(env.asked[0]).toMatch(/Your Discord account itself is not touched/);
+        expect(clearCalls()).toHaveLength(0);
+
+        // OK clears, and says so.
+        env.confirm = true;
+        await act(async () => { button!.click(); });
+        await settle();
+        expect(clearCalls()).toEqual([['discord_window_clear_data', undefined]]);
+        expect(statusText()).toMatch(/signed out on this PC/);
+
+        // Nothing stored, and a refusal, are said too.
+        env.invoke.mockImplementation(async () => 'nothing');
+        await act(async () => { button!.click(); });
+        await settle();
+        expect(statusText()).toMatch(/had nothing stored/);
+        env.invoke.mockImplementation(async () => { throw 'The Discord window did not close. Close it, then try again.'; });
+        await act(async () => { button!.click(); });
+        await settle();
+        expect(statusText()).toBe('The Discord window did not close. Close it, then try again.');
+    });
+
+    it('turning the switch off offers the way out, and only then', async () => {
+        const box = await openAdvanced();
+        // On: no question.
+        await act(async () => { box!.click(); });
+        await settle();
+        expect(loadSettings().showDiscordEntry).toBe(true);
+        expect(env.asked).toHaveLength(0);
+        // Off, declined: the switch is off and nothing is cleared.
+        env.confirm = false;
+        await act(async () => { box!.click(); });
+        await settle();
+        expect(loadSettings().showDiscordEntry).toBe(false);
+        expect(env.asked).toHaveLength(1);
+        expect(clearCalls()).toHaveLength(0);
+        // Off, accepted: cleared.
+        await act(async () => { box!.click(); });
+        env.confirm = true;
+        await act(async () => { box!.click(); });
+        await settle();
+        expect(env.asked).toHaveLength(2);
+        expect(clearCalls()).toHaveLength(1);
+    });
+
     it('is not offered in the web app', async () => {
         env.tauri = false;
         const box = await openAdvanced();
         expect(box).toBeNull();
+        expect(container.textContent).not.toContain('Sign out of Discord');
         // CONTROL: the section did render.
         expect(container.textContent).toContain('Developer Mode');
     });
@@ -254,20 +346,22 @@ describe('the Lite build keeps it', () => {
         return JSON.parse(r.stdout) as boolean[];
     }
 
-    it('neither module is remote-control code the Lite build would strip', () => {
-        const [api, hook, control] = refused([
+    it('none of its modules is remote-control code the Lite build would strip', () => {
+        const [api, hook, settingsRows, control] = refused([
             join(SRC, 'api', 'discordWindow.ts'),
             join(SRC, 'components', 'useDiscordEntry.ts'),
+            join(SRC, 'components', 'DiscordWindowSettings.tsx'),
             // CONTROL: the guard does refuse remote-control code.
             join(SRC, 'components', 'RcGlobals.tsx'),
         ]);
         expect(api).toBe(false);
         expect(hook).toBe(false);
+        expect(settingsRows).toBe(false);
         expect(control).toBe(true);
     }, 30_000);
 
     it('and neither reads the remote-control switch', () => {
-        for (const rel of ['api/discordWindow.ts', 'components/useDiscordEntry.ts']) {
+        for (const rel of ['api/discordWindow.ts', 'components/useDiscordEntry.ts', 'components/DiscordWindowSettings.tsx']) {
             const text = readFileSync(join(SRC, rel), 'utf8');
             expect(text, rel).not.toMatch(/RC_ENABLED|__RC_ENABLED__|remoteControl/);
         }
