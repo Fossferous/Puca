@@ -116,7 +116,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   the caret was there when it was pressed, so a desktop click or a phone
   whose keyboard is down gets no caret and no keyboard back; Android's Back
   takes the keyboard down WITHOUT leaving the field, so after Back the X
-  still brings it up.
+  still brings it up. Tapped with the field left, the X takes no caret but
+  the bar keeps its shape for 400 ms, so a quick second tap lands in the box
+  and not on the grid/list switch. Pressed from the keyboard (Tab, then
+  Enter or Space) or by a screen reader, the X puts the focus back in the
+  field rather than dropping it on the page.
   Each "also matched" line is windowed around its own match: the row is a
   single ellipsised line, and the match is the only thing it exists to show.
 - **Reminders** — everything with a time, grouped Overdue / Today /

@@ -21,9 +21,51 @@
  * up. Android's Back hides the keyboard WITHOUT taking the focus from the
  * field, so after Back the field still has the caret and Clear brings the
  * keyboard back (measured on the emulator). Escape still clears and leaves.
+ *
+ * Two more cases of the same rule. Clear pressed from the KEYBOARD (Tab to
+ * it, Enter or Space) or by a screen reader is a click no pointer press led
+ * to (isVirtualClick below): the button it is on is about to go, so the focus
+ * goes back to the field instead of falling to the page, where the next Tab
+ * would start from the top. And a tap on Clear with the field left takes no
+ * focus, but the bar holds its shape for CLEAR_HOLD_MS so it does not
+ * collapse under the finger: a quick second tap there (within the hold) lands
+ * in the search box, which a press on the pill focuses, and not on the
+ * grid/list switch. A deliberate second tap after the hold meets the bar
+ * as it then is.
  */
-import { forwardRef, useCallback, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { CloseIcon, GridIcon, ListLayoutIcon, MenuIcon, NoteIcon, RefreshIcon, SearchIcon } from '../../components/Icons';
+
+/** How long the bar keeps its searching shape after a tap on Clear that put
+ *  no caret back: longer than a second tap of a double tap. */
+const CLEAR_HOLD_MS = 400;
+
+/**
+ * A click on Clear that no finger or mouse made: Enter or Space on the
+ * focused button, or a screen reader's activation. The first three checks
+ * are react-aria's isVirtualClick (@react-aria/utils, isVirtualEvent.ts):
+ *  - Firefox's `mozInputSource` 0: JAWS and NVDA there;
+ *  - on Android, a click carrying a pointer type is TalkBack's only when it
+ *    still reports the button held (`buttons` 1); a real tap's click comes
+ *    with it released. `detail` is not read there: TalkBack's varies;
+ *  - elsewhere, `detail` 0 with no pointer type: the keyboard, and most
+ *    screen readers;
+ *  - and ours: no pointerdown on this button since the last click (`pressed`
+ *    false). Every real tap and mouse click on it has one.
+ * NOT verified with a real screen reader: jsdom pins each check; Tab, then
+ * Enter or Space, was measured in real Chromium, and real taps on the
+ * Android emulator.
+ */
+function isVirtualClick(e: ReactMouseEvent, pressed: boolean): boolean {
+    const native = e.nativeEvent as MouseEvent & { pointerType?: string; mozInputSource?: number };
+    if (native.mozInputSource === 0 && native.isTrusted) return true;
+    if (typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent) && native.pointerType) {
+        if (e.buttons === 1) return true;
+    } else if (e.detail === 0 && !native.pointerType) {
+        return true;
+    }
+    return !pressed;
+}
 
 interface NotesTopBarProps {
     query: string;
@@ -44,9 +86,17 @@ export const NotesTopBar = forwardRef<HTMLInputElement, NotesTopBarProps>(functi
     searchRef,
 ) {
     const [focused, setFocused] = useState(false);
-    const searching = focused || query !== '';
+    /** A tap on Clear that put no caret back holds the bar's shape briefly. */
+    const [held, setHeld] = useState(false);
+    const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (heldTimer.current) clearTimeout(heldTimer.current); }, []);
+    const searching = focused || query !== '' || held;
     const input = useRef<HTMLInputElement | null>(null);
-    /** The Clear press began with the caret in the field. */
+    /** A pointer press on Clear is under way (pointerdown seen, no click yet),
+     *  and whether it began with the caret in the field. Reset by the click
+     *  that reads them and by pointercancel; NOT by pointerleave, which a
+     *  touch screen fires after pointerup and before the click, on every tap. */
+    const clearPressed = useRef(false);
     const clearFromField = useRef(false);
     const setInput = useCallback((el: HTMLInputElement | null) => {
         input.current = el;
@@ -102,12 +152,19 @@ export const NotesTopBar = forwardRef<HTMLInputElement, NotesTopBarProps>(functi
                         title="Clear"
                         // Whether the caret was in the field when the press began
                         // (pointerdown comes before the button takes the focus).
-                        onPointerDown={() => { clearFromField.current = document.activeElement === input.current; }}
-                        onClick={() => {
-                            const back = clearFromField.current;
+                        onPointerDown={() => { clearPressed.current = true; clearFromField.current = document.activeElement === input.current; }}
+                        onPointerCancel={() => { clearPressed.current = false; clearFromField.current = false; }}
+                        onClick={e => {
+                            // The keyboard's or a screen reader's click puts the focus back;
+                            // a pointer's does when its press began with the caret in the field.
+                            const back = isVirtualClick(e, clearPressed.current) || clearFromField.current;
+                            clearPressed.current = false;
                             clearFromField.current = false;
                             onClearQuery();
-                            if (back) input.current?.focus();
+                            if (back) { input.current?.focus(); return; }
+                            if (heldTimer.current) clearTimeout(heldTimer.current);
+                            setHeld(true);
+                            heldTimer.current = setTimeout(() => { heldTimer.current = null; setHeld(false); }, CLEAR_HOLD_MS);
                         }}
                     >
                         <CloseIcon size={16} />

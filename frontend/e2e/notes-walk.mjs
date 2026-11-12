@@ -3602,14 +3602,35 @@ sb = await searchBar();
 ck('phone: the search left empty, the Notes mark and the bar are back', sb.brandShown && (await m.locator('button[aria-label="Refresh"]').isVisible()), JSON.stringify(sb));
 // Clear pressed with the field LEFT (its keyboard down) leaves the focus alone:
 // no keyboard springs up, and nothing has a caret for a shortcut key to type into.
+// The bar holds its shape a moment (NotesTopBar.tsx, CLEAR_HOLD_MS = 400), so
+// right after the tap the place Clear was is still the search box, not the
+// grid/list switch; then the bar is whole again.
 await m.fill('.notes-search input', 'bread');
 await m.evaluate(() => document.querySelector('.notes-search input').blur());
 await sleep(250);
+const leftClearAt = await m.locator('button[aria-label="Clear search"]').boundingBox();
+// Measured IN the page the moment the click has been handled (a capture
+// listener's setTimeout 0, after React's render), not after the round trip
+// back here: Playwright's tap returns before the click lands, and a loaded
+// machine could take longer than the hold.
+await m.evaluate(({ x, y }) => {
+    window.__heldBar = null;
+    document.addEventListener('click', () => setTimeout(() => {
+        const i = document.querySelector('.notes-search input');
+        const at = document.elementFromPoint(x, y);
+        window.__heldBar = { value: i.value, focused: document.activeElement === i, inSearch: !!at?.closest('.notes-search'), at: at ? (at.closest('button')?.getAttribute('aria-label') || at.tagName) : null };
+    }, 0), { capture: true, once: true });
+}, { x: leftClearAt.x + leftClearAt.width / 2, y: leftClearAt.y + leftClearAt.height / 2 });
 await m.tap('button[aria-label="Clear search"]');
-await sleep(300);
+await m.waitForFunction(() => window.__heldBar !== null, null, { timeout: 5000 }).catch(() => {});
+const heldBar = await m.evaluate(() => window.__heldBar);
+ck('phone: right after Clear with the field left, where Clear was is the search field (no caret taken)',
+    !!heldBar && heldBar.value === '' && !heldBar.focused && heldBar.inSearch && heldBar.at === 'INPUT',
+    JSON.stringify(heldBar));
+await sleep(700);
 sb = await searchBar();
-ck('phone: Clear with the field left empties it, takes no focus, and the bar is whole again',
-    (await m.inputValue('.notes-search input')) === '' && !(await m.evaluate(() => document.activeElement === document.querySelector('.notes-search input'))) && sb.brandShown,
+ck('phone: Clear with the field left takes no focus, and the bar is whole again after its hold',
+    !(await m.evaluate(() => document.activeElement === document.querySelector('.notes-search input'))) && sb.brandShown,
     JSON.stringify(sb));
 
 // Ordering on a phone: list view is one column, so the grip is offered there

@@ -29,9 +29,14 @@
  *    button; while not searching it hides nothing;
  *  - Clear keeps the field focused when the press began with the caret in
  *    it, so the bar does not collapse under the finger and put the grid/list
- *    switch where Clear was; pressed with the field NOT focused it leaves the
- *    focus alone (no caret for single-key shortcuts to type into, no keyboard
- *    popping up); Escape clears and leaves, and the bar is whole again;
+ *    switch where Clear was (a touch screen's pointerleave, which comes
+ *    before the click, does not lose that); tapped with the field NOT focused
+ *    it leaves the focus alone (no caret for single-key shortcuts to type
+ *    into, no keyboard popping up) and the bar holds its shape a moment before
+ *    it collapses; pressed from the keyboard or a screen reader (a click with
+ *    detail 0) it puts the focus back in the field instead of dropping it on
+ *    the page; a cancelled press is forgotten; Escape clears and leaves, and
+ *    the bar is whole again;
  *  - a press anywhere on the pill focuses the field: unfocused, the input is
  *    only ~17 px of the pill on a 360 px phone (0 at 330 px), so a tap on the
  *    magnifier or the padding used to focus nothing; a press on Clear stays
@@ -204,10 +209,47 @@ function imeBackspace(el: HTMLInputElement, code = 8) {
         key(el, 'keyup', code === 229 ? 'Unidentified' : 'Backspace', code);
     });
 }
-/** A pointer or mouse press on `el`; false when a handler prevented its default. */
-function press(el: Element, type: 'pointerdown' | 'mousedown') {
-    return el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+/** A pointer or mouse event on `el`; false when a handler prevented its default. */
+function press(el: Element, type: 'pointerdown' | 'pointerup' | 'pointerout' | 'pointerleave' | 'pointercancel' | 'mousedown') {
+    return el.dispatchEvent(new MouseEvent(type, { bubbles: type !== 'pointerleave', cancelable: true, button: 0 }));
 }
+/** A click with the fields a browser fills in. jsdom's `click()` has detail
+ *  0, which is what Enter or Space on a button gives; `pointerType` is how a
+ *  Chromium click (a PointerEvent there) says what made it. */
+function clickWith(el: Element, { detail, buttons = 0, pointerType }: { detail: number; buttons?: number; pointerType?: string }) {
+    const ev = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, buttons, detail });
+    if (pointerType !== undefined) Object.defineProperty(ev, 'pointerType', { value: pointerType });
+    return el.dispatchEvent(ev);
+}
+/** The click a mouse or a finger ends with: `detail` 1, the button released. */
+const pointerClick = (el: Element, pointerType?: string) => clickWith(el, { detail: 1, pointerType });
+/** The click Enter or Space on a focused button, or a screen reader, gives: no pointer, detail 0. */
+const keyClick = (el: Element) => clickWith(el, { detail: 0, pointerType: '' });
+/** A tap on `el` in a touch screen's order: pointerdown, pointerup, then
+ *  pointerout/pointerleave (touch has no hover, so they come BEFORE the
+ *  click), the focus moving at the compat mousedown, then the click. */
+function tap(el: HTMLElement, pointerType?: string) {
+    press(el, 'pointerdown');
+    press(el, 'pointerup');
+    press(el, 'pointerout');
+    press(el, 'pointerleave');
+    el.focus();
+    pointerClick(el, pointerType);
+}
+/** For the length of `fn`, a user agent that says Android (Chrome on a phone, the WebView). */
+async function asAndroid(fn: () => Promise<void> | void) {
+    const spy = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 16; Pixel) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Mobile Safari/537.36');
+    try { await fn(); } finally { spy.mockRestore(); }
+}
+/** A search typed, then the field left: the caret is nowhere. */
+function typedAndLeft(word: string) {
+    act(() => { field().focus(); });
+    for (const ch of word) imeLetter(field(), ch);
+    act(() => { field().blur(); });
+    return bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
+}
+/** Real time, in act: the bar's hold after a Clear is a timer. */
+const wait = async (ms: number) => { await act(async () => { await new Promise(r => setTimeout(r, ms)); }); };
 /** A word typed as a composition (Gboard with suggestions on, Samsung's keyboard). */
 function imeCompose(el: HTMLInputElement, word: string) {
     act(() => {
@@ -309,11 +351,9 @@ describe('Notes search on a phone has the room an Android keyboard needs', () =>
         act(() => { field().focus(); });
         for (const ch of 'milk') imeLetter(field(), ch);
         const clear = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
-        // A tap with the caret in the field: pointerdown while the field still
-        // has it, then the button takes the focus (the field blurs), then the click.
-        act(() => { press(clear, 'pointerdown'); clear.focus(); });
-        expect(bar().classList.contains('searching')).toBe(true);
-        act(() => { clear.click(); });
+        // A tap with the caret in the field, in a touch screen's order: the
+        // pointerleave before the click must not lose what pointerdown saw.
+        act(() => { tap(clear); });
         expect(field().value).toBe('');
         expect(document.activeElement).toBe(field());
         expect(bar().classList.contains('searching')).toBe(true);
@@ -335,12 +375,100 @@ describe('Notes search on a phone has the room an Android keyboard needs', () =>
         act(() => { field().blur(); });
         expect(bar().classList.contains('searching')).toBe(true);
         const clear = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
-        act(() => { press(clear, 'pointerdown'); clear.focus(); });
-        act(() => { clear.click(); });
+        act(() => { tap(clear); });
         expect(field().value).toBe('');
         expect(shownTitles()).toEqual(ALL);
         expect(document.activeElement).not.toBe(field());
+        // The bar holds its shape a moment, so it does not collapse under the
+        // finger and put the grid/list switch where Clear was...
+        expect(bar().classList.contains('searching')).toBe(true);
+        expect(document.activeElement).not.toBe(field());
+        // ...and then is whole again, still with no caret in the field.
+        await wait(700);
         expect(bar().classList.contains('searching')).toBe(false);
+        expect(document.activeElement).not.toBe(field());
+    });
+
+    it('Clear from the keyboard (Enter or Space) or a screen reader puts the focus back in the field, not on the page', async () => {
+        mount();
+        await settle();
+        act(() => { field().focus(); });
+        for (const ch of 'milk') imeLetter(field(), ch);
+        const clear = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
+        // Tab to it: the field blurs, the button has the focus, no pointer anywhere.
+        act(() => { clear.focus(); });
+        act(() => { keyClick(clear); });
+        expect(field().value).toBe('');
+        expect(document.activeElement).toBe(field());
+        expect(bar().classList.contains('searching')).toBe(true);
+        // The same from a field that had been left (a screen reader moves no caret first).
+        for (const ch of 'bike') imeLetter(field(), ch);
+        act(() => { field().blur(); });
+        const clear2 = bar().querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')!;
+        act(() => { keyClick(clear2); });
+        expect(field().value).toBe('');
+        expect(document.activeElement).toBe(field());
+    });
+
+    it('Enter or Space on Clear puts the focus back even after a mouse press that was dragged off it', async () => {
+        mount();
+        await settle();
+        const clear = typedAndLeft('milk');
+        // Pressed with the mouse, dragged off, released elsewhere: no click, no cancel.
+        act(() => { press(clear, 'pointerdown'); });
+        // Then Tab to it and Enter: detail 0 says keyboard, whatever the stale press says.
+        act(() => { clear.focus(); keyClick(clear); });
+        expect(field().value).toBe('');
+        expect(document.activeElement).toBe(field());
+    });
+
+    it('a click no pointer press led to (an accessibility service\'s activation) puts the focus back', async () => {
+        mount();
+        await settle();
+        const clear = typedAndLeft('milk');
+        // detail 1 and the button released, like a tap's, but no pointerdown on the button first.
+        act(() => { clear.focus(); pointerClick(clear); });
+        expect(field().value).toBe('');
+        expect(document.activeElement).toBe(field());
+    });
+
+    it('Android TalkBack\'s activation (a pointer type, the button still held) puts the focus back', async () => {
+        await asAndroid(async () => {
+            mount();
+            await settle();
+            const clear = typedAndLeft('milk');
+            // TalkBack's double-tap: pointerdown on the button, then a click whose
+            // `buttons` still reports the button and whose `detail` is not 0.
+            act(() => { press(clear, 'pointerdown'); clear.focus(); clickWith(clear, { detail: 1, buttons: 1, pointerType: 'touch' }); });
+            expect(field().value).toBe('');
+            expect(document.activeElement).toBe(field());
+        });
+    });
+
+    it('on Android a real tap on Clear with the field left is not taken for TalkBack: no caret, the bar held', async () => {
+        await asAndroid(async () => {
+            mount();
+            await settle();
+            const clear = typedAndLeft('milk');
+            act(() => { tap(clear, 'touch'); });
+            expect(field().value).toBe('');
+            expect(document.activeElement).not.toBe(field());
+            expect(bar().classList.contains('searching')).toBe(true);
+            await wait(700);
+            expect(bar().classList.contains('searching')).toBe(false);
+        });
+    });
+
+    it('a cancelled press on Clear is forgotten: a later click with no press of its own is judged as one', async () => {
+        mount();
+        await settle();
+        const clear = typedAndLeft('milk');
+        // A press with the field left, then the finger turned it into a scroll.
+        act(() => { press(clear, 'pointerdown'); press(clear, 'pointercancel'); });
+        // An activation with no pointerdown of its own: not the cancelled press's click.
+        act(() => { clear.focus(); pointerClick(clear); });
+        expect(field().value).toBe('');
+        expect(document.activeElement).toBe(field());
     });
 
     it('a press anywhere on the pill (the magnifier, the padding) focuses the field; a press on Clear or the field itself is left alone', async () => {
