@@ -1198,6 +1198,19 @@
     .notes-retime-edit .notes-textbtn { min-height: 44px; padding: 6px 14px; font-size: 16px; }
 }
 
+/* A phone's top bar has no room for the search field beside the mark and
+   four buttons: on a 411 px screen the field was 20 px wide once its Clear
+   button appeared, and on a 360 px one under 20 px before a letter was in.
+   In a field under ~36 px, Android's keyboard in the WebView lands each
+   letter at the START, so "milk" went in as "klmi" and Backspace deleted
+   nothing (NotesTopBar.tsx has the measurement). While searching (the field
+   focused or holding text) the mark, Refresh and the grid/list switch give
+   the field the row; the menu and the account button stay. */
+@media (pointer: coarse) and (max-width: 600px) {
+    .notes-topbar.searching .notes-brand,
+    .notes-topbar.searching .notes-topbar-spare { display: none; }
+}
+
 /* Reduced motion: the app-level [data-animations="false"] kills these too,
    this covers the OS preference for people who never opened Settings. */
 @media (prefers-reduced-motion: reduce) {

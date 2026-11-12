@@ -3528,16 +3528,72 @@ await m.keyboard.press('Escape');
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-dialog', { state: 'detached', timeout: 5000 });
 
+// The search field has ROOM on a phone (NotesTopBar.tsx, notes.css): it was
+// 20 px wide at 411 px and about nothing at 390 once its Clear button showed,
+// and in a field under ~36 px Android's keyboard in the WebView lands every
+// letter at the START, so "milk" went in as "klmi" and Backspace deleted
+// nothing (measured on an emulator with Gboard; page.fill cannot see it,
+// which is how this walk passed it). Focused and holding text, the field
+// must be wide, with the menu, Clear and the account button on screen and
+// what a tap there hits. Clear keeps the field focused, so the bar does not
+// collapse under the finger (it would put the grid/list switch where Clear
+// was); the mark comes back once the field is left empty. (clientWidth, not
+// innerWidth: see audit() above.)
+const searchBar = () => m.evaluate(() => {
+    const q = (s) => document.querySelector(s);
+    const hit = (s) => { const el = q(s); if (!el) return null; const b = el.getBoundingClientRect(); const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return { w: Math.round(b.width), on: b.right <= document.documentElement.clientWidth + 0.5 && b.left >= -0.5, hit: !!at && (at === el || el.contains(at)) }; };
+    const brand = q('.notes-brand');
+    return {
+        input: Math.round(q('.notes-search input').getBoundingClientRect().width),
+        brandShown: !!brand && brand.getBoundingClientRect().width > 0,
+        menu: hit('button[aria-label="Open navigation"]'),
+        clear: hit('button[aria-label="Clear search"]'),
+        account: hit('button[aria-label="Account and settings"]'),
+    };
+});
+await m.tap('.notes-search input');
+await sleep(250);
+let sb = await searchBar();
+ck('phone: the focused, empty search field is wide enough to type in (>= 120 px)', sb.input >= 120, JSON.stringify(sb));
 // A highlight must not push the card sideways at 390px.
 await m.fill('.notes-search input', 'bread');
 await sleep(400);
+sb = await searchBar();
+ck('phone: holding text, the search field is wide enough to type in and delete from (>= 120 px)', sb.input >= 120, JSON.stringify(sb));
+ck('phone: while searching, the menu, Clear and the account button are on screen and hit',
+    !!sb.menu?.on && !!sb.menu?.hit && !!sb.clear?.on && !!sb.clear?.hit && !!sb.account?.on && !!sb.account?.hit, JSON.stringify(sb));
+// NEGATIVE CONTROL: the same field without the `searching` mark is the old
+// layout, and the measurement must see it squeezed under the keyboard's floor.
+const unmarkedWidth = await m.evaluate(() => {
+    const bar = document.querySelector('.notes-topbar');
+    bar.classList.remove('searching');
+    const w = document.querySelector('.notes-search input').getBoundingClientRect().width;
+    bar.classList.add('searching');
+    return Math.round(w);
+});
+ck('phone: CONTROL — without the searching mark the same field is squeezed under 36 px', unmarkedWidth < 36, `${unmarkedWidth}px`);
 r = await audit();
 ck('phone: a search highlight does not overflow the card',
     await m.locator('mark.notes-hl').count() >= 1 && !r.bodyScrollsHorizontally && r.widest <= r.vw + 1,
     JSON.stringify({ widest: r.widest, vw: r.vw }));
 await mshot('phone-search-highlight');
+const clearAt = await m.locator('button[aria-label="Clear search"]').boundingBox();
 await m.tap('button[aria-label="Clear search"]');
 await sleep(300);
+sb = await searchBar();
+const underClear = await m.evaluate(({ x, y }) => {
+    const at = document.elementFromPoint(x, y);
+    return { focused: document.activeElement === document.querySelector('.notes-search input'), inSearch: !!at?.closest('.notes-search'), at: at ? (at.closest('button')?.getAttribute('aria-label') || at.tagName) : null };
+}, { x: clearAt.x + clearAt.width / 2, y: clearAt.y + clearAt.height / 2 });
+ck('phone: Clear empties the field and keeps it focused and wide, so the bar stays put',
+    (await m.inputValue('.notes-search input')) === '' && underClear.focused && sb.input >= 120 && !sb.brandShown, JSON.stringify({ sb, underClear }));
+ck('phone: a second tap where Clear was lands in the search box, never on the grid/list switch',
+    underClear.inSearch && !/Switch to (list|grid) view|Refresh/.test(underClear.at || ''), JSON.stringify(underClear));
+// Left empty (a tap elsewhere blurs it, as Android does), the bar is whole again.
+await m.evaluate(() => document.querySelector('.notes-search input').blur());
+await sleep(250);
+sb = await searchBar();
+ck('phone: the search left empty, the Notes mark and the bar are back', sb.brandShown && (await m.locator('button[aria-label="Refresh"]').isVisible()), JSON.stringify(sb));
 
 // Ordering on a phone: list view is one column, so the grip is offered there
 // — and it must be a real tap target that does not scroll the page when

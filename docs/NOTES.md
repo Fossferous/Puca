@@ -105,6 +105,12 @@ Púca's reminders. Anything you do in one is what you see in the other.
   from text this device has already decrypted: it is never stored, never
   cached and never sent, the query still never reaches the address bar, and
   text that cannot be decrypted is neither searched nor highlighted.
+  On a phone (a touch screen up to 600 px wide) the search box takes the top
+  bar while it is focused or holds text: the Notes mark, Refresh and the
+  grid/list switch step aside, and the menu and the account button stay.
+  Squeezed between them, the box was 20 px wide, and Android's keyboard in a
+  field under ~36 px puts every letter at the start, so Backspace deleted
+  nothing (NotesTopBar.tsx has the measurement).
   Each "also matched" line is windowed around its own match: the row is a
   single ellipsised line, and the match is the only thing it exists to show.
 - **Reminders** — everything with a time, grouped Overdue / Today /
