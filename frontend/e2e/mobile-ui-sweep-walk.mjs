@@ -5,6 +5,9 @@
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
 //              description. CONTROL: a field forced to 15px must be caught.
+//   toggle     The chat header's checklist button has no background or border, like the pin button
+//              beside it (it was the browser's own grey button on every theme). CONTROL: an
+//              unstyled button in the same header must be caught.
 //   header     A message from a 32-character name: its time is whole, on one line, inside the
 //              message and the window (it was "Today / at / 17:54" down the edge at 390, and off
 //              the screen at 360).
@@ -209,6 +212,29 @@ try {
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
+        }
+
+        // ── toggle: the chat header's checklist button is drawn like the pin button beside it
+        if (want('toggle')) {
+            const t = await P.evaluate(() => {
+                const look = (el) => { const cs = getComputedStyle(el); return { bg: cs.backgroundColor, border: cs.borderTopStyle }; };
+                const list = document.querySelector('.chat-header .checklist-toggle-btn');
+                const pins = document.querySelector('.chat-header .pins-toggle-btn');
+                // CONTROL: a button nothing styles, in the same header, is the browser's grey one.
+                const bare = document.createElement('button');
+                document.querySelector('.chat-header').appendChild(bare);
+                const control = look(bare);
+                bare.remove();
+                return { list: list && look(list), pins: pins && look(pins), control };
+            });
+            const plain = (l) => !!l && /rgba\(0, 0, 0, 0\)|transparent/.test(l.bg) && l.border === 'none';
+            check(`${size} toggle: the checklist button is drawn like the pin button (no background, no border)`, plain(t.list) && t.list.bg === t.pins.bg, t);
+            check(`${size} toggle: CONTROL - an unstyled button in the header is caught`, !plain(t.control), t.control);
+            check(`${size} toggle: a tap lands on the checklist button`, await tap(P, P.locator('.chat-header .checklist-toggle-btn')));
+            await sleep(400);
+            await tap(P, P.locator('.chat-header .checklist-toggle-btn')).catch(() => {});
+            await sleep(300);
+            await shot(P, `toggle-${size}`);
         }
 
         // ── header: a message from the 32-character name
