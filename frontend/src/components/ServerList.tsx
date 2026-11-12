@@ -9,7 +9,7 @@ import { serverUnreadCount, subscribeServerUnread } from './unreadStore';
 import './ServerList.css';
 import { AuthedImg } from './AuthedImg';
 import {
-    BellIcon, BellOffIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CompassIcon,
+    BellIcon, BellOffIcon, ChatIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CompassIcon,
     CopyIcon, DisbandIcon, EyeIcon, LogoutIcon, MailOpenIcon, MessageIcon, MonitorIcon,
     NoteIcon, SettingsIcon, UserAddIcon, UserIcon,
 } from './Icons';
@@ -25,6 +25,9 @@ interface ServerListProps {
     onOpenNotes?: () => void;
     /** Open the Devices view. */
     onOpenDevices?: () => void;
+    /** Open Discord's web app in a window of its own (desktop app, when the
+     *  owner turned it on: api/discordWindow.ts). Absent = no entry. */
+    onOpenDiscord?: () => void;
     /** Highlight the Devices rail button while the view is showing. */
     devicesActive?: boolean;
     /** Highlight the Notes rail button while the Tasks view is showing. */
@@ -70,6 +73,7 @@ export function ServerList({
     onJoinServer,
     onOpenNotes,
     onOpenDevices,
+    onOpenDiscord,
     devicesActive = false,
     notesActive = false,
     showingFriends = false,
@@ -407,6 +411,18 @@ export function ServerList({
                     >
                         <div className="server-icon-inner notes"><NoteIcon size={26} /></div>
                         {notesActive && <div className="server-indicator"></div>}
+                    </div>
+                )}
+
+                {/* Discord's own web app, in a window of its own (never inside
+                    this one, so nothing here ever lights up for it). */}
+                {onOpenDiscord && (
+                    <div
+                        className="server-icon discord-window"
+                        onClick={onOpenDiscord}
+                        title="Discord — opens Discord's website in a window of its own"
+                    >
+                        <div className="server-icon-inner discord-window"><ChatIcon size={26} /></div>
                     </div>
                 )}
 

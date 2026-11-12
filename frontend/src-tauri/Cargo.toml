@@ -172,6 +172,20 @@ sysinfo = "0.32"
 # `::windows_core::` paths, hence windows-core below: the same 0.58 release the
 # windows crate already pulls in, named directly — no new crate in the lock.
 windows-core = "0.58"
+# The Discord window's notification question (discord_window.rs): its
+# PermissionRequested handler, on the controller Tauri hands `with_webview`.
+# The SAME releases wry already builds (webview2-com 0.38 on windows 0.61), so
+# nothing new in the lock; wv2-core is that windows-core 0.61 under another
+# name, for the BOOL / PWSTR / HSTRING its methods take.
+webview2-com = "0.38"
+wv2-core = { package = "windows-core", version = "0.61" }
 windows = { version = "0.58", features = ["implement", "Win32_UI_Shell_PropertiesSystem", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services", "Win32_Graphics_Imaging", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 
 
+
+[dev-dependencies]
+# tauri::test (MockRuntime, get_ipc_response): discord_window.rs puts the
+# capability set this build compiled in through Tauri's own ACL. A feature of
+# the tauri already in the lock (`test = []`); dev-only, so the shipped app is
+# built without it.
+tauri = { version = "2.9.4", features = ["devtools", "tray-icon", "image-png", "test"] }

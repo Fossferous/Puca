@@ -1390,6 +1390,63 @@ Púca is not open. Tap the switch and allow notifications when the browser asks.
 
 ---
 
+## Discord in a window of its own (Windows desktop app)
+
+For people you still talk to on Discord, the Windows desktop app can open
+Discord's own website in a window of its own, without Discord installed.
+
+**Turn it on:** **Settings → Advanced → Desktop App → Show Discord in the
+server rail**. A **Discord** button appears in the server rail, above **Join a
+Server**. It is off by default.
+
+**Use it:** press the button and Discord's own page (`discord.com/app`) opens
+in its own window. Sign in on Discord's page as you would in a browser (email
+or phone and password, the QR code from Discord's phone app, or a passkey).
+From then on it is Discord: your DMs, your servers, replying as yourself. It
+stays signed in. Pressing the button again brings that window to the front; its
+size and place are remembered.
+
+**What Púca does there: nothing but open it.** Púca does not read, keep, send
+or press anything in that window, and holds no Discord sign-in of yours.
+
+- Discord's cookies and storage are kept apart from Púca's, in their own
+  folder (`%LOCALAPPDATA%\com.sovereign.chat\discord-profile`). Signing out of
+  Púca does not sign you out of Discord, and the other way round; **Log Out**
+  in Discord's own settings signs you out of Discord.
+- The window is a separate Púca program (a second **Púca** in Task Manager)
+  with none of Púca's features, data or connection to your server in it.
+- Discord's own pages stay in the window. Links to anything else (a YouTube
+  link, a picture's **Open in Browser**, a help article) open in your web
+  browser. So does linking an account under Discord's **Connections**
+  (Spotify, Xbox, ...): finish that in the browser, signed in to Discord
+  there.
+- It has no developer console: "paste this into the console" is how Discord
+  accounts are stolen, and Discord warns about it for that reason.
+
+**Notifications.** The first time Discord asks to show notifications (its own
+**Enable** banner, or **User Settings → Notifications** in Discord), Púca asks
+whether to allow them, because the window has no question of its own for this.
+Say **Yes** and Windows shows Discord's notifications, straight from Discord's
+page: Púca never sees them. **No** is not remembered, so Discord can ask again
+later. To stop them, turn them off in Discord's own notification settings.
+Discord plays its own sounds in that window, and a Discord call asks for your
+microphone and camera the usual way.
+
+**Good to know.**
+
+- Closing the window closes Discord. Quitting Púca does not close it: it is a
+  window of its own. Installing a Púca update closes it; open it again
+  afterwards.
+- It works the same in **Púca Lite**.
+- There is no Discord button in the web app or on phones. In a browser, a tab
+  of Discord's own site does this better (Discord's page cannot be shown inside
+  another site anyway), and on a phone Discord's own app does, with its own
+  notifications.
+- Púca shows no unread count from Discord: knowing it would mean reading
+  Discord's page.
+
+---
+
 ## Custom Emojis
 
 ### Upload an Emoji

@@ -210,6 +210,7 @@ import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedC
 import { playMessageSound, playMentionSound } from '../utils/audioFeedback';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { loadSettings } from './settingsStore';
+import { useDiscordEntry } from './useDiscordEntry';
 import { notifyNewMessage } from '../api/desktopNotify';
 import { startTaskReminders } from '../api/taskReminders';
 import { requestTasksTab } from '../api/tasksViewIntent';
@@ -1613,6 +1614,9 @@ export function Chat({ onLogout }: ChatProps) {
     const showToast = useCallback((text: string) => {
         setToast(prev => ({ text, seq: (prev?.seq ?? 0) + 1 }));
     }, []);
+    // The rail's Discord entry: the Windows desktop app, when Settings turns it
+    // on. Opens Discord's own window; nothing of it is ever in this one.
+    const openDiscord = useDiscordEntry(showToast);
 
     // Server-side rejections of a WS send (ServerMessage::Error) had NO handler
     // at all: the socket layer dispatches strictly by type, so a rejected DM —
@@ -5660,6 +5664,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // dashboard's tab (the sidebar's Tasks, the Friends panel's
                 // tab), so it lights the home button. Elsewhere: the Tasks view.
                 onOpenNotes={notesInApp ? (showNotesView ? leaveNotesView : openNotesView) : openTasksView}
+                onOpenDiscord={openDiscord}
                 notesActive={notesInApp ? showNotesView : showFriendsPanel && friendsTab === 'tasks'}
                 showingFriends={notesInApp ? showFriendsPanel : showFriendsPanel && friendsTab !== 'tasks'}
                 onShowFriends={() => {
