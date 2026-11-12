@@ -22,10 +22,12 @@ import { isAuthenticated } from '../api/auth';
 import { CloseIcon } from './Icons';
 import './Modal.css';
 import './DeepLinkNotice.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 export function DeepLinkNotice() {
     const notice = useSyncExternalStore(subscribeDeepLinkNotice, getDeepLinkNotice, getDeepLinkNotice);
     const [checking, setChecking] = useState(false);
+    useBackClose(dismissDeepLinkNotice, notice !== null);
 
     // Escape closes THIS, and only this: it is on top of whatever was open
     // (Settings, a call's dialogs), and one press must not close those too.

@@ -14,6 +14,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
+import { useBackClose } from '../../hooks/useBackClose';
 
 interface PopoverProps {
     anchor: HTMLElement | null;
@@ -27,6 +28,7 @@ const MARGIN = 8;
 export function Popover({ anchor, onClose, label, children }: PopoverProps) {
     const portalTarget = usePortalTarget();
     const onScreen = useLayerOnScreen();
+    useBackClose(onClose, onScreen);
     const ref = useRef<HTMLDivElement>(null);
     const [pos, setPos] = useState<{ left: number; top: number }>({ left: MARGIN, top: MARGIN });
 

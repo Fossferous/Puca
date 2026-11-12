@@ -14,6 +14,7 @@ import {
     NoteIcon, SettingsIcon, UserAddIcon, UserIcon,
 } from './Icons';
 import { askConfirm } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface ServerListProps {
     // servers prop removed
@@ -207,6 +208,7 @@ export function ServerList({
         server: null,
     });
     const menuRef = useRef<HTMLDivElement>(null);
+    useBackClose(() => setContextMenu(prev => ({ ...prev, visible: false })), contextMenu.visible);
     // Notification-level submenu open state; reset when the menu (re)opens.
     const [showNotifySubmenu, setShowNotifySubmenu] = useState(false);
     // Bump to re-render after writing a store the menu reads at render time

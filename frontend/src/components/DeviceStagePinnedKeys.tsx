@@ -56,6 +56,7 @@ import {
     GripIcon,
     TrashIcon,
 } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 
 const PINS_POS_KEY = 'device-stage-pinned-keys-pos';
 /** Grip strip + a row of 46 px buttons, padding included (a first guess
@@ -208,6 +209,7 @@ export function DeviceStagePinnedKeysEditor({ pins, onChange, show, onShow, peer
     peerName: string | null;
     onClose: () => void;
 }) {
+    useBackClose(onClose);
     const [mods, setMods] = useState<PinMod[]>([]);
     const [code, setCode] = useState('F5');
     const shadeOk = shadeKeysAvailable();

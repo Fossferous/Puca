@@ -68,6 +68,7 @@ import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
 import { interceptBack } from '../api/mobileApp';
+import { useBackClose } from '../hooks/useBackClose';
 
 const MOBILE = isMobile();
 
@@ -245,6 +246,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // keeps its menu; the keyboard reaches the panel from the tile too.
     const coarse = useCoarsePointer();
     const [volPanel, setVolPanel] = useState<{ userId: number; anchor: { top: number; bottom: number; right: number } } | null>(null);
+    useBackClose(() => setVolPanel(null), volPanel !== null);
     const volPanelRef = useRef<HTMLDivElement>(null);
     const volOpenerRef = useRef<HTMLButtonElement | null>(null);
     // Open only while its stream is watched: one that stops goes with it.

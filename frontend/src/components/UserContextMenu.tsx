@@ -33,6 +33,7 @@ import {
     FlagIcon,
 } from './Icons';
 import { askConfirm } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 export interface UserContextMenuProps {
     userId: number;
@@ -98,6 +99,7 @@ export function UserContextMenu({
     onToggleCustomSounds,
     onReport,
 }: UserContextMenuProps) {
+    useBackClose(onClose);
     const menuRef = useRef<HTMLDivElement>(null);
     const [volume, setVolume] = useState(() => getLocalUserVolumes()[userId] ?? 100);
     const [isMuted, setIsMuted] = useState(() => getLocalUserMutes()[userId] ?? false);

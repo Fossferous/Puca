@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Icon, type IconName, ArrowLeftIcon, ChevronRightIcon, CloseIcon, GlobeIcon, ImageIcon, MembersIcon } from './Icons';
 import './ServerCreateWizard.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 /** Everything the wizard collected. Every field is acted on (api/serverTemplates.ts). */
 export interface WizardResult {
@@ -38,6 +39,7 @@ const templates: Template[] = [
 ];
 
 export function ServerCreateWizard({ isOpen, onClose, onComplete, onJoinInstead }: ServerCreateWizardProps) {
+    useBackClose(onClose, isOpen);
     const [step, setStep] = useState<WizardStep>('template');
     const [selectedTemplate, setSelectedTemplate] = useState<string>('custom');
     const [audience, setAudience] = useState<'community' | 'friends'>('friends');

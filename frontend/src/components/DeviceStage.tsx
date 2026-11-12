@@ -94,6 +94,7 @@ import {
     CloseIcon, CrosshairIcon, LiveDotIcon, PlayIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 
 /**
@@ -594,6 +595,10 @@ export function DeviceStage() {
     /** "Type text…": the dialog's starting text, or null while it is closed. */
     const [typeText, setTypeText] = useState<string | null>(null);
     const typeTextOpen = typeText !== null;
+    // Android's BACK closes the phone's open menu, the type-text box and the
+    // pinned-keys editor first (they take it themselves); the stage itself is
+    // a screen, not a layer.
+    useBackClose(() => setActiveMobileMenu(null), isMobile && activeMobileMenu !== null);
     /** Real fullscreen (stageFullscreen.ts) is on. */
     const [fullscreen, setFullscreen] = useState(false);
     /** The stage root, which is what goes fullscreen. */

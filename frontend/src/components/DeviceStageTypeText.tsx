@@ -16,6 +16,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { MAX_TYPED_CHARS } from '../api/devices/typeText';
+import { useBackClose } from '../hooks/useBackClose';
 
 export function DeviceStageTypeText({ peerName, initial = '', onType, onClose }: {
     peerName: string | null;
@@ -23,6 +24,7 @@ export function DeviceStageTypeText({ peerName, initial = '', onType, onClose }:
     onType: (text: string) => void;
     onClose: () => void;
 }) {
+    useBackClose(onClose);
     const [text, setText] = useState(initial);
     const ref = useRef<HTMLTextAreaElement | null>(null);
     useEffect(() => { ref.current?.focus(); }, []);

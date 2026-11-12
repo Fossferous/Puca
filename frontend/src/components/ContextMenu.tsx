@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './ContextMenu.css';
 import { Icon, type IconName } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 
 export interface ContextMenuItem {
     id: string;
@@ -58,6 +59,7 @@ const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<H
 export function ContextMenu({ items, position, onClose, opener, label, fromKeyboard }: ContextMenuProps) {
     const menuRef = React.useRef<HTMLDivElement>(null);
     const [adjustedPosition, setAdjustedPosition] = useState(position);
+    useBackClose(onClose);
 
     useEffect(() => {
         // Adjust position to stay within viewport

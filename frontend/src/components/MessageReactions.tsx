@@ -7,6 +7,7 @@ import { EmojiPicker } from './EmojiPicker';
 import { PlusIcon } from './Icons';
 import './MessageReactions.css';
 import { AuthedImg } from './AuthedImg';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface MessageReactionsProps {
     messageId: string;
@@ -23,6 +24,7 @@ interface MessageReactionsProps {
 export function MessageReactions({ messageId, currentUserId, serverId, openRequest }: MessageReactionsProps) {
     const [reactions, setReactions] = useState<Reaction[]>([]);
     const [showPicker, setShowPicker] = useState(false);
+    useBackClose(() => setShowPicker(false), showPicker);
     const [loading, setLoading] = useState(true);
     const [customEmojis, setCustomEmojis] = useState<CustomEmoji[]>([]);
     const pickerRef = useRef<HTMLDivElement>(null);

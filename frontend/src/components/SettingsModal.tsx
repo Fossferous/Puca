@@ -71,6 +71,7 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 import WebPushSetting from './WebPushSetting';
 import { askConfirm, tellUser } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -630,6 +631,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             })
             .finally(() => setUnblocking(null));
     };
+
+    useBackClose(onClose, isOpen);
 
     // The header renders an "ESC" hint — make Escape actually close the modal.
     useEffect(() => {

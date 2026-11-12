@@ -3,6 +3,7 @@ import { activeSessions, endSession, subscribeSessions, type DeviceControlSessio
 import { DeviceFileManager } from './DeviceFileManager';
 import { DeviceDownloadStrip } from './DeviceDownloads';
 import './DeviceFileBrowser.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 /**
  * The file browser as its own surface, with no screen behind it.
@@ -39,6 +40,7 @@ export function DeviceFileBrowser() {
     const session = sessions.find(
         s => s.role === 'controller' && s.filesOnly && !s.audioHub && !s.powerOffOnly && s.phase !== 'ended',
     ) ?? null;
+    useBackClose(() => { if (session) endSession(session.id, 'closed the file browser'); }, session !== null);
 
     if (!session) return null;
 

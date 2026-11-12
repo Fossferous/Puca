@@ -29,6 +29,7 @@ import {
     PlusIcon, RepeatIcon, SnoozeIcon,
 } from '../Icons';
 import './Calendar.css';
+import { useBackClose } from '../../hooks/useBackClose';
 
 export type CalView = 'month' | 'week' | 'day' | 'agenda';
 
@@ -511,6 +512,7 @@ function EntryMenu({
     const portalTarget = usePortalTarget();
     const onScreen = useLayerOnScreen();
     const [moveTo, setMoveTo] = useState(entry.dayKeys[0]);
+    useBackClose(onClose, onScreen);
     useEffect(() => {
         // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
         if (!onScreen) return;

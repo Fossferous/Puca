@@ -14,6 +14,7 @@ import {
 import { AppMixerList, type MixerRowState } from './AppMixerList';
 import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
 import './ScreenShareModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface Props {
     isOpen: boolean;
@@ -31,6 +32,7 @@ function listWithLive(apps: CaptureApp[], live: SelectedApp[]): CaptureApp[] {
 }
 
 export function StreamAudioSourcesModal({ isOpen, onClose }: Props) {
+    useBackClose(onClose, isOpen);
     const [live, setLive] = useState<SelectedApp[]>(getLiveAudioSources);
     const [apps, setApps] = useState<CaptureApp[] | null>(null);
     /** Volumes for apps not (yet) in the stream, so ticking one uses them. */

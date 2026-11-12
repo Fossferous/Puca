@@ -130,6 +130,11 @@ sliver at 390px**. Under the coarse-pointer query every such modal must:
   inside the scroll container, and pad for `--safe-area-top`
 - cap free-floating modals at `max-height: 85dvh; overflow-y: auto` (the
   keyboard eats half the viewport; Save must stay reachable)
+- take Android's **Back**: `useBackClose(onClose, isOpen)` (`hooks/useBackClose.ts`)
+  inside the component, above any early return. Takers stack, so the layer
+  opened last closes first. `src/tests/backCloseCoverage.test.ts` fails a
+  component that draws a dialog, menu or backdrop without it, unless it is
+  listed there with the reason it leaves Back alone
 
 Reference implementations: `SettingsModal.css`, `ServerSettingsModal.css`,
 `RoleSettingsModal.css` (mobile blocks at the bottom of each).

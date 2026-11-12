@@ -746,40 +746,59 @@ export async function onMobileKeyboard(
 
 // --- the BACK gesture (APKs after 0.9.836) --------------------------------
 
-let backOwner: symbol | null = null;
+/** Everything open that BACK should close first, oldest first. */
+const backLayers: Array<{ close: () => void }> = [];
+/** The listener the native side is answering; bumped whenever it is let go,
+ *  so a listener still being removed can never close a second layer. */
+let backListener: { gen: number; handle: Promise<PluginListenerHandle | null> } | null = null;
+let backGen = 0;
 
 /**
  * Until the returned release is called, Android's BACK gesture calls
- * `onBack` instead of sending the app away: for something back should close
- * first, today a video in the player's in-app fullscreen (VideoPlayer.tsx).
- * One taker at a time, the newest winning; an older taker letting go late
- * does not switch it off under the newer one.
+ * `onBack` instead of sending the app away: for anything back should close
+ * first (a menu, a dialog, a sheet, Settings, the picture viewer, a video
+ * in the player's in-app fullscreen; hooks/useBackClose.ts is the React way
+ * in). Takers STACK: a press goes to the newest one still held, so a
+ * question over Settings closes the question and the next press closes
+ * Settings. An older taker letting go first leaves the newer one in charge,
+ * and a newer one letting go hands back to the older. Back sends the app
+ * away again only once every taker has let go.
  *
  * Nothing at all elsewhere (the web, the desktop app), and nothing visible on
  * an APK without the method: setBackIntercept rejects there (swallowed), the
  * listener never fires, and back leaves the app as it always did. A page that
- * reloads while it is on cannot strand back either — SovereignAppPlugin
+ * reloads while it is on cannot strand back either: SovereignAppPlugin
  * hands back to the system when no page listens.
  */
 export function interceptBack(onBack: () => void): () => void {
     if (!android()) return () => {};
-    const me = Symbol('back');
-    backOwner = me;
-    let released = false;
-    let handle: PluginListenerHandle | null = null;
-    App.addListener('backButton', () => {
-        if (!released && backOwner === me) onBack();
-    }).then(
-        (h) => { if (released) void h.remove(); else handle = h; },
-        () => { /* no plugin: back stays the system's */ },
-    );
+    const me = { close: onBack };
+    backLayers.push(me);
+    if (!backListener) {
+        const gen = ++backGen;
+        backListener = {
+            gen,
+            handle: App.addListener('backButton', () => {
+                if (gen !== backGen) return;
+                backLayers[backLayers.length - 1]?.close();
+            }).then((h) => h, () => null /* no plugin: back stays the system's */),
+        };
+    }
+    // Every push, not only the first: the native side switches itself off
+    // when a press finds no listener (a page reload), and a held layer must
+    // not be left without back after that.
     App.setBackIntercept({ enabled: true }).catch(() => { /* an APK without it */ });
+    let released = false;
     return () => {
         if (released) return;
         released = true;
-        void handle?.remove();
-        if (backOwner !== me) return;
-        backOwner = null;
+        const i = backLayers.indexOf(me);
+        if (i >= 0) backLayers.splice(i, 1);
+        if (backLayers.length > 0) return;
+        const gone = backListener;
+        backListener = null;
+        backGen++;
+        void gone?.handle.then((h) => h?.remove());
         App.setBackIntercept({ enabled: false }).catch(() => { /* an APK without it */ });
     };
 }

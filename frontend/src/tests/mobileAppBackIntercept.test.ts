@@ -84,6 +84,56 @@ describe('interceptBack', () => {
         expect(h.calls.at(-1)).toEqual({ enabled: false });
     });
 
+    it('takers STACK: the newest closes first, and letting it go hands back to the one under it', async () => {
+        // Settings (older) with a question over it (newer). The single owner
+        // this replaced switched back off when the question closed, so the
+        // next press left the app with Settings still open.
+        const settings = vi.fn();
+        const question = vi.fn();
+        const releaseSettings = interceptBack(settings);
+        const releaseQuestion = interceptBack(question);
+        await settle();
+        back();
+        expect(question).toHaveBeenCalledTimes(1);
+        expect(settings).not.toHaveBeenCalled();
+        releaseQuestion();
+        await settle();
+        expect(h.calls.at(-1)).toEqual({ enabled: true });
+        back();
+        expect(settings).toHaveBeenCalledTimes(1);
+        expect(question).toHaveBeenCalledTimes(1);
+        releaseSettings();
+        await settle();
+        expect(h.calls.at(-1)).toEqual({ enabled: false });
+        expect(h.listeners.get('backButton') ?? []).toHaveLength(0);
+    });
+
+    it('one press closes ONE layer, even straight after the last one let go and a new one opened', async () => {
+        const first = vi.fn();
+        const releaseFirst = interceptBack(first);
+        releaseFirst(); // the listener is still being removed...
+        const second = vi.fn();
+        const releaseSecond = interceptBack(second); // ...when the next layer opens
+        back(); // both listeners may still be there: only the current one acts
+        expect(first).not.toHaveBeenCalled();
+        expect(second).toHaveBeenCalledTimes(1);
+        await settle();
+        expect(h.listeners.get('backButton') ?? []).toHaveLength(1);
+        releaseSecond();
+        await settle();
+    });
+
+    it('a layer taken while another is open asks for the intercept again (the native side may have switched itself off)', async () => {
+        const releaseA = interceptBack(() => {});
+        const releaseB = interceptBack(() => {});
+        await settle();
+        expect(h.calls).toEqual([{ enabled: true }, { enabled: true }]);
+        releaseB();
+        releaseA();
+        await settle();
+        expect(h.calls.at(-1)).toEqual({ enabled: false });
+    });
+
     it('an APK without the method: no error escapes, and nothing else changes', async () => {
         h.missing = true;
         const onBack = vi.fn();

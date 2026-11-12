@@ -21,6 +21,7 @@ import {
 } from '../api/appDialogs';
 import { CloseIcon } from './Icons';
 import './AppDialogs.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 /**
  * A press in the question goes no further than the question. The page behind it is
@@ -59,6 +60,7 @@ function Question({ question }: { question: AppQuestion }) {
     const refuse = useCallback(() => {
         answerAppQuestion(id, kind === 'text' ? null : false);
     }, [id, kind]);
+    useBackClose(refuse);
 
     useEffect(() => {
         const dialog = dialogRef.current!;

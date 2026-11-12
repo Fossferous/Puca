@@ -49,6 +49,10 @@ Left to right on a desktop window:
 | Member list | Everyone on the server. A crown marks the **Server Owner**. Under it, **Active in your servers** lists the voice channels that have people in them in any of your servers ([below](#active-in-your-servers)) |
 
 On a phone the same areas are tabs along the bottom (**Chat**, **Members**, …).
+In the Android app, **Back** closes whatever is open on top first: a menu, a dialog, a sheet, Settings,
+Server Settings, a profile or the picture viewer, one at a time, newest first. With nothing open, Back leaves the
+app as it always has. (This needs an Android app installed after 0.9.836; on an older one Back always leaves the
+app.)
 
 ### The channel list: folding, and who is in a voice channel
 **Fold what you are not reading.** The **Text Channels** and **Voice Channels** headings are buttons

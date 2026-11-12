@@ -12,6 +12,7 @@
  */
 import { useState } from 'react';
 import { LockIcon, MicIcon } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 
 export type MicHelpPlatform = 'tauri' | 'android' | 'web';
 
@@ -26,6 +27,7 @@ export interface MicPermissionHelpProps {
 }
 
 export function MicPermissionHelp({ platform, onRetry, onDismiss, onResetDesktop, onOpenAndroidSettings }: MicPermissionHelpProps) {
+    useBackClose(onDismiss);
     const [settingsFailed, setSettingsFailed] = useState(false);
 
     return (

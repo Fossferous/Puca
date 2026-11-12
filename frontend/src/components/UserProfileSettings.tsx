@@ -8,6 +8,7 @@ import { CloseIcon, PlayIcon } from './Icons';
 import { fetchFileObjectUrl } from '../api/authedMedia';
 import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
 import { applyOutputDevice } from './settingsStore';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface UserProfileSettingsProps {
     isOpen: boolean;
@@ -28,6 +29,7 @@ type CropState = {
 };
 
 export function UserProfileSettings({ isOpen, onClose }: UserProfileSettingsProps) {
+    useBackClose(onClose, isOpen);
     const [profile, setProfile] = useState<Profile | null>(null);
     const [displayName, setDisplayName] = useState('');
     const [isUploading, setIsUploading] = useState(false);
