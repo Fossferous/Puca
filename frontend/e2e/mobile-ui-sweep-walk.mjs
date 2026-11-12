@@ -22,7 +22,8 @@
 //   link       A long address's card (built in the app from the address alone, so nothing is
 //              fetched) wraps it inside the card (it was cut off sideways mid-path).
 //   tasks      The Tasks view's empty-state sentence keeps 12px from the screen's edges (it ran
-//              flush from edge to edge).
+//              flush from edge to edge). Chat in the bottom bar then goes back to the channel
+//              (it left the Tasks view on screen: the tap did nothing).
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
 //              in an ellipsis and nothing scrolling sideways.
@@ -139,15 +140,21 @@ const api = (page, method, p, body) => page.evaluate(async ({ API, method, p, bo
     try { return JSON.parse(text); } catch { return text; }
 }, { API, method, p, body });
 
-/** A real tap at the middle of what is visible of `loc`; returns whether that point hits it. */
+/** A real tap at the middle of what is visible of `loc`; returns whether that point hits it.
+ *  `lastHit` names what the point hit, for a check's detail. */
+let lastHit = '';
 async function tap(page, loc) {
     await loc.scrollIntoViewIfNeeded().catch(() => {});
     const b = await loc.boundingBox();
     if (!b) throw new Error('nothing to tap');
     const x = b.x + b.width / 2, y = b.y + b.height / 2;
-    const hits = await loc.evaluate((el, [x, y]) => { const h = document.elementFromPoint(x, y); return !!h && (h === el || el.contains(h)); }, [x, y]);
+    const r = await loc.evaluate((el, [x, y]) => {
+        const h = document.elementFromPoint(x, y);
+        return { hits: !!h && (h === el || el.contains(h)), what: h ? `${h.tagName.toLowerCase()}.${String(h.className).split(' ').slice(0, 2).join('.')} at ${Math.round(x)},${Math.round(y)}` : 'nothing' };
+    }, [x, y]);
+    lastHit = r.what;
     await page.touchscreen.tap(x, y);
-    return hits;
+    return r.hits;
 }
 const nav = async (page, label) => { await tap(page, page.locator('.mobile-nav-btn', { hasText: label }).first()); await sleep(450); };
 const COMPOSER = 'form.message-form textarea';
@@ -432,7 +439,20 @@ try {
                 check(`${size} tasks: its words keep at least 12px from both edges of the screen`, m.l >= 12 && m.r <= m.vw - 12, m);
                 await shot(P, `tasks-${size}`);
             }
+            // The bottom bar's Chat leaves the Tasks view for the channel under it.
             await nav(P, 'Chat');
+            await sleep(400);
+            const back = await P.evaluate(() => {
+                const t = document.querySelector('.tasks-editor-empty, .tasks-view');
+                const shown = !!t && t.getBoundingClientRect().width > 0 && getComputedStyle(t).visibility !== 'hidden'
+                    && (() => { const r = t.getBoundingClientRect(); const h = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!h && t.contains(h); })();
+                const f = document.querySelector('form.message-form textarea');
+                const r = f?.getBoundingClientRect();
+                const h = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                return { tasksOnTop: shown, composerHit: !!h && (h === f || f.contains(h)), chatActive: !!document.querySelector('.mobile-nav-btn.active')?.textContent?.match(/chat/i) };
+            });
+            check(`${size} tasks: Chat in the bottom bar goes back to the channel (the Tasks view is gone, the composer is what a tap hits)`, !back.tasksOnTop && back.composerHit, back);
+            check(`${size} tasks: ...and Chat is the tab lit`, back.chatActive, back);
         }
 
         // ── mention: the @member list
@@ -464,7 +484,7 @@ try {
                 check(`${size} mention: a name too long for its row ends in an ellipsis`, m.items.length > 0 && m.items.every((i) => i.names.every((n) => !n.cut || n.ellipsis)), m.items);
                 check(`${size} mention: every row is 44px tall`, m.items.length > 0 && m.items.every((i) => i.h >= 43.5), m.items.map((i) => Math.round(i.h)));
                 const row = pop.locator('.autocomplete-item').first();
-                check(`${size} mention: a tap on the row lands on it`, await tap(P, row));
+                check(`${size} mention: a tap on the row lands on it`, await tap(P, row), lastHit);
                 await sleep(300);
                 const v = await box.inputValue();
                 check(`${size} mention: the tap put the name in the box`, v.startsWith('@' + phoneName), v);
