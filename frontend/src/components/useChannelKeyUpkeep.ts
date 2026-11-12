@@ -33,7 +33,12 @@
 import { useEffect, useRef } from 'react';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { keyedChannelIds, rewrapForMembershipChange } from '../api/channelKeys';
+import { getActiveIdentity } from '../api/e2ee';
 import { listChannels, type Channel, type Server } from '../api/servers';
+
+/** Between the catch-up's channels: a server of 150 keyed channels takes ~15 s
+ *  in the background instead of 300 requests at once. */
+export const CATCH_UP_PACE_MS = 100;
 
 export interface ChannelKeyUpkeepInput {
     currentUserId: number;
@@ -78,8 +83,14 @@ export function useChannelKeyUpkeep({ currentUserId, servers, currentServerId, c
         // the previous server's list for a render while the new one loads.
         const own = channels.filter(c => c.server_id === currentServerId);
         if (own.length === 0) return;
+        // No keys on this device yet (a sign-in still waiting for its keys to
+        // be restored): a pass now would do nothing, so the server is NOT
+        // marked caught up, and the next time its list arrives it runs.
+        if (!getActiveIdentity()) return;
         caughtUp.current.servers.add(currentServerId);
-        void rewrapForMembershipChange(keyedChannelIds(own), { bootstrap: false }).catch((e) => {
+        // Paced: a big server's sweep is two requests per channel, and it
+        // stops at the first 429 rather than pressing on.
+        void rewrapForMembershipChange(keyedChannelIds(own), { bootstrap: false, paceMs: CATCH_UP_PACE_MS }).catch((e) => {
             console.debug('[e2ee] key catch-up skipped:', e);
         });
     }, [currentUserId, currentServerId, channels, channelsFetched]);

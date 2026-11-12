@@ -354,6 +354,13 @@ function senderMaxBitrate(sender: RTCRtpSender): number | undefined {
 /// the previous epoch's key survives the switchover window.
 const KEYRING_SIZE = 16;
 const EPOCH_POLL_MS = 30_000;
+
+/** Two channel keys are the same bytes (refreshEpochKey: same epoch, other key). */
+export function sameKeyBytes(a: Uint8Array, b: Uint8Array | null): boolean {
+    if (!b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+}
 /// How long a decrypt failure keeps a participant marked unencrypted. MUST
 /// exceed LiveKit's own error-emission suppression window: it throttles to 5
 /// errors per 60 s per (identity, reason), so a peer whose frames NEVER decrypt
@@ -501,6 +508,11 @@ export class SfuManager {
      *  0 = the server named none: shareBitrateKbps then keeps the old cap. */
     private maxShareKbps = 0;
     private currentEpoch: number | null = null;
+    /** The channel key `currentEpoch` was set from. An epoch NUMBER cannot
+     *  tell a changed key: a rotation this device lost (two mints of one epoch)
+     *  left it on the right number with a key no row holds, and the poll never
+     *  replaced it because the number matched (0.9.861 review). */
+    private currentEpochKey: Uint8Array | null = null;
     /** Our sender is parked on a throwaway key because ensureChannelKey
      *  refused the current epoch (see refreshEpochKey). */
     private senderMutedByKeyRefusal = false;
@@ -736,6 +748,7 @@ export class SfuManager {
         try {
             await keyProvider.setEpochKey(deriveSfuMediaKey(ck.key, channelId, ck.epoch), ck.epoch);
             this.currentEpoch = ck.epoch;
+            this.currentEpochKey = ck.key;
             await room.setE2EEEnabled(true);
             // Subscriptions are explicit (opt-in streams): syncSubscriptions
             // decides per publication — mics/cameras always, screen shares only
@@ -826,11 +839,12 @@ export class SfuManager {
                 // Same epoch as before the refusal: put the sender back on the
                 // real key (the slot still holds it; this re-selects it).
                 await keyProvider.setEpochKey(deriveSfuMediaKey(ck.key, this.channelId, ck.epoch), ck.epoch);
+                this.currentEpochKey = ck.key;
                 this.senderMutedByKeyRefusal = false;
                 console.info('[sfu-e2ee] channel key available again — sender restored');
                 return;
             }
-            if (ck && ck.epoch !== this.currentEpoch) {
+            if (ck && (ck.epoch !== this.currentEpoch || !sameKeyBytes(ck.key, this.currentEpochKey))) {
                 this.senderMutedByKeyRefusal = false;
                 // Timestamped: the gap between a peer joining and this line is
                 // exactly the window where their audio cannot be decrypted, and
@@ -840,6 +854,7 @@ export class SfuManager {
                 this.lastEpochChangeAt = Date.now();
                 await keyProvider.setEpochKey(deriveSfuMediaKey(ck.key, this.channelId, ck.epoch), ck.epoch);
                 this.currentEpoch = ck.epoch;
+                this.currentEpochKey = ck.key;
                 // Real recovery evidence: past decrypt failures were almost
                 // certainly this epoch gap, so let peers prove themselves again
                 // under the new key instead of serving out the full hold.
@@ -864,6 +879,7 @@ export class SfuManager {
         this.room = null;
         this.channelId = null;
         this.currentEpoch = null;
+        this.currentEpochKey = null;
         this.senderMutedByKeyRefusal = false;
         this.localUserId = null;
         this.micPub = null;

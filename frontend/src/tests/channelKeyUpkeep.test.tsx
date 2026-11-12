@@ -30,10 +30,17 @@ vi.mock('../api/websocket', () => ({
     },
 }));
 
-const rewrap = vi.fn(async (_ids: number[], _opts?: { bootstrap?: boolean }) => 0);
+const rewrap = vi.fn(async (_ids: number[], _opts?: { bootstrap?: boolean; paceMs?: number }) => 0);
 vi.mock('../api/channelKeys', async (orig) => ({
     ...(await orig<typeof import('../api/channelKeys')>()),
-    rewrapForMembershipChange: (ids: number[], opts?: { bootstrap?: boolean }) => rewrap(ids, opts),
+    rewrapForMembershipChange: (ids: number[], opts?: { bootstrap?: boolean; paceMs?: number }) => rewrap(ids, opts),
+}));
+
+/** Whether this device holds its keys (a sign-in can start without them). */
+let hasIdentity = true;
+vi.mock('../api/e2ee', async (orig) => ({
+    ...(await orig<typeof import('../api/e2ee')>()),
+    getActiveIdentity: () => (hasIdentity ? ({ publicKeyEncoded: 'me' } as unknown as ReturnType<typeof import('../api/e2ee')['getActiveIdentity']>) : null),
 }));
 
 const listChannels = vi.fn(async (_serverId: string) => [] as Array<{ id: number; channel_type: number; server_id: string }>);
@@ -42,7 +49,7 @@ vi.mock('../api/servers', async (orig) => ({
     listChannels: (serverId: string) => listChannels(serverId),
 }));
 
-import { useChannelKeyUpkeep, type ChannelKeyUpkeepInput } from '../components/useChannelKeyUpkeep';
+import { useChannelKeyUpkeep, CATCH_UP_PACE_MS, type ChannelKeyUpkeepInput } from '../components/useChannelKeyUpkeep';
 import { keyedChannelIds } from '../api/channelKeys';
 
 /** Dutch Coffee Shop's shape: text channels, voice rooms, one collection. */
@@ -88,6 +95,7 @@ describe('useChannelKeyUpkeep', () => {
     afterEach(() => { for (const r of roots.splice(0)) act(() => r.unmount()); });
     beforeEach(() => {
         handlers.clear();
+        hasIdentity = true;
         rewrap.mockClear();
         listChannels.mockClear();
     });
@@ -133,7 +141,7 @@ describe('useChannelKeyUpkeep', () => {
         await flush();
         expect(rewrap).toHaveBeenCalledTimes(1);
         expect(rewrap.mock.calls[0][0]).toEqual([1, 4, 2, 3]);
-        expect(rewrap.mock.calls[0][1]).toEqual({ bootstrap: false });
+        expect(rewrap.mock.calls[0][1]).toEqual({ bootstrap: false, paceMs: CATCH_UP_PACE_MS });
 
         // The same server again (a re-render, a refetch): nothing more.
         rerender(input({ channels: [...S1] }));
@@ -170,6 +178,21 @@ describe('useChannelKeyUpkeep', () => {
         await flush();
         expect(rewrap).toHaveBeenCalledTimes(1);
         expect(rewrap.mock.calls[0][0]).toEqual([90, 91]);
+    });
+
+    it("the catch-up waits for this device's keys: a sign-in without them is not marked done, and runs once they are there", async () => {
+        // A sign-in can start before its keys are restored; a pass then would
+        // do nothing, and marking the server done would skip it for the whole
+        // sign-in (review, 0.9.861).
+        hasIdentity = false;
+        const { rerender } = mount(input());
+        await flush();
+        expect(rewrap).not.toHaveBeenCalled();
+        hasIdentity = true;
+        rerender(input({ channels: [...S1] }));
+        await flush();
+        expect(rewrap).toHaveBeenCalledTimes(1);
+        expect(rewrap.mock.calls[0][0]).toEqual([1, 4, 2, 3]);
     });
 
     it('signed out (no user) or no server: nothing', async () => {
