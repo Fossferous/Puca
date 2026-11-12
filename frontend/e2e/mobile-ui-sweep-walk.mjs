@@ -536,9 +536,9 @@ try {
                 // their own alignment and width (review finding: a centred, padded box reached them).
                 // TasksTrash's own markup, put where TasksView puts it, through the real stylesheet.
                 const t = await empty.evaluate((e) => {
-                    const trash = document.createElement('div');
+                    const trash = document.createElement('section');
                     trash.className = 'tasks-trash';
-                    trash.innerHTML = '<div class="tasks-trash-copy">Lists in Trash</div><ul class="tasks-trash-list"><li class="tasks-trash-row"><span class="tasks-trash-title">A trashed list</span></li></ul>';
+                    trash.innerHTML = '<p class="tasks-trash-copy">Lists in the trash stay until you delete them forever.</p><ul class="tasks-trash-list"><li class="tasks-trash-row"><span class="tasks-trash-title">A trashed list</span></li></ul>';
                     e.appendChild(trash);
                     const out = { copy: getComputedStyle(trash.querySelector('.tasks-trash-copy')).textAlign, title: getComputedStyle(trash.querySelector('.tasks-trash-title')).textAlign, boxPadding: getComputedStyle(e).paddingLeft };
                     trash.remove();
