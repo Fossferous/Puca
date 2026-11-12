@@ -245,6 +245,8 @@ const GATES = [
         ['e2e-no-screen-stage', 'no-screen-stage-real-browser.mjs e2e-artifacts/no-screen-stage-shots'],
         ['e2e-video-controls', 'video-controls-real-browser.mjs'],
         ['e2e-heic', 'heic-real-browser.mjs'],
+        // A message's pictures above its words; screenshots go to the ignored e2e-artifacts.
+        ['e2e-images-above-text', 'images-above-text-real-browser.mjs e2e-artifacts/images-above-text-shots'],
         ['e2e-device-stage-desktop', 'device-stage-desktop-real-browser.mjs'],
         // Pinned keys on the stage, phone and desktop. Rebuilds the same
         // device-stage harness as the two above (one at a time here).

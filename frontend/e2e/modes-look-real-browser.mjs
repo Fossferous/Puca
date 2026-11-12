@@ -768,7 +768,9 @@ try {
         await chat.evaluate(() => { window.__resetKinds(); window.__pressed.length = 0; });
         await settled();
         // A file after a stray `[`: the page has the spoiler, the file is inside it and none is in the clear, and the
-        // words before it are words (the old reading made them its name and the file open).
+        // words before it are words (the old reading made them its name and the file open). The spoilered picture is
+        // drawn above the words, in .message-media (components/messageMediaFirst.ts), with the space that only
+        // separated them from it: the words are exactly what was typed.
         const stray = await chat.evaluate(() => {
             const kind = document.querySelector('[data-kind="strayFile"]');
             const all = kind.querySelectorAll('.message-attachment').length;
@@ -777,11 +779,11 @@ try {
                 spoilers: kind.querySelectorAll('.spoiler').length,
                 inside,
                 outside: all - inside,
-                before: [...kind.childNodes].filter((n) => !(n.nodeType === 1 && n.classList.contains('spoiler'))).map((n) => n.textContent).join(''),
+                before: [...kind.childNodes].filter((n) => !(n.nodeType === 1 && (n.classList.contains('spoiler') || n.classList.contains('message-media')))).map((n) => n.textContent).join(''),
             };
         });
         check(`a file after a stray [ on ${theme}: it is inside the spoiler, none is in the clear, and the words before it are words`,
-            stray.spoilers === 1 && stray.inside === 1 && stray.outside === 0 && stray.before === 'ugh :[ ', stray);
+            stray.spoilers === 1 && stray.inside === 1 && stray.outside === 0 && stray.before === 'ugh :[', stray);
         const counted = async () => {
             const out = {};
             for (const kind of KINDS) out[kind] = await paintedIn(kind);

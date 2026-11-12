@@ -1069,6 +1069,15 @@
    The space above an image is the row's, like any other content's (see
    --message-pad / --message-run-pad on .message). */
 
+/* A message's pictures and videos, on their own line ABOVE its words
+   (components/messageMediaFirst.ts). Without it the composer's
+   `words ![photo](…)` was one line of text: the picture beside the words,
+   which sat on its bottom edge. Only a block: inside it the pictures are laid
+   out exactly as before (inline, in order, a space apart). */
+.message-media {
+    display: block;
+}
+
 /* E2EE attachment states (decrypting / failed / non-image download link) */
 .message-attachment {
     display: inline-flex;
