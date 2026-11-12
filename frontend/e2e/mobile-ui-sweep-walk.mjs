@@ -5,6 +5,9 @@
 //   fields     Every field a phone types into is 16px or more (iOS zooms the page on focus below
 //              that): the composer, the sign-in password, the emoji search, Server Settings'
 //              description. CONTROL: a field forced to 15px must be caught.
+//   header     A message from a 32-character name: its time is whole, on one line, inside the
+//              message and the window (it was "Today / at / 17:54" down the edge at 390, and off
+//              the screen at 360).
 //   mention    The @member list spans the composer (it was the text box's width: 164px at 390),
 //              inside the window, with 44px rows that a tap lands on, a 32-character name ending
 //              in an ellipsis and nothing scrolling sideways.
@@ -206,6 +209,28 @@ try {
                 check(`${size} fields: the sign-in ${label} is 16px or more`, (await fontPx(f)) >= 16, `${await fontPx(f)}px`);
             }
             await fresh.close();
+        }
+
+        // ── header: a message from the 32-character name
+        if (want('header')) {
+            const posted = await say(P, `Header check ${size}`);
+            check(`${size} header: posted a message`, posted);
+            await sleep(500);
+            const h = await P.evaluate(() => {
+                const rows = [...document.querySelectorAll('.messages-container > .message')].filter((m) => m.querySelector('.message-header'));
+                const row = rows[rows.length - 1];
+                const body = row.querySelector('.message-body') || row;
+                const time = row.querySelector('.message-header .message-time');
+                const author = row.querySelector('.message-header .message-author');
+                const br = body.getBoundingClientRect();
+                const lines = (el) => { const r = document.createRange(); r.selectNodeContents(el); return new Set([...r.getClientRects()].map((x) => Math.round(x.top))).size; };
+                const tr = time.getBoundingClientRect(), ar = author.getBoundingClientRect();
+                return { vw: innerWidth, body: { l: br.left, r: br.right }, time: { l: tr.left, r: tr.right, lines: lines(time), text: time.textContent }, author: { r: ar.right, text: author.textContent } };
+            });
+            check(`${size} header: the time is on one line`, h.time.lines === 1, h.time);
+            check(`${size} header: the time is inside the window and the message`, h.time.r <= h.vw && h.time.r <= h.body.r + 1 && h.time.l >= h.body.l - 1, h);
+            check(`${size} header: the name is inside the message`, h.author.r <= h.body.r + 1, h);
+            await shot(P, `header-${size}`);
         }
 
         // ── mention: the @member list

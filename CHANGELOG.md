@@ -18,6 +18,7 @@ one-line summary; this file is the full story. Versions follow
 - **Lock and Shut down from a remote-control session now say why Windows refused.** When the computer you control could not lock or shut down, the message read only "the power action failed"; it now gives Windows' own reason. This comes with the desktop app update on the computer being controlled.
 - **An iPhone no longer zooms in when you tap the message box.** On a phone the message box, the password field on the sign-in page, the emoji search and a server's description in Server Settings used slightly smaller text than iOS accepts (14 to 15 px instead of 16), so tapping one zoomed the whole app in, and it did not zoom back out. They now use 16 px on a phone. Arrives as an ordinary update.
 - **The list that comes up when you type @ or # on a phone is as wide as the message box area.** It used to be only as wide as the text box itself (about 160 px on a phone), so a longer name was cut off mid-letter and the list could be dragged sideways. It now spans the bottom of the screen, its rows are big enough for a finger, and a name too long for the row ends in "…". Arrives as an ordinary update.
+- **A message's time stays in one piece beside a long name.** On a phone, a long username squeezed the time next to it into a column ("Today / at / 17:54"), and on a narrower phone pushed it off the edge of the screen. When the name and the time do not fit on one line, the time now goes under the name, whole. Arrives as an ordinary update.
 
 ## 0.9.860 — 2026-11-08
 

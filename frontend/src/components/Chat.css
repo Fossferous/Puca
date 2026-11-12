@@ -1015,20 +1015,30 @@
     min-width: 0;
 }
 
+/* A name too long to share its line with the time puts the time on the next
+   line, whole. Unwrapped, the name kept its full width and the time was
+   squeezed beside it: "Today / at / 17:54" stacked down the right edge at
+   390px, and at 360px a 32-character username pushed the time off the
+   screen. A name longer than the column breaks rather than overflowing. */
 .message-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.5rem;
+    column-gap: 0.5rem;
+    min-width: 0;
 }
 
 .message-author {
     font-weight: 600;
     color: var(--mode-brand-text, var(--brand-primary));
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .message-time {
     font-size: 0.7rem;
     color: var(--text-faint);
+    white-space: nowrap;
 }
 
 .message-content {
