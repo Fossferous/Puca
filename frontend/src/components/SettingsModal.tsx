@@ -1347,7 +1347,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                     <div className="settings-header">
                         <h2>{sections.find(s => s.id === activeSection)?.label}</h2>
                         <button className="settings-close" onClick={onClose} aria-label="Close settings">
-                            <span>ESC</span>
+                            <span className="settings-close-hint">ESC</span>
                             <CloseIcon />
                         </button>
                     </div>

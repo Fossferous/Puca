@@ -12,7 +12,9 @@
 //              without high contrast (the chosen one was 3.3-3.5:1 everywhere).
 //   settings   A tap on a setting's name or hint toggles its checkbox (the labels named no control,
 //              so a phone had a lone 20px box), and a tap on the box still toggles it once. No
-//              "ESC" key hint on the phone's close button.
+//              "ESC" key hint on the phone's close button, and its X still drawn with Classic icons
+//              (an emoji <span>). On the desktop, a mouse drag selecting a hint's words leaves the
+//              setting alone, as a native label does (CONTROL: a plain click toggles it).
 //   toggle     The chat header's checklist button has no background or border, like the pin button
 //              beside it (it was the browser's own grey button on every theme). CONTROL: an
 //              unstyled button in the same header must be caught.
@@ -374,6 +376,25 @@ try {
             await shot(P, `settings-${size}`);
             const esc = await P.evaluate(() => [...document.querySelectorAll('.settings-close *')].filter((e) => e.children.length === 0 && /^\s*esc\s*$/i.test(e.textContent) && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0).length);
             check(`${size} settings: no "ESC" key hint on a phone's close button`, esc === 0, { shown: esc });
+            // ...but its X stays, with either icon style: Classic draws it as a <span> emoji, which a
+            // bare `span` rule hid along with the hint (review finding). Drawn = some leaf of the
+            // button other than the hint has a box and is not hidden.
+            const closeGlyph = () => P.evaluate(() => {
+                const btn = document.querySelector('.settings-close');
+                const leaves = [...btn.querySelectorAll('*')].filter((e) => !/^\s*esc\s*$/i.test(e.textContent ?? ''));
+                const hiddenUpTo = (e) => { for (let x = e; x && x !== btn; x = x.parentElement) if (getComputedStyle(x).display === 'none') return true; return false; };
+                const drawn = leaves.filter((e) => { const r = e.getBoundingClientRect(); return r.width > 4 && r.height > 4 && getComputedStyle(e).visibility !== 'hidden' && !hiddenUpTo(e); });
+                return { drawn: drawn.map((e) => `${e.tagName.toLowerCase()}.${String(e.getAttribute('class') ?? '')}`), text: btn.textContent.trim() };
+            });
+            const modern = await closeGlyph();
+            check(`${size} settings: CONTROL - with Modern icons the close button draws its X`, modern.drawn.length > 0, modern);
+            const styleSelect = P.locator('#icon-style-select');
+            await styleSelect.selectOption('classic');
+            await sleep(400);
+            const classic = await closeGlyph();
+            check(`${size} settings: with Classic icons the close button still draws its X`, classic.drawn.length > 0 && /✕/.test(classic.text), classic);
+            await styleSelect.selectOption('modern');
+            await sleep(300);
             await tap(P, P.locator('.settings-close').first());
             await sleep(400);
             await nav(P, 'Chat');

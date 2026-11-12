@@ -664,8 +664,10 @@
     }
 
     /* "ESC" names a key a phone does not have; the X beside it is the
-       button. */
-    .settings-close span {
+       button. By its own class: with Icon Style set to Classic the X is a
+       <span> too (Icons.tsx, .svrn-icon-legacy), and a bare `span` rule took
+       it away with the hint, leaving an empty close button. */
+    .settings-close-hint {
         display: none;
     }
 
