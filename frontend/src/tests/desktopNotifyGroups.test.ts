@@ -355,6 +355,8 @@ describe('Android is left as it was', () => {
         env.tauri = false;
         env.mobile = true;
         env.mobileNative = true;
+        // The ring is capped, so compare its newest entry, not its length.
+        const before = notify.notifyDiag().recent.at(-1);
         const d = notify.notifyNewMessage({
             title: 'bob sent a message', isOwn: false, isMuted: false, notifyKey: 'chan:s1', onlyIfGrouped: true,
             group: { key: 'chan:s1:7', kind: 'channel', where: '#general', author: 'bob', messageId: 'm1', important: true },
@@ -362,6 +364,8 @@ describe('Android is left as it was', () => {
         await settle();
         expect(d).toEqual({ fire: true, quiet: true });
         expect(env.androidPosted).toHaveLength(0);
+        // Nor to the diagnostics: the plain report of the same message is the one there.
+        expect(notify.notifyDiag().recent.at(-1)).toEqual(before);
     });
 });
 
@@ -387,13 +391,18 @@ describe('the web app', () => {
 
     it('a quiet update after you closed it shows nothing; the next burst pops', () => {
         channelMessage('alice', 'a');
+        vi.advanceTimersByTime(1_000);
+        // Still there: an update, quiet to the caller (no blip).
+        expect(channelMessage('bob', 'a2')).toEqual({ fire: true, quiet: true });
         FakeNotification.list.get('chan:s1:7')!.close();
         vi.advanceTimersByTime(2_000);
-        channelMessage('bob', 'b');
-        expect(FakeNotification.made).toHaveLength(1);
+        // Closed: nothing is shown, so the caller is NOT told to keep quiet,
+        // and the app's own sound still says a message arrived.
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+        expect(FakeNotification.made).toHaveLength(2);
         vi.advanceTimersByTime(61_000);
         channelMessage('carol', 'c');
-        expect(FakeNotification.made).toHaveLength(2);
+        expect(FakeNotification.made).toHaveLength(3);
         expect(FakeNotification.popups).toBe(2);
     });
 

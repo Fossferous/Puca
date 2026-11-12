@@ -216,10 +216,11 @@ async function showNativeToast(key: string, step: Pick<GroupStep, 'pop' | 'title
 /** The web app's notification for one conversation: tagged by it, so the
  *  browser replaces rather than adds; `renotify` only when it should pop. A
  *  quiet update with no notification left (the user closed it) shows
- *  nothing: a browser cannot add one without popping it. */
-function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): void {
+ *  nothing: a browser cannot add one without popping it. Says whether one is
+ *  there now, so a message that shows nothing is not also kept quiet. */
+function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): boolean {
     const prev = webLive.get(key);
-    if (!step.pop && !prev) return;
+    if (!step.pop && !prev) return false;
     try {
         // `renotify` is in the spec and in Chromium, not in TypeScript's DOM types.
         const options: NotificationOptions & { renotify?: boolean } = {
@@ -236,8 +237,10 @@ function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' 
             n.close();
         };
         n.onclose = () => { if (webLive.get(key) === n) webLive.delete(key); };
+        return true;
     } catch {
         // As below: construction can fail with permission granted.
+        return false;
     }
 }
 
@@ -443,18 +446,20 @@ export function notifyNewMessage(opts: {
     // exactly as they were.
     const group = decision.fire && !host && !(inputs.mobile && inputs.mobileNative) && opts.group && groupingOn()
         ? opts.group : null;
+    // A report that exists only for a grouped notification, where there is
+    // none: the message's other report did everything, and was recorded.
+    if (opts.onlyIfGrouped && !group) return decision.fire ? { fire: true, quiet: true } : decision;
     const step = group ? groups.record(group) : null;
     recordNotify({
         at: new Date().toISOString(),
         kind: 'message',
         key: group?.key ?? opts.notifyKey ?? '(no key)',
         outcome: !decision.fire ? decision.reason
-            : !group ? (opts.onlyIfGrouped ? 'not-grouped' : 'fired')
+            : !group ? 'fired'
                 : !step ? 'duplicate'
                     : step.pop ? 'fired' : 'updated',
         inputs,
     });
-    if (opts.onlyIfGrouped && !group) return decision.fire ? { fire: true, quiet: true } : decision;
     // Taskbar/tray unread badge: judged from the RAW inputs (never the
     // decision's short-circuited reason), wider than the toast — a message
     // that only failed the toast gates (setting off / no OS permission) is
@@ -499,9 +504,17 @@ export function notifyNewMessage(opts: {
             if (oldest === undefined) break;
             activations.delete(oldest);
         }
-        if (isTauri()) void showNativeToast(group.key, step);
-        else showWebNotification(group.key, step);
-        return step.pop ? decision : { fire: true, quiet: true };
+        if (isTauri()) {
+            // Quiet here is still on screen: Windows updates the toast where it
+            // is, or puts it back in the notification centre (toasts.rs).
+            void showNativeToast(group.key, step);
+            return step.pop ? decision : { fire: true, quiet: true };
+        }
+        // The web: a quiet message with nothing left to update (the user
+        // closed it) shows nothing, so it is not quiet to the caller either,
+        // and the app's own sound still says it arrived.
+        const shown = showWebNotification(group.key, step);
+        return step.pop || !shown ? decision : { fire: true, quiet: true };
     }
 
     // DESKTOP: go through the OS via Tauri, not the webview.

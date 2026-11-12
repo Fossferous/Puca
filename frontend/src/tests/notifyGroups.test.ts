@@ -143,6 +143,22 @@ describe('mentions and DMs', () => {
         expect(groups.record(chan('bob', 'm1', { important: true }))).toBeNull();
     });
 
+    it('a mention that STARTS a burst pops once, whichever report lands first', () => {
+        // The cross-channel frame is handled at once; the open channel's
+        // report waits for decryption, so the plain copy usually wins.
+        const { groups, advance } = harness();
+        expect(groups.record(chan('bob', 'm1'))!.pop).toBe(true);
+        advance(40); // decrypting
+        const up = groups.record(chan('bob', 'm1', { important: true }))!;
+        expect(up.pop).toBe(false);
+        expect(up.state.count).toBe(1);
+        // It was the burst's important pop: the next mention within a minute is quiet.
+        advance(5_000);
+        expect(groups.record(chan('carol', 'm2', { important: true }))!.pop).toBe(false);
+        advance(IMPORTANT_REPOP_MS);
+        expect(groups.record(chan('carol', 'm3', { important: true }))!.pop).toBe(true);
+    });
+
     it('a mention reported before its plain copy is not counted twice either', () => {
         const { groups } = harness();
         expect(groups.record(chan('bob', 'm1', { important: true }))!.pop).toBe(true);

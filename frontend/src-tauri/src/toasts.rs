@@ -34,9 +34,9 @@
 //! burst, a mention, a DM again after a while); this module only carries that
 //! out: `popup: true` replaces the conversation's toast and pops it,
 //! `popup: false` updates it in place, and re-adds it silently when the user
-//! had dismissed it. Every toast is silent (`<audio silent="true"/>`): the app
-//! plays its own message sound, as the web app's notifications always assumed
-//! (`silent: true` there).
+//! had dismissed it. Every toast is silent (`<audio silent="true"/>`), as the
+//! plugin's were (notify-rust hands tauri-winrt-notification no sound, which
+//! it writes as that same element): the app plays its own message sound.
 //!
 //! A click lands on the in-process `Activated` handler: it raises the window
 //! and tells the page which conversation to open (`toast-activated`). Windows
@@ -46,6 +46,9 @@
 //! Windows' plain shortcut launch instead, which the single-instance handler
 //! turns into "show the window" (lib.rs). Only a real Windows desktop can say
 //! which one happens; nothing here may show a toast to find out.
+
+// Off Windows the commands refuse and the rule below is only its tests'.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 /// The one Group every message toast is filed under. Removing it removes
 /// every message toast and nothing else (Púca Tasks and the plugin's toasts
@@ -209,8 +212,9 @@ mod win {
     }
 
     /// How many toast objects to keep alive. Each holds its click handler;
-    /// a conversation's newest replaces its older one.
-    const KEEP: usize = 64;
+    /// a conversation's newest replaces its older one. As many as the page
+    /// keeps conversations (api/notifyGroups.ts, MAX_GROUPS).
+    const KEEP: usize = 200;
 
     pub struct WinSink {
         app: AppHandle,

@@ -81,6 +81,8 @@ export interface GroupState {
     lastAt: number;
     /** When the toast last popped. */
     lastPopAt: number;
+    /** The message whose arrival last popped it, when it had an id. */
+    lastPopId: string | null;
     /** When an important message last popped it, in this burst (null: none yet). */
     importantPopAt: number | null;
 }
@@ -117,14 +119,21 @@ export function stepGroup(prev: GroupState | undefined, m: GroupMessage, now: nu
         // cross-channel frame could not).
         if (!important || prev.importantIds.includes(m.messageId!)) return null;
         const state: GroupState = { ...prev, where: m.where, importantIds: pushCapped(prev.importantIds, m.messageId!, MAX_IDS) };
-        return finish(state, mayPopImportant(prev, now), now);
+        // This very message popped the toast already (it started the burst,
+        // and the plain copy got here before the open channel had decrypted
+        // it): it has had its pop. Popping again would only replay the
+        // banner. It does count as the burst's important pop.
+        if (prev.lastPopId === m.messageId) {
+            return finish({ ...state, importantPopAt: prev.lastPopAt }, false, now);
+        }
+        return finish(state, mayPopImportant(prev, now), now, true, m.messageId);
     }
 
     // A new burst: no toast yet, or the conversation went quiet for a while.
     const newBurst = !prev || now - prev.lastAt >= QUIET_WINDOW_MS;
     const base: GroupState = prev ?? {
         key: m.key, kind: m.kind, where: m.where, count: 0, authors: [], ids: [], importantIds: [],
-        lastAt: now, lastPopAt: Number.NEGATIVE_INFINITY, importantPopAt: null,
+        lastAt: now, lastPopAt: Number.NEGATIVE_INFINITY, lastPopId: null, importantPopAt: null,
     };
     const state: GroupState = {
         ...base,
@@ -138,7 +147,7 @@ export function stepGroup(prev: GroupState | undefined, m: GroupMessage, now: nu
         importantPopAt: newBurst ? null : base.importantPopAt,
     };
     const pop = newBurst || (important && mayPopImportant(state, now));
-    return finish(state, pop, now, important);
+    return finish(state, pop, now, important, m.messageId);
 }
 
 /** An important message may pop: the first of its burst, or a while after the last. */
@@ -146,9 +155,9 @@ function mayPopImportant(s: GroupState, now: number): boolean {
     return s.importantPopAt === null || now - s.importantPopAt >= IMPORTANT_REPOP_MS;
 }
 
-function finish(state: GroupState, pop: boolean, now: number, important = true): GroupStep {
+function finish(state: GroupState, pop: boolean, now: number, important = true, messageId?: string): GroupStep {
     const next: GroupState = pop
-        ? { ...state, lastPopAt: now, importantPopAt: important ? now : state.importantPopAt }
+        ? { ...state, lastPopAt: now, lastPopId: messageId ?? null, importantPopAt: important ? now : state.importantPopAt }
         : state;
     return { pop, ...groupText(next), state: next };
 }

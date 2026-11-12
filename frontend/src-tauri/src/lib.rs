@@ -38,7 +38,8 @@ mod heif;
 mod rc_leftovers;
 mod hotkeys;
 mod ll_hook;
-#[cfg(feature = "remote-control")]
+// NOT gated: toasts.rs (message notifications, both variants) runs on it.
+// The Lite build (--no-default-features) failed to compile while it was.
 mod ordered_worker;
 #[cfg(feature = "remote-control")]
 mod lan;

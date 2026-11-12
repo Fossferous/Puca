@@ -1368,8 +1368,8 @@ messages*.
 
 - The first message pops it up. While the conversation goes on, each new
   message changes the same notification where it is, without popping it up
-  again and without a sound (Púca's own message sound plays for the first one
-  only, too).
+  again and without a sound: Púca's own message sound plays only when the
+  notification pops up.
 - After a quiet minute, the next message pops the same notification up again,
   still counting.
 - A DM pops up for its first message and then at most once a minute while it
@@ -1379,12 +1379,12 @@ messages*.
 - Reading the conversation in Púca (opening it with the window in front)
   takes its notification out of the notification centre, and the count starts
   again. Clicking the notification while it is on screen opens that
-  conversation; clicking one in Windows' notification centre brings Púca to
-  the front.
+  conversation.
 - People joining a server are one notification per server in the same way.
-- Muted servers and channels (including **Only @mentions**, except for a
-  mention in the channel you have open) and people you blocked still do not
-  notify.
+- Muted servers and channels (including **Only @mentions**) and people you
+  blocked still do not notify. The one exception, while notifications are
+  grouped: under **Only @mentions**, a mention of you in the channel you have
+  open does.
 - **Group notifications by conversation**, under the same setting, is on by
   default. Off, every message has a notification of its own, as before.
 - In the web app it is your browser that draws the notification, so how a
