@@ -162,8 +162,14 @@
            desktop, a Safari tab), so nothing there changes. */
         height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
         padding-bottom: var(--safe-area-bottom);
-        background: linear-gradient(180deg, rgba(22, 33, 62, 0.98), rgba(15, 15, 26, 1));
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        /* The theme's own surface and words (§6). The bar was a navy gradient
+           and white-at-half labels from before the themes, so Light had a dark
+           bar under a light app and the chosen tab's brand blue was 3.3-3.5:1
+           on every theme, high contrast included (under 4.5 for its ~10px
+           label). The channel list's shade, which the server rail and channel
+           list share on every theme. */
+        background: var(--bg-secondary, #0d0e10);
+        border-top: 1px solid var(--border-separator, rgba(255, 255, 255, 0.1));
         z-index: 300;
         justify-content: space-around;
         align-items: center;
@@ -185,14 +191,24 @@
         padding: 8px 2px;
         background: transparent;
         border: none;
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--text-muted, #949ba4);
         font-size: 0.7rem;
         cursor: pointer;
         transition: color 0.2s ease;
     }
 
     .mobile-nav-btn.active {
-        color: #5865f2;
+        /* The brand colour as words (theme.css): --brand-primary is under
+           4.5:1 on a surface on every theme. */
+        color: var(--brand-text, #8b93f6);
+    }
+
+    /* A tapped tab keeps a sticky :hover on touch, and the touch block below
+       gives every hovered button `background-color: inherit`: now that the
+       bar has a solid colour, the tab inherited it and painted it over the
+       bar's top border, a gap in the line above the tab just pressed. */
+    .mobile-nav-btn:hover {
+        background-color: transparent;
     }
 
     .mobile-nav-btn .nav-icon {
@@ -320,6 +336,39 @@
         /* Prevents iOS zoom */
         border-radius: 22px;
         padding: 10px 16px;
+    }
+
+    /* A field a phone types into must be 16px or more, or iOS zooms the page
+       in on focus and the fixed panel layout does not come back (§5). The
+       rules above lost that fight: component stylesheets load after this
+       file, so their equal-specificity rules win - Chat.css's
+       `.input-wrapper textarea` (0.95rem) and `.form-group input` (0.95rem),
+       Modal.css's `.form-group textarea` (14px) and EmojiPicker.css's search
+       (0.875rem). These are the fields the 2026-11-12 sweep measured under
+       16px at 390x844: the composer, the sign-in password and the recovery
+       code box behind "Forgot your password?", the emoji search and Server
+       Settings' description. One more class than each competing rule, so
+       load order no longer matters (e2e/mobile-ui-sweep-walk.mjs, "fields").
+       A new form needs its own rule (Edit Channel has one). */
+    .message-form .input-wrapper textarea,
+    .message-form .input-wrapper input,
+    .login-container .form-group input,
+    .login-container .form-group textarea,
+    .emoji-picker .emoji-search input,
+    .server-settings-container .form-group input,
+    .server-settings-container .form-group textarea {
+        font-size: 16px;
+    }
+
+    /* The composer is one line tall until you type, and "Message #<channel>"
+       is often longer than that line on a phone (136px of text box at 360):
+       it wrapped, and the second line was cut in half under the box's edge.
+       It stays on one line: an ellipsis where the engine draws one, clipped
+       at the box's edge where it does not (Chromium, for a textarea). */
+    .message-form .input-wrapper textarea::placeholder {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     /* Compact buttons on mobile */

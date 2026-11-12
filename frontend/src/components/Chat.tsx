@@ -7785,6 +7785,16 @@ export function Chat({ onLogout }: ChatProps) {
                             // slot, so without closing it "Chat" highlights
                             // itself and shows the device grid.
                             if (showDevicesView) { leaveDevicesView('chat'); return; }
+                            // And the Tasks view: it is the friends dashboard
+                            // on its Tasks tab, in this same slot, and it sets
+                            // the panel to 'chat' itself, so a bare
+                            // setMobilePanel left it on screen and the tap did
+                            // nothing. Back to the conversation under it, or,
+                            // with none, to the home dashboard's Friends tab.
+                            if (showFriendsPanel && friendsTab === 'tasks') {
+                                if (currentServer || currentDM) setShowFriendsPanel(false);
+                                else setFriendsTab('online');
+                            }
                             setMobilePanel('chat');
                         }}
                     >

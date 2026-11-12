@@ -277,7 +277,7 @@
 
 /* Fullscreen a camera tile.
  *
- * Top-RIGHT, opposite the LIVE badge, and it appears on hover so a wall of
+ * Top-RIGHT (the LIVE badge moves to its left, below), and it appears on hover so a wall of
  * faces is not a wall of buttons. A COARSE POINTER HAS NO HOVER, so on touch
  * it is simply always visible — a control that only exists under a mouse is a
  * control a phone user does not have, and the mobile walk is a gate here. */
@@ -314,6 +314,20 @@
 
 @media (pointer: coarse) {
     .vs-fullscreen-btn { opacity: 1; }
+}
+
+/* Someone streaming with their camera on has both, and both were top-right:
+   the button sat on the LIVE badge (on touch, where the button never hides,
+   always). The badge moves to the button's left: 8px inset + the button +
+   6px. The button is 32px, and mobile.css's 44px minimum on a phone. */
+.vs-fullscreen-btn ~ .vs-live-badge {
+    right: 46px;
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .vs-fullscreen-btn ~ .vs-live-badge {
+        right: 58px;
+    }
 }
 
 /* Fullscreen puts the TILE on the display, so the video must fill it rather

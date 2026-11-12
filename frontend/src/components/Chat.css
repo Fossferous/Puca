@@ -1015,20 +1015,30 @@
     min-width: 0;
 }
 
+/* A name too long to share its line with the time puts the time on the next
+   line, whole. Unwrapped, the name kept its full width and the time was
+   squeezed beside it: "Today / at / 17:54" stacked down the right edge at
+   390px, and at 360px a 32-character username pushed the time off the
+   screen. A name longer than the column breaks rather than overflowing. */
 .message-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.5rem;
+    column-gap: 0.5rem;
+    min-width: 0;
 }
 
 .message-author {
     font-weight: 600;
     color: var(--mode-brand-text, var(--brand-primary));
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .message-time {
     font-size: 0.7rem;
     color: var(--text-faint);
+    white-space: nowrap;
 }
 
 .message-content {
@@ -1599,11 +1609,16 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* Pinned messages panel */
 .pins-wrapper { position: relative; display: inline-block; }
-.pins-toggle-btn {
+/* The checklist toggle beside it had no rule at all, so every theme drew the
+   browser's own grey button there: a pale box in the dark header, the only
+   control in it with a background. */
+.pins-toggle-btn,
+.checklist-toggle-btn {
     background: none; border: none; cursor: pointer;
     font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
 }
-.pins-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+.pins-toggle-btn:hover,
+.checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
 .pins-panel {
     /* Anchored LEFT so the panel grows INTO the chat column. The pins button
        sits near the left of the header, and .chat-main clips at overflow:
@@ -3133,8 +3148,11 @@ body.voice-drag-active {
     background: var(--brand-primary, #5865f2); flex-shrink: 0;
 }
 .ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
-.ac-name { font-weight: 500; }
-.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; }
+/* A name too long for the row ends in an ellipsis on its own line, never mid-letter under the
+   edge with the row scrolling sideways (a 32-character username did both). */
+.ac-name, .ac-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-name { font-weight: 500; flex: 0 1 auto; }
+.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; flex: 0 10 auto; padding-left: 4px; }
 .autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75); }
 
 /* ---- Empty channel welcome ---- */
@@ -3213,6 +3231,25 @@ body.voice-drag-active {
 
     .emoji-picker-anchor .emoji-picker {
         width: 100%;
+    }
+
+    /* The @member / #channel list. Anchored to the text box it was as wide as
+       the box is on a phone - 164px at 390, 134px at 360, between the attach
+       and task buttons and the emoji and send ones - so a name was cut after a
+       dozen letters. It spans the composer instead (.message-form is sticky,
+       so it is the containing block once the box stops being one), and its
+       rows are a finger's 44px. */
+    .message-form .input-wrapper {
+        position: static;
+    }
+
+    .message-form .composer-autocomplete {
+        left: 8px;
+        right: 8px;
+    }
+
+    .message-form .autocomplete-item {
+        min-height: 44px;
     }
 
     /* Sticky-hover on tap otherwise floats the toolbar above the message,
