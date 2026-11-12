@@ -278,7 +278,9 @@ describe('a conversation going on while you are away (desktop app)', () => {
         await settle();
         for (let i = 1; i < 10; i++) {
             vi.advanceTimersByTime(2_000);
-            channelMessage('alice', `m${i}`);
+            // Nothing shows for these, so they are not quiet to the caller:
+            // the app's own sound still says each one arrived.
+            expect(channelMessage('alice', `m${i}`)).toEqual({ fire: true });
         }
         await settle();
         expect(env.pluginShown).toEqual([{ title: '#general · Lads', body: 'alice sent a message' }]);
@@ -300,6 +302,21 @@ describe('a conversation going on while you are away (desktop app)', () => {
         expect(shows()).toHaveLength(0);
         expect(env.pluginShown).toHaveLength(5);
         expect(env.pluginShown[0]).toEqual({ title: 'alice sent a message', body: 'New message' });
+    });
+
+    it('coming back to the window ends the burst: the next DM after you leave again pops', async () => {
+        const dm = (id: string) => notify.notifyNewMessage({
+            title: 'Bob sent you a message', isOwn: false, isMuted: false, notifyKey: 'dm:c1', nav: 'dm:c1',
+            group: { key: 'dm:c1', kind: 'dm', where: 'Bob', author: 'Bob', messageId: id },
+        });
+        expect(dm('d1')).toEqual({ fire: true });
+        await settle();
+        vi.advanceTimersByTime(15_000);
+        notify.endConversationBursts();
+        vi.advanceTimersByTime(25_000);
+        expect(dm('d2')).toEqual({ fire: true });
+        await settle();
+        expect(shows().map(s => s.popup)).toEqual([true, true]);
     });
 
     it('signing out takes every message toast away', async () => {

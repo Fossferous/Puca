@@ -210,7 +210,7 @@ import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedC
 import { playMessageSound, playMentionSound } from '../utils/audioFeedback';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { loadSettings } from './settingsStore';
-import { clearAllConversationNotifications, notifyNewMessage, seeConversation } from '../api/desktopNotify';
+import { clearAllConversationNotifications, endConversationBursts, notifyNewMessage, seeConversation } from '../api/desktopNotify';
 import { channelGroupKey, channelWhere, dmGroupKey, joinGroupKey } from '../api/notifyGroups';
 import { startTaskReminders } from '../api/taskReminders';
 import { requestTasksTab } from '../api/tasksViewIntent';
@@ -3498,8 +3498,10 @@ export function Chat({ onLogout }: ChatProps) {
             // sibling latch — you are looking at the app now.
             void clearMobileNotifications();
             // Desktop and web: the conversation on screen is seen, so its
-            // notification goes (and its count starts again).
+            // notification goes (and its count starts again), and every
+            // conversation's next message after you leave again pops.
             seeOnScreenRef.current();
+            endConversationBursts();
             const activeId = currentChannelIdRef.current;
             // Message list on screen AND pinned at the bottom: what arrived
             // while away is visible now. A covered chat (voice view, Notes

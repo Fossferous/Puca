@@ -110,8 +110,17 @@ describe('mentions and DMs', () => {
         expect(groups.record(chan('bob', 'c', { important: true }))!.pop).toBe(true);
         advance(5_000);
         expect(groups.record(chan('bob', 'd', { important: true }))!.pop).toBe(false);
-        advance(IMPORTANT_REPOP_MS);
+        // The conversation goes on (a message every 10 s, never a quiet
+        // minute), so what pops next is the once-a-minute rule, not the lull.
+        for (let t = 10_000; t < IMPORTANT_REPOP_MS; t += 10_000) {
+            advance(10_000);
+            expect(groups.record(chan('alice', `x${t}`))!.pop).toBe(false);
+        }
+        advance(5_000); // exactly a minute after the last important pop
         expect(groups.record(chan('carol', 'e', { important: true }))!.pop).toBe(true);
+        // A plain message right after it is quiet again: not a lull.
+        advance(1_000);
+        expect(groups.record(chan('alice', 'f'))!.pop).toBe(false);
     });
 
     it('a DM pops for its first message, then at most once a minute, not on every line', () => {
@@ -155,8 +164,33 @@ describe('mentions and DMs', () => {
         // It was the burst's important pop: the next mention within a minute is quiet.
         advance(5_000);
         expect(groups.record(chan('carol', 'm2', { important: true }))!.pop).toBe(false);
-        advance(IMPORTANT_REPOP_MS);
+        for (let t = 10_000; t < IMPORTANT_REPOP_MS; t += 10_000) {
+            advance(10_000);
+            expect(groups.record(chan('alice', `x${t}`))!.pop).toBe(false);
+        }
+        advance(10_000);
         expect(groups.record(chan('carol', 'm3', { important: true }))!.pop).toBe(true);
+    });
+
+    it('coming back to the window ends every burst, so the next message after you leave pops', () => {
+        // The reviewer's case: a DM pops, you look in on another channel,
+        // you go back to the game, the same person writes again 40 s on.
+        const { groups, advance } = harness();
+        const dm = (id: string): GroupMessage => ({ key: 'dm:c1', kind: 'dm', where: 'Bob', author: 'Bob', messageId: id });
+        expect(groups.record(dm('d1'))!.pop).toBe(true);
+        expect(groups.record(chan('alice', 'a'))!.pop).toBe(true);
+        advance(15_000);
+        groups.endBursts();       // back in Púca, reading something else
+        advance(25_000);
+        const again = groups.record(dm('d2'))!;
+        expect(again.pop).toBe(true);
+        expect(again.body).toBe('2 new messages');   // still what is waiting
+        expect(groups.record(chan('bob', 'b'))!.pop).toBe(true);
+        // CONTROL: without coming back, the same timing is one quiet burst.
+        const c = harness();
+        c.groups.record(dm('d1'));
+        c.advance(40_000);
+        expect(c.groups.record(dm('d2'))!.pop).toBe(false);
     });
 
     it('a mention reported before its plain copy is not counted twice either', () => {

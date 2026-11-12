@@ -1371,11 +1371,13 @@ messages*.
   again and without a sound: Púca's own message sound plays only when the
   notification pops up.
 - After a quiet minute, the next message pops the same notification up again,
-  still counting.
+  still counting. So does the first message after you have been back in Púca
+  and left again.
 - A DM pops up for its first message and then at most once a minute while it
-  goes on. An @mention of you pops up even in the middle of a conversation
-  when that channel is the one you have open in Púca. In another channel Púca
-  cannot tell: its messages stay encrypted until you open it.
+  goes on. An @mention of you does the same even in the middle of a busy
+  channel (at most once a minute), when that channel is the one you have open
+  in Púca. In another channel Púca cannot tell: its messages stay encrypted
+  until you open it.
 - Reading the conversation in Púca (opening it with the window in front)
   takes its notification out of the notification centre, and the count starts
   again. Clicking the notification while it is on screen opens that

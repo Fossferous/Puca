@@ -176,6 +176,12 @@ export function seeConversation(key: string): void {
     }
 }
 
+/** You came back to the window: whatever conversation goes on, its next
+ *  message after you leave again pops (api/notifyGroups.ts, endBursts). */
+export function endConversationBursts(): void {
+    groups.endBursts();
+}
+
 /** Sign-out: every conversation's notification goes, and every count. */
 export function clearAllConversationNotifications(): void {
     groups.clear();
@@ -508,7 +514,10 @@ export function notifyNewMessage(opts: {
             // Quiet here is still on screen: Windows updates the toast where it
             // is, or puts it back in the notification centre (toasts.rs).
             void showNativeToast(group.key, step);
-            return step.pop ? decision : { fire: true, quiet: true };
+            // Not quiet where the shell has refused its own toasts (a build
+            // for anything but Windows): there a quiet message shows nothing,
+            // so it must not take the app's sound away too.
+            return step.pop || nativeToasts === 'no' ? decision : { fire: true, quiet: true };
         }
         // The web: a quiet message with nothing left to update (the user
         // closed it) shows nothing, so it is not quiet to the caller either,

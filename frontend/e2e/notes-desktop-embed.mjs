@@ -148,6 +148,11 @@ const FAKE_SHELL = `(() => {
         stop_hotkey_listener: () => null,
         attention_main_window: () => null,
         release_attention_topmost: () => null,
+        // Message notifications, one per conversation (src-tauri/src/toasts.rs):
+        // Chat clears the one on screen on focus and every one at sign-out.
+        toast_show: () => null,
+        toast_clear: () => null,
+        toast_clear_all: () => null,
         clear_webview_permissions: () => null,
         hide_screen_capture_bar: () => null,
         list_monitors: () => ({ monitors: [{ index: 0, left: 0, top: 0, width: 1280, height: 800, primary: true }], virt_left: 0, virt_top: 0, virt_width: 1280, virt_height: 800 }),
@@ -972,6 +977,9 @@ await sleep(1000);
 const dbsAfter = await cacheDbs();
 ck('sign-out: Notes\' sealed on-device cache is deleted', dbsAfter.length === 0, JSON.stringify(dbsAfter));
 ck('sign-out: no Notes prefs left in storage', await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('pucaNotesPrefs')).length === 0));
+// No conversation's notification outlives the session (api/desktopNotify.ts).
+ck('sign-out: every message notification is taken out of the notification centre',
+    await page.evaluate(() => window.__shell.calls.includes('toast_clear_all')));
 
 const shellFinal = await page.evaluate(() => ({ calls: [...new Set(window.__shell.calls)], unknown: [...new Set(window.__shell.unknown)], notes: window.__shell.notifications.length }));
 console.log(`INFO  commands the app sent the shell: ${shellFinal.calls.join(', ')}`);

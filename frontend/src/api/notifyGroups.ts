@@ -26,9 +26,12 @@
  *    important one of its burst, and again at most once per
  *    IMPORTANT_REPOP_MS: a mention in a busy channel is not lost in the chatter,
  *    and a DM exchange does not pop on every line;
+ *  - coming back to the window ends every burst (endBursts): you were here,
+ *    so the first message after you leave again pops, whatever the clock says;
  *  - the count, and the names, run until the conversation is SEEN (opened in
  *    the app with the window focused, or its toast clicked): the toast says
- *    what is waiting, not what arrived in the last minute.
+ *    what arrived while you were away, not only in the last minute. Messages
+ *    that arrive while you are using Púca are not counted: the app shows them.
  *
  * Content-free like everything in desktopNotify.ts: names (which the old
  * titles carried already), a channel or server name, and a count. Never a
@@ -211,6 +214,14 @@ export class NotifyGroups {
             this.groups.delete(oldest);
         }
         return step;
+    }
+
+    /** You came back to the window: every conversation's burst ends, so the
+     *  next message pops; counts and names stay until each is seen. */
+    endBursts(): void {
+        for (const [key, s] of this.groups) {
+            this.groups.set(key, { ...s, lastAt: Number.NEGATIVE_INFINITY, importantPopAt: null });
+        }
     }
 
     /** The conversation was seen: its count starts again from nothing. */
