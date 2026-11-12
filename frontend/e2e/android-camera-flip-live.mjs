@@ -208,12 +208,12 @@ async function dismiss(page) {
     }
 }
 async function signUp(page, user) {
-    await page.getByPlaceholder('Enter username').waitFor({ timeout: 90000 });
+    await page.getByPlaceholder('Enter username').waitFor({ timeout: 300000 });
     await page.locator('.toggle-mode').click();
     await page.getByPlaceholder('Enter username').fill(user);
     await page.getByPlaceholder('Choose a password (min 8 characters)').fill(PASS);
     await page.locator('button.login-button[type="submit"]').click();
-    await page.waitForURL('**/chat', { timeout: 90000 });
+    await page.waitForURL('**/chat', { timeout: 300000 });
     await sleep(2000);
     await dismiss(page);
 }
@@ -287,7 +287,24 @@ const viewerCamera = async (V, uid) => { await V.evaluate(BLOCK_GRID); return V.
     const m = await import('/src/components/voiceState.ts');
     const stream = m.globalCameraStreams.get(uid);
     const all = stream?.getVideoTracks().filter(t => t.readyState === 'live') ?? [];
-    const track = all[all.length - 1];
+    // Each track's decoded frames now and a second later: the camera is the
+    // one whose count moves (the last one when none or several do).
+    const decoded = async (t) => {
+        let n = 0;
+        for (const pc of window.__pcs) {
+            if (pc.connectionState === 'closed') continue;
+            for (const r of pc.getReceivers()) if (r.track === t) (await r.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') n += s.framesDecoded || 0; });
+        }
+        return n;
+    };
+    let track = all[all.length - 1];
+    if (all.length > 1) {
+        const a = await Promise.all(all.map(decoded));
+        await new Promise(r => setTimeout(r, 1200));
+        const b = await Promise.all(all.map(decoded));
+        const moving = all.filter((_, i) => b[i] > a[i]);
+        if (moving.length === 1) track = moving[0];
+    }
     if (!track) return { live: false };
     const tileEl = [...document.querySelectorAll('video')].find(v => v.srcObject === stream && v.getClientRects().length > 0) ?? null;
     let tile = null;
@@ -339,6 +356,19 @@ const shotOf = (dataUrl) => Buffer.from((dataUrl || ',').split(',')[1] || '', 'b
 let forwarded = false;
 const browsers = [];
 try {
+    // The desktop viewer first: its page comes from a dev server, and with
+    // the phone's app starting at the same time a loaded machine starved it
+    // for minutes.
+    step('the viewer');
+    const b = await chromium.launch({ channel: CHANNEL, headless: true, args: VIEWER_ARGS }); browsers.push(b);
+    const ctx = await b.newContext({ viewport: { width: 1400, height: 900 } });
+    await ctx.addInitScript(VIEWER_INIT);
+    await ctx.addInitScript(QUIET);
+    const V = await ctx.newPage();
+    V.setDefaultTimeout(120000); // a loaded machine: see the viewer's comment above
+    V.on('pageerror', (e) => console.log(`  [viewer pageerror] ${e.message.slice(0, 200)}`));
+    await V.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 300000 });
+    await V.getByPlaceholder('Enter username').waitFor({ timeout: 300000 });
     step('a fresh app');
     const attached = execFileSync(ADB, ['devices'], { encoding: 'utf8' });
     if (!attached.split('\n').map(l => l.trim().split(/\s+/)).some(([s, st]) => s === SERIAL && st === 'device')) throw new Error(`${SERIAL} is not attached`);
@@ -357,18 +387,12 @@ try {
     browsers.push(wvBrowser);
     const P = await until(() => wvBrowser.contexts().flatMap(c => c.pages()).find(p => p.url().startsWith('https://localhost')), 30000);
     if (!P) throw new Error('the page of the app did not appear');
+    P.setDefaultTimeout(120000);
     P.on('console', (m) => { const t = m.text(); if (/camera|\[WebRTC\]|facing/i.test(t)) console.log(`  [phone] ${t.slice(0, 240)}`); });
     if (SFU) await P.context().addInitScript(EMULATOR_LOOPBACK);
     await P.evaluate(QUIET);
     await P.reload({ waitUntil: 'domcontentloaded' });
 
-    const b = await chromium.launch({ channel: CHANNEL, headless: true, args: VIEWER_ARGS }); browsers.push(b);
-    const ctx = await b.newContext({ viewport: { width: 1400, height: 900 } });
-    await ctx.addInitScript(VIEWER_INIT);
-    await ctx.addInitScript(QUIET);
-    const V = await ctx.newPage();
-    V.on('pageerror', (e) => console.log(`  [viewer pageerror] ${e.message.slice(0, 200)}`));
-    await V.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 120000 });
 
     step('signing up both');
     await signUp(V, `camv_${stamp}`);

@@ -1206,6 +1206,11 @@ export class WebRTCManager {
             const senders = peer.connection.getSenders();
             // Already carried (nothing changed: one camera, or a second press).
             if (senders.some(s => this.trackOf(s) === newTrack)) continue;
+            // The FIRST camera sender, as before. After the camera was turned
+            // off and on there are two (the first keeps the stopped track and
+            // turning on added another), and the first is the one the other
+            // side's tile plays: its stream lists the tracks in the order they
+            // came, and a <video> plays the first. Measured on the emulator.
             const videoSender = senders.find(s => {
                 const t = this.trackOf(s);
                 return t?.kind === 'video' && !screenVideo.has(t);
