@@ -127,16 +127,14 @@ import {
     powerOffOffered,
     powerOffQuestion,
     refusalText as powerOffRefusalText,
+    setPowerOffLine,
+    subscribePowerOffLines,
+    claimPowerOff,
+    releasePowerOff,
+    type PowerOffLine,
     type PowerOffOutcome,
     type PowerOffTarget,
 } from '../api/devices/powerOff';
-
-/** A card's Power off line (see `powerOffs`). */
-interface PowerOffLine {
-    running: boolean;
-    kind: PowerOffOutcome['kind'] | null;
-    text: string;
-}
 
 /** The step a card's Power off is on, or how it ended, under its buttons —
  *  the wake line's look, since it is the same kind of news. The live region
@@ -417,10 +415,10 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     /** The machine card whose Audio Hub panel is open (by primary row id). */
     const [audioHubId, setAudioHubId] = useState<string | null>(null);
     /** Each card's Power off line: running (with the step it is on), or how
-     *  it ended. Keyed by card: a machine's primary row id, or `share-<id>`. */
+     *  it ended. Kept in api/devices/powerOff.ts, not here: a power-off
+     *  outlives this view (a phone going back to the chat mid-flight). */
     const [powerOffs, setPowerOffs] = useState<ReadonlyMap<string, PowerOffLine>>(new Map());
-    /** Cards with a Power off between the press and its outcome. */
-    const powerOffInFlight = useRef(new Set<string>());
+    useEffect(() => subscribePowerOffLines(setPowerOffs), []);
     const [autostart, setAutostartState] = useState<boolean | null>(null);
     const [forwarding, setForwardingState] = useState<boolean | null>(null);
     const [unattended, setUnattendedState] = useState<boolean | null>(null);
@@ -1125,15 +1123,6 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         }
     };
 
-    const setPowerOffLine = (key: string, line: PowerOffLine | null): void => {
-        setPowerOffs(prev => {
-            const next = new Map(prev);
-            if (line) next.set(key, line);
-            else next.delete(key);
-            return next;
-        });
-    };
-
     /**
      * POWER OFF, forcibly (api/devices/powerOff.ts). Asked first, in the
      * app's own question, naming the PC and the unsaved work; then the card
@@ -1149,14 +1138,14 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         resolveRow: () => Promise<{ id: string; signIn: boolean } | null>,
         share?: PowerOffTarget['share'],
     ) => {
-        // A REF, set before the question: two quick presses both read the
-        // last render's state, and the second would start a second flow.
-        if (powerOffInFlight.current.has(key) || powerOffs.get(key)?.running) return;
-        powerOffInFlight.current.add(key);
+        // Claimed before the question, in the store: two quick presses both
+        // read the last render's state, and a card come back mid-flight has a
+        // fresh one — either would start a second flow.
+        if (!claimPowerOff(key)) return;
         try {
             await runPowerOff(key, name, resolveRow, share);
         } finally {
-            powerOffInFlight.current.delete(key);
+            releasePowerOff(key);
         }
     };
 

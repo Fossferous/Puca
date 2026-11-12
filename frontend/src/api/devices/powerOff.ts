@@ -35,6 +35,7 @@ import {
     POWER_OFF_NOT_ALLOWED_REASON,
     POWER_OFF_ATTENDED_REASON,
     POWER_OFF_UNLOCKED_REASON,
+    POWER_OFF_LOCKED_REASON,
     type DeviceControlSession,
     type PowerOffProgress,
 } from './session';
@@ -149,6 +150,10 @@ export function refusalText(n: string, reason: string, signIn = false): string {
             + `access, that is why: it waits for somebody there to let the connection in, and Power off `
             + `works only on a PC set up for unattended access.`;
     }
+    if (reason === POWER_OFF_LOCKED_REASON || /machine is now locked/i.test(reason)) {
+        return `${n} locked before it could be powered off, so it was not powered off. Press Power `
+            + `off again to try once more.`;
+    }
     if (reason === POWER_OFF_UNLOCKED_REASON) {
         return `Somebody signed in at ${n} just now, so it was not powered off. Press Power off again `
             + `if you still want it off: anything they have open would be lost.`;
@@ -246,4 +251,49 @@ export async function powerOffDevice(
     } finally {
         unsubscribe();
     }
+}
+
+// ---- each card's line, kept OUTSIDE the Devices view -------------------------
+//
+// A power-off outlives the view that started it (a phone swiping back to the
+// chat while the passphrase prompt is up), and so must what it says: kept
+// here, as wakeSession keeps the wake lines, so the card comes back on the
+// step it is on or on how it ended, with Power off still held while it runs.
+
+/** A card's Power off line: running (with the step it is on), or how it ended. */
+export interface PowerOffLine {
+    running: boolean;
+    kind: PowerOffOutcome['kind'] | null;
+    text: string;
+}
+
+const lines = new Map<string, PowerOffLine>();
+const lineListeners = new Set<(all: ReadonlyMap<string, PowerOffLine>) => void>();
+const inFlight = new Set<string>();
+
+/** Set a card's line, or clear it with null. Keyed by card: a machine's
+ *  primary row id, or `share-<id>`. */
+export function setPowerOffLine(key: string, line: PowerOffLine | null): void {
+    if (line) lines.set(key, line);
+    else lines.delete(key);
+    const snapshot = new Map(lines);
+    for (const l of lineListeners) l(snapshot);
+}
+
+export function subscribePowerOffLines(l: (all: ReadonlyMap<string, PowerOffLine>) => void): () => void {
+    lineListeners.add(l);
+    l(new Map(lines));
+    return () => { lineListeners.delete(l); };
+}
+
+/** Hold a card from the press to its outcome: false when it already has one
+ *  going (two quick presses, or a press on a card come back mid-flight). */
+export function claimPowerOff(key: string): boolean {
+    if (inFlight.has(key)) return false;
+    inFlight.add(key);
+    return true;
+}
+
+export function releasePowerOff(key: string): void {
+    inFlight.delete(key);
 }

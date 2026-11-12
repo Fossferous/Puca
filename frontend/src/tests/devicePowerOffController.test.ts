@@ -29,8 +29,11 @@ vi.mock('../api/devices/unattendedPrompt', () => ({
 }));
 const confirmUaSeed = vi.fn();
 const forgetUaSeed = vi.fn();
+// The passphrase stretch (argon2id: ~0.4 s on a desktop, longer on a phone),
+// replaceable so a test can make time pass inside it.
+const deriveUaSeed = vi.fn((): Uint8Array => new Uint8Array(32));
 vi.mock('../api/devices/unattended', () => ({
-    deriveUaSeed: () => new Uint8Array(32),
+    deriveUaSeed: () => deriveUaSeed(),
     signUaChallengeSeed: () => new Uint8Array(64),
     rememberedUaSeed: () => null,
     rememberUaSeed: () => {},
@@ -39,9 +42,10 @@ vi.mock('../api/devices/unattended', () => ({
 }));
 // The follow to a PC's desktop after somebody signs in at it (wakeSession).
 const followToDesktop = vi.fn();
+const followToSignIn = vi.fn();
 vi.mock('../api/devices/wakeSession', () => ({
     followToDesktop: (...a: unknown[]) => followToDesktop(...a),
-    followToSignIn: () => {},
+    followToSignIn: (...a: unknown[]) => followToSignIn(...a),
 }));
 vi.mock('../api/devices/index', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/devices/index')>()),
@@ -470,6 +474,68 @@ describe('an armed PC (the passphrase)', () => {
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: HANDOVER_REASON } });
         await settle();
         expect(followToDesktop).toHaveBeenCalled();
+    });
+
+    it('the deadline falling due while the passphrase is being STRETCHED is no verdict: the proof still goes, and the clock starts from it', async () => {
+        // The prompt has closed (awaitingUaPassphrase is false again), but the
+        // proof has not left: argon2id, then signing and sealing, take real
+        // time. A verdict there would end the session before the proof it was
+        // waiting for, and tell the user to update a PC that is fine.
+        const { POWER_OFF_ANSWER_TIMEOUT_MS, POWER_OFF_TOO_OLD_REASON } = await import('../api/devices/session');
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { id, key } = await activeController({ powerOff: true });
+        await spinUntil('the power-off frame', async () => (await powerFrames(key)).length === 1);
+        requestUnattendedPassphrase.mockResolvedValueOnce('correct horse');
+        // The stretch outlasts the whole deadline, so it falls due INSIDE it.
+        deriveUaSeed.mockImplementationOnce(() => {
+            vi.advanceTimersByTime(POWER_OFF_ANSWER_TIMEOUT_MS + 500);
+            return new Uint8Array(32);
+        });
+        await hostSignal(id, key, CHALLENGE);
+        await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+        expect(deriveUaSeed, 'premise: the stretch ran').toHaveBeenCalled();
+        expect(seen.get(id)?.phase, 'not ended before its proof left').toBe('active');
+        expect(seen.get(id)?.powerOff?.state).toBe('sent');
+        // From the proof, the host's full answer time — and then the verdict.
+        await vi.advanceTimersByTimeAsync(POWER_OFF_ANSWER_TIMEOUT_MS - 100);
+        expect(seen.get(id)?.powerOff?.state, 'a full deadline from the proof').toBe('sent');
+        await vi.advanceTimersByTimeAsync(200);
+        expect(seen.get(id)?.powerOff).toEqual({ state: 'failed', reason: POWER_OFF_TOO_OLD_REASON });
+    });
+
+    it('a LOCK at the PC first (the host hands a session over at a lock): not done, and NOT followed to its lock screen', async () => {
+        const { LOCK_HANDOVER_REASON, POWER_OFF_LOCKED_REASON } = await import('../api/devices/session');
+        followToSignIn.mockClear();
+        const { id } = await sentPowerOff();
+        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: LOCK_HANDOVER_REASON } });
+        await settle();
+        expect(seen.get(id)?.powerOff, 'never "unknown": the host drops what it held at the lock')
+            .toEqual({ state: 'failed', reason: POWER_OFF_LOCKED_REASON });
+        expect(followToSignIn, 'a Control session nobody asked for').not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: a Files session IS followed to the lock screen on the same hand-over', async () => {
+        const { LOCK_HANDOVER_REASON } = await import('../api/devices/session');
+        followToSignIn.mockClear();
+        const { id } = await activeController({ filesOnly: true });
+        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: LOCK_HANDOVER_REASON } });
+        await settle();
+        expect(followToSignIn).toHaveBeenCalled();
+    });
+
+    it('a friend\'s PC locking first: not done either (the share\'s own wording for that end)', async () => {
+        const { LOCK_HANDOVER_REASON } = await import('../api/devices/session');
+        followToSignIn.mockClear();
+        const { id, key } = await activeController({
+            powerOff: true,
+            share: { inviteId: 7, ownerUser: 9, ownerUsername: 'friend', capabilities: ['control'] },
+        });
+        await spinUntil('the power-off frame', async () => (await powerFrames(key)).length === 1);
+        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: LOCK_HANDOVER_REASON } });
+        await settle();
+        expect(seen.get(id)?.powerOff?.state).toBe('failed');
+        expect(seen.get(id)?.powerOff?.reason).toMatch(/machine is now locked/);
+        expect(followToSignIn).not.toHaveBeenCalled();
     });
 
     it('proved: the held request is the host\'s to carry out, and its ack is taken', async () => {
