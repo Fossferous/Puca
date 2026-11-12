@@ -129,6 +129,29 @@ html[data-stream-takeover] .voice-panel-compact.vp-collapsed {
     box-shadow: none;
 }
 
+/* The camera strip (CameraRail.css) is the stage's bottom row, right where
+   the voice bar floats: with a camera on, the bar covered the cameras and
+   the room's name was drawn over a face. While the controls are shown the
+   strip rises above the bar, over the foot of the picture as the bar and
+   the header are; hidden, it drops back. A transform, so the picture is
+   not laid out again on every tap; none while a camera in it fills the
+   screen (a transform would hold that position:fixed tile inside the
+   strip). A control session already keeps the bar
+   in a row of its own below the stage, and with no voice bar there is
+   nothing to rise above. */
+html[data-stream-takeover]:not([data-stream-controlling]):has(.voice-panel-compact) .stream-stage .camera-rail {
+    position: relative;
+    z-index: 5;
+    transform: translateY(calc(-1 * var(--mobile-voice-panel-h, 60px)));
+    transition: transform 0.2s ease;
+}
+
+/* !important: the rule above is the more specific one. */
+html[data-stream-takeover][data-stream-chrome="hidden"] .stream-stage .camera-rail,
+html[data-media-fullscreen] .stream-stage .camera-rail {
+    transform: none !important;
+}
+
 /* The controls overlay, hidden by a tap (or a few idle seconds): gone from
    sight AND from touch, so a tap on the picture lands on the picture. */
 html[data-stream-takeover] .stream-stage-header,
@@ -171,7 +194,8 @@ html[data-stream-controlling] .stream-tile:has(.control-capture) .stream-tile-he
     html[data-stream-takeover] .voice-panel-compact,
     html[data-stream-chrome="hidden"] .stream-stage-header,
     html[data-stream-chrome="hidden"] .stream-tile-header,
-    html[data-stream-chrome="hidden"] .voice-panel-compact {
+    html[data-stream-chrome="hidden"] .voice-panel-compact,
+    html[data-stream-takeover] .stream-stage .camera-rail {
         transition: none;
     }
 }
