@@ -501,7 +501,11 @@ can never be bought, sold or exchanged for anything.
 ### Start Sharing
 From the desktop app, a browser, or the Android app (see
 [From the Android app](#from-the-android-app) below). A phone's browser and
-the iPhone cannot share a screen.
+the iPhone cannot share a screen: browsers on Android have no screen sharing
+for web pages, and neither has Safari on iPhone and iPad before iOS 27
+(Púca does not offer the new iOS 27 one yet; it has not been tried). On those,
+**Share Screen** in the voice panel is dimmed, and pressing it says why; on an
+Android phone it points you to the Púca app for Android.
 
 Púca remembers the **Resolution**, **Frame Rate** and **Audio to share** you
 last picked, and **Share Screen** uses them without asking. So if you turn the
@@ -588,8 +592,8 @@ What is different from a computer:
 - **A still screen sends little.** Frames go out when something on the
   screen changes, plus about one a second while nothing does.
 - It needs the new Android app (a new install from the download page, not
-  only the in-app update), in Púca Lite too. In an older Android app the
-  button stays hidden.
+  only the in-app update), in Púca Lite too. In an older Android app,
+  **Share Screen** says so when you press it.
 
 ### How much a share sends
 

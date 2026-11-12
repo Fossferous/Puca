@@ -1,0 +1,90 @@
+/* Share Screen where this device cannot share (ShareUnavailableButton.tsx).
+   The button reads as unavailable (dimmed), never as disabled: pressing it
+   is how the person finds out why. */
+.voice-btn.vp-share-unavailable {
+    opacity: 0.6;
+}
+.voice-btn.vp-share-unavailable[aria-expanded="true"] {
+    opacity: 1;
+}
+
+/* Fixed to the window rather than to the button: the voice bar sits in a
+   scrolling sidebar on desktop and is a clipped bottom bar on a phone. */
+.share-unavailable-card {
+    position: fixed;
+    z-index: 9000;
+    left: 16px;
+    right: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 120px);
+    max-width: 420px;
+    margin: 0 auto;
+    max-height: calc(100dvh - 160px);
+    overflow-y: auto;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: var(--bg-floating, var(--bg-secondary, #2b2d31));
+    color: var(--text-normal, #f2f3f5);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+    text-align: left;
+}
+
+.share-unavailable-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+.share-unavailable-head strong {
+    flex: 1;
+    font-size: 15px;
+    line-height: 1.35;
+    color: var(--text-normal, #f2f3f5);
+}
+
+.share-unavailable-card p {
+    margin: 8px 0 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-normal, #f2f3f5);
+}
+.share-unavailable-card .share-unavailable-note {
+    color: var(--text-muted, #b5bac1);
+}
+
+.share-unavailable-close {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin: -6px -8px 0 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal, #f2f3f5);
+    cursor: pointer;
+}
+.share-unavailable-close:hover {
+    background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.08));
+}
+
+/* White on this blue is 6.4:1. */
+.share-unavailable-get {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 8px;
+    background: #4752c4;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+@media (pointer: coarse) {
+    .share-unavailable-close { width: 44px; height: 44px; margin: -10px -12px 0 0; }
+    .share-unavailable-get { min-height: 44px; }
+}

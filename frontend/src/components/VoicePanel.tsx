@@ -79,7 +79,7 @@ import { shouldTakeOver } from '../api/ownVoice';
 import { pressMute, pressDeafen, imposeMute, micBack, micOpen, UNMUTED, type SelfMute, type MuteConstraints } from '../api/rtc/selfMute';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
-import { isTouchDevice, screenShareOffered } from './settingsModal.utils';
+import { isTouchDevice } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
@@ -108,8 +108,11 @@ import { isBlocked } from './blockStore';
 import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { combineHostIdle, decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
-import { hostIdleSeconds, hostReportsIdle, screenShareAvailable } from '../api/embedHost';
+import { hostIdleSeconds, hostReportsIdle, hostScreenShare, screenShareAvailable } from '../api/embedHost';
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
+import { currentShareEnv, shareAvailability } from './shareAvailability';
+import { ShareUnavailableButton } from './ShareUnavailableButton';
+import { Capacitor } from '@capacitor/core';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
@@ -307,7 +310,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Android app shares from its native half (api/nativeScreenShare.ts),
     // when the installed APK carries it.
     const nativeShare = nativeScreenShareAvailable();
-    const isMobile = !screenShareOffered() && !nativeShare;
+    // Whether a share can start here at all, and if not why (phone browsers,
+    // an iPad asking for desktop sites, an old APK): shareAvailability.ts.
+    // `isMobile` keeps its old name and meaning, "no Share on this device".
+    const shareHere = shareAvailability(currentShareEnv(nativeShare, hostScreenShare() !== null, Capacitor.getPlatform()));
+    const isMobile = !shareHere.canShare;
 
     // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
     // query (utils/phonePanel.ts), and nothing else. This decides whether the
@@ -4031,6 +4038,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             >
                                 {controlsExpanded ? <ChevronDownIcon size={18} /> : <ChevronUpIcon size={18} />}
                             </button>
+                        )}
+                        {/* Where this device cannot share (a phone's browser, an old
+                            APK), Share explains why instead of being missing. Inside an
+                            embedding host that supplies no picture it stays hidden. */}
+                        {!shareHere.canShare && shareAvailable && (
+                            <ShareUnavailableButton reason={shareHere.reason} />
                         )}
                         {/* Hide screen share on mobile - not supported - and inside an
                             embedding host that supplies no picture, where it could only fail */}
