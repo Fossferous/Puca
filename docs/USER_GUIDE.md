@@ -803,8 +803,10 @@ unattended access refuses it: it still asks whoever is there to let the
 connection in, as it does for **Control**, but even if they do, they agreed to
 a connection, not to losing their unsaved work, so it is not powered off. Use
 **Control** and **More → Shut down…** there instead. If somebody signs in at a
-locked computer before it powers off, it is not powered off either, and the
-card says so.
+locked computer before it powers off, or the computer locks first, it is not
+powered off either, and the card says so; no other session is opened in its
+place. Leaving **Devices** while it runs does not lose it: the card says how it
+went when you come back.
 
 The card then says how it went: that the computer is powering off, or why
 not — it is offline (it may already be off), it runs a Púca too old to know

@@ -224,6 +224,10 @@ export const POWER_OFF_STOPPED_WAITING_REASON = 'power-off: accepted, stopped wa
 /** Somebody signed in at the PC (its lock-screen service handed over) before
  *  the power-off was carried out: not done, and not followed to the desktop. */
 export const POWER_OFF_UNLOCKED_REASON = 'the console was unlocked';
+/** The PC locked (the attended host hands a session over at a lock) before
+ *  the power-off was carried out: not done, and not followed to the lock
+ *  screen. The share's own wording for the same end is matched as well. */
+export const POWER_OFF_LOCKED_REASON = 'the console was locked';
 
 /**
  * CONTROLLER: where the device card's Power off stands on this session.
@@ -2953,7 +2957,15 @@ function armPowerOffDeadline(s: Internal, ms: number): void {
             // background (an iPhone's timers fire late, all at once). Each of
             // those is bounded by the session's own lifecycle, which ends it
             // — and an end while 'sent' is 'unknown', never 'too old'.
-            if (s.awaitingUaPassphrase || s.transportDown || s.peerReconnecting
+            //
+            // Nor while a challenge has come and its proof has not LEFT: the
+            // prompt closes before the passphrase is stretched (a deliberately
+            // slow derivation, longer on a phone), signed and sealed, and a
+            // verdict in that gap would end the session before the proof it
+            // was waiting for went out. The host's own passphrase deadline
+            // bounds this, and sending the proof starts this clock afresh.
+            if (s.awaitingUaPassphrase || (s.unattended && !s.uaProofSent)
+                || s.transportDown || s.peerReconnecting
                 || !wsClient.isConnected || appIsBackgrounded()) {
                 armPowerOffDeadline(s, ms);
                 return;
@@ -2998,6 +3010,8 @@ function heldUnproved(s: Internal, endReason: string): boolean {
     // The lock-screen service stood down because somebody signed in: had it
     // carried the power-off out, the end would carry the shutdown reason.
     if (endReason === POWER_OFF_UNLOCKED_REASON) return true;
+    // Locked first: the attended host drops whatever it held at the lock.
+    if (endReason === POWER_OFF_LOCKED_REASON || /machine is now locked/i.test(endReason)) return true;
     return /unattended (passphrase|access)|too many wrong/i.test(endReason);
 }
 
@@ -5519,8 +5533,12 @@ export function installDeviceSessions(): void {
                 return;
             }
             const host = s.peerDevice;
-            teardown(s, 'the console was locked', false, true);
-            followMachineToSignIn(host);
+            teardown(s, POWER_OFF_LOCKED_REASON, false, true);
+            // NOT for a session opened only to power off: the host knows no
+            // offer, so it takes it for a screen session and hands it over at
+            // a lock — and following would open a Control session nobody
+            // asked for. The card says what happened instead.
+            if (!s.powerOffOnly) followMachineToSignIn(host);
             return;
         }
         // NO SCREEN ON THAT PC — a code (noScreen.ts), shown as a sentence

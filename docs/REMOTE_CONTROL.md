@@ -223,6 +223,13 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   If somebody signs in at the locked PC first, the lock-screen service hands
   over and the session ends: not powered off, and — unlike a Control session
   — not followed to the desktop, which would open a session nobody asked for.
+  The same for a PC that LOCKS first: the attended host, which never saw an
+  offer, takes the session for a screen one and hands it over at the lock;
+  not powered off, and not followed to the lock screen. The 8 s answer clock
+  also gives no verdict between the passphrase prompt closing and the proof
+  leaving (the slow passphrase stretch, signing and sealing). The card's line
+  is kept outside the Devices view (`setPowerOffLine` in powerOff.ts), so
+  leaving the view mid-flight loses nothing.
 - **The host is the gate.** An unproved controller gets nothing; a share
   without `control` is refused — out loud, with `power-failed`, because the
   card is waiting on an answer (the other power actions keep their silence

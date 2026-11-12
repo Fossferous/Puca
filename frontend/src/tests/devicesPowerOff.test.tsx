@@ -42,6 +42,7 @@ vi.mock('../api/devices/session', () => ({
     POWER_OFF_NOT_ALLOWED_REASON: 'power-off: this share does not include control',
     POWER_OFF_ATTENDED_REASON: 'power-off: someone there let this connection in',
     POWER_OFF_UNLOCKED_REASON: 'the console was unlocked',
+    POWER_OFF_LOCKED_REASON: 'the console was locked',
     connectToDevice: vi.fn(),
     subscribeSessions: (l: (s: unknown[]) => void) => { l([]); return () => {}; },
     audioHubSessionFor: () => null,
@@ -65,6 +66,9 @@ vi.mock('../api/devices/powerOff', async () => {
 });
 
 const { DevicesView } = await import('../components/DevicesView');
+// The REAL store (the mock above spreads the real module): each card's line
+// lives outside the view, so a test must not inherit the last one's.
+const { setPowerOffLine } = await import('../api/devices/powerOff');
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -111,6 +115,7 @@ beforeEach(() => {
     listIncomingShares.mockResolvedValue([]);
     askConfirm.mockReset();
     powerOffDevice.mockReset();
+    for (const key of ['pc', 'share-5', 'share-6']) setPowerOffLine(key, null);
 });
 afterEach(() => {
     act(() => root?.unmount());
@@ -224,6 +229,34 @@ describe('pressing it', () => {
         expect(powerOffDevice).not.toHaveBeenCalled();
         expect(host!.querySelector('.device-power-status')?.textContent)
             .toBe('Slim-Jim is offline, so it cannot be powered off from here (it may already be off).');
+    });
+});
+
+describe('leaving the Devices view mid-flight', () => {
+    it('keeps the line and the hold: back on the view, the step it is on, then how it ended', async () => {
+        // A phone going back to the chat while the passphrase prompt is up:
+        // the power-off goes on, and so must what its card says.
+        listDevices.mockResolvedValue([slimJim(true)]);
+        askConfirm.mockResolvedValue(true);
+        let finish: (o: Outcome) => void = () => {};
+        powerOffDevice.mockImplementation((_t, onProgress) => {
+            onProgress?.('Asking Slim-Jim to power off…');
+            return new Promise<Outcome>(r => { finish = r; });
+        });
+        await mount();
+        await click(buttonNamed('Power off'));
+        act(() => root?.unmount());
+        host?.remove();
+        await mount();
+        const status = () => cardOf('Slim-Jim')!.querySelector('.device-power-status');
+        expect(status()?.textContent, 'the step it is on, not an empty card').toBe('Asking Slim-Jim to power off…');
+        expect(buttonNamed('Power off')!.disabled, 'still held: a second press would start a second flow').toBe(true);
+        await click(buttonNamed('Power off'));
+        expect(askConfirm, 'nothing asked again').toHaveBeenCalledTimes(1);
+        await act(async () => { finish({ kind: 'going', text: 'Slim-Jim is powering off.' }); });
+        await settle();
+        expect(status()?.textContent).toBe('Slim-Jim is powering off.');
+        expect(powerOffDevice).toHaveBeenCalledTimes(1);
     });
 });
 
