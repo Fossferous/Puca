@@ -88,11 +88,12 @@ all.
 **Its own profile, held exclusively.** `profile_dir_from_env` is the only folder
 it uses. WebView2 opens it with exclusive access (`create_environment`), so no
 other program, Púca's own window included, can open a browser on Discord's data
-while the window is open. Four environment variables could point WebView2
-elsewhere, attach a debugger, or write its encryption keys to a file, and the
-window takes them out before WebView2 starts (`SCRUBBED_ENV`). A WebView2 too
-old to have the window's gates for external programs and screen sharing gets
-no Discord window at all, rather than one without them.
+while the window is open. Before WebView2 starts, the window takes out every
+`WEBVIEW2_` environment variable except the one that picks the runtime, and
+`SSLKEYLOGFILE` (`scrubbed`): between them they could point WebView2 elsewhere,
+attach a debugger, or write its encryption keys to a file. A WebView2 too old
+to have the window's gates for external programs and screen sharing gets no
+Discord window at all, rather than one without them, and says so.
 
 **Discord's domains only.** A page may load in the window only from
 discord.com and its subdomains, discord.gg (invites) and discordapp.com (its

@@ -502,6 +502,19 @@ mod pid_tree_tests {
         assert!(!is_pucas_own(&m, 444, 100, &[100, 900]));
     }
 
+    /// Every guard in this file asks is_pucas_own: one still on the tree-only
+    /// check would let the Discord window's sound into a share after a restart.
+    #[test]
+    fn no_guard_is_left_on_the_tree_only_check() {
+        let source = include_str!("audio_capture.rs");
+        let code: String = source.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        // Built here, so this test's own text is not what it finds.
+        let direct = ["super::", "pid_in_tree("].concat();
+        assert_eq!(code.matches(direct.as_str()).count(), 0, "a guard still calls pid_in_tree directly");
+        let asked = ["super::", "is_pucas_own("].concat();
+        assert!(code.matches(asked.as_str()).count() >= 3, "the guards ask is_pucas_own");
+    }
+
     #[test]
     fn survives_missing_parents_and_cycles() {
         // 300's parent is unknown; 700 <-> 800 is a cycle.
@@ -699,19 +712,35 @@ pub mod windows_audio {
         Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png_data)))
     }
 
-    /// Every running process of THIS program (its exe path, or its name where the
-    /// path cannot be read): Púca itself and the Discord window.
+    /// Every running process of THIS program, by its image name (`Puca.exe`,
+    /// `Puca-Lite.exe`): Púca itself and the Discord window. The name, not the
+    /// path, as stream_boost.rs does: a path can be written several ways (a short
+    /// 8.3 form, a `subst` drive), and a mismatch would quietly let the Discord
+    /// window's sound back in.
     fn same_program_pids(sys: &System) -> Vec<u32> {
-        let me = std::env::current_exe().ok();
-        let my_name = me.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
+        let Some(my_name) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        else {
+            return Vec::new();
+        };
         sys.processes()
             .iter()
-            .filter(|(_, p)| match (p.exe(), &me) {
-                (Some(exe), Some(me)) => exe.to_string_lossy().eq_ignore_ascii_case(&me.to_string_lossy()),
-                _ => my_name.as_deref().is_some_and(|n| p.name().to_string_lossy().eq_ignore_ascii_case(n)),
-            })
+            .filter(|(_, p)| p.name().to_string_lossy().eq_ignore_ascii_case(&my_name))
             .map(|(pid, _)| pid.as_u32())
             .collect()
+    }
+
+    /// Is `pid` Púca's own (super::is_pucas_own), from a fresh process list?
+    /// Every guard that keeps Púca's sound, and the Discord window's, out of a
+    /// capture asks this.
+    fn is_own(sys: &System, pid: u32) -> bool {
+        let parent_of: std::collections::HashMap<u32, u32> = sys
+            .processes()
+            .iter()
+            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
+            .collect();
+        super::is_pucas_own(&parent_of, pid, std::process::id(), &same_program_pids(sys))
     }
 
     /// Get list of running applications that may have audio.
@@ -745,7 +774,7 @@ pub mod windows_audio {
             .filter_map(|(pid, p)| p.parent().map(|pp| (pid.as_u32(), pp.as_u32())))
             .collect();
         // And every other process of this program (the Discord window), wherever
-        // it now sits in the tree: super::is_pucas_own.
+        // it now sits in the tree: super::is_pucas_own, as every guard here.
         let same_program = same_program_pids(&sys);
 
         // Which process trees are making sound RIGHT NOW (best-effort — an
@@ -862,19 +891,15 @@ pub mod windows_audio {
         if pid == 0 {
             return None;
         }
-        let own_pid = std::process::id();
         let mut sys = System::new();
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
             sysinfo::ProcessRefreshKind::new(),
         );
-        let parent_of: std::collections::HashMap<u32, u32> = sys
-            .processes()
-            .iter()
-            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
-            .collect();
-        if super::pid_in_tree(&parent_of, pid, own_pid) {
+        // Púca's own window, or the Discord window (even one a restarted Púca
+        // did not start): never the owner whose sound goes with a share.
+        if is_own(&sys, pid) {
             return None;
         }
         let name = sys.process(sysinfo::Pid::from_u32(pid))?.name().to_string_lossy().to_string();
@@ -1322,7 +1347,7 @@ pub mod windows_audio {
     // and Puca's own tree is refused, so the stream structurally cannot
     // carry Puca's voice-chat output (the exclude-mode leak class).
 
-    use std::collections::{HashMap as StdHashMap, VecDeque};
+    use std::collections::VecDeque;
     use std::sync::atomic::AtomicU32;
     use std::sync::{Mutex, OnceLock};
 
@@ -1369,19 +1394,13 @@ pub mod windows_audio {
     /// Puca's own process tree, which must never be captured (it carries the
     /// voice call). Same guard as start_capture's.
     fn is_own_tree(pid: u32) -> bool {
-        let own_pid = std::process::id();
         let mut sys = System::new();
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
             sysinfo::ProcessRefreshKind::new(),
         );
-        let parent_of: StdHashMap<u32, u32> = sys
-            .processes()
-            .iter()
-            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
-            .collect();
-        super::pid_in_tree(&parent_of, pid, own_pid)
+        is_own(&sys, pid)
     }
 
     /// Add one app to the stream audio that is ALREADY running (the "Audio
@@ -1642,19 +1661,13 @@ pub mod windows_audio {
         state: Arc<AudioCaptureState>,
     ) -> Result<Vec<u32>, String> {
         // Own-tree guard, same rationale as start_capture's include-mode guard.
-        let own_pid = std::process::id();
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let parent_of: StdHashMap<u32, u32> = sys
-            .processes()
-            .iter()
-            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
-            .collect();
         let mut failed: Vec<u32> = Vec::new();
         let targets: Vec<u32> = pids
             .into_iter()
             .filter(|&p| {
-                if super::pid_in_tree(&parent_of, p, own_pid) {
+                if is_own(&sys, p) {
                     log::warn!("Refusing mixer capture of PID {} — Puca's own tree", p);
                     failed.push(p);
                     false

@@ -73,7 +73,9 @@ pub const START_URL: &str = "https://discord.com/app";
 /// WebView2 user-data folder, under the app's local data directory.
 const PROFILE_DIR: &str = "discord-profile";
 
-/// Environment variables WebView2 reads that would undo this window's isolation:
+/// Environment variables taken out before WebView2 starts: every `WEBVIEW2_*`
+/// ([`scrubbed`]) but the one that picks the runtime, and these. Named here, the
+/// ones known to undo this window's isolation:
 /// another user-data folder (Púca's own, say), or extra browser arguments, such
 /// as `--remote-debugging-port`, or a script-debugger pipe, either of which would
 /// let another program drive the browser holding the owner's Discord session.
@@ -358,12 +360,24 @@ pub fn profile_dir_from_env(local_app_data: Option<OsString>) -> Option<PathBuf>
     Some(profile_dir(&base.join(env!("PUCA_IDENTIFIER"))))
 }
 
-/// Take out what [`SCRUBBED_ENV`] lists, before any WebView2 exists in this process.
+/// Is this environment variable taken out of the Discord window's process?
+/// [`SCRUBBED_ENV`], and every other `WEBVIEW2_*` (a debugger wait, a release
+/// channel, whatever WebView2 adds later) except the runtime's folder.
+pub fn scrubbed(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SCRUBBED_ENV.contains(&upper.as_str())
+        || (upper.starts_with("WEBVIEW2_") && upper != "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")
+}
+
+/// Take out what [`scrubbed`] names, before any WebView2 exists in this process.
 fn scrub_webview2_env() {
-    for name in SCRUBBED_ENV {
-        // Edition 2021: safe. Called first thing in a fresh process, before any
-        // other thread exists.
-        std::env::remove_var(name);
+    let names: Vec<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+    for name in names {
+        if scrubbed(&name.to_string_lossy()) {
+            // Edition 2021: safe. Called first thing in a fresh process, before
+            // any other thread exists.
+            std::env::remove_var(&name);
+        }
     }
 }
 
@@ -470,7 +484,9 @@ pub fn run_window_process() {
             return;
         };
         if let Err(e) = crate::discord_host::run(&profile) {
-            eprintln!("discord window: {e}");
+            // The owner just pressed the button: say why nothing opened, rather
+            // than nothing at all (this process has no console and no log).
+            crate::discord_host::tell_owner(&e);
         }
     }
     #[cfg(not(windows))]
@@ -683,6 +699,20 @@ mod tests {
         assert!(SCRUBBED_ENV.contains(&"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
         assert!(SCRUBBED_ENV.contains(&"WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER"));
         assert!(SCRUBBED_ENV.contains(&"SSLKEYLOGFILE"));
+        for name in [
+            "WEBVIEW2_USER_DATA_FOLDER",
+            "webview2_additional_browser_arguments",
+            "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER",
+            "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE",
+            "WEBVIEW2_SOMETHING_NEW",
+            "SSLKEYLOGFILE",
+            "sslkeylogfile",
+        ] {
+            assert!(scrubbed(name), "{name}");
+        }
+        for name in ["WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", "LOCALAPPDATA", "PATH", "SystemRoot", "TEMP"] {
+            assert!(!scrubbed(name), "{name} stays");
+        }
     }
 
     #[test]

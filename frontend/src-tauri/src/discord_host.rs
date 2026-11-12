@@ -671,6 +671,17 @@ fn answer_pending_question(allowed: bool, nonce: isize) {
     ASKING.store(false, Ordering::SeqCst);
 }
 
+/// Say why the Discord window could not open: a WebView2 too old for its gates,
+/// or one that would not start. Only after the owner pressed the button.
+pub fn tell_owner(error: &str) {
+    let title = wide("Discord - Púca");
+    let text = wide(&format!("The Discord window could not open.\n\n{error}"));
+    // SAFETY: two NUL-terminated wide strings that outlive the call; no owner.
+    unsafe {
+        MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONWARNING);
+    }
+}
+
 /// The notification question. WebView2 has none of its own for notifications. On
 /// a thread of its own, owned by the Discord window: the window keeps drawing,
 /// and the question sits on top of the window that asked. OK and Cancel, with
@@ -901,15 +912,16 @@ mod tests {
         "set_exclusive_user_data_folder_access",
     ];
 
-    /// The names called as `.Name(` that look like COM methods (a capital, or
-    /// webview2-com's `add_` / `remove_` / `set_`), in order of appearance.
+    /// The names called as `.Name(` or `Type::Name(` (spaces before the bracket
+    /// allowed) that look like COM methods: a capital, or webview2-com's `add_` /
+    /// `remove_` / `set_`. In order of appearance.
     fn com_calls(source: &str) -> Vec<String> {
-        let bytes = source.as_bytes();
         let mut calls = Vec::new();
-        for (i, _) in source.match_indices('.') {
-            let rest = &source[i + 1..];
+        let starts = source.match_indices('.').map(|(i, _)| i + 1).chain(source.match_indices("::").map(|(i, _)| i + 2));
+        for start in starts {
+            let rest = &source[start..];
             let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-            if name.is_empty() || bytes.get(i + 1 + name.len()) != Some(&b'(') {
+            if name.is_empty() || !rest[name.len()..].trim_start_matches([' ', '\t']).starts_with('(') {
                 continue;
             }
             let com_like = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
@@ -937,11 +949,19 @@ mod tests {
         for forbidden in ["set_additional_browser_arguments", "tauri::", "eval("] {
             assert!(!source.contains(forbidden), "discord_host.rs has {forbidden}");
         }
-        // NEGATIVE CONTROL: the scan sees the calls that matter.
+        // The window only ever goes to Discord's start page, or to an address
+        // a popup asked for that passed the popup rules (https, Discord's app).
+        let navigates: Vec<&str> = source.match_indices(".Navigate(").map(|(i, _)| {
+            let rest = &source[i + ".Navigate(".len()..];
+            &rest[..rest.find(')').unwrap() + 1]
+        }).collect();
+        assert_eq!(navigates, ["&HSTRING::from(START_URL)", "&HSTRING::from(url)"], "Navigate's arguments");
+        // NEGATIVE CONTROL: the scan sees the calls that matter, however written.
         for injected in [
             "webview.ExecuteScript(&x, &h)",
             "webview.add_WebResourceResponseReceived(&h, &mut t)",
-            "webview.AddScriptToExecuteOnDocumentCreated(&x, &h)",
+            "ICoreWebView2_2::add_WebResourceResponseReceived(&webview, &h, &mut t)",
+            "webview.AddScriptToExecuteOnDocumentCreated (&x, &h)",
             "options.set_additional_browser_arguments(x)",
         ] {
             let found = com_calls(injected);
@@ -987,14 +1007,18 @@ mod tests {
   try { cw.postMessage('probe'); } catch (e) { }
   async function probe(url, init) {
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 4000);
+    const t = setTimeout(() => c.abort(), 8000);
     try {
       const res = await fetch(url, Object.assign({}, init, { signal: c.signal }));
       return 'answered:' + (res.headers.get('Tauri-Response') || '') + ':' + res.status;
     } catch (e) { return 'error'; } finally { clearTimeout(t); }
   }
   r.ipcFetch = await probe('http://ipc.localhost/plugin%3Aapp%7Cversion', { method: 'POST', body: '{}' });
-  r.assetFetch = await probe('http://tauri.localhost/index.html');
+  // no-cors: a server's answer resolves (opaque) whatever its CORS headers say,
+  // as Tauri's asset protocol would, and only a network error rejects. An image,
+  // because Chromium's opaque-response blocking may turn an HTML answer into a
+  // network error; the question is only whether anything answers at all.
+  r.assetFetch = await probe('http://tauri.localhost/assets/probe.png', { mode: 'no-cors' });
   document.title = 'RESULT:' + JSON.stringify(r);
 })();"#;
 
@@ -1189,7 +1213,9 @@ mod tests {
         let bridged = load_probe(&env, |env, webview| unsafe {
             let settings = webview.Settings().unwrap();
             settings.SetIsWebMessageEnabled(true).unwrap();
-            // Tauri's way of serving its IPC and its files: intercept the two names.
+            // Tauri's way of serving its IPC and its files: intercept the two names,
+            // with Tauri's own headers (its IPC answers any origin; its asset
+            // protocol answers only its own window's origin, never this page's).
             for name in ["http://ipc.localhost/*", "http://tauri.localhost/*"] {
                 webview.AddWebResourceRequestedFilter(&HSTRING::from(name), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL).unwrap();
             }
@@ -1199,14 +1225,15 @@ mod tests {
                 .add_WebResourceRequested(
                     &webview2_com::WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                         if let Some(args) = args {
-                            let response = env.CreateWebResourceResponse(
-                                None,
-                                200,
-                                &HSTRING::from("OK"),
-                                &HSTRING::from(
-                                    "Tauri-Response: ok\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Tauri-Response",
-                                ),
-                            )?;
+                            let mut uri = PWSTR::null();
+                            args.Request()?.Uri(&mut uri)?;
+                            let headers = if take_pwstr(uri).starts_with("http://ipc.localhost/") {
+                                "Tauri-Response: ok\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: Tauri-Response"
+                            } else {
+                                "Content-Type: image/png\r\nAccess-Control-Allow-Origin: http://tauri.localhost"
+                            };
+                            let response =
+                                env.CreateWebResourceResponse(None, 200, &HSTRING::from("OK"), &HSTRING::from(headers))?;
                             args.SetResponse(&response)?;
                         }
                         Ok(())
@@ -1229,9 +1256,9 @@ mod tests {
         let seen = &bridged.seen;
         assert_eq!(seen["internals"], "object", "control: an injected bridge is seen: {seen}");
         assert!(*bridged.messages.borrow() >= 1, "control: with web messaging on, the message arrives: {seen}");
-        for key in ["ipcFetch", "assetFetch"] {
-            assert_eq!(seen[key], "answered:ok:200", "control: an intercepting bridge is seen ({key}): {seen}");
-        }
+        assert_eq!(seen["ipcFetch"], "answered:ok:200", "control: an intercepted IPC is seen: {seen}");
+        // An opaque answer: no headers, status 0, but an answer.
+        assert_eq!(seen["assetFetch"], "answered::0", "control: an intercepted asset server is seen: {seen}");
         drop(bridged);
         drop(plain);
 
