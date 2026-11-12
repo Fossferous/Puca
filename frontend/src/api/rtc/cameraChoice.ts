@@ -128,12 +128,20 @@ export function flipTarget(cameras: CameraInfo[], current: { deviceId: string | 
         if (cameras.length !== 1 && cameras.every(c => c.facing === null)) return { facing: want };
     }
     // Cameras that face no known way (desktop webcams), or only one way: the
-    // next one in the list, round.
+    // next one in the list, round. Not an infrared or depth camera (a laptop's
+    // Windows Hello "IR Camera"): it shows no picture a call wants, and a Flip
+    // that opened one, failed and put the first camera back would never get
+    // past it to a third. Unless that is what is on, or all there is.
     if (cameras.length < 2) return null;
-    const at = cameras.findIndex(c => c.deviceId === current.deviceId);
-    const next = cameras[(at + 1) % cameras.length];
+    const seeing = cameras.filter(c => !SENSOR_ONLY.test(c.label) || c.deviceId === current.deviceId);
+    const ring = seeing.length >= 2 ? seeing : cameras;
+    const at = ring.findIndex(c => c.deviceId === current.deviceId);
+    const next = ring[(at + 1) % ring.length];
     return next && next.deviceId !== current.deviceId ? { deviceId: next.deviceId } : null;
 }
+
+/** A camera that is a sensor rather than a picture: infrared, depth. */
+const SENSOR_ONLY = /infrared|\bir\b|depth/i;
 
 const ANDROID_NAME = /^camera2? \d+, facing (front|back)$/i;
 
@@ -173,13 +181,18 @@ const BASE: MediaTrackConstraints = {
 
 /**
  * getUserMedia video constraints. A request opens exactly that camera (or
- * fails, and the caller falls back: openCamera in media.ts); none opens the
- * front camera on a phone and the default one anywhere else.
+ * fails, and the caller falls back: openCamera in media.ts). None asks for no
+ * camera in particular: the browser's default, which on a phone is the front
+ * camera (Chromium on Android lists it first; so does Safari on iOS) and on a
+ * computer the system's default webcam. Not even `ideal: 'user'`: it scores a
+ * built-in camera that says it faces the user above a USB webcam that says
+ * nothing, so a docked laptop with its lid shut would open the black built-in
+ * camera instead of the webcam it always had.
  */
 export function cameraConstraints(request: CameraRequest | null): MediaTrackConstraints {
     if (request && 'deviceId' in request) return { ...BASE, deviceId: { exact: request.deviceId } };
     if (request && 'facing' in request) return { ...BASE, facingMode: { exact: request.facing } };
-    return { ...BASE, facingMode: { ideal: 'user' } };
+    return { ...BASE };
 }
 
 /**
@@ -224,12 +237,16 @@ export function isCameraUnavailable(err: unknown): boolean {
 export interface LocalCameraState {
     /** The open camera's id (its track's settings), or null with none open. */
     deviceId: string | null;
+    /** The open camera's TRACK. A camera opened again is the same device but a
+     *  new track: what shows it (the self-view) has to bind the new one, or
+     *  it shows the stopped one, black. */
+    trackId: string | null;
     facing: Facing;
     /** Every camera the browser lists, as of the last look. */
     cameras: CameraInfo[];
 }
 
-let state: LocalCameraState = { deviceId: null, facing: null, cameras: [] };
+let state: LocalCameraState = { deviceId: null, trackId: null, facing: null, cameras: [] };
 const listeners = new Set<() => void>();
 
 export function localCameraState(): LocalCameraState {
@@ -238,7 +255,8 @@ export function localCameraState(): LocalCameraState {
 
 export function setLocalCameraState(next: Partial<LocalCameraState>): void {
     const merged = { ...state, ...next };
-    if (merged.deviceId === state.deviceId && merged.facing === state.facing && sameCameras(merged.cameras, state.cameras)) return;
+    if (merged.deviceId === state.deviceId && merged.trackId === state.trackId && merged.facing === state.facing
+        && sameCameras(merged.cameras, state.cameras)) return;
     state = merged;
     listeners.forEach(fn => { try { fn(); } catch { /* a listener's own fault */ } });
 }

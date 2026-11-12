@@ -447,7 +447,7 @@ export class MediaManager {
             this.localStream = null;
         }
         this.cameraEpoch++;
-        setLocalCameraState({ deviceId: null, facing: null });
+        setLocalCameraState({ deviceId: null, trackId: null, facing: null });
         // Deliberate teardown: any late ended/mute from the old capture is
         // stale, not a device loss.
         this.rawMicTrack = null;
@@ -654,7 +654,7 @@ export class MediaManager {
                 this.localStream?.removeTrack(track);
             });
             this.cameraEpoch++;
-            setLocalCameraState({ deviceId: null, facing: null });
+            setLocalCameraState({ deviceId: null, trackId: null, facing: null });
             return null;
         }
 
@@ -675,17 +675,17 @@ export class MediaManager {
      *  never drawn the wrong way round, then the full list of cameras. */
     private async noteCamera(track: MediaStreamTrack | null): Promise<void> {
         if (!track) {
-            setLocalCameraState({ deviceId: null, facing: null });
+            setLocalCameraState({ deviceId: null, trackId: null, facing: null });
             return;
         }
         const settings = track.getSettings?.() ?? {};
         const deviceId = settings.deviceId ?? null;
         const said = facingOfSettings(settings);
-        setLocalCameraState({ deviceId, facing: said });
+        setLocalCameraState({ deviceId, trackId: track.id, facing: said });
         const cameras = await listCameras();
         if (this.localStream?.getVideoTracks()[0] !== track) return; // switched again meanwhile
         const listed = cameras.find(c => c.deviceId === deviceId);
-        setLocalCameraState({ deviceId, facing: said ?? listed?.facing ?? null, cameras });
+        setLocalCameraState({ deviceId, trackId: track.id, facing: said ?? listed?.facing ?? null, cameras });
     }
 
     /** The open camera's track, its id and the way it faces, as the track says. */

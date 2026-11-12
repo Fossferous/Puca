@@ -109,6 +109,22 @@ describe('where Flip goes', () => {
         expect(flipTarget([], { deviceId: null, facing: 'user' })).toEqual({ facing: 'environment' });
     });
 
+    it("a laptop's infrared (Windows Hello) camera is passed over: Flip goes on to a camera with a picture", () => {
+        const laptop: CameraInfo[] = [
+            { deviceId: 'l-cam', label: 'Integrated Camera', facing: null },
+            { deviceId: 'l-ir', label: 'Integrated IR Camera', facing: null },
+            { deviceId: 'l-usb', label: 'Logitech C920', facing: null },
+        ];
+        expect(flipTarget(laptop, { deviceId: 'l-cam', facing: null })).toEqual({ deviceId: 'l-usb' });
+        expect(flipTarget(laptop, { deviceId: 'l-usb', facing: null })).toEqual({ deviceId: 'l-cam' });
+        // With nothing else to go to, or the IR camera itself on, it is not hidden.
+        expect(flipTarget(laptop.slice(0, 2), { deviceId: 'l-cam', facing: null })).toEqual({ deviceId: 'l-ir' });
+        expect(flipTarget(laptop, { deviceId: 'l-ir', facing: null })).toEqual({ deviceId: 'l-usb' });
+        // Words that merely contain the letters are not infrared.
+        expect(flipTarget([{ deviceId: 'a', label: 'Fairphone Camera', facing: null }, { deviceId: 'b', label: 'Mirror Cam', facing: null }],
+            { deviceId: 'a', facing: null })).toEqual({ deviceId: 'b' });
+    });
+
     it('desktop webcams face no known way: the next one, round', () => {
         expect(flipTarget(DESKTOP, { deviceId: 'd-1', facing: null })).toEqual({ deviceId: 'd-2' });
         expect(flipTarget(DESKTOP, { deviceId: 'd-3', facing: null })).toEqual({ deviceId: 'd-1' });
@@ -141,8 +157,11 @@ describe('the constraints that open it', () => {
         expect(cameraConstraints({ facing: 'environment' }).deviceId).toBeUndefined();
     });
 
-    it('none: the front camera if there is one, anything otherwise (an ideal)', () => {
-        expect(cameraConstraints(null).facingMode).toEqual({ ideal: 'user' });
+    it('none asks for no camera in particular: the browser\'s default (the front one on a phone), as before this change', () => {
+        // Not even ideal 'user': Chromium scores a built-in camera that says it
+        // faces the user above a USB webcam that says nothing, so a docked
+        // laptop with its lid shut would get the black built-in camera.
+        expect(cameraConstraints(null).facingMode).toBeUndefined();
         expect(cameraConstraints(null).deviceId).toBeUndefined();
     });
 

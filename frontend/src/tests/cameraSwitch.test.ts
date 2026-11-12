@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import { MediaManager } from '../api/rtc/media';
-import { localCameraState, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
+import { localCameraState, onLocalCameraState, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
 import { loadSettings, rememberedCamera, saveSettings } from '../components/settingsStore';
 
 /**
@@ -121,7 +121,7 @@ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve();
 
 beforeEach(() => {
     localStorage.clear();
-    setLocalCameraState({ deviceId: null, facing: null, cameras: [] });
+    setLocalCameraState({ deviceId: null, trackId: null, facing: null, cameras: [] });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -132,11 +132,16 @@ afterEach(() => {
 });
 
 describe('Flip on a phone', () => {
-    it('the camera starts on the FRONT camera, mirrored', async () => {
-        useCameras([BACK, FRONT]); // Android lists the back camera first
+    it('the camera starts on the FRONT camera, mirrored, asking for no camera in particular (the browser\'s default)', async () => {
+        // Chromium on Android lists the front camera first (measured on the
+        // emulator: "camera 0, facing front", then the back one), and so does
+        // Safari on iOS; the default is the first.
+        useCameras([FRONT, BACK]);
         const media = inCall();
         await media.toggleVideo(true);
         await flush();
+        expect(rig.asked[0].facingMode, 'the default request named a facing mode').toBeUndefined();
+        expect(rig.asked[0].deviceId).toBeUndefined();
         expect(videoOf(media)[0].cam).toBe(FRONT);
         expect(localCameraState().facing).toBe('user');
         expect(selfViewMirrored(localCameraState().facing)).toBe(true);
@@ -254,6 +259,25 @@ describe('when a camera will not open', () => {
         expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
         expect(localCameraState().facing).toBe('user');
         expect(rememberedCamera(), 'a camera that never opened is not remembered').toBeNull();
+    });
+
+    it('the camera put back is a NEW track, and the self-view is told (it re-binds, or it shows the stopped one: black)', async () => {
+        useCameras([FRONT, BACK], { refuse: (cam) => (cam === BACK ? named('NotReadableError') : null) });
+        const media = inCall();
+        await media.toggleVideo(true);
+        await flush();
+        const before = videoOf(media)[0];
+        let told = 0;
+        const off = onLocalCameraState(() => { told++; });
+        await media.flipCamera();
+        await flush();
+        off();
+        const after = videoOf(media)[0];
+        expect(after.cam, 'the camera that was on is back').toBe(FRONT);
+        expect(after, 'the same camera, opened again: a new track').not.toBe(before);
+        expect(before.readyState).toBe('ended');
+        expect(localCameraState().trackId, 'the store still names the stopped track').toBe(after.id);
+        expect(told, 'nobody was told the camera changed, so the self-view kept the stopped track').toBeGreaterThan(0);
     });
 
     it('a camera still being let go of is asked for once more, a moment later', async () => {

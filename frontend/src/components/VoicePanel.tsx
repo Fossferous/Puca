@@ -29,6 +29,7 @@ import {
 } from '../api/rtc/shareHealthLive';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useLocalCamera } from './useLocalCamera';
+import { usePipDrag } from './usePipDrag';
 import { cameraDisplayName, flipLabel, listCameras, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
 import type { CameraSwitch } from '../api/rtc/media';
 
@@ -372,13 +373,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => installVoiceAudioResume(), []);
 
     // Camera PiP (Picture-in-Picture) state for mobile
-    const [pipPosition, setPipPosition] = useState({ x: 20, y: 100 });
-    const [isDragging, setIsDragging] = useState(false);
+    // Where the self-view is, and its drag (usePipDrag: a press is a tap until
+    // it moves, and only a press that started on it moves it).
+    const pipDrag = usePipDrag();
+    const pipPosition = pipDrag.position;
+    const isDragging = pipDrag.isDragging;
     const [isFullscreen, setIsFullscreen] = useState(false);
-    const dragStartRef = useRef({ x: 0, y: 0, startX: 0, startY: 0 });
-    /** Whether the press on the self-view has moved far enough to be a drag
-     *  (then its click is not a tap). A ref: the click reads it at once. */
-    const pipMovedRef = useRef(false);
     const pipRef = useRef<HTMLDivElement>(null);
     // The camera this device has on, and the camera menu (api/rtc/cameraChoice.ts).
     const ownCamera = useLocalCamera();
@@ -2811,8 +2811,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, [roomId]);
 
     // Bind the camera to the self-view when it is on: again when the self-view
-    // goes full screen or back (another <video>), and when the camera is
-    // switched (a new track; a fresh stream, so the element takes it).
+    // goes full screen or back (another <video>), and whenever another TRACK
+    // is on (a switch, or the same camera opened again after a switch that
+    // failed: same device, new track); a fresh stream, so the element takes it.
     useEffect(() => {
         if (isCameraOn && cameraPreviewRef.current) {
             // Use a small delay to allow toggleVideo to complete first
@@ -2829,7 +2830,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         } else if (!isCameraOn && cameraPreviewRef.current) {
             cameraPreviewRef.current.srcObject = null;
         }
-    }, [isCameraOn, isFullscreen, ownCamera.deviceId]);
+    }, [isCameraOn, isFullscreen, ownCamera.trackId]);
 
     // Handle mute toggle
     const toggleMute = useCallback(() => {
@@ -3150,73 +3151,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { notifyEmbedChanged(); },
         [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown, isScreenSharing]);
 
-    // PiP drag handlers (touch for mobile)
-    // The self-view drags. A press becomes a drag only once it has moved
-    // PIP_DRAG_SLOP px; short of that it is a tap, and a tap on the picture
-    // opens the camera menu. Every press used to start a drag at once (the
-    // mouse half of a touch too, which set `isDragging` again after touchend
-    // cleared it, its mouseup listener added only by an effect), and the
-    // click was dropped while `isDragging` was still set: on the Android
-    // emulator, real taps on the self-view opened its options once in
-    // thirteen, so Flip, behind them, was hardly reachable at all.
-    const PIP_DRAG_SLOP = 8;
-    const placePip = useCallback((x: number, y: number) => {
-        setPipPosition({
-            x: Math.max(0, Math.min(window.innerWidth - 150, x)),
-            y: Math.max(0, Math.min(window.innerHeight - 200, y)),
-        });
-    }, []);
-
-    const handlePipTouchStart = useCallback((e: React.TouchEvent) => {
-        const touch = e.touches[0];
-        dragStartRef.current = {
-            x: touch.clientX,
-            y: touch.clientY,
-            startX: pipPosition.x,
-            startY: pipPosition.y
-        };
-        pipMovedRef.current = false;
-    }, [pipPosition]);
-
-    const handlePipTouchMove = useCallback((e: React.TouchEvent) => {
-        const touch = e.touches[0];
-        const deltaX = touch.clientX - dragStartRef.current.x;
-        const deltaY = touch.clientY - dragStartRef.current.y;
-        if (!pipMovedRef.current && Math.hypot(deltaX, deltaY) < PIP_DRAG_SLOP) return;
-        pipMovedRef.current = true;
-        setIsDragging(true);
-        placePip(dragStartRef.current.startX + deltaX, dragStartRef.current.startY + deltaY);
-    }, [placePip]);
-
-    const handlePipTouchEnd = useCallback(() => {
-        setIsDragging(false);
-    }, []);
-
-    // PiP drag handlers (mouse for desktop): the listeners go on with the
-    // press itself, not from an effect after the next render.
-    const handlePipMouseDown = useCallback((e: React.MouseEvent) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        const start = { x: e.clientX, y: e.clientY, startX: pipPosition.x, startY: pipPosition.y };
-        dragStartRef.current = start;
-        pipMovedRef.current = false;
-        const move = (ev: MouseEvent) => {
-            const deltaX = ev.clientX - start.x;
-            const deltaY = ev.clientY - start.y;
-            if (!pipMovedRef.current && Math.hypot(deltaX, deltaY) < PIP_DRAG_SLOP) return;
-            pipMovedRef.current = true;
-            setIsDragging(true);
-            placePip(start.startX + deltaX, start.startY + deltaY);
-        };
-        const up = () => {
-            document.removeEventListener('mousemove', move);
-            document.removeEventListener('mouseup', up);
-            setIsDragging(false);
-        };
-        document.addEventListener('mousemove', move);
-        document.addEventListener('mouseup', up);
-    }, [pipPosition, placePip]);
-
     /** The camera menu, under the control that opened it (ContextMenu: a key's
      *  menu takes the focus to its first row and gives it back). The list is
      *  looked at again as it opens: a webcam plugged in since shows up. */
@@ -3227,14 +3161,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, []);
     const closeCameraMenu = useCallback(() => setCameraMenu(null), []);
 
+    const { isTap: isPipTap } = pipDrag;
     const handlePipTap = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
         // The click that ends a drag is not a tap.
-        if (pipMovedRef.current) {
-            pipMovedRef.current = false;
-            return;
-        }
+        if (!isPipTap(e)) return;
         openCameraMenu(e.currentTarget, e.detail === 0, 'self-view');
-    }, [openCameraMenu]);
+    }, [openCameraMenu, isPipTap]);
 
     /**
      * The ONE on/off path for the local camera. The main toggle, the PiP
@@ -4281,10 +4213,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 touchAction: 'none',
                                 cursor: isDragging ? 'grabbing' : 'grab'
                             }}
-                            onTouchStart={handlePipTouchStart}
-                            onTouchMove={handlePipTouchMove}
-                            onTouchEnd={handlePipTouchEnd}
-                            onMouseDown={handlePipMouseDown}
+                            {...pipDrag.handlers}
                         >
                             <video
                                 ref={cameraPreviewRef}
@@ -4314,6 +4243,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     aria-busy={cameraSwitching}
                                     // Its own press: no drag, no menu.
                                     onTouchStart={(e) => e.stopPropagation()}
+                                    onTouchMove={(e) => e.stopPropagation()}
+                                    onTouchEnd={(e) => e.stopPropagation()}
                                     onMouseDown={(e) => e.stopPropagation()}
                                     onClick={(e) => { e.stopPropagation(); void flipCamera(); }}
                                 >
