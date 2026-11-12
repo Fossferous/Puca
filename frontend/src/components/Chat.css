@@ -929,6 +929,22 @@
     padding: var(--message-pad) 0;
 }
 
+/* Android: a long press on a message, a member or a channel is Púca's menu
+   (the browser fires contextmenu for it), and the same press also selected
+   the word under the finger, with handles and Android's Copy bar under the
+   menu. Those rows take no selection there; the menu's Copy Text copies a
+   message. The message box and an edit field stay selectable (a text field
+   keeps its own selection). An iPhone is not marked: it has no long-press
+   menu, and selection is how it copies (components/longPressMenu.ts). */
+@media (pointer: coarse) {
+    [data-long-press-menu] .message,
+    [data-long-press-menu] .member-item,
+    [data-long-press-menu] .channel {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+}
+
 /* Hover stretches the row's background to the list's edges: HORIZONTAL only.
    A hover that also set vertical padding overrode the grouped rows' (compact
    mode did, moving every row below the pointer by ~3px on each hover). */
