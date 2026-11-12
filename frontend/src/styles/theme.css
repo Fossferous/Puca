@@ -67,8 +67,11 @@
     /* Primary text */
     --text-muted: #949ba4;
     /* Secondary text, timestamps */
-    --text-faint: #6d6f78;
-    /* Disabled, placeholder */
+    --text-faint: #8b8e97;
+    /* Hints, timestamps, placeholders, offline members. 4.5:1 or more on
+       every dark surface it sits on (--bg-primary 5.4, --bg-secondary 5.9,
+       --bg-hover 5.0, --bg-quaternary 4.7; AMOLED's too). It was #6d6f78:
+       3.1 to 3.9:1, under what words need. */
     --text-link: #00a8fc;
     /* Links */
     --text-positive: #23a55a;
@@ -325,7 +328,8 @@
  * contrast) are preserved exactly. Each theme block below only picks the
  * hue, a base saturation, and a brand triplet; the shared scaffold does
  * the rest. Text colours are inherited from :root — near-white on these
- * backgrounds keeps the same contrast as the stock dark theme.
+ * backgrounds keeps the same contrast as the stock dark theme — except
+ * --text-faint, which needs its own to hold 4.5:1 here.
  */
 [data-theme="pink"],
 [data-theme="purple"],
@@ -333,6 +337,10 @@
 [data-theme="orange"],
 [data-theme="yellow"] {
     /* Background layers — same lightness ladder as dark, tinted */
+    /* :root's faint grey is 4.2:1 on these themes' lighter --bg-quaternary
+       (16%): their own, a touch lighter and on-hue, holds 4.6:1 or more on
+       every surface of all five. */
+    --text-faint: hsl(var(--theme-hue) 6% 57%);
     --bg-primary: hsl(var(--theme-hue) var(--theme-sat) 11%);
     --bg-secondary: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 7%);
     --bg-tertiary: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 7%);

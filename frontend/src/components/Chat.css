@@ -2145,7 +2145,10 @@ button.message-attachment.error { color: #ffb4b4; }
     background: var(--bg-quaternary);
 }
 
-.member-item.offline {
+/* Offline members read as dimmed by their name's colour (--text-faint,
+   below) and a faded avatar. The whole row at half opacity took the name to
+   1.8:1. */
+.member-item.offline .member-avatar {
     opacity: 0.5;
 }
 

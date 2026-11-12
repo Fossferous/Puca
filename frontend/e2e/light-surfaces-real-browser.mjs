@@ -83,7 +83,8 @@ const OLD_DARK_SURFACES = `[data-theme="light"] :is(${darkSurfaces}) {
 // What was below the bar on every theme, as it was. Must fail, on the themes named.
 const OLD_SHARED = `
 .notes-undo .notes-textbtn, .notes-draw-btn.active, .link-preview-title { color: var(--brand-primary) !important; }
-.notes-popover h4, .notes-labels-hint, .nick-edit-modal .settings-hint { color: var(--text-faint) !important; }
+/* #6d6f78: the dark themes' --text-faint until 2026-11-12, now itself 4.5:1 (theme.css). */
+.notes-popover h4, .notes-labels-hint, .nick-edit-modal .settings-hint { color: #6d6f78 !important; }
 .link-preview-site { color: #6c7086 !important; }
 .sched-btn.primary, .sched-seg button.on, .notes-update-strip-btn { background: var(--brand-primary) !important; }
 .nick-edit-actions .save-btn { background: var(--brand-primary) !important; color: var(--bg-primary) !important; }
