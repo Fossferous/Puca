@@ -8,7 +8,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
-- **Púca Notes' search works on Android phones again, deleting included.** On a phone the search box was squeezed to a sliver between the Notes name and the buttons. Once it held a letter, the keyboard put each new letter at the start ("milk" went in as "klmi"), and Backspace deleted nothing, so the results stayed filtered until you pressed the X. While you search on a phone, the box now takes the top bar: the Notes name, Refresh and the grid/list switch step aside, and the menu and your account button stay. They come back when you clear the search. Arrives as an ordinary update of the Púca Notes app and the Notes web page.
+- **Púca Notes' search works on Android phones again, deleting included.** On a phone the search box was squeezed to a sliver between the Notes name and the buttons. Once it held a letter, the keyboard put each new letter at the start ("milk" went in as "klmi"), and Backspace deleted nothing, so the results stayed filtered until you pressed the X. While you search on a phone, the box now takes the top bar: the Notes name, Refresh and the grid/list switch step aside, and the menu and your account button stay. They come back when you clear the search. A tap anywhere on the search box opens it, the magnifier included, and the X keeps the keyboard up only if you were typing. Arrives as an ordinary update of the Púca Notes app and the Notes web page.
 
 ## 0.9.860 — 2026-11-08
 

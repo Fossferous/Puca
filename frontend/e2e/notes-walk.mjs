@@ -3551,8 +3551,14 @@ const searchBar = () => m.evaluate(() => {
         account: hit('button[aria-label="Account and settings"]'),
     };
 });
-await m.tap('.notes-search input');
+// A tap on the pill's MAGNIFIER, not the input: unfocused, the input is only
+// part of the pill (~20 px of it on a 360 px phone, 0 at 330 px), and a tap
+// on the magnifier or the padding used to focus nothing.
+const magnifierInput = await m.locator('.notes-search input').boundingBox();
+await m.tap('.notes-search svg');
 await sleep(250);
+ck('phone: a tap on the search pill\'s magnifier focuses the field', await m.evaluate(() => document.activeElement === document.querySelector('.notes-search input')),
+    `unfocused input ${Math.round(magnifierInput?.width ?? -1)} px`);
 let sb = await searchBar();
 ck('phone: the focused, empty search field is wide enough to type in (>= 120 px)', sb.input >= 120, JSON.stringify(sb));
 // A highlight must not push the card sideways at 390px.
@@ -3594,6 +3600,17 @@ await m.evaluate(() => document.querySelector('.notes-search input').blur());
 await sleep(250);
 sb = await searchBar();
 ck('phone: the search left empty, the Notes mark and the bar are back', sb.brandShown && (await m.locator('button[aria-label="Refresh"]').isVisible()), JSON.stringify(sb));
+// Clear pressed with the field LEFT (its keyboard down) leaves the focus alone:
+// no keyboard springs up, and nothing has a caret for a shortcut key to type into.
+await m.fill('.notes-search input', 'bread');
+await m.evaluate(() => document.querySelector('.notes-search input').blur());
+await sleep(250);
+await m.tap('button[aria-label="Clear search"]');
+await sleep(300);
+sb = await searchBar();
+ck('phone: Clear with the field left empties it, takes no focus, and the bar is whole again',
+    (await m.inputValue('.notes-search input')) === '' && !(await m.evaluate(() => document.activeElement === document.querySelector('.notes-search input'))) && sb.brandShown,
+    JSON.stringify(sb));
 
 // Ordering on a phone: list view is one column, so the grip is offered there
 // — and it must be a real tap target that does not scroll the page when
