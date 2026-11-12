@@ -22,6 +22,9 @@ vi.mock('../api/channelKeys', () => ({ ensureChannelKey: vi.fn(async () => ({ ke
 vi.mock('../api/client', () => ({ apiClient: { get: vi.fn() } }));
 
 import { LocalVideoTrack, Track } from 'livekit-client';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SfuManager } from '../api/rtc/sfuManager';
 
 class FakeCamTrack extends EventTarget {
@@ -102,6 +105,7 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(sender.replaced.every(t => t === rear), 'the sender was handed something else').toBe(true);
         expect(sender.track).toBe(rear);
         expect(sender.transform, 'the sealing transform is the one that was there').toBe(transform);
+        expect((pub.track as unknown as { sender: unknown }).sender, 'the publication went to another sender').toBe(sender);
         expect(pub.track!.mediaStreamTrack).toBe(rear);
         expect(lp.unpublishTrack, 'the camera was unpublished (the old republish)').not.toHaveBeenCalled();
         expect(lp.publishTrack, 'a second camera publication was made').not.toHaveBeenCalled();
@@ -115,8 +119,9 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(old.readyState).toBe('live');
     });
 
-    it('a publication that will not take it: the new camera is published afresh, the old one taken off', async () => {
+    it('a publication that will not take it (connected): the new camera is published afresh, the old one taken off', async () => {
         const { sfu, s, pub, pubs, lp } = await rig();
+        (s.room as { state: string }).state = 'connected';
         pub.track!.replaceTrack = vi.fn(async () => { throw new Error('unable to replace an unpublished track'); }) as never;
         const rear = new FakeCamTrack('cam-back');
         await sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
@@ -136,6 +141,69 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(sender.track).toBe(rear);
         expect(sender.replaced.every(t => t === rear)).toBe(true);
         expect(pubs.map(p => p.trackSid)).toEqual(['TR_camera_1']);
+    });
+
+    it('a switch while LiveKit reconnects, that the publication cannot take yet: nothing published afresh then; once reconnected, the new camera is put on', async () => {
+        const { sfu, s, pub, pubs, lp } = await rig();
+        (s.room as { state: string }).state = 'reconnecting';
+        const original = pub.track!.replaceTrack.bind(pub.track!);
+        pub.track!.replaceTrack = vi.fn(async () => { throw new Error('unable to replace an unpublished track'); }) as never;
+        const rear = new FakeCamTrack('cam-back');
+        await sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        expect(lp.publishTrack, 'a camera was published while LiveKit was reconnecting').not.toHaveBeenCalled();
+        void original;
+
+        (s.room as { state: string }).state = 'connected';
+        await sfu.reassertCamera();
+        expect(pubs.map(p => p.track?.mediaStreamTrack), 'after the reconnect the room still has no camera, or the stopped one').toEqual([rear]);
+    });
+
+    it('a full reconnect that re-published the stopped camera: the camera wanted goes back on, on that publication', async () => {
+        const { sfu, s, pubs } = await rig();
+        (s.room as { state: string }).state = 'connected';
+        const rear = new FakeCamTrack('cam-back');
+        await sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        // LiveKit's republishAllTracks: a new publication of the track it had
+        // before (the front camera, stopped by the switch).
+        const stoppedFront = new FakeCamTrack('cam-front');
+        stoppedFront.readyState = 'ended';
+        const again = new LocalVideoTrack(stoppedFront as unknown as MediaStreamTrack, undefined, true);
+        const sender2 = new FakeSender(stoppedFront);
+        (again as unknown as { sender: FakeSender }).sender = sender2;
+        pubs.splice(0, pubs.length, { source: Track.Source.Camera, track: again, trackSid: 'TR_camera_3' });
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+        await new Promise(r => setTimeout(r, 0));
+        sender2.replaced.length = 0;
+
+        await sfu.reassertCamera();
+        expect(again.mediaStreamTrack, 'the room kept the stopped camera after the reconnect').toBe(rear);
+        expect(sender2.track).toBe(rear);
+    });
+
+    it('the camera turned off while the swap is under way: the publication is not handed back, nothing published', async () => {
+        const { sfu, s, pub, lp } = await rig();
+        (s.room as { state: string }).state = 'connected';
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        const original = pub.track!.replaceTrack.bind(pub.track!);
+        pub.track!.replaceTrack = vi.fn(async (t: MediaStreamTrack, u: boolean) => { await gate; return original(t, u); }) as never;
+        const rear = new FakeCamTrack('cam-back');
+        const swapping = sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        await Promise.resolve();
+        await sfu.unpublishCamera();
+        rear.readyState = 'ended'; // the media layer stopped it with the camera
+        release();
+        await swapping;
+        expect(s.cameraPub, 'the publication Turn off took off came back').toBeNull();
+        expect(lp.publishTrack).not.toHaveBeenCalled();
+    });
+
+    it('VoicePanel hands every switch to the SFU manager, connected or reconnecting', () => {
+        const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/VoicePanel.tsx'), 'utf8');
+        const call = src.indexOf('await sfuManager.replaceCameraTrack(live)');
+        expect(call, 'the switch no longer reaches the SFU manager').toBeGreaterThan(0);
+        const guard = src.lastIndexOf('if (', call);
+        expect(src.slice(guard, call), 'held back while LiveKit is not Connected (a reconnect) the publication kept the stopped camera').not.toMatch(/\.connected/);
     });
 
     it('no camera published: nothing happens', async () => {

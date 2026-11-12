@@ -996,16 +996,6 @@ export function outputGain(): number {
     return Math.max(0, Math.min(1, (typeof v === 'number' ? v : 100) / 100));
 }
 
-/**
- * Microphone send multiplier, 0..4. Input Volume (0–200%) times Manual Gain
- * (0–200%, only when Auto Gain Control is off — AGC would just fight a static
- * boost). 1.0 means "leave the mic alone", and callers skip building a gain
- * stage entirely in that case.
- *
- * Exists because both sliders were cosmetic: Input Volume only scaled the
- * settings panel's own level-meter math and Manual Gain was read by nothing —
- * the same disease outputGain() was written to cure on the output side.
- */
 /** The camera a call should open (Settings' `camera`), or null for the default. */
 export function rememberedCamera(): RememberedCamera | null {
     const c = loadSettings().camera;
@@ -1022,6 +1012,16 @@ export function rememberCamera(camera: RememberedCamera | null): void {
     try { saveSettings({ ...s, camera }); } catch { /* storage full or blocked: this call still uses it */ }
 }
 
+/**
+ * Microphone send multiplier, 0..4. Input Volume (0–200%) times Manual Gain
+ * (0–200%, only when Auto Gain Control is off — AGC would just fight a static
+ * boost). 1.0 means "leave the mic alone", and callers skip building a gain
+ * stage entirely in that case.
+ *
+ * Exists because both sliders were cosmetic: Input Volume only scaled the
+ * settings panel's own level-meter math and Manual Gain was read by nothing —
+ * the same disease outputGain() was written to cure on the output side.
+ */
 export function inputGain(): number {
     const s = loadSettings();
     const vol = typeof s.inputVolume === 'number' ? s.inputVolume : 100;

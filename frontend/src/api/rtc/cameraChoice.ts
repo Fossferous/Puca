@@ -128,16 +128,23 @@ export function flipTarget(cameras: CameraInfo[], current: { deviceId: string | 
         if (cameras.length !== 1 && cameras.every(c => c.facing === null)) return { facing: want };
     }
     // Cameras that face no known way (desktop webcams), or only one way: the
-    // next one in the list, round. Not an infrared or depth camera (a laptop's
-    // Windows Hello "IR Camera"): it shows no picture a call wants, and a Flip
-    // that opened one, failed and put the first camera back would never get
-    // past it to a third. Unless that is what is on, or all there is.
+    // next one in the list, round. Never to an infrared or depth camera (a
+    // laptop's Windows Hello "IR Camera"): it shows no picture a call wants,
+    // Flip would remember it for every call after, and one that will not open
+    // would stand between Flip and a third camera. So a laptop with one webcam
+    // and an IR camera has nowhere to Flip to; the camera menu still lists the
+    // IR camera for anyone who means it.
     if (cameras.length < 2) return null;
     const seeing = cameras.filter(c => !SENSOR_ONLY.test(c.label) || c.deviceId === current.deviceId);
-    const ring = seeing.length >= 2 ? seeing : cameras;
-    const at = ring.findIndex(c => c.deviceId === current.deviceId);
-    const next = ring[(at + 1) % ring.length];
+    if (seeing.length < 2) return null;
+    const at = seeing.findIndex(c => c.deviceId === current.deviceId);
+    const next = seeing[(at + 1) % seeing.length];
     return next && next.deviceId !== current.deviceId ? { deviceId: next.deviceId } : null;
+}
+
+/** Whether Flip has anywhere to go from the camera on (it is shown only then). */
+export function canFlip(state: { cameras: CameraInfo[]; deviceId: string | null; facing: Facing }): boolean {
+    return state.cameras.length > 1 && flipTarget(state.cameras, { deviceId: state.deviceId, facing: state.facing }) !== null;
 }
 
 /** A camera that is a sensor rather than a picture: infrared, depth. */

@@ -531,6 +531,12 @@ export class SfuManager {
 
     private micPub: LocalTrackPublication | null = null;
     private cameraPub: LocalTrackPublication | null = null;
+    /** The camera track the camera publication should carry (publishCamera,
+     *  replaceCameraTrack); null with the camera off. A switch made while
+     *  LiveKit was reconnecting could not reach the publication, which then
+     *  kept the stopped track: a frozen or black camera for everyone until
+     *  it was turned off and on (reassertCamera puts it right). */
+    private cameraWanted: MediaStreamTrack | null = null;
     /**
      * The screen-share publications THIS CLIENT currently has, read from the
      * room every time.
@@ -868,6 +874,7 @@ export class SfuManager {
         this.localUserId = null;
         this.micPub = null;
         this.cameraPub = null;
+        this.cameraWanted = null;
         this.shareStreams.clear();
         this.focusedUserId = null;
         this.watchedVideo.clear();
@@ -952,6 +959,9 @@ export class SfuManager {
      */
     async replaceCameraTrack(newTrack: MediaStreamTrack): Promise<void> {
         if (!this.room || !this.cameraPub) return;
+        this.cameraWanted = newTrack;
+        // Still the camera to put on (not turned off, nor switched again).
+        const current = () => this.cameraWanted === newTrack && newTrack.readyState === 'live';
         const pubs = this.localPubs(Track.Source.Camera).filter(p => p.track);
         const [keep, ...extra] = pubs;
         for (const pub of extra) {
@@ -960,21 +970,42 @@ export class SfuManager {
         if (keep?.track) {
             try {
                 await keep.track.replaceTrack(newTrack, true);
-                this.cameraPub = keep;
+                // Turned off meanwhile: unpublishCamera took the publication
+                // off; do not hand it back.
+                if (current() && this.cameraPub) this.cameraPub = keep;
                 return;
             } catch (err) {
                 console.warn('[sfu] camera replaceTrack failed; publishing the new camera afresh:', err);
                 await this.room.localParticipant.unpublishTrack(keep.track.mediaStreamTrack, true).catch(() => { /* already gone */ });
             }
         }
+        // Afresh only while connected, and only the camera still wanted: a
+        // stopped track published is a ghost camera tile for everyone.
+        // Reconnecting, reassertCamera does it once the room is back.
+        if (!current() || !this.connected || !this.room) return;
         this.cameraPub = await this.room.localParticipant.publishTrack(newTrack, {
             source: Track.Source.Camera,
             simulcast: true,
         });
     }
 
+    /**
+     * After a reconnect: the camera publication carries the camera wanted. A
+     * switch made while LiveKit was reconnecting could not reach it, and a
+     * full reconnect re-publishes the publication's own (stopped) track.
+     */
+    async reassertCamera(): Promise<void> {
+        const want = this.cameraWanted;
+        if (!this.room || !this.cameraPub || !want || want.readyState !== 'live') return;
+        const pub = this.localPubs(Track.Source.Camera).find(p => p.track);
+        if (pub?.track?.mediaStreamTrack === want) return;
+        console.info('[sfu] the camera publication lost the camera switched to while reconnecting; putting it back');
+        await this.replaceCameraTrack(want);
+    }
+
     async publishCamera(track: MediaStreamTrack): Promise<void> {
         if (!this.room) return;
+        this.cameraWanted = track;
         this.cameraPub = await this.room.localParticipant.publishTrack(track, {
             source: Track.Source.Camera,
             simulcast: true,
@@ -987,6 +1018,7 @@ export class SfuManager {
         // the old guard `this.cameraPub?.track` then skipped the unpublish and
         // nulled the field — leaving the camera streaming to the room after the
         // person had turned it off, with nothing left to stop it.
+        this.cameraWanted = null;
         for (const pub of this.localPubs(Track.Source.Camera)) {
             if (pub.track) {
                 await this.room?.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, true);
@@ -2511,6 +2543,11 @@ export class SfuManager {
             .on(RoomEvent.Reconnected, () => this.syncSubscriptions())
             // A full reconnect re-published the share with its first options.
             .on(RoomEvent.Reconnected, () => this.afterReconnect())
+            // ...and the camera with the track it had, which a switch made
+            // while reconnecting may have stopped.
+            .on(RoomEvent.Reconnected, () => {
+                void this.reassertCamera().catch((e) => console.warn('[sfu] could not put the camera back after a reconnect', e));
+            })
             // The perms sweep can flip NO_RECEIVE mid-call (UpdateParticipant).
             .on(RoomEvent.ParticipantPermissionsChanged, () => this.syncSubscriptions())
             // Who can hear us (dfPause.ts). ConnectionStateChanged covers the

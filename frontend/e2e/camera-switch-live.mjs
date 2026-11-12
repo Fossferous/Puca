@@ -47,6 +47,11 @@
 // NEGATIVE CONTROL: PHONE_APP= a bundle built before this change (Flip asked
 // for the front camera again): the flip checks must FAIL.
 //
+// Start the dev server AFTER the last edit to a module this walk imports by its
+// path (components/voiceState.ts, api/rtc/sfuManager.ts): an edit under a
+// running server gives the app's import an HMR timestamp, and the walk's own
+// import is then a second, empty copy (every tile reads as missing).
+//
 // Usage: API=http://127.0.0.1:3010 APP=http://127.0.0.1:5196 [PHONE_APP=<old build>] [SFU=1 LK_API= LK_KEY= LK_SECRET=] [OUT=dir] node e2e/camera-switch-live.mjs
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
@@ -479,6 +484,8 @@ try {
     const fsButtons = [];
     for (const sel of ['.camera-fullscreen-controls [data-testid="camera-flip"]', '.camera-fullscreen-controls [data-testid="camera-choose"]', '.camera-fullscreen-controls .exit-btn', '.camera-fullscreen-controls .cam-off-btn']) fsButtons.push(await geometry(P, sel));
     check('phone: full screen\'s Flip, Cameras, Exit and Turn Off Camera are whole buttons, >= 44 px, on screen, what a tap hits', fsButtons.every(g => target44(g) && g.w > g.h), fsButtons);
+    const fsFlipNamed = await P.locator('.camera-fullscreen-controls').getByRole('button', { name: /^Flip Camera$/ }).count();
+    check("phone: full screen's Flip is named by the words on it, Flip Camera (what voice control says to press)", fsFlipNamed === 1, { fsFlipNamed });
     if (OUT) save('phone-fullscreen.png', await P.screenshot());
     await press(P, '.camera-fullscreen-controls [data-testid="camera-flip"]');
     const fsFront = await waitOwn(P, c => c.live && c.label === 'Front Camera' && c.block !== 'none');

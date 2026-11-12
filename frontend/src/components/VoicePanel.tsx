@@ -30,7 +30,7 @@ import {
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useLocalCamera } from './useLocalCamera';
 import { usePipDrag } from './usePipDrag';
-import { cameraDisplayName, flipLabel, listCameras, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
+import { cameraDisplayName, canFlip, flipLabel, listCameras, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
 import type { CameraSwitch } from '../api/rtc/media';
 
 /** Which control opened the camera menu (its aria-expanded). */
@@ -127,7 +127,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers, showOwnCamera } from './voiceState';
 import { tellUser, tellUserAndWait } from '../api/appDialogs';
 
 interface VoicePanelProps {
@@ -3276,19 +3276,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // Nothing changed (one camera), or the camera went off meanwhile.
         if (!result.ok && (result.reason === 'only-one' || result.reason === 'no-camera')) return;
         const live = result.track;
-        if (live && sfuMode && sfuManager.connected) {
+        // Every switch goes to the SFU manager, connected or reconnecting: a
+        // switch held back while LiveKit reconnected left the publication on
+        // the stopped camera for the rest of the call (sfuManager keeps the
+        // camera wanted and puts it back after the reconnect).
+        if (live && sfuMode) {
             try {
                 await sfuManager.replaceCameraTrack(live);
             } catch (err) {
                 console.error('[VoicePanel] could not put the new camera on the SFU:', err);
             }
         }
-        if (live) {
-            // A fresh stream object, so every <video> showing your camera
-            // binds the new track rather than keep the stopped one.
-            globalCameraStreams.set(currentUserId, new MediaStream([live]));
-            notifyStreamStateChange();
-        }
+        // Only while still on (voiceState.showOwnCamera): turned off, or the
+        // call left, while the switch finished, it would come back as a black
+        // tile of you.
+        if (live) showOwnCamera(currentUserId, live);
         if (result.ok) return;
         if (!live) {
             setError('Your camera could not be opened again, so it is off.');
@@ -3316,7 +3318,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             onClick: () => { if (c.deviceId !== ownCamera.deviceId) void chooseCamera(c.deviceId); },
         }));
         if (cams.length > 0) items.push({ id: 'camera-sep', label: '', separator: true });
-        if (cams.length > 1) {
+        if (canFlip(ownCamera)) {
             items.push({ id: 'camera-flip', label: flipLabel(ownCamera.facing), icon: 'flip-camera', testId: 'camera-menu-flip', onClick: () => { void flipCamera(); } });
         }
         if (!isFullscreen) {
@@ -4233,7 +4235,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 title="Your camera: tap for cameras, full screen and turning it off; drag to move it"
                                 onClick={handlePipTap}
                             />
-                            {ownCamera.cameras.length > 1 && (
+                            {canFlip(ownCamera) && (
                                 <button
                                     type="button"
                                     className="pip-flip-btn"
@@ -4265,11 +4267,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 muted
                             />
                             <div className="camera-fullscreen-controls">
-                                {ownCamera.cameras.length > 1 && (
+                                {canFlip(ownCamera) && (
                                     <button
                                         className="fullscreen-btn"
                                         data-testid="camera-flip"
-                                        aria-label={flipLabel(ownCamera.facing)}
+                                        // The words on it are its name (what voice control
+                                        // says to press); what it does is the description.
+                                        title={flipLabel(ownCamera.facing)}
                                         aria-busy={cameraSwitching}
                                         onClick={() => { void flipCamera(); }}
                                     >

@@ -130,6 +130,22 @@ export const globalCameraUsers = new Map<number, string>(); // userId -> usernam
 // their own screen share, and other people's cameras must survive it.
 export const globalCameraStreams = new Map<number, MediaStream>();
 
+/**
+ * Show `track` as your own camera on every surface (the stage tile, the camera
+ * rail), as a fresh stream so each <video> binds it. Only while it is LIVE: a
+ * camera switch finishes after awaits (each peer, the SFU), and a camera
+ * turned off, or a call left, in that time has stopped the track and removed
+ * your entry. Putting it back then showed a black tile of you with your
+ * camera off, which on an SFU call even outlived the call. Answers whether it
+ * was shown.
+ */
+export function showOwnCamera(userId: number, track: MediaStreamTrack): boolean {
+    if (track.readyState !== 'live') return false;
+    globalCameraStreams.set(userId, new MediaStream([track]));
+    notifyStreamStateChange();
+    return true;
+}
+
 // Members of the call this client is in that the server flags stream-only
 // (VoiceSpeakState.stream_only: automated streaming accounts,
 // docs/STREAM_ONLY.md). Written only by the in-call VoicePanel from those

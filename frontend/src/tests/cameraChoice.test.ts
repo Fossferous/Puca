@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-    cameraConstraints, cameraDisplayName, camerasOf, facingFromLabel, facingOf, flipLabel, flipTarget,
+    cameraConstraints, cameraDisplayName, camerasOf, canFlip, facingFromLabel, facingOf, flipLabel, flipTarget,
     localCameraState, mainCamera, onLocalCameraState, resolveRemembered, selfViewMirrored, setLocalCameraState,
     type CameraInfo,
 } from '../api/rtc/cameraChoice';
@@ -117,8 +117,12 @@ describe('where Flip goes', () => {
         ];
         expect(flipTarget(laptop, { deviceId: 'l-cam', facing: null })).toEqual({ deviceId: 'l-usb' });
         expect(flipTarget(laptop, { deviceId: 'l-usb', facing: null })).toEqual({ deviceId: 'l-cam' });
-        // With nothing else to go to, or the IR camera itself on, it is not hidden.
-        expect(flipTarget(laptop.slice(0, 2), { deviceId: 'l-cam', facing: null })).toEqual({ deviceId: 'l-ir' });
+        // One webcam and an IR camera: nowhere to Flip to (it would open the
+        // IR camera and remember it for every call), and no Flip shown.
+        expect(flipTarget(laptop.slice(0, 2), { deviceId: 'l-cam', facing: null })).toBeNull();
+        expect(canFlip({ cameras: laptop.slice(0, 2), deviceId: 'l-cam', facing: null })).toBe(false);
+        expect(canFlip({ cameras: laptop, deviceId: 'l-cam', facing: null })).toBe(true);
+        // The IR camera on (chosen from the menu): Flip leaves it.
         expect(flipTarget(laptop, { deviceId: 'l-ir', facing: null })).toEqual({ deviceId: 'l-usb' });
         // Words that merely contain the letters are not infrared.
         expect(flipTarget([{ deviceId: 'a', label: 'Fairphone Camera', facing: null }, { deviceId: 'b', label: 'Mirror Cam', facing: null }],
@@ -136,6 +140,13 @@ describe('where Flip goes', () => {
             { deviceId: 'm2', label: 'USB Camera', facing: null },
         ];
         expect(flipTarget(mixed, { deviceId: 'm1', facing: 'user' })).toEqual({ deviceId: 'm2' });
+    });
+
+    it('Flip is shown only where it has somewhere to go', () => {
+        expect(canFlip({ cameras: ANDROID, deviceId: 'a-front', facing: 'user' })).toBe(true);
+        expect(canFlip({ cameras: DESKTOP, deviceId: 'd-1', facing: null })).toBe(true);
+        expect(canFlip({ cameras: [ANDROID[0]], deviceId: 'a-front', facing: 'user' })).toBe(false);
+        expect(canFlip({ cameras: [], deviceId: null, facing: null })).toBe(false);
     });
 
     it('one camera: nowhere to go', () => {
