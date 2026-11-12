@@ -1405,6 +1405,209 @@ describe('power actions', () => {
         await signal(key, { kind: 'power', action: 'reboot' });
         expect(powerAction).not.toHaveBeenCalled();
     });
+
+    it('a shutdown Windows refuses reaches the controller in the SHELL\'s words (a Tauri Err is a bare string)', async () => {
+        // The catch used to keep only Error messages, and a Tauri command's
+        // Err arrives as a string: every refusal read "the power action failed".
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockRejectedValueOnce('this account does not hold SeShutdownPrivilege');
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: 'shutdown' });
+        const failed = (await hostFrames(key, before)).find(f => f.kind === 'power-failed');
+        expect(failed?.reason).toBe('this account does not hold SeShutdownPrivilege');
+    });
+});
+
+/** Every signal the host sealed after index `from`, opened as the controller
+ *  would — kinds AND fields, in the order they left. */
+async function hostFrames(key: Uint8Array, from: number): Promise<Array<Record<string, unknown>>> {
+    const { openControl } = await import('../api/e2ee');
+    const out: Array<Record<string, unknown>> = [];
+    for (const m of sent.slice(from)) {
+        const blob = m.payload?.payload;
+        if (!blob) continue;
+        const plain = await openControl(key, blob);
+        if (plain) out.push(JSON.parse(plain) as Record<string, unknown>);
+    }
+    return out;
+}
+
+describe('the forced power-off (the device card\'s Power off), host side', () => {
+    // Literals on purpose, as above: the wire strings the controller sends
+    // and matches on. Both Rust hosts pin 'force_power_off' as well.
+    const ACTION = 'force_power_off';
+    const SHUTDOWN_REASON = 'the device is shutting down';
+    const deviceEnds = () => sent
+        .filter(m => m.type === 'DeviceEnd')
+        .map(m => (m.payload as { reason?: string } | undefined)?.reason);
+
+    /** An ARMED host whose controller has proved the passphrase: the case the
+     *  card is for (nobody at the PC). */
+    async function provedHost(): Promise<{ key: Uint8Array }> {
+        armed = true;
+        const { key } = await activeHostSession();
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+        return { key };
+    }
+
+    /** What had left when Windows was asked, and the calls, recorded. */
+    function recordAtCall(key: Uint8Array, before: number) {
+        const at: { frames: Array<Record<string, unknown>> | null; ends: Array<string | undefined> | null } = { frames: null, ends: null };
+        powerAction.mockImplementation(async () => {
+            at.frames = await hostFrames(key, before);
+            at.ends = deviceEnds();
+        });
+        return at;
+    }
+
+    it('sent BEFORE the proof (the card sends no offer): held, nothing called, nothing answered', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        expect(powerAction).not.toHaveBeenCalled();
+        expect((await hostFrames(key, before)).filter(f => String(f.kind).startsWith('power'))).toEqual([]);
+        expect(deviceEnds()).toEqual([]);
+    });
+
+    it('…and the proof carries it out: the ack FIRST, then exactly the forced power-off, then the end with the reason', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        const at = recordAtCall(key, before);
+        await signal(key, { kind: 'power', action: ACTION });
+        expect(powerAction, 'not before the proof').not.toHaveBeenCalled();
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+        await settle();
+        expect(powerAction.mock.calls, 'one call, the FORCED action — never the gentle shutdown').toEqual([[ACTION]]);
+        // Once every app is closed unasked, this process can be gone before
+        // anything else leaves it: the ack had left before Windows was asked.
+        expect(at.frames!.find(f => f.kind === 'power-ack')?.action).toBe(ACTION);
+        expect(at.ends, 'and the goodbye had not').toEqual([]);
+        expect(deviceEnds()).toContain(SHUTDOWN_REASON);
+        powerAction.mockImplementation(async () => {});
+    });
+
+    it('a WRONG passphrase never carries the held one out', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        await signal(key, { kind: 'power', action: ACTION });
+        // verifyUaResponse answers false (the default): a wrong passphrase.
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('bad') });
+        await settle();
+        expect(powerAction).not.toHaveBeenCalled();
+    });
+
+    it('on a session already proved: the ack first, then the call, then the end', async () => {
+        const { key } = await provedHost();
+        powerAction.mockClear();
+        const before = sent.length;
+        const at = recordAtCall(key, before);
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        expect(powerAction.mock.calls).toEqual([[ACTION]]);
+        expect(at.frames!.map(f => f.kind)).toContain('power-ack');
+        expect(at.ends).toEqual([]);
+        expect(deviceEnds()).toContain(SHUTDOWN_REASON);
+        powerAction.mockImplementation(async () => {});
+    });
+
+    it('an UNARMED PC (somebody there let the connection in): refused OUT LOUD, nothing called', async () => {
+        // They answered "a device wants to connect to this screen", not "close
+        // every app here without asking me to save".
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        const frames = await hostFrames(key, before);
+        expect(frames.map(f => f.kind)).toEqual(['power-failed']);
+        expect(frames[0]).toMatchObject({ action: ACTION, reason: 'power-off: someone there let this connection in' });
+        expect(powerAction).not.toHaveBeenCalled();
+        expect(deviceEnds()).toEqual([]);
+    });
+
+    it('a share WITHOUT control is refused OUT LOUD — the card is waiting — and nothing is called', async () => {
+        armed = true;
+        shareCaps = ['view_only', 'files'];
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        const frames = await hostFrames(key, before);
+        expect(frames.map(f => f.kind)).toEqual(['power-failed']);
+        expect(frames[0]).toMatchObject({ action: ACTION, reason: 'power-off: this share does not include control' });
+        expect(powerAction).not.toHaveBeenCalled();
+        // The other power actions keep their silence (unchanged).
+        await signal(key, { kind: 'power', action: 'lock' });
+        expect((await hostFrames(key, before)).length).toBe(1);
+    });
+
+    it('POSITIVE CONTROL: a share WITH control on an ARMED PC (the owner\'s standing grant) reaches it', async () => {
+        armed = true;
+        shareCaps = ['control'];
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        expect(powerAction).toHaveBeenCalledWith(ACTION);
+    });
+
+    it('…but on an UNARMED PC, where somebody there let the friend in, it is refused like the owner\'s', async () => {
+        armed = false;
+        shareCaps = ['control'];
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        expect((await hostFrames(key, before)).find(f => f.kind === 'power-failed')?.reason)
+            .toBe('power-off: someone there let this connection in');
+        expect(powerAction).not.toHaveBeenCalled();
+    });
+
+    it('Windows refusing: power-failed in the shell\'s own words, and the session stays up', async () => {
+        const { key } = await provedHost();
+        powerAction.mockRejectedValueOnce('a shutdown is already under way there (an app may be holding it, waiting for somebody at that PC to save), and Windows will not force a second one');
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        const frames = await hostFrames(key, before);
+        expect(frames.map(f => f.kind)).toEqual(['power-ack', 'power-failed']);
+        expect(String(frames[1].reason)).toMatch(/already under way/);
+        expect(deviceEnds(), 'the machine is still up — the session must be too').toEqual([]);
+    });
+
+    it('a shell too old to parse the action (serde "unknown variant") is reported as too old', async () => {
+        const { key } = await provedHost();
+        powerAction.mockRejectedValueOnce(
+            'invalid args `action` for command `power_action`: unknown variant `force_power_off`, expected one of `lock`, `shutdown`',
+        );
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        const failed = (await hostFrames(key, before)).find(f => f.kind === 'power-failed');
+        expect(failed?.reason).toBe('power-off: that Púca is too old to know it');
+    });
+
+    it('a host WITHOUT a power backend says it cannot be powered off', async () => {
+        hasPowerAction = false;
+        const { key } = await provedHost();
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: ACTION });
+        await settle();
+        const failed = (await hostFrames(key, before)).find(f => f.kind === 'power-failed');
+        expect(failed?.reason).toBe('this device cannot be powered off from Púca');
+        expect(deviceEnds()).toEqual([]);
+    });
 });
 
 /**

@@ -717,6 +717,12 @@ struct SealedSession {
     /// waiting for an answer — so refusing outright here (which the first
     /// version of this file did) does not delay the connection, it kills it.
     pending_offer: Option<String>,
+    /// The device card's forced power-off, arrived before the passphrase was
+    /// proved: HELD for the same reason as `pending_offer` (that session
+    /// sends no offer; this request is its whole purpose), carried out by the
+    /// `ua-response` arm once the proof checks out, and gone with the session
+    /// if it never does.
+    pending_power_off: bool,
     /// ICE candidates that arrived before the stream existed to receive them.
     ///
     /// THE BUG THAT MADE EVERY FIRST CONNECTION FAIL. The controller trickles
@@ -1199,6 +1205,44 @@ impl Agent {
         };
         s.send_seq += 1;
         Response::SealedSignals { payloads: vec![sealed] }
+    }
+
+    /// Carry out a `power` action for a session that HAS proved the
+    /// passphrase (the `power` arm, or the forced power-off held until the
+    /// proof). What goes back, and why, is explained at the `power` arm.
+    fn power_now(&mut self, session_id: &str, requested: &str) -> Response {
+        let Some(action) = crate::power::PowerAction::parse(requested) else {
+            return self.power_failed(session_id, requested, "that power action is not one this agent knows");
+        };
+        match dispatch_power(crate::power::plan(action)) {
+            // The forced power-off (the device card's Power off) ends the
+            // same way: Windows accepted it, so the controller is told why
+            // the box is going.
+            Ok(()) if action == crate::power::PowerAction::Shutdown
+                || action == crate::power::PowerAction::ForcePowerOff =>
+            {
+                Response::error(crate::power::SHUTDOWN_REASON)
+            }
+            // Display actions are ACKED: the controller arms a 5s wait for
+            // exactly these, and silence must keep meaning "old host" rather
+            // than "success".
+            Ok(()) if action == crate::power::PowerAction::DisplaysOff => {
+                // Honest caveat: SC_MONITORPOWER sleep ends on ANY input —
+                // including keys this very session injects to sign in.
+                // Off-until-you-type is still what the ask means at a lock
+                // screen, but the ack must not oversell it.
+                self.power_ack(
+                    session_id,
+                    requested,
+                    Some("Displays sleep until the next input — typing here wakes them"),
+                )
+            }
+            Ok(()) if action == crate::power::PowerAction::DisplaysOn => {
+                self.power_ack(session_id, requested, None)
+            }
+            Ok(()) => Response::SealedSignals { payloads: vec![] },
+            Err(e) => self.power_failed(session_id, requested, &e),
+        }
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
@@ -2041,6 +2085,7 @@ impl Agent {
                         send_seq: 0,
                         ice_servers,
                         pending_offer: None,
+                        pending_power_off: false,
                         pending_ice: Vec::new(),
                     },
                 );
@@ -2197,10 +2242,20 @@ impl Agent {
                         };
                         match self.ua.verify(&n, &session_id, &g, now_ms()) {
                             Ok(()) => {
-                                let held = self.sealed.get_mut(&session_id).and_then(|s| {
-                                    s.ua_ok = true;
-                                    s.pending_offer.take()
-                                });
+                                let (held, power_off) = match self.sealed.get_mut(&session_id) {
+                                    Some(s) => {
+                                        s.ua_ok = true;
+                                        (s.pending_offer.take(), std::mem::take(&mut s.pending_power_off))
+                                    }
+                                    None => (None, false),
+                                };
+                                // The device card's Power off, held at the
+                                // `power` arm: the one thing this session was
+                                // opened for (it sends no offer), carried out
+                                // now that the proof is in.
+                                if power_off {
+                                    return self.power_now(&session_id, crate::power::FORCE_POWER_OFF_WIRE);
+                                }
                                 // RELEASE WHATEVER WAS HELD, so proving the
                                 // passphrase resumes the session rather than
                                 // leaving the controller on a black tile
@@ -2324,39 +2379,27 @@ impl Agent {
                         if let Some(r) = self.gate(crate::flavour::Capability::Power) {
                             return r;
                         }
+                        let requested = v.get("action").and_then(|x| x.as_str()).unwrap_or("").to_string();
                         let ua_ok = self.sealed.get(&session_id).map(|x| x.ua_ok).unwrap_or(false);
                         if !ua_ok {
+                            // THE DEVICE CARD'S POWER OFF IS HELD, not dropped:
+                            // that session sends no offer (there is nothing
+                            // to show, and a files-only offer is refused at
+                            // the sign-in screen above), so its request comes
+                            // the moment it connects, concurrently with the
+                            // passphrase prompt, exactly as an offer does.
+                            // Carried out only once the proof checks out
+                            // (the `ua-response` arm). Every other action
+                            // keeps its silence: nothing is owed to a peer
+                            // that has not proved itself.
+                            if requested == crate::power::FORCE_POWER_OFF_WIRE {
+                                if let Some(s) = self.sealed.get_mut(&session_id) {
+                                    s.pending_power_off = true;
+                                }
+                            }
                             return Response::SealedSignals { payloads: vec![] };
                         }
-                        let requested = v.get("action").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                        let Some(action) = crate::power::PowerAction::parse(&requested) else {
-                            return self.power_failed(&session_id, &requested, "that power action is not one this agent knows");
-                        };
-                        match dispatch_power(crate::power::plan(action)) {
-                            Ok(()) if action == crate::power::PowerAction::Shutdown => {
-                                Response::error(crate::power::SHUTDOWN_REASON)
-                            }
-                            // Display actions are ACKED: the controller arms a
-                            // 5s wait for exactly these, and silence must keep
-                            // meaning "old host" rather than "success".
-                            Ok(()) if action == crate::power::PowerAction::DisplaysOff => {
-                                // Honest caveat: SC_MONITORPOWER sleep ends on
-                                // ANY input — including keys this very session
-                                // injects to sign in. Off-until-you-type is
-                                // still what the ask means at a lock screen,
-                                // but the ack must not oversell it.
-                                self.power_ack(
-                                    &session_id,
-                                    &requested,
-                                    Some("Displays sleep until the next input — typing here wakes them"),
-                                )
-                            }
-                            Ok(()) if action == crate::power::PowerAction::DisplaysOn => {
-                                self.power_ack(&session_id, &requested, None)
-                            }
-                            Ok(()) => Response::SealedSignals { payloads: vec![] },
-                            Err(e) => self.power_failed(&session_id, &requested, &e),
-                        }
+                        self.power_now(&session_id, &requested)
                     }
 
                     // Unknown kinds are ignored rather than errored: the
@@ -4942,6 +4985,118 @@ mod tests {
         }
         assert_eq!(power_plans(), vec![crate::power::Plan::NoOp, crate::power::Plan::Shutdown]);
         assert_eq!(inject_calls(), 0);
+    }
+
+    #[test]
+    fn the_forced_power_off_reaches_the_seam_as_its_own_plan_and_ends_the_session_with_the_reason() {
+        // The device card's Power off. Its own plan, never the gentle
+        // Shutdown's: the difference IS the feature (apps are not asked to
+        // save). Ends like a shutdown, so the controller reads why.
+        let (mut a, key) = proved_headless();
+        match power_signal(&mut a, &key, 1, "force_power_off") {
+            Response::Error { message } => assert_eq!(message, crate::power::SHUTDOWN_REASON),
+            other => panic!("an accepted power-off must end the session WITH the reason: {other:?}"),
+        }
+        assert_eq!(power_plans(), vec![crate::power::Plan::ForcePowerOff]);
+        assert_eq!(inject_calls(), 0);
+    }
+
+    #[test]
+    fn a_forced_power_off_windows_refuses_is_power_failed_and_the_session_survives() {
+        power_answers(Err("Windows refused to power it off (error 1190)".to_string()));
+        let (mut a, key) = proved_headless();
+        let r = power_signal(&mut a, &key, 1, "force_power_off");
+        let f = only_sealed(&r, &key);
+        assert_eq!(f["kind"], "power-failed");
+        assert_eq!(f["action"], "force_power_off");
+        assert!(f["reason"].as_str().unwrap_or("").contains("error 1190"), "{f}");
+        power_answers(Ok(()));
+    }
+
+    #[test]
+    fn a_forced_power_off_from_an_unproved_session_reaches_nothing() {
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        a.ua.arm(puca_ua::UaRecord::new(
+            [1u8; 16],
+            ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key().to_bytes(),
+        ));
+        let key = open_sealed(&mut a, "s1");
+        let r = power_signal(&mut a, &key, 1, "force_power_off");
+        assert!(matches!(&r, Response::SealedSignals { payloads } if payloads.is_empty()), "{r:?}");
+        assert_eq!(power_plans(), vec![]);
+    }
+
+    /// An ARMED sign-in-screen session the way the real one runs: the agent's
+    /// sealed challenge out (its n=0), and the controller's sealed proof as a
+    /// frame `n` the caller chooses — signed right, or not.
+    fn armed_challenged() -> (Agent, [u8; 32], ed25519_dalek::SigningKey, String) {
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        a.ua.arm(puca_ua::UaRecord::new([1u8; 16], sk.verifying_key().to_bytes()));
+        let key = open_sealed(&mut a, "s1");
+        let own = match a.handle(Request::SealedChallenge { session_id: "s1".into() }) {
+            Response::SealedSignals { mut payloads } => payloads.remove(0),
+            other => panic!("expected the challenge, got {other:?}"),
+        };
+        let challenge: serde_json::Value =
+            serde_json::from_str(&crate::control_key::open(&key, &own).expect("open")).unwrap();
+        (a, key, sk, challenge["nonce"].as_str().unwrap().to_string())
+    }
+    fn sealed_proof(a: &mut Agent, key: &[u8; 32], sk: &ed25519_dalek::SigningKey, nonce_b64: &str, n: i64) -> Response {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let nonce_raw: [u8; 32] = b64.decode(nonce_b64).unwrap().try_into().unwrap();
+        let sig = ed25519_dalek::Signer::sign(sk, &puca_ua::challenge_message("s1", &nonce_raw));
+        let proof = seal_signal(
+            key,
+            "s1",
+            n,
+            serde_json::json!({ "kind": "ua-response", "nonce": nonce_b64, "sig": b64.encode(sig.to_bytes()) }),
+        );
+        a.handle(Request::SealedSignal { session_id: "s1".into(), payload: proof })
+    }
+
+    #[test]
+    fn the_forced_power_off_sent_before_the_proof_is_held_and_carried_out_by_the_proof() {
+        // THE SIGN-IN-SCREEN CASE THE DEVICE CARD EXISTS FOR (a locked PC is
+        // reached through this agent). That session sends NO offer — a
+        // files-only one is refused here outright — so its request arrives
+        // the moment it connects, while the passphrase is being typed. Dropped
+        // there (as every other power action is), the card could never power
+        // a locked PC off: it would only ever hear silence.
+        let (mut a, key, sk, nonce) = armed_challenged();
+        let r = power_signal(&mut a, &key, 0, "force_power_off");
+        assert!(matches!(&r, Response::SealedSignals { payloads } if payloads.is_empty()), "{r:?}");
+        assert_eq!(power_plans(), vec![], "nothing before the proof");
+        match sealed_proof(&mut a, &key, &sk, &nonce, 1) {
+            Response::Error { message } => assert_eq!(message, crate::power::SHUTDOWN_REASON),
+            other => panic!("the proof must carry the held power-off out and end WITH the reason: {other:?}"),
+        }
+        assert_eq!(power_plans(), vec![crate::power::Plan::ForcePowerOff]);
+        assert_eq!(inject_calls(), 0);
+    }
+
+    #[test]
+    fn a_held_power_off_whose_proof_is_wrong_is_never_carried_out() {
+        let (mut a, key, _sk, nonce) = armed_challenged();
+        power_signal(&mut a, &key, 0, "force_power_off");
+        let wrong = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let r = sealed_proof(&mut a, &key, &wrong, &nonce, 1);
+        assert!(matches!(r, Response::Error { .. }), "a wrong passphrase is refused: {r:?}");
+        assert_eq!(power_plans(), vec![]);
+    }
+
+    #[test]
+    fn other_power_actions_before_the_proof_are_still_dropped_not_held() {
+        // Only the forced power-off is held; a Lock or Shut down sent unproved
+        // stays silence, then and after the proof (unchanged behaviour).
+        let (mut a, key, sk, nonce) = armed_challenged();
+        power_signal(&mut a, &key, 0, "shutdown");
+        let r = sealed_proof(&mut a, &key, &sk, &nonce, 1);
+        assert!(matches!(&r, Response::SealedSignals { payloads } if payloads.is_empty()), "{r:?}");
+        assert_eq!(power_plans(), vec![]);
     }
 
     #[test]

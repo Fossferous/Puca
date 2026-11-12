@@ -251,6 +251,9 @@ const GATES = [
         // Pinned keys on the stage, phone and desktop. Rebuilds the same
         // device-stage harness as the two above (one at a time here).
         ['e2e-device-stage-pinned-keys', 'device-stage-pinned-keys-real-browser.mjs'],
+        // The device card's Power off against stand-in PCs (its own harness,
+        // vite.devicesharness.config.ts): nothing is ever powered off.
+        ['e2e-devices-power', 'devices-power-real-browser.mjs e2e-artifacts/devices-power-shots'],
         // Needs WebKit installed once per machine (npx playwright install webkit); it
         // fails, saying so, when it is not. Screenshots go to the ignored e2e-artifacts.
         ['e2e-ios-web-app', 'ios-web-app-real-browser.mjs e2e-artifacts/ios-web-app-shots'],

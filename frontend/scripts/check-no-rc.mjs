@@ -60,6 +60,7 @@ const DETECTORS = [
     { s: 'is controlling this device', why: 'host-side control banner' },
     { s: 'Allow remote control with the lid closed', why: 'the lid-closed virtual screen option' },
     { s: 'no-screen:lid', why: 'the "that PC\'s screen is off" session end' },
+    { s: 'force_power_off', why: 'the device card\'s forced Power off' },
 ];
 
 /**

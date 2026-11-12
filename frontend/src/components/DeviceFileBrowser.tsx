@@ -33,9 +33,11 @@ export function DeviceFileBrowser() {
     // A host session shows its own indicator; the stage owns everything else.
     // An Audio Hub session is files-only on the wire but browses nothing: its
     // panel lives on the device card, and claiming it here would cover the
-    // very card it is shown on.
+    // very card it is shown on. A power-off session (the card's Power off) is
+    // the same: marked files-only (it sends no offer), its outcome said on
+    // the card.
     const session = sessions.find(
-        s => s.role === 'controller' && s.filesOnly && !s.audioHub && s.phase !== 'ended',
+        s => s.role === 'controller' && s.filesOnly && !s.audioHub && !s.powerOffOnly && s.phase !== 'ended',
     ) ?? null;
 
     if (!session) return null;

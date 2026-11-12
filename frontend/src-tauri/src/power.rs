@@ -34,6 +34,11 @@ pub enum PowerAction {
     /// get their WM_QUERYENDSESSION and only HUNG ones are forced — the safer
     /// of the two force flags (plain EWX_FORCE discards unsaved work outright).
     Shutdown,
+    /// The device card's Power off: `shutdown /s /f /t 0`. Apps are closed
+    /// without being asked to save — `force_power_off` below says exactly how
+    /// and why it is InitiateShutdownW. The controller asks before sending it,
+    /// naming the PC and the unsaved work.
+    ForcePowerOff,
     /// All panels dark + the keep-off ticker (display_power.rs).
     DisplaysOff,
     /// Every panel BUT the primary dark, via DDC/CI. Honest per-monitor.
@@ -126,6 +131,9 @@ mod imp {
             | PowerAction::DisplaysReattach => Err(PowerError::Failed(
                 "display actions are routed to display_power, not perform()".into(),
             )),
+            PowerAction::ForcePowerOff => Err(PowerError::Failed(
+                "the forced power-off is routed to force_power_off, not perform()".into(),
+            )),
             PowerAction::Lock => unsafe {
                 LockWorkStation().map_err(|e| PowerError::Failed(format!("LockWorkStation failed: {e}")))
             },
@@ -141,6 +149,47 @@ mod imp {
             }
         }
     }
+
+    /// The real OS behind `super::force_power_off`. A TEST BUILD PANICS
+    /// before any call: no test may power the machine running it off.
+    pub struct Os;
+
+    impl super::ShutdownOs for Os {
+        fn enable_shutdown_privilege(&mut self) -> Result<(), String> {
+            if cfg!(test) {
+                panic!("a test reached the real SeShutdownPrivilege call");
+            }
+            enable_privilege("SeShutdownPrivilege").map_err(|e| e.to_string())
+        }
+
+        fn initiate_shutdown(&mut self, grace_secs: u32, flags: u32, reason: u32) -> u32 {
+            if cfg!(test) {
+                panic!("a test reached the real InitiateShutdownW");
+            }
+            use windows::Win32::System::Shutdown::{InitiateShutdownW, SHUTDOWN_FLAGS, SHUTDOWN_REASON};
+            // NULL machine = this one; NULL message = no dialog text.
+            unsafe {
+                InitiateShutdownW(
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    grace_secs,
+                    SHUTDOWN_FLAGS(flags),
+                    SHUTDOWN_REASON(reason),
+                )
+            }
+        }
+
+        fn exit_windows(&mut self, flags: u32, reason: u32) -> Result<(), String> {
+            if cfg!(test) {
+                panic!("a test reached the real ExitWindowsEx");
+            }
+            use windows::Win32::System::Shutdown::{EXIT_WINDOWS_FLAGS, SHUTDOWN_REASON};
+            unsafe {
+                ExitWindowsEx(EXIT_WINDOWS_FLAGS(flags), SHUTDOWN_REASON(reason))
+                    .map_err(|e| format!("ExitWindowsEx failed: {e}"))
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -148,6 +197,102 @@ mod imp {
     use super::{PowerAction, PowerError};
     pub fn perform(_action: PowerAction) -> Result<(), PowerError> {
         Err(PowerError::Unsupported)
+    }
+    /// Not Windows (a Linux desktop host): refused at the first step, with the
+    /// same words as Lock and Shut down there. The controller shows them.
+    pub struct Os;
+    impl super::ShutdownOs for Os {
+        fn enable_shutdown_privilege(&mut self) -> Result<(), String> {
+            Err(PowerError::Unsupported.to_string())
+        }
+        fn initiate_shutdown(&mut self, _grace_secs: u32, _flags: u32, _reason: u32) -> u32 {
+            50 // ERROR_NOT_SUPPORTED
+        }
+        fn exit_windows(&mut self, _flags: u32, _reason: u32) -> Result<(), String> {
+            Err(PowerError::Unsupported.to_string())
+        }
+    }
+}
+
+// ---- the FORCED power-off ----------------------------------------------------
+//
+// KEEP IN STEP with crates/puca-agent/src/power.rs, which carries the same
+// thirty lines for the sign-in-screen host (the two are deliberately not
+// shared — see that file's header). Both are pinned by the same tests.
+//
+// What `shutdown /s /f /t 0` does, and why it is InitiateShutdownW and not the
+// ExitWindowsEx the gentle Shutdown uses (Microsoft Learn, both pages):
+//  - ExitWindowsEx's EWX_FORCE "has no effect if terminal services is
+//    enabled", and the Remote Desktop Services service runs on every current
+//    Windows, so that flag forces nothing there;
+//  - SHUTDOWN_FORCE_SELF logs this session off forcefully ("if this flag is
+//    not set ... a shutdown is not guaranteed even if the function returns
+//    successfully"), SHUTDOWN_FORCE_OTHERS does the same to every other
+//    signed-in session (without it the call fails with
+//    ERROR_SHUTDOWN_USERS_LOGGED_ON), SHUTDOWN_POWEROFF turns the power off,
+//    and SHUTDOWN_GRACE_OVERRIDE with a grace period of 0 means now, even
+//    over a shutdown somebody has scheduled;
+//  - no SHUTDOWN_HYBRID: without it InitiateShutdown "always initiate[s] a
+//    full system shutdown". The Devices page tells people to turn Fast
+//    Startup off because a hybrid shutdown usually cannot be woken, so a full
+//    one is what Wake & connect can bring back;
+//  - no SHUTDOWN_INSTALL_UPDATES: not the moment for a long update nobody is
+//    there to watch.
+// It needs SeShutdownPrivilege ENABLED: every interactive user holds it.
+
+/// SHUTDOWN_FORCE_OTHERS | SHUTDOWN_FORCE_SELF | SHUTDOWN_POWEROFF |
+/// SHUTDOWN_GRACE_OVERRIDE; a Windows test checks it against the SDK.
+pub const FORCE_POWER_OFF_FLAGS: u32 = 0x1 | 0x2 | 0x8 | 0x20;
+/// Seconds of warning before it goes: none.
+pub const FORCE_POWER_OFF_GRACE_SECS: u32 = 0;
+/// SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER |
+/// SHTDN_REASON_FLAG_PLANNED — the gentle Shutdown's reason. Never 0, which
+/// logs an UNPLANNED shutdown that can make Windows dump state first.
+pub const POWER_OFF_REASON: u32 = 0x8000_0000;
+/// ERROR_NOT_READY: InitiateShutdown's documented answer when fast user
+/// switching is on and nobody is signed in. Cannot happen from the signed-in
+/// shell; handled the same way as the agent so the two stay one design.
+pub const ERROR_NOT_READY: u32 = 21;
+/// EWX_SHUTDOWN | EWX_POWEROFF | EWX_FORCE for that fallback.
+pub const NOBODY_SIGNED_IN_EXIT_FLAGS: u32 = 0x1 | 0x8 | 0x4;
+
+/// The OS calls a forced power-off makes, as a seam.
+pub trait ShutdownOs {
+    /// AdjustTokenPrivileges(SeShutdownPrivilege, enabled).
+    fn enable_shutdown_privilege(&mut self) -> Result<(), String>;
+    /// InitiateShutdownW(this machine, no message, grace, flags, reason);
+    /// its return value (0 = ERROR_SUCCESS).
+    fn initiate_shutdown(&mut self, grace_secs: u32, flags: u32, reason: u32) -> u32;
+    /// ExitWindowsEx(flags, reason).
+    fn exit_windows(&mut self, flags: u32, reason: u32) -> Result<(), String>;
+}
+
+/// Power this machine off now, closing everything without asking it to save.
+/// Ok means Windows accepted the request (it then proceeds asynchronously).
+pub fn force_power_off(os: &mut impl ShutdownOs) -> Result<(), PowerError> {
+    os.enable_shutdown_privilege().map_err(PowerError::Failed)?;
+    match os.initiate_shutdown(FORCE_POWER_OFF_GRACE_SECS, FORCE_POWER_OFF_FLAGS, POWER_OFF_REASON) {
+        0 => Ok(()),
+        ERROR_NOT_READY => os
+            .exit_windows(NOBODY_SIGNED_IN_EXIT_FLAGS, POWER_OFF_REASON)
+            .map_err(PowerError::Failed),
+        code => Err(PowerError::Failed(force_power_off_refusal(code))),
+    }
+}
+
+/// What a refused InitiateShutdownW means, in words for the person who asked.
+pub fn force_power_off_refusal(code: u32) -> String {
+    match code {
+        // ERROR_ACCESS_DENIED
+        5 => "Windows refused: the account Púca runs as there may not shut it down".to_string(),
+        // ERROR_SHUTDOWN_IN_PROGRESS: Windows takes no second shutdown while
+        // one is going, and a gentle one can be held by an app with unsaved
+        // work until somebody at the machine answers it.
+        1115 => "a shutdown is already under way there (an app may be holding it, \
+                 waiting for somebody at that PC to save), and Windows will not force \
+                 a second one"
+            .to_string(),
+        code => format!("Windows refused to power it off (error {code})"),
     }
 }
 
@@ -174,6 +319,9 @@ pub async fn power_action(
     tauri::async_runtime::spawn_blocking(move || match action {
         PowerAction::Lock | PowerAction::Shutdown => {
             imp::perform(action).map_err(|e| e.to_string()).map(|()| None)
+        }
+        PowerAction::ForcePowerOff => {
+            force_power_off(&mut imp::Os).map_err(|e| e.to_string()).map(|()| None)
         }
         PowerAction::DisplaysOff => dp.displays_off().map(|()| None),
         PowerAction::DisplaysOffKeepPrimary => dp.displays_off_keep_primary().map(Some),
@@ -269,5 +417,149 @@ mod tests {
         assert!(serde_json::from_str::<PowerAction>("\"restart\"").is_err());
         assert!(serde_json::from_str::<PowerAction>("\"Lock\"").is_err());
         assert!(serde_json::from_str::<PowerAction>("\"displaysoff\"").is_err());
+        // The device card's Power off: session.ts FORCE_POWER_OFF_ACTION and
+        // the agent's parse spell it the same.
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"force_power_off\"").unwrap(),
+            PowerAction::ForcePowerOff
+        );
+        assert!(serde_json::from_str::<PowerAction>("\"forcepoweroff\"").is_err());
+        assert!(serde_json::from_str::<PowerAction>("\"power_off\"").is_err());
+    }
+
+    // ---- the forced power-off, against a recording stand-in for Windows ----
+    //
+    // NOTHING here reaches the OS: `force_power_off` is handed `FakeOs`. No
+    // test hands it the real `imp::Os` — not even to watch its test-build
+    // panic, because that test would power this machine off the day someone
+    // removed the guard to see it go red. The guard is reviewed by reading.
+
+    use super::{
+        force_power_off, PowerError, ShutdownOs, ERROR_NOT_READY, FORCE_POWER_OFF_FLAGS,
+        FORCE_POWER_OFF_GRACE_SECS, NOBODY_SIGNED_IN_EXIT_FLAGS, POWER_OFF_REASON,
+    };
+
+    struct FakeOs {
+        calls: Vec<String>,
+        privilege: Result<(), String>,
+        initiate: u32,
+        exit: Result<(), String>,
+    }
+
+    impl FakeOs {
+        fn answering(initiate: u32) -> Self {
+            FakeOs { calls: Vec::new(), privilege: Ok(()), initiate, exit: Ok(()) }
+        }
+    }
+
+    impl ShutdownOs for FakeOs {
+        fn enable_shutdown_privilege(&mut self) -> Result<(), String> {
+            self.calls.push("privilege".into());
+            self.privilege.clone()
+        }
+        fn initiate_shutdown(&mut self, grace_secs: u32, flags: u32, reason: u32) -> u32 {
+            self.calls.push(format!("initiate grace={grace_secs} flags={flags:#x} reason={reason:#x}"));
+            self.initiate
+        }
+        fn exit_windows(&mut self, flags: u32, reason: u32) -> Result<(), String> {
+            self.calls.push(format!("exit flags={flags:#x} reason={reason:#x}"));
+            self.exit.clone()
+        }
+    }
+
+    #[test]
+    fn force_power_off_asks_windows_for_exactly_a_forced_full_power_off_with_no_grace() {
+        let mut os = FakeOs::answering(0);
+        assert_eq!(force_power_off(&mut os), Ok(()));
+        assert_eq!(
+            os.calls,
+            vec!["privilege".to_string(), "initiate grace=0 flags=0x2b reason=0x80000000".to_string()]
+        );
+        let f = FORCE_POWER_OFF_FLAGS;
+        assert_ne!(f & 0x1, 0, "SHUTDOWN_FORCE_OTHERS: other signed-in sessions are closed too");
+        assert_ne!(f & 0x2, 0, "SHUTDOWN_FORCE_SELF: this session's apps are not asked to save");
+        assert_ne!(f & 0x8, 0, "SHUTDOWN_POWEROFF: the power goes off");
+        assert_ne!(f & 0x20, 0, "SHUTDOWN_GRACE_OVERRIDE: now, even over a scheduled shutdown");
+        assert_eq!(f & 0x4, 0, "never SHUTDOWN_RESTART");
+        assert_eq!(f & 0x10, 0, "never SHUTDOWN_NOREBOOT (that leaves the power on)");
+        assert_eq!(f & 0x40, 0, "never SHUTDOWN_INSTALL_UPDATES");
+        assert_eq!(f & 0x80, 0, "never SHUTDOWN_RESTARTAPPS");
+        assert_eq!(f & 0x200, 0, "never SHUTDOWN_HYBRID: a hybrid shutdown usually cannot be woken");
+        assert_eq!(FORCE_POWER_OFF_GRACE_SECS, 0);
+        assert_eq!(POWER_OFF_REASON, 0x8000_0000);
+    }
+
+    #[test]
+    fn without_the_privilege_nothing_is_asked_of_windows() {
+        let mut os = FakeOs::answering(0);
+        os.privilege = Err("this account does not hold SeShutdownPrivilege".into());
+        assert_eq!(
+            force_power_off(&mut os),
+            Err(PowerError::Failed("this account does not hold SeShutdownPrivilege".into()))
+        );
+        assert_eq!(os.calls, vec!["privilege".to_string()]);
+    }
+
+    #[test]
+    fn nobody_signed_in_falls_back_to_exit_windows_with_force() {
+        let mut os = FakeOs::answering(ERROR_NOT_READY);
+        assert_eq!(force_power_off(&mut os), Ok(()));
+        assert_eq!(os.calls[2], "exit flags=0xd reason=0x80000000");
+        assert_eq!(NOBODY_SIGNED_IN_EXIT_FLAGS, 0xd);
+    }
+
+    #[test]
+    fn a_refusal_is_said_in_words_and_tries_nothing_else() {
+        for (code, words) in [(5u32, "may not shut it down"), (1115, "already under way"), (1190, "error 1190")] {
+            let mut os = FakeOs::answering(code);
+            match force_power_off(&mut os) {
+                Err(PowerError::Failed(e)) => assert!(e.contains(words), "{code}: {e}"),
+                other => panic!("{code}: {other:?}"),
+            }
+            assert_eq!(os.calls.len(), 2, "{code}: {:?}", os.calls);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_literal_flags_are_the_windows_sdk_constants() {
+        use windows::Win32::Foundation::ERROR_NOT_READY as SDK_NOT_READY;
+        use windows::Win32::System::Shutdown::*;
+        assert_eq!(
+            FORCE_POWER_OFF_FLAGS,
+            (SHUTDOWN_FORCE_OTHERS | SHUTDOWN_FORCE_SELF | SHUTDOWN_POWEROFF | SHUTDOWN_GRACE_OVERRIDE).0
+        );
+        assert_eq!(
+            POWER_OFF_REASON,
+            (SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED).0
+        );
+        assert_eq!(NOBODY_SIGNED_IN_EXIT_FLAGS, (EWX_SHUTDOWN | EWX_POWEROFF | EWX_FORCE).0);
+        assert_eq!(ERROR_NOT_READY, SDK_NOT_READY.0);
+    }
+
+    /// The agent's copy (crates/puca-agent/src/power.rs) must ask Windows for
+    /// the same thing. Read from its source, since this crate cannot depend on
+    /// that one: a change to either side's flags fails here until both agree.
+    #[test]
+    fn the_sign_in_screen_agent_asks_for_the_same_power_off() {
+        let agent = include_str!("../../../crates/puca-agent/src/power.rs");
+        for line in [
+            "pub const FORCE_POWER_OFF_FLAGS: u32 = 0x1 | 0x2 | 0x8 | 0x20;",
+            "pub const FORCE_POWER_OFF_GRACE_SECS: u32 = 0;",
+            "pub const POWER_OFF_REASON: u32 = 0x8000_0000;",
+            "pub const NOBODY_SIGNED_IN_EXIT_FLAGS: u32 = 0x1 | 0x8 | 0x4;",
+            "\"force_power_off\" => Some(Self::ForcePowerOff),",
+        ] {
+            assert!(agent.contains(line), "the agent's power.rs no longer has: {line}");
+        }
+        let here = include_str!("power.rs");
+        for line in [
+            "pub const FORCE_POWER_OFF_FLAGS: u32 = 0x1 | 0x2 | 0x8 | 0x20;",
+            "pub const FORCE_POWER_OFF_GRACE_SECS: u32 = 0;",
+            "pub const POWER_OFF_REASON: u32 = 0x8000_0000;",
+            "pub const NOBODY_SIGNED_IN_EXIT_FLAGS: u32 = 0x1 | 0x8 | 0x4;",
+        ] {
+            assert!(here.contains(line), "this power.rs no longer has: {line}");
+        }
     }
 }

@@ -785,6 +785,44 @@ nobody is connected** on that computer. Its sign-in-screen service is not
 updated this way: Windows asks permission for that, so someone at the
 computer has to click **Update the service** when Púca offers it.
 
+### Power off
+
+**Power off** on a Windows computer's card in **Devices** shuts that computer
+down straight away, without opening its screen. It asks first, naming the
+computer, because it is forced: Windows closes every app on it without asking
+it to save, the way `shutdown /s /f /t 0` does, so anything unsaved there is
+lost, in every account signed in to it, even while it is locked. **Shut
+down…** in the session's **More** menu is the gentle one, which lets apps ask
+to save first.
+
+It works on a computer **set up for unattended access** (**Devices → This
+device** on it): it asks for that computer's unattended passphrase first, as
+**Control** does, and it works while that computer is locked or at its
+sign-in screen too, when it has lock-screen access. A computer without
+unattended access refuses it: it still asks whoever is there to let the
+connection in, as it does for **Control**, but even if they do, they agreed to
+a connection, not to losing their unsaved work, so it is not powered off. Use
+**Control** and **More → Shut down…** there instead. If somebody signs in at a
+locked computer before it powers off, it is not powered off either, and the
+card says so.
+
+The card then says how it went: that the computer is powering off, or why
+not — it is offline (it may already be off), it runs a Púca too old to know
+the command (update Púca on it, or use **Control** and then **More → Shut
+down…**), it is in another remote session, it is not set up for unattended
+access, the passphrase was not given or not accepted, or Windows refused.
+
+It is a full shutdown, never Fast Startup's hybrid one, so **Wake & connect**
+can start the computer again where Wake-on-LAN is set up (see *To wake this
+computer from another device* on the Devices page).
+
+A friend's computer shared with you **with control** has **Power off** too,
+when it is set up for unattended access; one shared view-only or for files
+only does not, and refuses it if asked. It is only offered for Windows
+computers: a Linux computer, a phone and this device have no **Power off**.
+The computer needs this version of the Púca desktop app; the button itself
+arrives with the ordinary update.
+
 ### From a computer
 The bar above the picture:
 

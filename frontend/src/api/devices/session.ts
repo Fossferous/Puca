@@ -179,6 +179,70 @@ export const LOCK_HANDOVER_REASON = 'console-locked-handover';
 /** The end-reason the host sends BEFORE shutting down on request. */
 export const SHUTDOWN_REASON = 'the device is shutting down';
 
+/**
+ * THE DEVICE CARD'S POWER OFF (docs/REMOTE_CONTROL.md, *Power off from the
+ * device list*): `shutdown /s /f /t 0` on the host — apps are closed without
+ * being asked to save. A `power` action like Lock and Shut down, spelled the
+ * same on all three receiving ends (this file, the Tauri shell's serde, the
+ * agent's parse), each pinned by its own test.
+ *
+ * A session opened for it sends NO offer (see DeviceConnectAnswered): the
+ * request goes the moment it connects, and both hosts HOLD it until the
+ * unattended passphrase is proved, as they hold an offer.
+ *
+ * An older host does not know it: it drops an unknown action, or (an armed
+ * one) any power frame from a controller not yet proved, on the floor. So the
+ * controller waits POWER_OFF_ANSWER_TIMEOUT_MS — restarted when the proof is
+ * sent, paused while the passphrase is typed — and then says that PC's Púca
+ * is too old. An older sign-in-screen agent that gets it after a proof
+ * answers power-failed "not one this agent knows", read the same way.
+ */
+export const FORCE_POWER_OFF_ACTION = 'force_power_off';
+
+/** How long a host has to answer the forced power-off. Every current host
+ *  answers within a round trip (the attended host acks BEFORE it calls
+ *  Windows; the agent calls first and ends the session), so this is only
+ *  ever reached by a host too old to know the action. */
+export const POWER_OFF_ANSWER_TIMEOUT_MS = 8_000;
+
+/** After the attended host's ack, how long to wait for the session to end
+ *  with the shutdown reason (or for a power-failed) before stopping. The
+ *  call it makes returns at once, so the end follows within a second. */
+export const POWER_OFF_GOING_TIMEOUT_MS = 15_000;
+
+/** Why a power-off did not happen, in codes rather than sentences: the host
+ *  sends the first two as a power-failed reason as well (a shell too old for
+ *  the action, a share without control), and powerOff.ts turns each into a
+ *  sentence naming the PC — which only this side knows the name of. */
+export const POWER_OFF_TOO_OLD_REASON = 'power-off: that Púca is too old to know it';
+export const POWER_OFF_NOT_ALLOWED_REASON = 'power-off: this share does not include control';
+/** The attended host's refusal on a session somebody AT the PC let in (it is
+ *  not armed for unattended access): they agreed to a connection, not to
+ *  every app on it being closed unasked. */
+export const POWER_OFF_ATTENDED_REASON = 'power-off: someone there let this connection in';
+export const POWER_OFF_STOPPED_WAITING_REASON = 'power-off: accepted, stopped waiting';
+/** Somebody signed in at the PC (its lock-screen service handed over) before
+ *  the power-off was carried out: not done, and not followed to the desktop. */
+export const POWER_OFF_UNLOCKED_REASON = 'the console was unlocked';
+
+/**
+ * CONTROLLER: where the device card's Power off stands on this session.
+ *  - 'waiting': asked, the session still connecting (it is sent the moment
+ *    it is connected);
+ *  - 'sent': on its way, POWER_OFF_ANSWER_TIMEOUT_MS running;
+ *  - 'accepted': the attended host said it is calling Windows;
+ *  - 'done': it is going: the session ended with the shutdown reason, or
+ *    went while the host was going;
+ *  - 'unknown': the connection ended between sending and any answer;
+ *  - 'failed': it is not powering off; `reason` says why (the host's words,
+ *    or one of the POWER_OFF_*_REASON constants, or the session's end).
+ */
+export type PowerOffState = 'waiting' | 'sent' | 'accepted' | 'done' | 'unknown' | 'failed';
+export interface PowerOffProgress {
+    state: PowerOffState;
+    reason: string | null;
+}
+
 /** The input kinds the diagnostic counts by name. Anything else is 'other':
  *  the wire's `t` is the peer's own string, and a diagnostic must never turn
  *  an arbitrary one into a key of its output. */
@@ -349,6 +413,16 @@ export interface DeviceControlSession {
      *  panel on the device card is its only UI. Always false on a host, which
      *  neither knows nor needs to know why the controller connected. */
     audioHub: boolean;
+    /** CONTROLLER: the device card's Power off on this session, if one was
+     *  asked (see PowerOffProgress). On a session opened only for it
+     *  (`connectToDevice({ powerOff: true })`; it sends no offer, so the host
+     *  never learns of `filesOnly` and captures nothing) no surface claims it:
+     *  the device card is its only UI. */
+    powerOff: PowerOffProgress | null;
+    /** CONTROLLER: this session was opened only to power the host off
+     *  (`connectToDevice({ powerOff: true })`). It ends with the outcome and
+     *  never leaves a red banner of its own; the card says what happened. */
+    powerOffOnly: boolean;
     /** CONTROLLER: whether the host reports its screen blanked. Driven by the
      *  host's ack, never set optimistically — a toggle that lies about this is
      *  worse than one that is slow. */
@@ -458,6 +532,17 @@ interface Internal extends DeviceControlSession {
     /** CONTROLLER: when this session went active (Date.now()), for how long
      *  it was up when its end is logged. Undefined while it never did. */
     activeAt?: number;
+    /** CONTROLLER: the host has answered this session's offer, so it has
+     *  accepted this controller (an armed host only once the passphrase was
+     *  proved). What the device card's Power off needs before it may ride
+     *  this session (powerOffSessionFor). */
+    answered?: boolean;
+    /** CONTROLLER: this side has sent the unattended passphrase proof. With
+     *  `unattended` (a challenge came) and no proof, a host that holds the
+     *  power-off until the proof cannot have carried it out. */
+    uaProofSent?: boolean;
+    /** CONTROLLER: the forced power-off's deadline. */
+    powerOffTimer?: ReturnType<typeof setTimeout> | null;
     /** CONTROLLER: Audio Hub requests sent on this session and not yet
      *  answered, by request id. Resolved by the host's `audio-hub-result`, by
      *  a deadline, or by teardown — never left hanging. */
@@ -469,6 +554,10 @@ interface Internal extends DeviceControlSession {
      *  passphrase was proved, held (only the latest) and served once it is —
      *  the same reasoning as `pendingFileRequest`. */
     pendingAudioHub?: { op: AudioHubOp; rid: string } | null;
+    /** HOST: the device card's forced power-off arrived before the
+     *  unattended passphrase was proved: held, carried out by the proof
+     *  (serveForcePowerOff), gone with the session if it never comes. */
+    heldPowerOff?: boolean;
     /** HOST: a cursor-ownership request (set-cursor-owner) that arrived
      *  before the unattended passphrase was proved — only the latest, applied
      *  once it is, after the held offer (setDrawCursor is an IPC against the
@@ -923,6 +1012,8 @@ function emit(): void {
         filesChannel: s.filesChannel,
         fileRoot: s.fileRoot, fileScopeKind: s.fileScopeKind, filesOnly: s.filesOnly,
         audioHub: s.audioHub,
+        powerOff: s.powerOff ? { ...s.powerOff } : null,
+        powerOffOnly: s.powerOffOnly,
         privacyActive: s.privacyActive,
         cursorOwned: s.cursorOwned,
         reconnecting: s.reconnecting,
@@ -1670,7 +1761,7 @@ function teardown(
     // deliberate end the peer sent, its fixed "the session ended"); how long
     // it was up says when it started.
     if (s.role === 'controller' && s.phase !== 'ended') {
-        const kind = s.audioHub ? 'audio-hub' : s.filesOnly ? 'files' : 'control';
+        const kind = s.audioHub ? 'audio-hub' : s.powerOffOnly ? 'power-off' : s.filesOnly ? 'files' : 'control';
         const upFor = s.activeAt ? `, up ${sessionAge(Date.now() - s.activeAt)}` : '';
         logRcConnect(`${kind} ended${deliberate ? ' by choice' : ''} while ${s.phase}: ${logAs ?? reason}`
             + ` (socket ${wsClient.isConnected ? 'up' : 'down'}`
@@ -1691,7 +1782,13 @@ function teardown(
         // end_device_session only honours a conn the session records
         // (opposite_conn), and a fresh conn is a stranger to it — a replayed
         // DeviceEnd is refused, by policy the server's tests pin.
-        wsClient.send({ type: 'DeviceEnd', payload: { session_id: s.id, reason } });
+        //
+        // The reason is server-visible. A session opened only to power off
+        // says nothing of what it was for, or of what the host answered
+        // (those arrived sealed): it is "the session ended", which the host
+        // reads as an ordinary hang-up.
+        const wireReason = s.role === 'controller' && s.powerOffOnly ? 'the session ended' : reason;
+        wsClient.send({ type: 'DeviceEnd', payload: { session_id: s.id, reason: wireReason } });
     }
     // A remembered unattended seed this session signed with but the host never
     // demonstrably accepted is dropped. Rejection produces no signal of its
@@ -1770,6 +1867,7 @@ function teardown(
     // Drop anything held for a passphrase that will now never arrive.
     s.pendingOffer = null;
     s.pendingAudioHub = null;
+    s.heldPowerOff = false;
     s.heldCursorOwner = null;
     // And answer every Audio Hub request still waiting, so a panel is never
     // left spinning on a session that no longer exists.
@@ -1794,12 +1892,20 @@ function teardown(
     s.caretChannel = null;
     s.caretOpen = false;
     clearMediaDeadline(s);
+    // A power-off still in flight ends with the session, and HOW it ends is
+    // the card's answer (powerOff.ts words it): the host saying it is going
+    // (or going while it had said so) is the success; a session that never
+    // got as far as sending is a failure with the session's own reason; one
+    // that ended between sending and any answer cannot be called either way.
+    settlePowerOff(s, deliberate ? reason : (s.error ?? reason));
     s.phase = 'ended';
     // A deliberate end must not LEAVE an error either: a transient one latched
     // earlier in the session (a refused monitor switch, a privacy toggle that
     // failed) would otherwise be presented as the reason the session ended,
-    // minutes after the user had already read and moved past it.
-    s.error = deliberate ? null : (s.error ?? reason);
+    // minutes after the user had already read and moved past it. Nor does a
+    // session opened only to power off: its outcome is the card's to say,
+    // and an error here would ALSO put the stage's failure banner over it.
+    s.error = deliberate || s.powerOffOnly ? null : (s.error ?? reason);
     if (owns) {
         clearStreamQualityTimeout(s.id);
         lastViewSize.delete(s.id);
@@ -2741,7 +2847,7 @@ export function setPrivacyMode(sessionId: string, enabled: boolean): void {
  *  it) rather than darkening panels; the host restores on reattach, session
  *  end, and app start. */
 export type PowerAction =
-    | 'lock' | 'shutdown'
+    | 'lock' | 'shutdown' | typeof FORCE_POWER_OFF_ACTION
     | 'displays_off' | 'displays_off_keep_primary' | 'displays_on'
     | 'displays_detach_others' | 'displays_reattach';
 
@@ -2787,6 +2893,8 @@ function setPowerNotice(s: Internal, text: string | null): void {
  * session to send on (the UI says so).
  */
 export function sendPowerAction(sessionId: string, action: PowerAction): boolean {
+    // The forced power-off has its own waiting and answers; never a bare send.
+    if (action === FORCE_POWER_OFF_ACTION) return requestForcePowerOff(sessionId);
     const s = sessions.get(sessionId);
     if (!s || s.role !== 'controller' || s.phase !== 'active') return false;
     // A view-only share may not lock or power off the owner's machine — the
@@ -2805,6 +2913,142 @@ export function sendPowerAction(sessionId: string, action: PowerAction): boolean
         }, POWER_ACK_TIMEOUT_MS);
     }
     return true;
+}
+
+// ---- the device card's forced power-off (controller) ------------------------
+
+/** Nothing more will change this power-off. */
+function powerOffSettled(p: PowerOffProgress | null): boolean {
+    return !p || p.state === 'done' || p.state === 'unknown' || p.state === 'failed';
+}
+
+function clearPowerOffTimer(s: Internal): void {
+    if (s.powerOffTimer) { clearTimeout(s.powerOffTimer); s.powerOffTimer = null; }
+}
+
+/** It is not powering off: say why, and end a session that existed only for
+ *  this (deliberately: the card says why, so no banner). */
+function failPowerOff(s: Internal, reason: string): void {
+    clearPowerOffTimer(s);
+    s.powerOff = { state: 'failed', reason };
+    if (s.powerOffOnly && s.phase !== 'ended') teardown(s, reason, true, true);
+    else emit();
+}
+
+/** The deadline for the state the power-off is in now: unanswered after
+ *  POWER_OFF_ANSWER_TIMEOUT_MS is a host too old to know the action; accepted
+ *  and still connected after POWER_OFF_GOING_TIMEOUT_MS stops the waiting
+ *  (the host said it was going, and Windows proceeds on its own). */
+function armPowerOffDeadline(s: Internal, ms: number): void {
+    clearPowerOffTimer(s);
+    s.powerOffTimer = setTimeout(() => {
+        s.powerOffTimer = null;
+        if (sessions.get(s.id) !== s || s.phase === 'ended') return;
+        if (s.powerOff?.state === 'sent') {
+            // NOT A VERDICT WHILE THE HOST COULD NOT HAVE ANSWERED: the
+            // passphrase is still being typed (the host holds the request
+            // until the proof; sending the proof starts this clock afresh),
+            // the link is down or the other end is reconnecting (the frame
+            // may be in nobody's hands), or this app was frozen in the
+            // background (an iPhone's timers fire late, all at once). Each of
+            // those is bounded by the session's own lifecycle, which ends it
+            // — and an end while 'sent' is 'unknown', never 'too old'.
+            if (s.awaitingUaPassphrase || s.transportDown || s.peerReconnecting
+                || !wsClient.isConnected || appIsBackgrounded()) {
+                armPowerOffDeadline(s, ms);
+                return;
+            }
+            failPowerOff(s, POWER_OFF_TOO_OLD_REASON);
+        } else if (s.powerOff?.state === 'accepted') {
+            s.powerOff = { state: 'done', reason: POWER_OFF_STOPPED_WAITING_REASON };
+            if (s.powerOffOnly) teardown(s, POWER_OFF_STOPPED_WAITING_REASON, true, true);
+            else emit();
+        }
+    }, ms);
+}
+
+/** Send the request: on a power-off session the moment it is connected (it
+ *  sends no offer), on a ridden session at once (it has been answered). A
+ *  current host holds it until the passphrase is proved, so silence past the
+ *  deadline — which waits out the passphrase — is a host too old to know it. */
+function sendForcePowerOff(s: Internal): void {
+    if (s.powerOff?.state !== 'waiting') return;
+    // A share without control may not power the owner's PC off — the line
+    // sendPowerAction draws, said here rather than sent to be refused. The
+    // host draws it again on its side (and says so too).
+    if (s.share && !s.share.capabilities.includes('control')) {
+        failPowerOff(s, POWER_OFF_NOT_ALLOWED_REASON);
+        return;
+    }
+    s.powerOff = { state: 'sent', reason: null };
+    armPowerOffDeadline(s, POWER_OFF_ANSWER_TIMEOUT_MS);
+    emit();
+    void sendSignal(s, { kind: 'power', action: FORCE_POWER_OFF_ACTION }).catch(() => {
+        if (sessions.get(s.id) === s && s.powerOff?.state === 'sent') {
+            failPowerOff(s, 'the request could not be sent');
+        }
+    });
+}
+
+/** Sent, but certainly never carried out: the PC asked for the passphrase
+ *  and was never given it, or refused it — and a current host holds the
+ *  request until the proof, an older one drops it. */
+function heldUnproved(s: Internal, endReason: string): boolean {
+    if (s.unattended && !s.uaProofSent) return true;
+    // The lock-screen service stood down because somebody signed in: had it
+    // carried the power-off out, the end would carry the shutdown reason.
+    if (endReason === POWER_OFF_UNLOCKED_REASON) return true;
+    return /unattended (passphrase|access)|too many wrong/i.test(endReason);
+}
+
+/** Teardown's half: a power-off still in flight ends with its session. */
+function settlePowerOff(s: Internal, endReason: string): void {
+    clearPowerOffTimer(s);
+    const p = s.powerOff;
+    if (!p || powerOffSettled(p)) return;
+    if (endReason === SHUTDOWN_REASON || p.state === 'accepted') {
+        // The host said it is going, or the session ended BECAUSE it is: the
+        // connection dropping after an accepted power-off is the PC going.
+        s.powerOff = { state: 'done', reason: endReason };
+    } else if (p.state === 'sent' && !heldUnproved(s, endReason)) {
+        // Sent, then the connection went with no answer either way: the PC
+        // may have gone too fast to say so, or the network may have dropped.
+        s.powerOff = { state: 'unknown', reason: endReason };
+    } else {
+        s.powerOff = { state: 'failed', reason: endReason };
+    }
+}
+
+/**
+ * Power the host of a LIVE controller session off, forcibly, on that session
+ * (the card rides a Control or Files session that is already open rather than
+ * being refused by the host's one-session rule). True when it was asked; the
+ * outcome arrives on the session's `powerOff`. False when the session cannot
+ * carry it yet (not this side's, not answered, reconnecting): the caller
+ * opens its own instead.
+ */
+export function requestForcePowerOff(sessionId: string): boolean {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || !s.answered
+        || s.transportDown || s.peerReconnecting) return false;
+    if (s.powerOff && !powerOffSettled(s.powerOff)) return true; // already under way
+    s.powerOff = { state: 'waiting', reason: null };
+    sendForcePowerOff(s);
+    return true;
+}
+
+/** A live controller session to `hostDevice` that can carry the power-off
+ *  now, if there is one (see requestForcePowerOff). */
+export function powerOffSessionFor(hostDevice: string): string | null {
+    for (const s of sessions.values()) {
+        // Not one whose other end is reconnecting: the server drops what is
+        // sent meanwhile (the same line requestKeyframe draws).
+        if (s.role === 'controller' && s.peerDevice === hostDevice && s.phase === 'active'
+            && s.answered && !s.transportDown && !s.peerReconnecting) {
+            return s.id;
+        }
+    }
+    return null;
 }
 
 /**
@@ -3756,6 +4000,13 @@ export async function connectToDevice(
          *  with `share`: Audio Hub is the owner's alone, and the host refuses
          *  it on a share session whatever this side sends. */
         audioHub?: boolean;
+        /** Open the session only to power that PC off, forcibly (the device
+         *  card's Power off; see FORCE_POWER_OFF_ACTION). Marked filesOnly
+         *  here, so nothing on this side waits for a picture, but it sends NO
+         *  offer: the request goes the moment it is connected, and the host
+         *  holds it until the passphrase is proved. The person asked first, on
+         *  the card, before this is called. */
+        powerOff?: boolean;
         /** Present when connecting to a FRIEND's device under an accepted
          *  share. The host verifies everything independently; this side uses
          *  it to resolve and verify the host's key (a foreign device is not
@@ -3779,9 +4030,11 @@ export async function connectToDevice(
     const id = newId();
     const s: Internal = {
         // An Audio Hub session IS a files-only session on the wire: no
-        // capture on the host, no media deadline here.
-        filesOnly: opts?.filesOnly === true || opts?.audioHub === true,
+        // capture on the host, no media deadline here. So is a power-off one.
+        filesOnly: opts?.filesOnly === true || opts?.audioHub === true || opts?.powerOff === true,
         audioHub: opts?.audioHub === true,
+        powerOff: opts?.powerOff === true ? { state: 'waiting', reason: null } : null,
+        powerOffOnly: opts?.powerOff === true,
         share: opts?.share
             ? {
                 inviteId: opts.share.inviteId,
@@ -3852,9 +4105,14 @@ export async function connectToDevice(
         // an end: opening Files or Control replaces it (the panel then rides
         // the new session — audioHubSessionFor), rather than being refused
         // as "already handling a session" by a host it is merely holding.
+        // A power-off session is the same kind of means to an end; and a NEW
+        // one replaces nothing but those two — it is a files-only session on
+        // the wire, but pressing Power off must not silently end somebody's
+        // Files session (the card rides a live one instead: powerOff.ts).
         if (old.role === 'controller' && old.peerDevice === hostDevice && old.phase !== 'ended'
             && old.id !== id
-            && (old.audioHub || (old.filesOnly === s.filesOnly && !s.audioHub))) {
+            && (old.audioHub || old.powerOffOnly
+                || (old.filesOnly === s.filesOnly && !s.audioHub && !s.powerOffOnly))) {
             teardown(old, 'replaced by a new connection to that device', true, true);
         }
     }
@@ -4515,6 +4773,8 @@ export function installDeviceSessions(): void {
                 // the side that knows what it opened the session for.
                 filesOnly: false,
                 audioHub: false,
+                powerOff: null,
+                powerOffOnly: false,
                 hostCaptureless: !caps.capture,
                 // Set below only after the share verification chain passes;
                 // the public shareUser/viewOnly are derived from it in emit().
@@ -4984,6 +5244,21 @@ export function installDeviceSessions(): void {
                 }
                 if (p.cap_w && p.cap_h) s.captureSize = { w: p.cap_w, h: p.cap_h };
 
+                // A POWER-OFF SESSION SENDS NO OFFER. There is nothing to show
+                // and nothing to browse, and the sign-in-screen agent (the way
+                // into a locked PC) ends a files-only offer outright, so an
+                // offer would make Power off impossible on exactly the PCs it
+                // is for. The request goes now; both hosts hold it until the
+                // unattended passphrase is proved, as they hold an offer.
+                if (s.powerOffOnly) {
+                    clearConnectDeadline(s);
+                    s.phase = 'active';
+                    s.activeAt = Date.now();
+                    emit();
+                    sendForcePowerOff(s);
+                    return;
+                }
+
                 // The receive side — files channel, recvonly transceiver, the
                 // WKWebView eager-attach dance — is shared with restartMedia;
                 // the whys live on buildControllerPc.
@@ -5222,8 +5497,11 @@ export function installDeviceSessions(): void {
         // reason, the session simply went quiet and the phone sat frozen.
         if (p?.reason === HANDOVER_REASON && s.role === 'controller') {
             const host = s.peerDevice;
-            teardown(s, 'the console was unlocked', false, true);
-            followMachineToDesktop(host);
+            teardown(s, POWER_OFF_UNLOCKED_REASON, false, true);
+            // NOT for a session opened only to power off: following it would
+            // open a Control session nobody asked for, on a PC somebody has
+            // just signed in to. The card says what happened instead.
+            if (!s.powerOffOnly) followMachineToDesktop(host);
             return;
         }
         // WE ASKED THAT MACHINE TO LOCK, AND IT DID — the mirror handover: the
@@ -5268,6 +5546,10 @@ export function installDeviceSessions(): void {
         // at that device declined" and "unattended passphrase rejected" reach
         // the person who needs them.
         const deliberate = !p?.reason || reason === 'the session ended';
+        // A power-off that ended BECAUSE the PC is going was carried out on
+        // the proof (the host holds it until then): the remembered passphrase
+        // was right, and teardown must not forget it as an unconfirmed one.
+        if (reason === SHUTDOWN_REASON && s.powerOff && s.uaProofSent) uaProofAccepted(s);
         s.error = deliberate ? null : reason;
         teardown(s, reason, false, deliberate);
     });
@@ -5847,6 +6129,65 @@ async function serveAudioHub(s: Internal, op: AudioHubOp, rid: string): Promise<
     }
 }
 
+/**
+ * HOST: the device card's forced power-off (FORCE_POWER_OFF_ACTION). Every
+ * gate is checked HERE, because the passphrase replay reaches this directly,
+ * and every refusal is said OUT LOUD as power-failed: the card that sent it is
+ * waiting on an answer, and silence would read there as a Púca too old to
+ * know it.
+ *
+ *  - The proof, when this PC demands one (held until then by the caller).
+ *  - A share needs 'control' — the line Lock and Shut down draw.
+ *  - ONLY A SESSION NOBODY HERE HAD TO LET IN: the passphrase proved, or a
+ *    share on an ARMED PC (the owner's standing, host-signed grant). On an
+ *    unarmed PC somebody at it answered "a device wants to connect to this
+ *    screen"; they agreed to that, not to every app here being closed
+ *    unasked, and they are the one who would lose the work. Refused, so the
+ *    card can say so; Control's More → Shut down… (which lets apps ask to
+ *    save) is still there.
+ *  - The ack FIRST, then Windows: with every app closed unasked, this very
+ *    process can be gone before anything else leaves it. A session that
+ *    ended meanwhile (the controller gave up) is not powered off.
+ */
+async function serveForcePowerOff(s: Internal): Promise<void> {
+    if (s.role !== 'host' || s.phase === 'ended' || sessions.get(s.id) !== s) return;
+    if (s.uaRequired && !s.uaVerified) return;
+    const refuse = (reason: string): Promise<void> => sendSignal(s, {
+        kind: 'power-failed', action: FORCE_POWER_OFF_ACTION, reason: reason.slice(0, MAX_REASON_LEN),
+    }).catch(() => undefined);
+    if (s.share && !s.share.capabilities.includes('control')) {
+        await refuse(POWER_OFF_NOT_ALLOWED_REASON);
+        return;
+    }
+    const admittedUnattended = s.uaVerified || (s.share !== null && s.hostArmed);
+    if (!admittedUnattended) {
+        await refuse(POWER_OFF_ATTENDED_REASON);
+        return;
+    }
+    try {
+        const backend = await getHostBackend();
+        if (!backend.powerAction) throw new Error('this device cannot be powered off from Púca');
+        await sendSignal(s, { kind: 'power-ack', action: FORCE_POWER_OFF_ACTION });
+        // (Re-read after the awaits: teardown can have run meanwhile.)
+        if (sessions.get(s.id) !== s || (s.phase as SessionPhase) === 'ended') return;
+        try {
+            await backend.powerAction(FORCE_POWER_OFF_ACTION);
+        } catch (e) {
+            // A shell from before the action refuses to parse it (serde:
+            // "unknown variant"): that is a Púca too old to know it, which
+            // the card can say properly.
+            const text = typeof e === 'string' ? e : e instanceof Error ? e.message : '';
+            if (/unknown variant/i.test(text)) throw new Error(POWER_OFF_TOO_OLD_REASON);
+            throw e;
+        }
+        teardown(s, SHUTDOWN_REASON, true, true);
+    } catch (e) {
+        console.warn('[device-session] forced power-off failed', e);
+        // A Tauri command's Err is a bare STRING: Windows' own words.
+        await refuse(typeof e === 'string' && e ? e : e instanceof Error ? e.message : 'the power-off failed');
+    }
+}
+
 /** The host sent something only a VERIFIED controller receives (its monitor
  *  list, an answer, a file grant), so the seed that signed this session's
  *  challenge is known-good: mark it and slide its expiry. A no-op for the
@@ -6007,6 +6348,10 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 let b = '';
                 for (const x of sig) b += String.fromCharCode(x);
                 await sendSignal(s, { kind: 'ua-response', nonce: chalNonce, sig: btoa(b) });
+                // The host carries a held power-off out on this proof: its
+                // answer is due from now, not from when it was sent.
+                s.uaProofSent = true;
+                if (s.powerOff?.state === 'sent') armPowerOffDeadline(s, POWER_OFF_ANSWER_TIMEOUT_MS);
                 // Proof sent — the screen should follow. Resume the clock
                 // so a host that never answers is still reported.
                 armMediaDeadline(s);
@@ -6040,6 +6385,14 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 }
                 s.uaVerified = true;
                 emit();
+                // The device card's Power off, held at the `power` arm: that
+                // session was opened for nothing else (it sends no offer), so
+                // it goes first, before any screen list is announced.
+                if (s.heldPowerOff && s.phase === 'active' && sessions.get(s.id) === s) {
+                    s.heldPowerOff = false;
+                    void serveForcePowerOff(s);
+                    return;
+                }
                 // The screen list was withheld until exactly now — an
                 // unauthenticated controller must not read this machine's
                 // display names. This is the ONLY place it can be released,
@@ -6388,6 +6741,21 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'power') {
             if (s.role !== 'host') return;
+            // THE DEVICE CARD'S FORCED POWER-OFF has its own path
+            // (serveForcePowerOff), with its own gates and answers.
+            if (data.action === FORCE_POWER_OFF_ACTION) {
+                if (s.uaRequired && !s.uaVerified) {
+                    // HELD, not dropped, until the passphrase is proved
+                    // (released in the `ua-response` arm): that session sends
+                    // no offer, so its request arrives the moment it connects,
+                    // while the passphrase is still being typed — exactly as
+                    // an offer does. Never carried out without the proof.
+                    s.heldPowerOff = true;
+                    return;
+                }
+                void serveForcePowerOff(s);
+                return;
+            }
             if (s.uaRequired && !s.uaVerified) return;
             // A share without 'control' may not lock or power off this machine
             // — the same gate as the input injector below, for the same
@@ -6502,10 +6870,16 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     }, 1500);
                 } catch (e) {
                     console.warn('[device-session] power action failed', e);
+                    // A Tauri command's Err arrives as a bare STRING, not an
+                    // Error — and it is the OS's own reason ("Windows refused:
+                    // …"), which is the whole point of reporting a failure.
+                    const reason = typeof e === 'string' && e
+                        ? e
+                        : e instanceof Error ? e.message : 'the power action failed';
                     await sendSignal(s, {
                         kind: 'power-failed',
                         action,
-                        reason: e instanceof Error ? e.message : 'the power action failed',
+                        reason: reason.slice(0, MAX_REASON_LEN),
                     }).catch(() => undefined);
                 }
             })();
@@ -6699,6 +7073,15 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 setPowerNotice(s, `Displays: ${why}`);
                 return;
             }
+            // The card's power-off: its answer is the card's to say, never
+            // the session's banner. Only one this side is waiting on.
+            if (data.action === FORCE_POWER_OFF_ACTION) {
+                // Either host answers this only past the proof (or with no
+                // proof asked at all): a remembered passphrase was right.
+                uaProofAccepted(s);
+                if (s.powerOff && !powerOffSettled(s.powerOff)) failPowerOff(s, why);
+                return;
+            }
             const what = data.action === 'shutdown' ? 'shut down' : 'lock';
             s.error = `could not ${what} that device: ${why}`;
             emit();
@@ -6706,6 +7089,18 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'power-ack') {
             if (s.role !== 'controller') return;
+            // The attended host's "calling Windows now" for the card's
+            // power-off. Only a 'sent' one moves; anything else is stale.
+            if (data.action === FORCE_POWER_OFF_ACTION) {
+                // Sent only past the proof: the remembered passphrase was right.
+                uaProofAccepted(s);
+                if (s.powerOff?.state === 'sent') {
+                    s.powerOff = { state: 'accepted', reason: null };
+                    armPowerOffDeadline(s, POWER_OFF_GOING_TIMEOUT_MS);
+                    emit();
+                }
+                return;
+            }
             // ONLY display acks mean anything here: an ack for any other
             // action must not cancel a display action's pending deadline or
             // blank the notice with a null (review W4-N-nit — a stray
@@ -7049,6 +7444,11 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 );
                 return;
             }
+
+            // The host has accepted this controller (an armed one answers only
+            // after the passphrase): the device card's Power off may ride
+            // this session from now on (powerOffSessionFor).
+            s.answered = true;
 
             try {
                 // Some WebRTC implementations (like Safari on iOS) strictly follow SDP RFCs 
