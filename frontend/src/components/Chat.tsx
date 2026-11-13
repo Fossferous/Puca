@@ -1204,7 +1204,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Android's BACK closes what is open here first (hooks/useBackClose.ts).
     useBackClose(() => setShowCreateModal(false), showCreateModal);
     useBackClose(() => setNickEditServer(null), nickEditServer !== null);
-    useBackClose(() => setShowPins(false), showPins);
+    // Pins are drawn only in a channel's header: a DM or the Friends page keeps showPins set.
+    useBackClose(() => setShowPins(false), showPins && !currentDM && currentChannel !== null);
     useBackClose(() => setFormatMenu(null), formatMenu !== null);
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
 

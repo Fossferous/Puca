@@ -336,7 +336,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // on top of each other while typing" report).
     const [controlsExpanded, setControlsExpanded] = useState(false);
     // The phone's call bar opened to all its controls: Back folds it first.
-    useBackClose(() => setControlsExpanded(false), controlsExpanded);
+    useBackClose(() => setControlsExpanded(false), controlsExpanded && isPhonePanel && isInVoice);
     const panelRef = useRef<HTMLDivElement>(null);
 
     // Mobile: publish the panel's REAL height so mobile.css can reserve

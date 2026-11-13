@@ -246,12 +246,13 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // keeps its menu; the keyboard reaches the panel from the tile too.
     const coarse = useCoarsePointer();
     const [volPanel, setVolPanel] = useState<{ userId: number; anchor: { top: number; bottom: number; right: number } } | null>(null);
-    useBackClose(() => setVolPanel(null), volPanel !== null);
     const volPanelRef = useRef<HTMLDivElement>(null);
     const volOpenerRef = useRef<HTMLButtonElement | null>(null);
     // Open only while its stream is watched: one that stops goes with it.
     const openVol = volPanel && selectedStreams.includes(volPanel.userId) ? volPanel : null;
     const volOpen = openVol !== null;
+    // Held while it is drawn: a stream that stops takes the panel with it.
+    useBackClose(() => setVolPanel(null), volOpen);
     // The element in fullscreen (a tile), where the panel and the menu must
     // open instead of <body> / the stage. Followed live, and both close when
     // it changes: a panel anchored to a button that just moved would float

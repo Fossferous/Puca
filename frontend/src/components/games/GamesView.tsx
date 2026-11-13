@@ -154,7 +154,7 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
     const notice = g.notice && g.notice.room_id === roomId ? g.notice : null;
     const [createdAt, setCreatedAt] = useState<number | null>(null);
     const [pendingSit, setPendingSit] = useState<number | null>(null);
-    useBackClose(() => setPendingSit(null), pendingSit !== null);
+    useBackClose(() => setPendingSit(null), pendingSit !== null && table !== null);
     const [offline, setOffline] = useState(false);
     /** A Join (notice, tile, picker) that found every seat taken. */
     const [full, setFull] = useState(false);

@@ -139,6 +139,24 @@ describe('Android BACK closes the overlay on top, not the app', () => {
         expect(second).toHaveBeenCalledTimes(1);
     });
 
+    it('a question that must be answered holds Back: nothing under it closes (review finding)', async () => {
+        // RecoveryCodeModal and ClipApprovalPrompt take Back and do nothing with it. Without
+        // that, Back went past them and closed Settings (or folded the call bar) out of sight.
+        const closedUnder = vi.fn();
+        function Under() { useBackClose(closedUnder); return null; }
+        function MustAnswer({ up }: { up: boolean }) { useBackClose(() => {}, up); return null; }
+        act(() => root.render(<><Under /><MustAnswer up={false} /></>));
+        act(() => root.render(<><Under /><MustAnswer up /></>));
+        await settle();
+        await back();
+        expect(closedUnder).not.toHaveBeenCalled();
+        // CONTROL: answered (gone), the next Back closes what was under it.
+        act(() => root.render(<><Under /><MustAnswer up={false} /></>));
+        await settle();
+        await back();
+        expect(closedUnder).toHaveBeenCalledTimes(1);
+    });
+
     it('a popup with no other close than its X (the first-run welcome)', async () => {
         const onDismiss = vi.fn();
         act(() => root.render(<WelcomePopup onCreateServer={() => {}} onJoinServer={() => {}} onDismiss={onDismiss} />));

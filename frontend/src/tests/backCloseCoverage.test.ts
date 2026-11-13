@@ -30,7 +30,6 @@ const NOT_A_LAYER: Record<string, string> = {
 
 /** A layer that deliberately leaves Back alone. */
 const LEAVES_BACK: Record<string, string> = {
-    'ClipApprovalPrompt.tsx': "Escape there DECLINES someone else's clip; Back leaves the app and the question waits",
     'ClipComposerModal.tsx': 'the desktop app only: Clips are captured on the desktop',
     'DeviceStageDesktopBar.tsx': "the desktop's bar; a phone's stage draws DeviceStageMobileMenus instead",
     'FileAccessPrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
@@ -38,7 +37,6 @@ const LEAVES_BACK: Record<string, string> = {
     'UnattendedPassphrasePrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
     'RemoteControlOverlay.tsx': "remote control OF a phone: the phone screen-share work's, not this one's",
     'ScreenShareModal.tsx': "the phone's own screen share: the phone screen-share work's, not this one's",
-    'RecoveryCodeModal.tsx': 'a recovery code shown once must be acknowledged; Back must not dismiss it',
 };
 
 /** Layers that match no LAYER pattern, so the scan cannot find them. */
@@ -46,6 +44,10 @@ const MUST_TAKE_BACK = [
     'ContextMenu.tsx', 'EmojiPicker.tsx', 'UserContextMenu.tsx', 'ServerList.tsx', 'MessageReactions.tsx',
     'UserProfilePopup.tsx', 'ChecklistPanel.tsx', 'ServerCreateWizard.tsx', 'notes/Popover.tsx',
     'StreamStage.tsx', 'VoicePanel.tsx', 'DeviceStage.tsx', 'Chat.tsx',
+    // These two hold Back and do nothing with it: a recovery code shown once, and a vote on
+    // someone else's clip (Escape there declines), must be answered, and nothing under them
+    // may close while they wait.
+    'RecoveryCodeModal.tsx', 'ClipApprovalPrompt.tsx',
 ];
 
 function walk(dir: string): string[] {

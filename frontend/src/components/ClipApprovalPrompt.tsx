@@ -30,6 +30,7 @@ import { endedAgoText, expiresInText, includesClause, pickShown } from '../api/c
 import { formatClock } from '../api/clips/clipPresets';
 import { ClipIcon, ShieldCheckIcon, WarningIcon } from './Icons';
 import './ClipApprovalPrompt.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 const HOLD_OFF_MS = 400;
 const RESOLVE_LOCK_MS = 600;
@@ -55,6 +56,9 @@ export function ClipApprovalPrompt() {
 
     const shown = pickShown(state, shownId);
     const shownClipId = shown?.clipId ?? null;
+    // A question that must be answered here: Back does nothing while it is up,
+    // so nothing under it (the call bar's controls, Settings) closes unseen.
+    useBackClose(() => {}, shown !== null);
 
     // Track which request is on screen (so a resolution can keep it up for its
     // terminal copy). Keyed on the shown id ONLY — keying on `shownId` too made

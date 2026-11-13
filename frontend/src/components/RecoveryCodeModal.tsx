@@ -17,6 +17,7 @@ import {
 } from '../api/recoveryPrompt';
 import { KeyIcon, CheckIcon, CopyIcon } from './Icons';
 import './RecoveryCodeModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 export function RecoveryCodeModal() {
     const [code, setCode] = useState<string | null>(null);
@@ -26,6 +27,9 @@ export function RecoveryCodeModal() {
     // The live value for the timer below: an effect closure would see the
     // initial null forever and arm the reminder underneath a code being shown.
     const codeRef = useRef<string | null>(null);
+    // A question that must be answered here: Back does nothing while it is up,
+    // so nothing under it (Settings, the call bar's controls) closes unseen.
+    useBackClose(() => {}, code !== null || reminder);
 
     useEffect(() => {
         // Poll briefly for a stashed code (register/migration set it during login).
