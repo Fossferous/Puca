@@ -271,7 +271,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--text-faint, #72767d);
+    background: var(--faint-fill, var(--text-faint, #72767d));
     flex: 0 0 auto;
 }
 

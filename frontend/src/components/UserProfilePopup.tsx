@@ -13,6 +13,7 @@ import { usePresence, PRESENCE_LABEL } from '../api/presenceStore';
 import { placeProfilePopup } from './userProfilePopupPlacement';
 import './UserProfilePopup.css';
 import { askConfirm, askText, tellUser } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface UserProfilePopupProps {
     member: MemberWithRoles;
@@ -43,6 +44,7 @@ export function UserProfilePopup({
     onStartDM,
     presentation = 'anchored',
 }: UserProfilePopupProps) {
+    useBackClose(onClose);
     const [allRoles, setAllRoles] = useState<Role[]>([]);
     const [memberRoleIds, setMemberRoleIds] = useState<Set<number>>(new Set());
     const [isLoading, setIsLoading] = useState(true);

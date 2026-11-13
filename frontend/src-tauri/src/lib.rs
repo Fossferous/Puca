@@ -24,6 +24,13 @@ mod device_key;
 // NOT gated: `puca://invite/...` links from outside the app (the web invite
 // page's "Open in the Púca app", registered by the installer in both builds).
 mod deep_link;
+// NOT gated: Discord's own web app in a window of its own (docs/DISCORD.md),
+// run as a second process of this executable with no Tauri and nothing of Púca
+// in it (both builds). Public for tests/discord_acl.rs, which needs its name.
+pub mod discord_window;
+// That process on Windows: a plain Win32 window hosting WebView2 directly.
+#[cfg(windows)]
+mod discord_host;
 // A PC set up for remote control updating ITSELF (the page decides when):
 // quiet install, hidden relaunch, its records on disk. Hosts are RC-only.
 #[cfg(feature = "remote-control")]
@@ -38,7 +45,8 @@ mod heif;
 mod rc_leftovers;
 mod hotkeys;
 mod ll_hook;
-#[cfg(feature = "remote-control")]
+// NOT gated: toasts.rs (message notifications, both variants) runs on it.
+// The Lite build (--no-default-features) failed to compile while it was.
 mod ordered_worker;
 #[cfg(feature = "remote-control")]
 mod lan;
@@ -87,6 +95,9 @@ mod service_cmd;
 mod service_link;
 #[cfg(feature = "remote-control")]
 mod wol;
+// Message notifications that replace one another per conversation instead of
+// stacking one per message (Windows toasts with a Tag and a Group).
+mod toasts;
 // Keeps the owner's per-app GPU pin on the WebView2 runtime that does the
 // share capture and encode — the pin is keyed by exe path and the runtime's
 // path changes with every auto-update. Registry + loader + process APIs, so
@@ -375,13 +386,15 @@ fn stop_app_audio_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// Hide WebView2's "… is sharing a window and audio" bar (see capture_bar.rs).
+/// Hide this app's own WebView2 "… is sharing a window and audio" bar, never
+/// another app's or the Discord window's (see capture_bar.rs).
 /// Returns how many bar windows were hidden (0 = none found yet — caller retries).
 ///
 /// MUST stay async + spawn_blocking: the frontend polls this every 700ms for
-/// the whole share, and EnumWindows over every top-level window (plus a
-/// process-name query per candidate) on the MAIN thread ran ~1.4x/s in
-/// exactly the window where live control input was also being injected there.
+/// the whole share, and EnumWindows over every top-level window (plus one
+/// Toolhelp process snapshot, taken when some window passes the class and
+/// title checks) on the MAIN thread ran ~1.4x/s in exactly the window where
+/// live control input was also being injected there.
 #[tauri::command]
 async fn hide_screen_capture_bar() -> u32 {
     tauri::async_runtime::spawn_blocking(capture_bar::hide_capture_bar)
@@ -1331,6 +1344,14 @@ fn started_hidden() -> bool {
 }
 
 pub fn run() {
+    // `Puca.exe --discord-window` is the Discord window's own process
+    // (discord_window.rs, discord_host.rs): none of what follows, no Tauri, no
+    // plugin, no command. Decided before anything here touches WebView2 or the disk.
+    if discord_window::is_window_launch(std::env::args_os()) {
+        discord_window::run_window_process();
+        return;
+    }
+
     // Check for scheduled permission reset BEFORE WebView2 initializes
     check_and_clear_permissions_on_startup();
 
@@ -1824,6 +1845,9 @@ pub fn run() {
             list_anticheat_processes,
             attention_main_window,
             release_attention_topmost,
+            toasts::toast_show,
+            toasts::toast_clear,
+            toasts::toast_clear_all,
             #[cfg(feature = "remote-control")]
             start_control_guard,
             #[cfg(feature = "remote-control")]
@@ -1839,6 +1863,8 @@ pub fn run() {
             release_control_input,
             open_external,
             deep_link::deep_link_take,
+            discord_window::discord_window_open,
+            discord_window::discord_window_clear_data,
             set_unread_badge,
             get_idle_seconds,
             clear_webview_permissions,

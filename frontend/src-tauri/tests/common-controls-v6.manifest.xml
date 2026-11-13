@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  TEST executables only (build.rs, embed_test_manifest): the Common-Controls v6
+  dependency the shipped app gets from tauri-build's own resource. A test that
+  builds a mock Tauri app links Tauri's menu and dialog code, which imports
+  TaskDialogIndirect from comctl32 v6; without this manifest that test program
+  cannot even start (STATUS_ENTRYPOINT_NOT_FOUND, 0xc0000139). The same content
+  as tauri-build's windows-app-manifest.xml.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

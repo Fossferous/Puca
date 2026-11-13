@@ -1,6 +1,7 @@
 import { ChecklistBody } from './ChecklistBody';
 import { ChecklistIcon, CloseIcon } from './Icons';
 import './ChecklistPanel.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface ChecklistPanelProps {
     channelId: number;
@@ -20,6 +21,7 @@ interface ChecklistPanelProps {
  *  CHANNEL and the server-wide "All checklists" view render the exact same
  *  UI. */
 export function ChecklistPanel({ channelId, isOpen, onClose, myPerms, currentUserId, resolveUserName }: ChecklistPanelProps) {
+    useBackClose(onClose, isOpen);
     if (!isOpen) return null;
     return (
         <div className="checklist-panel">

@@ -277,7 +277,7 @@
 
 /* Fullscreen a camera tile.
  *
- * Top-RIGHT, opposite the LIVE badge, and it appears on hover so a wall of
+ * Top-RIGHT (the LIVE badge moves to its left, below), and it appears on hover so a wall of
  * faces is not a wall of buttons. A COARSE POINTER HAS NO HOVER, so on touch
  * it is simply always visible — a control that only exists under a mouse is a
  * control a phone user does not have, and the mobile walk is a gate here. */
@@ -314,6 +314,64 @@
 
 @media (pointer: coarse) {
     .vs-fullscreen-btn { opacity: 1; }
+}
+
+/* Someone streaming with their camera on has both, and both were top-right:
+   the button sat on the LIVE badge (on touch, where the button never hides,
+   always). The badge moves to the button's left: 8px inset + the button +
+   6px. The button is 32px, and mobile.css's 44px minimum on a phone. */
+.vs-fullscreen-btn ~ .vs-live-badge {
+    right: 46px;
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .vs-fullscreen-btn ~ .vs-live-badge {
+        right: 58px;
+    }
+}
+
+/* The in-app fullscreen (mediaFullscreen.ts route 3) moves the button inside
+   the safe areas and makes it 44px (phoneLandscape.css): the badge follows,
+   6px to its left and level with its middle. */
+html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn ~ .vs-live-badge {
+    top: calc(max(8px, var(--safe-area-top, 0px)) + 13px);
+    right: calc(max(8px, var(--safe-area-right, 0px)) + 50px);
+}
+
+/* The call view's header on a phone: "2 people" sat beside the name and the
+   Invite and Back to Chat buttons took the rest, so the name was cut to
+   "Lou…" at 390 px and less at 360. The count goes under the name, and the
+   name takes what the buttons leave. */
+@media (pointer: coarse) and (max-width: 600px) {
+    .voice-stage-title {
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        column-gap: 0.5rem;
+        align-items: center;
+    }
+
+    .voice-stage-icon {
+        grid-row: span 2;
+    }
+
+    .voice-stage-name {
+        line-height: 1.2;
+    }
+
+    .voice-stage-count {
+        font-size: 0.75rem;
+        line-height: 1.2;
+    }
+
+    .voice-stage-controls {
+        gap: 2px;
+    }
+
+    .voice-stage-btn {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+    }
 }
 
 /* Fullscreen puts the TILE on the display, so the video must fill it rather

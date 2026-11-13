@@ -95,7 +95,7 @@ async function inCall(opts: { camera: boolean }) {
     const media = (mgr as unknown as { media: Record<string, unknown> }).media;
     media.getLocalStreamSync = () => local;
     media.getScreenShareStreamSync = () => share;
-    media.switchCamera = async () => backCamera;
+    media.switchCamera = async () => ({ ok: true, track: backCamera });
     closeGate();
     gate.open(); // building the call waits on nothing
     await mgr.callUser(2);
@@ -142,7 +142,7 @@ describe('the setting switched on while a share or a camera is being published',
         const { mgr } = await inCall({ camera: true });
         closeGate();
 
-        const flipping = mgr.switchCamera('user');
+        const flipping = mgr.switchCamera({ facing: 'environment' });
         await settle(); // parked on the first peer's replaceTrack
         mgr.setRequireMediaE2ee(true);
         await settle();
@@ -164,7 +164,7 @@ describe('the setting switched on while a share or a camera is being published',
         gate.open();
 
         await mgr.addScreenShareToPeers();
-        await mgr.switchCamera('user');
+        await mgr.switchCamera({ facing: 'environment' });
         await settle();
 
         expect(pcs).toHaveLength(2);

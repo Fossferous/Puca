@@ -28,6 +28,7 @@ import {
 } from '../api/devices/shares';
 import { CloseIcon } from './Icons';
 import './DeviceShareModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 type ScreenLevel = 'none' | 'view_only' | 'control';
 
@@ -54,6 +55,7 @@ function statusLabel(s: DeviceShare, onHost: boolean): string {
 }
 
 export function DeviceShareModal({ device, onClose }: { device: VerifiedDevice; onClose: () => void }) {
+    useBackClose(onClose);
     const [shares, setShares] = useState<DeviceShare[] | null>(null);
     const [friends, setFriends] = useState<Friend[] | null>(null);
     const [friendId, setFriendId] = useState<number | ''>('');

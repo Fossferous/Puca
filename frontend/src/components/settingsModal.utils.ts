@@ -81,3 +81,55 @@ const ALL_SETTINGS_SECTIONS: readonly SettingsSection[] = [
 export function settingsSections(opts: { mobile: boolean }): SettingsSection[] {
     return ALL_SETTINGS_SECTIONS.filter(s => !(opts.mobile && s.id === 'keybinds'));
 }
+
+/** What a press inside a settings row can mean already, without this helper. */
+const ROW_CONTROLS = 'input, select, textarea, button, a[href], [role="button"], [role="switch"], [contenteditable="true"]';
+
+/**
+ * A press on a setting's name or hint toggles its checkbox.
+ *
+ * Nearly every on/off setting is a `.settings-option` row: a `<label>` with
+ * the name, a hint under it, and a bare checkbox. The label names no control
+ * (66 of them in SettingsModal), so only the 20px box answered a press, and on
+ * a phone the row stacks into a column with the box alone under the hint:
+ * a 20px target, under §5's 44. This makes the whole row the target. It acts
+ * only where the meaning is unambiguous: a row holding exactly one control,
+ * and that control an enabled checkbox; a press on any control, or on a label
+ * the browser already ties to one, is left to the browser (it would toggle
+ * twice otherwise), and so is a press that ended selecting the row's words.
+ * Returns whether it toggled.
+ */
+export function toggleSettingFromRow(target: EventTarget | null, opts: { pressInSelection?: boolean } = {}): boolean {
+    if (!(target instanceof Element)) return false;
+    if (target.closest(ROW_CONTROLS)) return false;
+    const label = target.closest('label');
+    if (label instanceof HTMLLabelElement && label.control) return false;
+    const row = target.closest('.settings-option');
+    if (!row) return false;
+    // A press that ends a drag across the words is someone selecting them to
+    // copy, not choosing: a native <label> ignores that click too (Chromium's
+    // and Gecko's label activation both skip a click that made a selection).
+    // Without this, copying a phrase of a hint flipped and saved its setting.
+    // But not a single press that went down INSIDE words already selected
+    // (`pressInSelection`, from pointInSelection at mousedown): Chromium's
+    // label takes that one, and the selection goes with it. Skipping it too
+    // made a second press necessary.
+    const selection = target.ownerDocument.getSelection?.();
+    if (!opts.pressInSelection && selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(row)) return false;
+    const controls = row.querySelectorAll(ROW_CONTROLS);
+    if (controls.length !== 1) return false;
+    const box = controls[0];
+    if (!(box instanceof HTMLInputElement) || box.type !== 'checkbox' || box.disabled) return false;
+    box.click();
+    return true;
+}
+
+/** Whether (x, y) is on words that are selected now: read at mousedown, before
+ *  the press changes the selection, for toggleSettingFromRow. */
+export function pointInSelection(doc: Document, x: number, y: number): boolean {
+    const selection = doc.getSelection?.();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+    const range = selection.getRangeAt(0);
+    if (typeof range.getClientRects !== 'function') return false;
+    return [...range.getClientRects()].some(b => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom);
+}

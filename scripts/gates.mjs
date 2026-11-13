@@ -147,6 +147,9 @@ const GATES = [
         steps: [
             { run: 'node scripts/build-agent.mjs', cwd: FE, lock: 'cargo-target', nice: true },
             { run: 'cargo test', cwd: 'frontend/src-tauri', lock: 'cargo-src-tauri', nice: true, check: cargoCheck },
+            // The Lite app is this shell without remote-control
+            // (tauri:build:lite); toasts.rs once broke only that build (E0433).
+            { run: 'cargo check --no-default-features', cwd: 'frontend/src-tauri', lock: 'cargo-src-tauri', nice: true },
         ],
     },
     {
@@ -267,6 +270,10 @@ const GATES = [
         ['e2e-iphone-stream', 'iphone-stream-real-browser.mjs e2e-artifacts/iphone-stream-shots'],
         // Full Chromium headless (the headless shell refuses notifications).
         ['e2e-web-push', 'web-push-real-browser.mjs'],
+        // One notification per conversation, desktop shell and web, with
+        // 0.9.860's module as the control. Full Chromium headless, OS
+        // notifications off, as e2e-web-push.
+        ['e2e-notify-coalesce', 'notify-coalesce-real-browser.mjs'],
         // Edge and Firefox (installed once). Silent by construction: tones start only once every
         // stream plays through a muted sink, and any unmute fails the run.
         ['e2e-stream-audio-gain', 'stream-audio-gain-real-browser.mjs'],
@@ -285,10 +292,11 @@ const GATES = [
 // Never run by this script; printed in every summary.
 const NOT_RUN_HERE = [
     'connectedDebugAndroidTest (notes-app, headless emulator)',
-    'e2e/android-shade-keys-live.mjs, android-share-live.mjs (headless emulator)',
-    'e2e/feature-flows.mjs, games-live, games-walk, modes-walk, sidebar-toggles-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
+    'e2e/android-shade-keys-live.mjs, android-share-live.mjs, android-control-live.mjs, android-phone-sweep-live.mjs, android-camera-flip-live.mjs (headless emulator)',
+    'e2e/feature-flows.mjs, games-live, games-walk, modes-walk, sidebar-toggles-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll, server-gone-live, channel-gone-live, newcomer-voice-key-live, sidebar-hide-hover-active-walk, mobile-ui-sweep-walk, camera-switch-live (throwaway backend)',
     'e2e/poker-table-real-browser.mjs, user-context-menu-reach.mjs (vite dev server)',
     'e2e-live-verify, batch7-permbits-live, the two-peer voice suites (throwaway stack)',
+    'scripts/check-apk-control.mjs (frontend/; the two BUILT release APKs, full and Lite)',
 ];
 
 function vitestCheck(out) {

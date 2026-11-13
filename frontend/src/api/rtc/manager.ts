@@ -4,7 +4,8 @@ import {
     CTL_STATE_LABEL, CTL_STREAM_ID, forgetControlChannels, registerControlChannel,
 } from './controlDc';
 import { withRelayOnlyIfRequested } from '../iceConfig';
-import { MediaManager, type MicReacquireOptions } from './media';
+import { MediaManager, type CameraSwitch, type MicReacquireOptions } from './media';
+import type { CameraRequest } from './cameraChoice';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
@@ -727,8 +728,21 @@ export class WebRTCManager {
 
     /** End every hold that is over (see heldSenders). */
     private sweepHeldSenders(): void {
+        const screen: MediaStreamTrack[] = this.media.getScreenShareStreamSync()?.getVideoTracks() ?? [];
         for (const [sender, held] of [...this.heldSenders]) {
             if (held.swaps > 0) continue; // a stand-in is still going on
+            // A camera switch under way has stopped the old camera before
+            // opening the next (a phone opens one at a time): its sender's hold
+            // waits for the next camera. Ended on the stopped track here, the
+            // hold put nothing on the sender, the next camera found no camera
+            // sender and went out on a NEW transceiver, which the other side's
+            // tile never plays (black for the rest of the call), or, before
+            // that nothing landed, onto this sender with no hold at all.
+            // Until EVERY peer has the new camera, not just until the media
+            // layer has it: putCameraOnPeers awaits each peer in turn, and a
+            // peer not yet reached still holds the stopped camera.
+            if (held.real?.kind === 'video' && !screen.includes(held.real)
+                && (this.cameraSwitchesUnderWay > 0 || this.media.cameraSwitchInProgress())) continue;
             const peer = this.peers.get(held.userId);
             const c = peer?.mediaCrypto;
             const onPeer = !!peer && peer.connection.getSenders().includes(sender);
@@ -1163,42 +1177,83 @@ export class WebRTCManager {
         return localStream;
     }
 
-    async switchCamera(currentFacingMode: 'user' | 'environment'): Promise<MediaStream | null> {
-        const newTrack = await this.media.switchCamera(currentFacingMode);
-        const localStream = this.media.getLocalStreamSync();
+    /**
+     * Put another camera on (MediaManager.switchCamera) and onto every peer.
+     * The camera rides the SAME sender it rode before (replaceTrack): no
+     * renegotiation, and the sender's frame-encryption transform is the
+     * sender's, so the new camera is sealed exactly as the old one was. The
+     * SFU path does the same through LiveKit (sfuManager.replaceCameraTrack).
+     */
+    async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
+        return this.cameraSwitch(() => this.media.switchCamera(request));
+    }
 
-        if (newTrack && localStream) {
-            // Never grab the screen-share video sender: while sharing with the
-            // camera on, "first video sender" IS the screen share — replacing
-            // its track would swap the outgoing stream for the camera feed.
-            const screenVideo = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getVideoTracks() ?? []);
-            // The guard is read before EVERY peer, over a snapshot: this loop
-            // awaits, and "Require encryption" switched on meanwhile rebuilds
-            // the peers into this.peers, where a live iteration would reach
-            // the new ones and add the camera to them (second review, finding
-            // 5). A peer rebuilt meanwhile got its media from the join-time
-            // guard, so it is left alone.
-            for (const [userId, peer] of [...this.peers]) {
-                if (this.publishBlockedByEnforcement()) return localStream;
-                if (this.peers.get(userId) !== peer) continue;
-                if (!this.sendsTo(userId)) continue;
-                const senders = peer.connection.getSenders();
-                const videoSender = senders.find(s => {
-                    const t = this.trackOf(s);
-                    return t?.kind === 'video' && !screenVideo.has(t);
-                });
+    /** Flip (MediaManager.flipCamera), onto every peer like switchCamera. */
+    async flipCamera(): Promise<CameraSwitch> {
+        return this.cameraSwitch(() => this.media.flipCamera());
+    }
 
-                if (videoSender) {
-                    // replaceTrack needs no renegotiation.
-                    await this.replaceSenderTrack(videoSender, newTrack);
-                } else {
-                    // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
-                    this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
-                }
-            }
-            return localStream;
+    /** Camera switches under way here, from the media layer's start until
+     *  every peer has the new camera (sweepHeldSenders waits for them). */
+    private cameraSwitchesUnderWay = 0;
+
+    private async cameraSwitch(run: () => Promise<CameraSwitch>): Promise<CameraSwitch> {
+        this.cameraSwitchesUnderWay++;
+        try {
+            const result = await run();
+            // The track on now, also when the switch failed and the camera that
+            // was on was opened again (a new track all the same).
+            if (result.track) await this.putCameraOnPeers(result.track);
+            return result;
+        } finally {
+            this.cameraSwitchesUnderWay--;
         }
-        return null;
+    }
+
+    private async putCameraOnPeers(newTrack: MediaStreamTrack): Promise<void> {
+        const localStream = this.media.getLocalStreamSync();
+        if (!localStream) return;
+        // Never grab the screen-share video sender: while sharing with the
+        // camera on, "first video sender" IS the screen share — replacing
+        // its track would swap the outgoing stream for the camera feed.
+        const screenVideo = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getVideoTracks() ?? []);
+        // The guard is read before EVERY peer, over a snapshot: this loop
+        // awaits, and "Require encryption" switched on meanwhile rebuilds
+        // the peers into this.peers, where a live iteration would reach
+        // the new ones and add the camera to them (second review, finding
+        // 5). A peer rebuilt meanwhile got its media from the join-time
+        // guard, so it is left alone.
+        for (const [userId, peer] of [...this.peers]) {
+            if (this.publishBlockedByEnforcement()) return;
+            // Turned off (or the call left) while an earlier peer took it:
+            // the peers not reached yet are given nothing. A peer with no
+            // camera sender would get a new transceiver for a camera that is
+            // off, and turned on again meanwhile, a peer's live camera would
+            // be swapped for this stopped one (frozen for them).
+            if (newTrack.readyState !== 'live') return;
+            if (this.peers.get(userId) !== peer) continue;
+            if (!this.sendsTo(userId)) continue;
+            const senders = peer.connection.getSenders();
+            // Already carried (nothing changed: one camera, or a second press).
+            if (senders.some(s => this.trackOf(s) === newTrack)) continue;
+            // The FIRST camera sender, as before. After the camera was turned
+            // off and on there are two (the first keeps the stopped track and
+            // turning on added another), and the first is the one the other
+            // side's tile plays: its stream lists the tracks in the order they
+            // came, and a <video> plays the first. Measured on the emulator.
+            const videoSender = senders.find(s => {
+                const t = this.trackOf(s);
+                return t?.kind === 'video' && !screenVideo.has(t);
+            });
+
+            if (videoSender) {
+                // replaceTrack needs no renegotiation.
+                await this.replaceSenderTrack(videoSender, newTrack);
+            } else {
+                // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
+                this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
+            }
+        }
     }
 
     setOnScreenShareEnded(callback: (() => void) | null) {

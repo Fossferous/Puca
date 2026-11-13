@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './ContextMenu.css';
 import { Icon, type IconName } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 
 export interface ContextMenuItem {
     id: string;
@@ -15,6 +16,12 @@ export interface ContextMenuItem {
     disabled?: boolean;
     separator?: boolean;
     onClick?: () => void;
+    /** One of a set to choose from (a menu a control opened): a radio item,
+     *  ticked when true. Its row keeps the icon's place for the tick. */
+    checked?: boolean;
+    /** data-testid on the row (docs/AUTOMATION.md), and a value for it. */
+    testId?: string;
+    value?: string;
 }
 
 interface ContextMenuProps {
@@ -37,6 +44,8 @@ interface ContextMenuProps {
      * (settleFocus).
      */
     fromKeyboard?: boolean;
+    /** Another class beside `context-menu`, for a menu with its own sizes. */
+    className?: string;
 }
 
 /**
@@ -55,17 +64,23 @@ const settleFocus = (opener: HTMLElement | undefined, fromKeyboard: boolean | un
 
 const enabledItems = (menu: HTMLElement | null) => [...(menu?.querySelectorAll<HTMLButtonElement>('.context-menu-item:not(:disabled)') ?? [])];
 
-export function ContextMenu({ items, position, onClose, opener, label, fromKeyboard }: ContextMenuProps) {
+export function ContextMenu({ items, position, onClose, opener, label, fromKeyboard, className }: ContextMenuProps) {
     const menuRef = React.useRef<HTMLDivElement>(null);
     const [adjustedPosition, setAdjustedPosition] = useState(position);
+    useBackClose(onClose);
 
     useEffect(() => {
-        // Adjust position to stay within viewport
-        if (menuRef.current) {
+        // Adjust position to stay within viewport: as it is first drawn, and again whenever it
+        // changes size. A row that arrives after it opened (the camera menu looks at the cameras
+        // again as it opens, and a webcam plugged in since adds one) grew a menu measured only once
+        // past the window's edge, its last row (Turn off camera) out of reach.
+        const menu = menuRef.current;
+        if (!menu) return;
+        const fit = () => {
             // offsetWidth/Height, not getBoundingClientRect: the menu is scaling in
             // from 95% right now, and a rect would measure it 5% short and leave its
             // end past the window's edge.
-            const { offsetWidth, offsetHeight } = menuRef.current;
+            const { offsetWidth, offsetHeight } = menu;
             const viewportWidth = window.innerWidth;
             const viewportHeight = window.innerHeight;
 
@@ -79,9 +94,13 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
                 y = viewportHeight - offsetHeight - 8;
             }
 
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- reposition after measuring the rendered menu
-            setAdjustedPosition({ x, y });
-        }
+            setAdjustedPosition(prev => (prev.x === x && prev.y === y ? prev : { x, y }));
+        };
+        fit();
+        if (typeof ResizeObserver === 'undefined') return;
+        const resized = new ResizeObserver(fit);
+        resized.observe(menu);
+        return () => resized.disconnect();
     }, [position]);
 
     useEffect(() => {
@@ -144,7 +163,7 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
     return (
         <div
             ref={menuRef}
-            className="context-menu"
+            className={`context-menu${className ? ` ${className}` : ''}`}
             role={opener ? 'menu' : undefined}
             aria-label={opener ? label : undefined}
             tabIndex={opener ? -1 : undefined}
@@ -163,7 +182,10 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
                     <button
                         key={item.id}
                         className={`context-menu-item ${item.danger ? 'danger' : ''} ${item.disabled ? 'disabled' : ''}`}
-                        role={opener ? 'menuitem' : undefined}
+                        role={opener ? (item.checked !== undefined ? 'menuitemradio' : 'menuitem') : undefined}
+                        aria-checked={opener && item.checked !== undefined ? item.checked : undefined}
+                        data-testid={item.testId}
+                        data-value={item.value}
                         onClick={() => {
                             if (!item.disabled && item.onClick) {
                                 // First: a question this opens gives the focus back to what had it.
@@ -177,7 +199,9 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
                         {/* The icon stays INSIDE the wrapper: .context-menu-icon sets
                             width: 20px, and CSS beats the svg's width attribute, so
                             moving the class onto the icon would stretch it. */}
-                        {item.icon && <span className="context-menu-icon"><Icon name={item.icon} /></span>}
+                        {item.checked !== undefined
+                            ? <span className="context-menu-icon" aria-hidden="true">{item.checked ? <Icon name="check" /> : null}</span>
+                            : item.icon && <span className="context-menu-icon"><Icon name={item.icon} /></span>}
                         <span className="context-menu-label">{item.label}</span>
                     </button>
                 );

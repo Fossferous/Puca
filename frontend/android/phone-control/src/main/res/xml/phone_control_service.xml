@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What Púca's control service asks Android for, and no more:
+     - canPerformGestures: taps, swipes and long presses (dispatchGesture);
+     - canRetrieveWindowContent: ONLY to find the focused text field when a
+       viewer in control types (findFocus). Nothing on screen is ever read
+       out, logged or sent;
+     - one event type, which the service ignores (onAccessibilityEvent is
+       empty), batched once a second: Android requires one. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/phone_control_description"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:notificationTimeout="1000"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:isAccessibilityTool="false" />

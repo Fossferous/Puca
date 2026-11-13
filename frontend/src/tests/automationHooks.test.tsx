@@ -107,6 +107,7 @@ const HOOKS: Hook[] = [
     { ids: ['voice-leave'], file: 'components/VoicePanel.tsx', attr: 'data-testid="voice-leave"', needs: ['leaveVoice();'] },
     { ids: ['settings-join-without-mic'], file: 'components/SettingsModal.tsx', attr: 'data-testid="settings-join-without-mic"', needs: ["updateSetting('joinWithoutMic', e.target.checked)", 'checked={settings.joinWithoutMic}'] },
     { ids: ['settings-auto-open-streams'], file: 'components/SettingsModal.tsx', attr: 'data-testid="settings-auto-open-streams"', needs: ["updateSetting('autoOpenStreams', e.target.value as AutoOpenStreams)", 'value={settings.autoOpenStreams}'] },
+    { ids: ['settings-camera'], file: 'components/SettingsModal.tsx', attr: 'data-testid="settings-camera"', needs: ["updateSetting('camera', picked", "value={settings.camera?.deviceId || 'default'}"] },
     { ids: ['create-stream-only-role'], file: 'components/RoleSettingsModal.tsx', attr: 'data-testid="create-stream-only-role"', needs: ['onClick={handleCreateStreamOnlyRole}'] },
     { ids: ['role-automated-streaming'], file: 'components/StreamOnlyRoleSection.tsx', attr: 'data-testid="role-automated-streaming"', needs: ['stream-only-section'] },
     { ids: ['role-stream-only'], file: 'components/StreamOnlyRoleSection.tsx', attr: 'data-testid="role-stream-only"', needs: ["onToggle('STREAM_ONLY')", 'checked={has(PERMISSIONS.STREAM_ONLY)}'] },

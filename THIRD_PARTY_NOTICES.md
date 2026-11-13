@@ -170,7 +170,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 |---|---|---|
 | @decky/api@1.1.3 | LGPL-2.1 | https://registry.npmjs.org/@decky/api/-/api-1.1.3.tgz |
 
-## Rust crates in the server, desktop shell, native helpers and the wasm (843)
+## Rust crates in the server, desktop shell, native helpers and the wasm (844)
 
 | crate | licence | used by | origin |
 |---|---|---|---|
@@ -679,7 +679,8 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | rustc-hash@2.1.3 | Apache-2.0 OR MIT | desktop, puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rust-lang/rustc-hash |
 | rustfft@6.4.1 | MIT OR Apache-2.0 | wasm | https://github.com/ejmahler/RustFFT |
 | rusticata-macros@4.1.0 | MIT/Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rusticata/rusticata-macros.git |
-| rustix@1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/bytecodealliance/rustix |
+| rustix@1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | wasm | https://github.com/bytecodealliance/rustix |
+| rustix@1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/bytecodealliance/rustix |
 | rustls-native-certs@0.8.4 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls-native-certs |
 | rustls-pki-types@1.15.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/rustls/pki-types |
 | rustls-platform-verifier-android@0.1.1 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
@@ -812,7 +813,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | tokio-tungstenite@0.21.0 | MIT | desktop, puca-service, puca-waker | https://github.com/snapview/tokio-tungstenite |
 | tokio-tungstenite@0.24.0 | MIT | backend | https://github.com/snapview/tokio-tungstenite |
 | tokio-util@0.7.19 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tokio-rs/tokio |
-| tokio@1.53.1 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tokio-rs/tokio |
+| tokio@1.53.3 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tokio-rs/tokio |
 | toml_datetime@0.6.3 | MIT OR Apache-2.0 | desktop | https://github.com/toml-rs/toml |
 | toml_datetime@0.7.5+spec-1.1.0 | MIT OR Apache-2.0 | desktop | https://github.com/toml-rs/toml |
 | toml_datetime@1.1.1+spec-1.1.0 | MIT OR Apache-2.0 | desktop, puca-agent, puca-service | https://github.com/toml-rs/toml |
@@ -908,33 +909,33 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | window-vibrancy@0.6.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri-plugin-vibrancy |
 | windows_aarch64_gnullvm@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_aarch64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_aarch64_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_aarch64_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_aarch64_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_aarch64_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_aarch64_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_aarch64_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_aarch64_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_aarch64_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_gnu@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_gnu@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_i686_gnu@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_i686_gnu@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_i686_gnu@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_i686_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_i686_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_i686_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_i686_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_i686_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_i686_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnu@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnu@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnullvm@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows_x86_64_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-collections@0.2.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-collections@0.3.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
@@ -966,12 +967,12 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | windows-sys@0.45.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-sys@0.48.0 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
 | windows-sys@0.52.0 | MIT OR Apache-2.0 | desktop, puca-service | https://github.com/microsoft/windows-rs |
-| windows-sys@0.59.0 | MIT OR Apache-2.0 | desktop, puca-agent, puca-service | https://github.com/microsoft/windows-rs |
+| windows-sys@0.59.0 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows-sys@0.60.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows-sys@0.61.2 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/microsoft/windows-rs |
+| windows-sys@0.61.2 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker, wasm | https://github.com/microsoft/windows-rs |
 | windows-targets@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-targets@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
-| windows-targets@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
+| windows-targets@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
 | windows-targets@0.53.5 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-threading@0.1.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-threading@0.2.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { EMOJI_CATEGORIES, QUICK_EMOJIS, searchEmojis } from '../api/emojis';
 import { Icon } from './Icons';
 import './EmojiPicker.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface EmojiPickerProps {
     onSelect: (emoji: string) => void;
@@ -13,6 +14,7 @@ interface EmojiPickerProps {
 export function EmojiPicker({ onSelect, onClose, position, quickMode = false }: EmojiPickerProps) {
     const [selectedCategory, setSelectedCategory] = useState(0);
     const [searchQuery, setSearchQuery] = useState('');
+    useBackClose(onClose);
 
     const handleEmojiClick = (emoji: string) => {
         onSelect(emoji);

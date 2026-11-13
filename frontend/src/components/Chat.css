@@ -929,6 +929,28 @@
     padding: var(--message-pad) 0;
 }
 
+/* Android: a long press on a message, a member or a channel is Púca's menu
+   (the browser fires contextmenu for it), and the same press also selected
+   the word under the finger, with handles and Android's Copy bar under the
+   menu. Those rows take no selection there; the menu's Copy Text copies a
+   message. The message box and an edit field stay selectable (a text field
+   keeps its own selection). An iPhone is not marked: it has no long-press
+   menu, and selection is how it copies (components/longPressMenu.ts). */
+@media (pointer: coarse) {
+    [data-long-press-menu] .message,
+    [data-long-press-menu] .member-item,
+    [data-long-press-menu] .channel {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+
+    /* A field inside one, editing a message: Chromium inherits user-select. */
+    [data-long-press-menu] .message :is(input, textarea, [contenteditable="true"]) {
+        -webkit-user-select: text;
+        user-select: text;
+    }
+}
+
 /* Hover stretches the row's background to the list's edges: HORIZONTAL only.
    A hover that also set vertical padding overrode the grouped rows' (compact
    mode did, moving every row below the pointer by ~3px on each hover). */
@@ -1015,20 +1037,30 @@
     min-width: 0;
 }
 
+/* A name too long to share its line with the time puts the time on the next
+   line, whole. Unwrapped, the name kept its full width and the time was
+   squeezed beside it: "Today / at / 17:54" stacked down the right edge at
+   390px, and at 360px a 32-character username pushed the time off the
+   screen. A name longer than the column breaks rather than overflowing. */
 .message-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.5rem;
+    column-gap: 0.5rem;
+    min-width: 0;
 }
 
 .message-author {
     font-weight: 600;
     color: var(--mode-brand-text, var(--brand-primary));
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .message-time {
     font-size: 0.7rem;
     color: var(--text-faint);
+    white-space: nowrap;
 }
 
 .message-content {
@@ -1599,11 +1631,20 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* Pinned messages panel */
 .pins-wrapper { position: relative; display: inline-block; }
-.pins-toggle-btn {
+/* The checklist toggle beside it had no rule at all, so every theme drew the
+   browser's own grey button there: a pale box in the dark header, the only
+   control in it with a background. */
+.pins-toggle-btn,
+.checklist-toggle-btn {
     background: none; border: none; cursor: pointer;
     font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
 }
-.pins-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+/* Only where something can hover: a tap on a touch screen left the grey box
+   on the button until the next tap elsewhere (a sticky :hover). */
+@media (hover: hover) {
+    .pins-toggle-btn:hover,
+    .checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+}
 .pins-panel {
     /* Anchored LEFT so the panel grows INTO the chat column. The pins button
        sits near the left of the header, and .chat-main clips at overflow:
@@ -2114,7 +2155,10 @@ button.message-attachment.error { color: #ffb4b4; }
     background: var(--bg-quaternary);
 }
 
-.member-item.offline {
+/* Offline members read as dimmed by their name's colour (--text-faint,
+   below) and a faded avatar. The whole row at half opacity took the name to
+   1.8:1. */
+.member-item.offline .member-avatar {
     opacity: 0.5;
 }
 
@@ -3133,8 +3177,11 @@ body.voice-drag-active {
     background: var(--brand-primary, #5865f2); flex-shrink: 0;
 }
 .ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
-.ac-name { font-weight: 500; }
-.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; }
+/* A name too long for the row ends in an ellipsis on its own line, never mid-letter under the
+   edge with the row scrolling sideways (a 32-character username did both). */
+.ac-name, .ac-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-name { font-weight: 500; flex: 0 1 auto; }
+.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; flex: 0 10 auto; padding-left: 4px; }
 .autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75); }
 
 /* ---- Empty channel welcome ---- */
@@ -3215,6 +3262,25 @@ body.voice-drag-active {
         width: 100%;
     }
 
+    /* The @member / #channel list. Anchored to the text box it was as wide as
+       the box is on a phone - 164px at 390, 134px at 360, between the attach
+       and task buttons and the emoji and send ones - so a name was cut after a
+       dozen letters. It spans the composer instead (.message-form is sticky,
+       so it is the containing block once the box stops being one), and its
+       rows are a finger's 44px. */
+    .message-form .input-wrapper {
+        position: static;
+    }
+
+    .message-form .composer-autocomplete {
+        left: 8px;
+        right: 8px;
+    }
+
+    .message-form .autocomplete-item {
+        min-height: 44px;
+    }
+
     /* Sticky-hover on tap otherwise floats the toolbar above the message,
        overlapping the previous message's text. Keep it inside the
        message's own bounds instead. The unified toolbar is up to 7 buttons
@@ -3238,13 +3304,29 @@ body.voice-drag-active {
         min-height: 30px;
     }
 
-    .search-bar input {
-        width: 120px;
-        max-width: 30vw;
-        font-size: 16px;
+    /* The channel's name keeps its room in the header. At 360 px it was cut
+       to six letters ("announ…") behind a 120 px search box whose own words
+       were cut ("Search this c"); the box says "Search" on a phone now and
+       is that wide, and widens over the header when it takes the focus. The
+       name ellipsises, and never below four letters' room. Scoped to the
+       header: Friends' search boxes are .search-bar too, and took 88 px. */
+    .chat-header {
+        padding-left: 12px;
+        padding-right: 12px;
     }
 
-    .search-bar input:focus {
+    .chat-header h2 {
+        min-width: 4em;
+    }
+
+    .chat-header .search-bar input {
+        width: 88px;
+        max-width: 30vw;
+        font-size: 16px;
+        text-overflow: ellipsis;
+    }
+
+    .chat-header .search-bar input:focus {
         position: absolute;
         right: 0;
         width: calc(100vw - 24px);

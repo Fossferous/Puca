@@ -104,6 +104,50 @@ public class ScreenShareService extends Service {
         return s != null && s.projection != null;
     }
 
+    /**
+     * What the running share captures: {contentW, contentH, visible (0/1),
+     * changedAt (elapsedRealtime of the last change of shape or visibility)},
+     * or null when nothing is shared. Content is the screen as turned now, or
+     * (Android 14+, one app shared) that app's window, which may be hidden
+     * behind another app. Read by the full build's control of this phone,
+     * which must not aim a viewer's point at anything but the whole screen.
+     */
+    static long[] contentState() {
+        ScreenShareService s = current;
+        if (s == null || s.projection == null || s.ended || s.display == null) return null;
+        return new long[] { s.contentW, s.contentH, s.contentVisible ? 1 : 0, s.contentChangedAt };
+    }
+
+    /** An extra line on the share's notification and one action beside Stop
+     *  sharing, or none (all null). Safe from any thread. */
+    private static volatile String noticeLine;
+    private static volatile String noticeActionLabel;
+    private static volatile PendingIntent noticeAction;
+
+    static void setNotice(String line, String actionLabel, PendingIntent action) {
+        noticeLine = line;
+        noticeActionLabel = line == null ? null : actionLabel;
+        noticeAction = line == null ? null : action;
+        ScreenShareService s = current;
+        if (s == null || s.ended) return;
+        NotificationManager nm = (NotificationManager) s.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null) {
+            try {
+                nm.notify(NOTIFICATION_ID, s.buildNotification());
+            } catch (RuntimeException e) {
+                Log.w(TAG, "notification update refused", e);
+            }
+        }
+    }
+
+    /** Told every time a share ends (teardown), from the thread that ended
+     *  it. The full build's control of this phone ends with the share. */
+    private static volatile Runnable endWatcher;
+
+    static void setEndWatcher(Runnable r) {
+        endWatcher = r;
+    }
+
     /** The running share's id, or 0. */
     static long sharingId() {
         ScreenShareService s = current;
@@ -178,6 +222,11 @@ public class ScreenShareService extends Service {
      *  one app shared) that app's window. */
     private int contentW;
     private int contentH;
+    /** Whether the captured content is on screen (Android 14+ tells, for one
+     *  app shared; the whole screen always is), and when the content last
+     *  changed shape or visibility. Read from other threads. */
+    private volatile boolean contentVisible = true;
+    private volatile long contentChangedAt;
     private int width;
     private int height;
     private int dpi;
@@ -290,11 +339,23 @@ public class ScreenShareService extends Service {
                     // screen) changed size. Fit the new shape.
                     resizeTo(w, h);
                 }
+
+                @Override
+                public void onCapturedContentVisibilityChanged(boolean isVisible) {
+                    // Android 14+: one app shared and it went behind another
+                    // (or came back). The whole screen is always visible.
+                    if (contentVisible != isVisible) {
+                        contentVisible = isVisible;
+                        contentChangedAt = SystemClock.elapsedRealtime();
+                    }
+                }
             }, handler());
 
             int[] screen = screenSize();
             contentW = screen[0];
             contentH = screen[1];
+            contentVisible = true;
+            contentChangedAt = SystemClock.elapsedRealtime();
             int[] size = ScreenShareFrames.fit(contentW, contentH, wantW, wantH);
             width = size[0];
             height = size[1];
@@ -356,6 +417,9 @@ public class ScreenShareService extends Service {
     /** Capture thread. */
     private void resizeTo(int contentW, int contentH) {
         if (ended || display == null || contentW <= 0 || contentH <= 0) return;
+        if (contentW != this.contentW || contentH != this.contentH) {
+            contentChangedAt = SystemClock.elapsedRealtime();
+        }
         this.contentW = contentW;
         this.contentH = contentH;
         int[] size = ScreenShareFrames.fit(contentW, contentH, wantW, wantH);
@@ -460,6 +524,17 @@ public class ScreenShareService extends Service {
 
     private void teardown() {
         ended = true;
+        noticeLine = null;
+        noticeActionLabel = null;
+        noticeAction = null;
+        Runnable w = endWatcher;
+        if (w != null) {
+            try {
+                w.run();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "share-end watcher failed", e);
+            }
+        }
         if (displayListener != null) {
             DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
             if (dm != null) dm.unregisterDisplayListener(displayListener);
@@ -517,11 +592,18 @@ public class ScreenShareService extends Service {
         Intent stop = new Intent(this, ScreenShareService.class).setAction(ACTION_STOP);
         PendingIntent stopPi = PendingIntent.getService(this, 1, stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        String line = noticeLine;
+        String text = line != null ? line : "Everyone in the call sees this phone's screen.";
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Sharing your screen")
-                .setContentText("Everyone in the call sees this phone's screen.")
+                .setContentText(text)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
                 .setSmallIcon(android.R.drawable.ic_menu_slideshow)
-                .setContentIntent(openPi)
+                .setContentIntent(openPi);
+        PendingIntent extra = noticeAction;
+        String extraLabel = noticeActionLabel;
+        if (line != null && extra != null && extraLabel != null) b.addAction(0, extraLabel, extra);
+        return b
                 .addAction(0, "Stop sharing", stopPi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)

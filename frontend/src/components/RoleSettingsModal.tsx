@@ -5,6 +5,7 @@ import { getToken, decodeJwtPayload } from '../api/auth';
 import { CloseIcon, CrownIcon } from './Icons';
 import { StreamOnlyRoleSection } from './StreamOnlyRoleSection';
 import './RoleSettingsModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface RoleSettingsModalProps {
     isOpen: boolean;
@@ -123,6 +124,7 @@ export function RoleSettingsModal({
     embedded = false,
     modesSupported = true,
 }: RoleSettingsModalProps) {
+    useBackClose(onClose, isOpen && !embedded);
     const [roles, setRoles] = useState<Role[]>([]);
     const [selectedRole, setSelectedRole] = useState<Role | null>(null);
     const [isLoading, setIsLoading] = useState(true);

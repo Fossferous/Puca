@@ -21,6 +21,7 @@ import { parseServerTimestamp } from '../utils/serverTime';
 import { fetchFileUrl } from '../api/authedMedia';
 import { CLIP_PRESETS, DEFAULT_CLIP_PRESET, clipPreset, clipStorageBytes, formatClock, formatMB, presetName } from '../api/clips/clipPresets';
 import { askConfirm } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 /** Server timestamps arrive as RFC3339 UTC (older rows naive UTC) — render
  *  them in the viewer's locale instead of leaking the wire format. */
@@ -97,6 +98,7 @@ export function ServerSettingsModal({
     modesSupported = false,
     initialTab = 'overview',
 }: ServerSettingsModalProps) {
+    useBackClose(onClose, isOpen);
     const [activeTab, setActiveTab] = useState<'overview' | 'roles' | 'modes' | 'emoji' | 'invites' | 'moderation'>(initialTab);
 
     // Overview state

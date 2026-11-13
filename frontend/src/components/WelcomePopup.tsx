@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ServerAddIcon, LinkIcon, CloseIcon, ChevronRightIcon } from './Icons';
 import './WelcomePopup.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface WelcomePopupProps {
     onCreateServer: () => void;
@@ -9,6 +10,7 @@ interface WelcomePopupProps {
 }
 
 export function WelcomePopup({ onCreateServer, onJoinServer, onDismiss }: WelcomePopupProps) {
+    useBackClose(onDismiss);
     const [hovered, setHovered] = useState<'create' | 'join' | null>(null);
 
     return (

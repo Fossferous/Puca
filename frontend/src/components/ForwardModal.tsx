@@ -7,6 +7,7 @@ import { wsClient } from '../api/websocket';
 import { buildForwardText } from './contextMenuUtils';
 import { CloseIcon } from './Icons';
 import './ForwardModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface ForwardModalProps {
     /** Decrypted content of the message being forwarded. */
@@ -27,6 +28,7 @@ interface ForwardModalProps {
  * encryptDMContent + WS), so re-encryption for the target happens naturally.
  */
 export function ForwardModal({ content, servers, dmConversations, onClose, onSentToChannel }: ForwardModalProps) {
+    useBackClose(onClose);
     const [filter, setFilter] = useState('');
     const [channelsByServer, setChannelsByServer] = useState<Map<string, Channel[]>>(new Map());
     const [sendingKey, setSendingKey] = useState<string | null>(null);

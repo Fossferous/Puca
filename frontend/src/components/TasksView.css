@@ -306,6 +306,15 @@
     gap: 8px;
 }
 
+/* The sentence under the icon, padded and centred: with neither it ran from
+   the screen's left edge to its right on a phone, flush with both. On the
+   sentence alone, not the box: Trash (TasksTrash) is drawn in the same box,
+   and its rows must keep their width and their own alignment. */
+.tasks-editor-empty > p {
+    padding: 0 20px;
+    text-align: center;
+}
+
 .tasks-empty-icon { font-size: 40px; }
 
 .tasks-muted {

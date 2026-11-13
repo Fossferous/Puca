@@ -8,6 +8,7 @@ import './EmojiSettings.css';
 import { AuthedImg } from './AuthedImg';
 import { CloseIcon, TrashIcon } from './Icons';
 import { askConfirm } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 /** The signed-in user's id, straight from the JWT (0 when unparseable). */
 function currentUserId(): number {
@@ -28,6 +29,7 @@ interface EmojiSettingsProps {
 }
 
 export function EmojiSettings({ isOpen, onClose, serverId, serverName, isOwner, embedded = false }: EmojiSettingsProps) {
+    useBackClose(onClose, isOpen && !embedded);
     const [emojis, setEmojis] = useState<CustomEmoji[]>([]);
     const [newEmojiName, setNewEmojiName] = useState('');
     const [selectedFile, setSelectedFile] = useState<File | null>(null);

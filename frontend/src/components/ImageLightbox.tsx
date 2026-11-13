@@ -49,6 +49,7 @@ import {
     type Transform, type Box, type Picture, type TapMark,
 } from './imageZoom';
 import './ImageLightbox.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface ImageLightboxProps {
     url: string;
@@ -83,6 +84,7 @@ interface DownInfo { x: number; y: number; onPicture: boolean; moved: boolean }
 export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageLightboxProps) {
     const portalTarget = usePortalTarget();
     const onScreen = useLayerOnScreen();
+    useBackClose(onClose, onScreen);
     const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
     const [copyError, setCopyError] = useState('');
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');

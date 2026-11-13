@@ -329,8 +329,14 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+}
+
+/* Your own FRONT camera is shown as a mirror shows you; a rear one as it is,
+   or what it films reads backwards (api/rtc/cameraChoice.ts selfViewMirrored).
+   Set by VoicePanel.tsx; it used to mirror every camera. */
+.camera-preview-mini video.mirrored,
+.camera-fullscreen video.mirrored {
     transform: scaleX(-1);
-    /* Mirror for front camera */
 }
 
 .camera-dot-mini {
@@ -940,11 +946,10 @@
     height: 100%;
     object-fit: cover;
     border-radius: 10px;
-    transform: scaleX(-1);
-    /* Mirror for selfie view */
 }
 
 .camera-preview-mini.pip-draggable .camera-label {
+    pointer-events: none;
     position: absolute;
     bottom: 8px;
     left: 50%;
@@ -955,54 +960,73 @@
     border-radius: 4px;
 }
 
-/* PiP Options Overlay */
-.pip-options-overlay {
+/* The self-view's own controls. The whole picture is one button (a tap opens
+   the camera menu: every camera, Flip, Full screen, Turn off); the corner
+   button flips at once. Both sit over a camera picture, whatever the theme,
+   so they carry their own dark backing: white on at least 60% black is 4.5:1
+   over the brightest picture there can be. */
+.pip-open-menu {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    cursor: inherit;
+}
+
+/* Its own hover, so mobile.css's touch rule (button:hover { background-color:
+   inherit }, which outranks a bare class) cannot reach it: a tap on a phone
+   leaves the button hovered, and inherited it was the self-view's opaque
+   background, laid over the camera picture while the menu was open. */
+.pip-open-menu:hover {
+    background: transparent;
+}
+
+.pip-open-menu:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: -3px;
+    box-shadow: inset 0 0 0 6px rgba(0, 0, 0, 0.7);
+}
+
+.pip-flip-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 36px;
+    height: 36px;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    border-radius: 10px;
-    animation: fadeIn 0.2s ease;
-}
-
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-    }
-
-    to {
-        opacity: 1;
-    }
-}
-
-.pip-option-btn {
-    background: rgba(255, 255, 255, 0.15);
+    padding: 0;
     border: none;
-    color: white;
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-size: 12px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
     cursor: pointer;
-    backdrop-filter: blur(4px);
-    transition: background 0.2s ease;
-    width: 80%;
-    text-align: center;
 }
 
-.pip-option-btn:active {
-    background: rgba(255, 255, 255, 0.3);
+.pip-flip-btn:hover {
+    background: rgba(0, 0, 0, 0.75);
 }
 
-.pip-option-btn.close-btn {
-    background: rgba(237, 66, 69, 0.5);
+.pip-flip-btn:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: 1px;
 }
 
-.pip-option-btn.close-btn:active {
-    background: rgba(237, 66, 69, 0.7);
+.pip-flip-btn[aria-busy="true"] {
+    opacity: 0.6;
+}
+
+@media (pointer: coarse) {
+    .pip-flip-btn {
+        width: 44px;
+        height: 44px;
+    }
 }
 
 /* Fullscreen Camera View */
@@ -1021,8 +1045,6 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    transform: scaleX(-1);
-    /* Mirror for selfie view */
 }
 
 .camera-fullscreen-controls {
@@ -1031,6 +1053,7 @@
     left: 0;
     right: 0;
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 12px;
     padding: 20px;
@@ -1039,7 +1062,11 @@
 }
 
 .fullscreen-btn {
-    background: rgba(255, 255, 255, 0.15);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    background: rgba(0, 0, 0, 0.6);
     border: none;
     color: white;
     padding: 12px 20px;
@@ -1052,15 +1079,37 @@
 
 .fullscreen-btn:active {
     transform: scale(0.95);
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.75);
+}
+
+/* Their own hover, for the same touch rule: hovered after a tap, they
+   inherited the controls' see-through gradient and lost the dark backing
+   their words need over a bright picture. */
+.fullscreen-btn:hover {
+    background: rgba(0, 0, 0, 0.75);
+}
+
+.fullscreen-btn.exit-btn:hover {
+    background: #3b45a8;
+}
+
+.fullscreen-btn.cam-off-btn:hover {
+    background: #8a2628;
+}
+
+.fullscreen-btn:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: 2px;
 }
 
 .fullscreen-btn.exit-btn {
-    background: rgba(88, 101, 242, 0.5);
+    background: #4752c4;
 }
 
-.fullscreen-btn.close-btn {
-    background: rgba(237, 66, 69, 0.5);
+/* Not `close-btn`: that is a round 32 px X elsewhere (FriendsPanel.css,
+   ServerSettingsModal.css), and it squeezed this into a red circle. */
+.fullscreen-btn.cam-off-btn {
+    background: #a12d2f;
 }
 
 /* Permission Help Modal */
@@ -1203,6 +1252,7 @@
 .voice-e2ee.partial { color: #ffe0a3; background: rgba(191, 149, 60, 0.18); }
 .voice-e2ee.off { color: #ffc4c4; background: rgba(191, 60, 60, 0.15); }
 .voice-e2ee { display: inline-flex; align-items: center; gap: 5px; }
+.voice-e2ee-lock { display: none; }
 .voice-e2ee:focus-visible { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35); }
 
 /* (i) affordance — a hint that the badge explains itself on hover/focus. */
@@ -1327,6 +1377,35 @@
         flex-shrink: 0;
     }
 
+    /* In the one-row bar the badge is its lock alone, in the badge's colour:
+       closed when every stream is encrypted, open when some or none are. Its
+       words ("Encrypted", 85 px with the (i)) squeezed the channel name to
+       "Lo…" at 390 px and to nothing at 360. A tap still opens the details,
+       the badge's name is unchanged for a screen reader, and the expanded
+       panel shows the words. */
+    .voice-panel-compact.vp-collapsed .voice-e2ee {
+        padding: 3px 6px;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-e2ee-lock {
+        display: inline-flex;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-e2ee-label,
+    .voice-panel-compact.vp-collapsed .e2ee-info {
+        display: none;
+    }
+
+    /* Under 380 px the green signal icon goes too (the badge's lock, in the
+       same green, says the call is up): its 27 px are the name's, which was
+       three letters at 360. No floor on the name: one that cannot fit pushes
+       the badge under Mute (it did, by 13 px at 360). */
+    @media (max-width: 379px) {
+        .voice-panel-compact.vp-collapsed .voice-connected-icon {
+            display: none;
+        }
+    }
+
     .voice-panel-compact.vp-collapsed .voice-controls-compact {
         flex-wrap: nowrap;
         gap: 6px;
@@ -1344,10 +1423,19 @@
     /* Secondary controls live behind the expand chevron while collapsed.
        Clip buttons never render on phones (isTauri gate) but a coarse-pointer
        touch laptop under 1024px does reach here — hide them the same way. */
+    /* The share's own chevron (Stream settings / Stream quality) and its
+       audio sources go with Share: where sharing is offered on a phone-sized
+       touch screen (the Android app's own share, a touch laptop) the chevron
+       made a fifth button in a bar sized for four, the encryption badge slid
+       under Mute (18px at 390, 48px at 360) and the channel name went to
+       nothing. */
     .voice-panel-compact.vp-collapsed .voice-dropdown,
     .voice-panel-compact.vp-collapsed .vp-camera,
+    .voice-panel-compact.vp-collapsed .vp-camera-options,
     .voice-panel-compact.vp-collapsed .vp-activities,
     .voice-panel-compact.vp-collapsed .vp-screenshare,
+    .voice-panel-compact.vp-collapsed .vp-share-options,
+    .voice-panel-compact.vp-collapsed .vp-stream-audio,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-arm,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-save {
         display: none;
@@ -1416,6 +1504,21 @@
     flex: 0 0 auto;
     min-width: 22px;
     padding: 8px 2px;
+}
+
+/* The camera's split button: this narrow half opens the camera menu (which
+   camera, Flip, Full screen), as Share's opens its settings. */
+.voice-btn.vp-camera-options {
+    flex: 0 0 auto;
+    min-width: 22px;
+    padding: 8px 2px;
+}
+
+@media (pointer: coarse) {
+    .voice-btn.vp-camera-options {
+        min-width: 44px;
+        min-height: 44px;
+    }
 }
 
 /* Audio sources while live (StreamAudioSourcesModal) — beside Stop Sharing. */

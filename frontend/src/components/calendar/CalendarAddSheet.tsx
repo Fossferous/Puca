@@ -15,6 +15,7 @@ import { type ScheduleKind } from '../../api/taskSchedule';
 import { DEFAULT_REMINDER_TIMES } from '../../api/reminderTimes';
 import { CalendarIcon, CloseIcon, MembersIcon } from '../Icons';
 import '../schedule/Schedule.css';
+import { useBackClose } from '../../hooks/useBackClose';
 
 export interface AddTarget {
     key: string;
@@ -56,6 +57,7 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
     const [kind, setKind] = useState<ScheduleKind>('event');
     const [target, setTarget] = useState(defaultTarget && targets.some(t => t.key === defaultTarget) ? defaultTarget : (targets[0]?.key ?? (allowNew ? 'new' : '')));
     const [busy, setBusy] = useState(false);
+    useBackClose(onClose, onScreen);
 
     useEffect(() => {
         // Hidden with Notes in the desktop app: not our key (portalTarget.ts).

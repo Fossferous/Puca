@@ -5,6 +5,10 @@
 // Silent by construction: the tone goes to a MediaStream destination, never
 // to the context's speakers.
 export type MicReacquireOptions = Record<string, unknown>;
+/** The real one's shape (rtc/media.ts); this stand-in never switches cameras. */
+export type CameraSwitch =
+    | { ok: true; track: MediaStreamTrack }
+    | { ok: false; reason: 'no-camera' | 'only-one' | 'unavailable' | 'denied'; track: MediaStreamTrack | null };
 
 /** A tone, as a track (no speakers involved). */
 async function toneTrack(frequency: number): Promise<MediaStreamTrack> {
@@ -80,7 +84,9 @@ export class MediaManager {
         if (!enable) cams.forEach((t) => { t.stop(); this.local!.removeTrack(t); });
         return null;
     }
-    async switchCamera(): Promise<MediaStreamTrack | null> { return null; }
+    async switchCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }
+    cameraSwitchInProgress(): boolean { return false; }
+    async flipCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }
     stopLocalStream(): void { this.local?.getTracks().forEach((t) => t.stop()); this.local = null; }
     stopScreenShare(): boolean {
         const was = !!this.screen;

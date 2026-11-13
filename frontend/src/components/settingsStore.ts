@@ -2,6 +2,7 @@ import { isTauri } from '../api/platform';
 import { mediaTransformApi } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
 import type { ShareLadderMode } from '../api/rtc/shareLadder';
+import type { RememberedCamera } from '../api/rtc/cameraChoice';
 // App settings persisted in localStorage. Extracted from SettingsModal so that
 // component file only exports a component (keeps React Fast Refresh working).
 
@@ -55,6 +56,11 @@ export const defaultSettings = {
 
     // Notifications
     desktopNotifications: true,
+    /** One notification per conversation that updates in place and pops up
+     *  only when a conversation starts again (api/notifyGroups.ts), in the
+     *  desktop and web apps. Off: one notification per message, as before.
+     *  Android groups by its own notification key either way. */
+    groupNotifications: true,
     /** Android: OS notifications for messages, fired locally from this
      *  device's own WebSocket while the app is running (foreground app =
      *  suppressed, like desktop). There is no push service — nothing can
@@ -173,8 +179,11 @@ export const defaultSettings = {
     // re-hide the bar every 700 ms for the whole capture, which suppressed the
     // strongest indicator the user had that their screen was being recorded —
     // along with its in-band "Stop sharing" button. Kept as an option because
-    // the bar genuinely does sit on top of a fullscreen game. The tray icon
-    // badges amber while any capture runs whether or not this is on.
+    // the bar genuinely does sit on top of a fullscreen game. Only Púca's own
+    // bar is hidden, never another app's or the Discord window's
+    // (capture_bar.rs). The tray icon badges amber while Púca itself is
+    // capturing (a screen share, an armed clip buffer, a device session)
+    // whether or not this is on; another app's capture does not turn it.
     hideOsCaptureBar: false,
 
     // --- Screen-control (remote control of your shared screen) kill switches ---
@@ -196,6 +205,14 @@ export const defaultSettings = {
     // Voice
     inputDeviceId: 'default',
     outputDeviceId: 'default',
+    /**
+     * The camera a call opens (api/rtc/cameraChoice.ts): the one last picked
+     * in the camera menu, by Flip, or in Settings > Voice & Video. null = the
+     * default (the front camera on a phone). Kept with its name and the way
+     * it faced, so it is found again when the browser hands out new ids.
+     * Per device, like the microphone.
+     */
+    camera: null as RememberedCamera | null,
     inputVolume: 100,
     outputVolume: 100,
     noiseSuppression: true,
@@ -401,6 +418,14 @@ export const defaultSettings = {
      * mid-call) is gone either way.
      */
     autoInstallUpdates: false,
+    /**
+     * Show Discord in the server rail (the Windows desktop app only): it opens
+     * Discord's own web app in a window of its own, signed in on Discord's page,
+     * which Púca never reads (api/discordWindow.ts, src-tauri/src/discord_window.rs).
+     * Default OFF: Púca does not put another chat service in front of everyone
+     * who installs it; the person who wants it turns it on in Settings > Advanced.
+     */
+    showDiscordEntry: false,
     /**
      * A PC set up for remote control (unattended access armed, or lock-screen
      * access installed) installs a newer desktop release BY ITSELF and
@@ -985,6 +1010,22 @@ export function notifEnabled(category: NotifSoundCategory): boolean {
 export function outputGain(): number {
     const v = loadSettings().outputVolume;
     return Math.max(0, Math.min(1, (typeof v === 'number' ? v : 100) / 100));
+}
+
+/** The camera a call should open (Settings' `camera`), or null for the default. */
+export function rememberedCamera(): RememberedCamera | null {
+    const c = loadSettings().camera;
+    return c && typeof c === 'object' && typeof c.deviceId === 'string' ? c : null;
+}
+
+/** Keep `camera` as the one to open next time (null: back to the default). */
+export function rememberCamera(camera: RememberedCamera | null): void {
+    const s = loadSettings();
+    const same = (s.camera?.deviceId ?? null) === (camera?.deviceId ?? null)
+        && (s.camera?.label ?? null) === (camera?.label ?? null)
+        && (s.camera?.facing ?? null) === (camera?.facing ?? null);
+    if (same) return;
+    try { saveSettings({ ...s, camera }); } catch { /* storage full or blocked: this call still uses it */ }
 }
 
 /**

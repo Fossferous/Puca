@@ -3,6 +3,7 @@ import { getInviteInfo, joinViaInvite, listPublicServers, joinServer, type Invit
 import { parseInviteCode } from '../api/pendingInvite';
 import { CloseIcon } from './Icons';
 import './JoinServerModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface JoinServerModalProps {
     isOpen: boolean;
@@ -28,6 +29,7 @@ function isServer(v: unknown): v is Server {
 }
 
 export function JoinServerModal({ isOpen, onClose, onServerJoined, initialCode }: JoinServerModalProps) {
+    useBackClose(onClose, isOpen);
     const [activeTab, setActiveTab] = useState<Tab>('invite');
     const [inviteCode, setInviteCode] = useState('');
     const [inviteInfo, setInviteInfo] = useState<InviteInfo | null>(null);

@@ -49,6 +49,10 @@ Left to right on a desktop window:
 | Member list | Everyone on the server. A crown marks the **Server Owner**. Under it, **Active in your servers** lists the voice channels that have people in them in any of your servers ([below](#active-in-your-servers)) |
 
 On a phone the same areas are tabs along the bottom (**Chat**, **Members**, …).
+In the Android app, **Back** closes whatever is open on top first: a menu, a dialog, a sheet, Settings,
+Server Settings, a profile or the picture viewer, one at a time, newest first. With nothing open, Back leaves the
+app as it always has. (This needs an Android app installed after 0.9.836; on an older one Back always leaves the
+app.)
 
 ### The channel list: folding, and who is in a voice channel
 **Fold what you are not reading.** The **Text Channels** and **Voice Channels** headings are buttons
@@ -365,7 +369,8 @@ The voice panel's buttons, by tooltip:
 | **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **You joined without a microphone — nobody can hear you** when you joined without one on purpose, **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode. Mute now to stay muted when it comes back** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there. With no microphone the button, and your **Toggle Mute** key, still work (except while you are deafened, in an AFK channel, or without the Speak permission): they decide whether you come back muted when a microphone returns, and the button then reads **No microphone detected — you stay muted when it comes back. Click to unmute**; deafened, it reads **No microphone detected — you are deafened, so you stay muted when it comes back**. If you were muted or deafened when your microphone dropped out, you come back muted |
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
-| **Turn On Camera** / **Turn Off Camera** | Share your webcam |
+| **Turn On Camera** / **Turn Off Camera** | Share your camera. It opens the camera you used last on this device (see [Cameras: front, rear and the camera menu](#cameras-front-rear-and-the-camera-menu)) |
+| **Camera: choose which camera** | The arrow beside the camera button, while it is on and there is more than one camera: the camera menu |
 | **Share Screen** / **Stop Sharing** | See [Screen Sharing](#screen-sharing) |
 | **Disconnect** | Leave voice |
 
@@ -378,6 +383,42 @@ are in the call, your microphone is closed at once and the status line
 changes. If it is given back, the panel says
 **You can speak in this channel now. Leave and rejoin it to use your microphone.**
 The microphone is not reopened mid-call; disconnect and join the channel again.
+
+### Cameras: front, rear and the camera menu
+With your camera on, your own picture sits in a small window you can drag
+anywhere.
+
+- **Flip**, the round button in the corner of your picture, switches between
+  the front and the rear camera: from the front camera to the phone's main rear
+  camera, and back. On a computer with more than one webcam it goes on to the
+  next one. It is shown only when there is another camera to go to.
+- **Tap your picture** (or click it), or use the arrow beside the camera button,
+  for the camera menu: every camera the device has, by its name, the one in use
+  ticked, then **Switch to the rear camera** (or the front), **Full screen** and
+  **Turn off camera**. An iPhone lists each of its rear lenses (**Back Camera**,
+  **Back Ultra Wide Camera**, **Back Telephoto Camera** and so on); an Android
+  phone lists the cameras its maker lets apps use, which on many phones is one
+  front and one rear camera. A webcam's name is shown without the numbers some
+  add in brackets.
+- **Full screen** shows your picture across the screen with **Flip Camera**,
+  **Cameras**, **Exit Fullscreen** and **Turn Off Camera**.
+- Your picture is shown as a mirror would show you only while the camera faces
+  you. A rear camera is shown as it is, so writing it films reads the right way
+  round. A webcam that does not say which way it faces is taken to face you.
+  Everyone else sees your camera as it is, whichever camera it is.
+- The camera you switch to is kept on that device: the next time you turn your
+  camera on, in any call, it is that one. **Settings → Voice & Video → Camera**
+  chooses it before a call, but only once Púca has been allowed to use the
+  camera: until then it lists only **Default** (the front camera on a phone).
+  On a phone that means turning your camera on in a call once after opening
+  Púca; the cameras are then listed by name. A camera that is not there any
+  more (a webcam unplugged) gives way to the default one.
+- If the camera you pick cannot be opened (another app holds it), you stay on
+  the one you had and the panel says so.
+
+The other camera goes out on the same connection as the first, so it is
+end-to-end encrypted exactly as the first was, in an ordinary call and in an
+SFU channel alike; nobody else in the call has to do anything.
 
 ### Mute vs Deafen
 - **Mute**: others cannot hear you; you still hear them
@@ -501,7 +542,11 @@ can never be bought, sold or exchanged for anything.
 ### Start Sharing
 From the desktop app, a browser, or the Android app (see
 [From the Android app](#from-the-android-app) below). A phone's browser and
-the iPhone cannot share a screen.
+the iPhone cannot share a screen: browsers on Android have no screen sharing
+for web pages, and neither has Safari on iPhone and iPad before iOS 27
+(Púca does not offer the new iOS 27 one yet; it has not been tried). On those,
+**Share Screen** in the voice panel is dimmed, and pressing it says why; on an
+Android phone it points you to the Púca app for Android.
 
 Púca remembers the **Resolution**, **Frame Rate** and **Audio to share** you
 last picked, and **Share Screen** uses them without asking. So if you turn the
@@ -588,8 +633,93 @@ What is different from a computer:
 - **A still screen sends little.** Frames go out when something on the
   screen changes, plus about one a second while nothing does.
 - It needs the new Android app (a new install from the download page, not
-  only the in-app update), in Púca Lite too. In an older Android app the
-  button stays hidden.
+  only the in-app update), in Púca Lite too. In an older Android app,
+  **Share Screen** says so when you press it.
+
+### Let someone control your phone
+
+While you share your whole screen from the Android app, someone watching
+can ask to control the phone: to tap, swipe and type on whatever is on your
+screen, and press Back, Home and Recents. Nothing happens until you allow
+it, every time, twice: in Púca, and then in Android's own **Let "Name"
+control this phone?**, which Púca's page cannot answer for you.
+
+The first time, Android has to let Púca do it:
+
+1. When someone asks, Púca shows **Allow control of this phone?** (and a
+   notification, if you are in another app; tap it to open Púca)
+2. If it says to turn on **Púca remote control** first, tap **Open
+   Accessibility settings**, open **Púca remote control** and switch it on.
+   Android explains what an accessibility service can do; Púca uses it only
+   while you have allowed someone, and does not read your screen with it.
+   If it says instead that Android has stopped Púca remote control for now,
+   the switch is already on and there is nothing to turn on: an automation
+   or testing app can make Android do that, and **Allow control** can be
+   pressed once Android runs it again
+3. If Android says it is a **restricted setting** (Android 13 and later, for
+   an app installed from the download page): tap **Open App info** in Púca's
+   prompt, tap the menu at the top right, choose **Allow restricted
+   settings**, then switch **Púca remote control** on again
+4. Back in Púca, **Allow control** can now be pressed
+5. Android then asks **Let "Name" control this phone?**: **Allow** starts
+   it, **Cancel** turns them down (as **Deny** does). It waits half a
+   minute for an answer
+
+To turn it off again: Android's **Settings › Accessibility › Púca remote
+control**, off. Púca's prompt will then ask you to switch it on before anyone
+can control the phone.
+
+While someone is in control:
+
+- an orange frame goes round your screen, over every app, with **"Name" is
+  controlling this phone** and a **Stop** button at the top (your touches
+  go through the frame and the words to the app underneath; only Stop
+  takes a tap);
+- Púca's notification **Sharing your screen** says who, and has **Stop
+  control**;
+- in Púca, the banner at the top has **Stop control**.
+
+Any of those Stops ends it at once, and so does locking the phone, stopping
+the share (from Púca or the notification), or leaving the call. It never
+comes back by itself, not even when you share again: they have to ask
+again, and you to allow again.
+
+It works only while you share the **entire screen**. Shared one app
+(Android 14 and later), Púca refuses control, because the person watching
+could not see where a tap outside that app would land. Android does not say
+which you chose, so an app that fills the whole screen looks like the entire
+screen until you switch away from it, which ends control within a second; a
+tap sent in that moment can reach the app you switched to. Choose **Entire
+screen** to be sure. Typing goes into the
+text box you or they tapped, and it does not press keyboard shortcuts. What
+they type is never put into a password box, but their Enter still reaches
+one, and a tap on your phone's own keyboard is a tap like any other, so they
+can still type with that.
+
+Control of a phone is in the full Púca app only, not in Púca Lite, and needs
+the new Android app (a new install from the download page). Phones running
+Android 7 cannot be controlled: Púca says so, and does not offer the switch
+in Android's settings.
+
+### Control someone's phone
+
+When the person sharing is on a phone, **Request control** on their stream
+asks them; once they allow it:
+
+- **click** (or tap, on a phone) is a tap on their screen, **drag** is a
+  swipe, a **right-click** is a long press, and the **mouse wheel** scrolls;
+- typing on your keyboard types into the text box they have open; Esc is Back.
+  Keyboard shortcuts do nothing on a phone, and neither do accents typed
+  with a dead key or text from an input method for Chinese, Japanese or
+  Korean;
+- the stream's buttons gain **Back**, **Home** and **Recent apps** for their
+  phone.
+
+While you wait for an answer, the request's button on the stream is a
+cancel button (the right-click menu only shows **Control Requested…**;
+after a cancel you can ask that person again after a short wait). If
+nobody answers for nearly three minutes (their app cannot be
+controlled at all, Púca Lite for instance), the request is dropped.
 
 ### How much a share sends
 
@@ -723,7 +853,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |
-| **Request Control** | Ask the sharer for keyboard and mouse control of their screen; they must accept |
+| **Request Control** | Ask the sharer for keyboard and mouse control of their screen (or touch control of their phone, see [Control someone's phone](#control-someones-phone)); they must accept. While waiting, the stream's own button cancels the request; in the right-click menu the row reads **Control Requested…** and cannot be pressed |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
 | **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
 
@@ -1355,6 +1485,43 @@ turns this off for you: you then show as plain online while connected.
 **Show online status** off hides all of it — you appear offline. Voice
 channels' AFK move (**Server Settings**) is separate and unchanged.
 
+### Message notifications on a computer
+In the **desktop app** (full and Lite) and in the **web app** while it is
+open, a message that arrives while you are not using Púca (another window has
+the focus, a game say) shows a notification: **Settings → Notifications →
+Enable Desktop Notifications**. It names who wrote and where, never what they
+wrote. While you are using Púca nothing shows; the in-app pop-ups do that job.
+
+A conversation is **one notification that keeps count**, not one per message,
+for each channel and each DM: *#general · Lads*, *alice and 2 others: 5 new
+messages*.
+
+- The first message pops it up. While the conversation goes on, each new
+  message changes the same notification where it is, without popping it up
+  again and without a sound: Púca's own message sound plays only when the
+  notification pops up.
+- After a quiet minute, the next message pops the same notification up again,
+  still counting. So does the first message after you have been back in Púca
+  and left again.
+- A DM pops up for its first message and then at most once a minute while it
+  goes on. An @mention of you does the same even in the middle of a busy
+  channel (at most once a minute), when that channel is the one you have open
+  in Púca. In another channel Púca cannot tell: its messages stay encrypted
+  until you open it.
+- Reading the conversation in Púca (opening it with the window in front)
+  takes its notification out of the notification centre, and the count starts
+  again. Clicking the notification while it is on screen opens that
+  conversation.
+- People joining a server are one notification per server in the same way.
+- Muted servers and channels (including **Only @mentions**) and people you
+  blocked still do not notify. The one exception, while notifications are
+  grouped: under **Only @mentions**, a mention of you in the channel you have
+  open does.
+- **Group notifications by conversation**, under the same setting, is on by
+  default. Off, every message has a notification of its own, as before.
+- In the web app it is your browser that draws the notification, so how a
+  replaced one looks is up to it.
+
 ### Notifications while Púca is closed
 In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in
 Chrome, Edge, Firefox or Safari on a computer or an Android phone —
@@ -1387,6 +1554,77 @@ Púca is not open. Tap the switch and allow notifications when the browser asks.
   that something arrived, when, and from which server, never who wrote or
   what; it may be able to guess that people woken together share a channel.
   `docs/PRIVACY.md` has the details.
+
+---
+
+## Discord in a window of its own (Windows desktop app)
+
+For people you still talk to on Discord, the Windows desktop app can open
+Discord's own website in a window of its own, without Discord installed.
+[DISCORD.md](DISCORD.md) says how that window is kept apart from Púca, what
+Púca can and cannot see, and the risks that remain.
+
+**Turn it on:** **Settings → Advanced → Desktop App → Show Discord in the
+server rail**. A **Discord** button appears in the server rail, above **Join a
+Server**. It is off by default.
+
+**Use it:** press the button and Discord's own page opens in its own window.
+Sign in on Discord's page as you would in a browser (email or phone and
+password, the QR code from Discord's phone app, or a passkey). From then on it
+is Discord: your DMs, your servers, replying as yourself. It stays signed in.
+Pressing the button again brings that window to the front; its size and place
+are remembered. The title bar shows which site the window is on, for example
+**Discord · discord.com**: there is no address bar.
+
+**What Púca does there: nothing but open it.** Púca's code never runs in that
+window, and Púca cannot read the page, your messages or your Discord sign-in.
+Your Púca server never sees any of it: the window talks to Discord directly.
+Your Discord sign-in is kept in a separate store on this PC.
+
+- Discord's own pages stay in the window. A link to anything else (a YouTube
+  link, a picture's **Open in Browser**, a help article) opens in your web
+  browser. So does linking an account under Discord's **Connections**
+  (Spotify, Xbox, ...): finish that in the browser, signed in to Discord
+  there. A link that would start another program on your PC does nothing.
+- It has no developer console: "paste this into the console" is how Discord
+  accounts are stolen.
+- Files you download from Discord go to your Downloads folder, as in Edge, and
+  nothing opens by itself.
+
+**Notifications.** The first time Discord asks to show notifications (its own
+**Enable** banner, or **User Settings → Notifications** in Discord), Púca asks
+whether to allow them, because the window has no question of its own for this.
+Press **OK** and Windows shows Discord's notifications, straight from Discord's
+page: Púca never sees them. **Cancel** (the default, so Enter allows nothing) is
+not remembered, so Discord can ask again later. To stop them, turn them off in
+Discord's own notification settings.
+
+**Calls.** A Discord voice or video call works in that window: it asks for your
+microphone and camera the usual way, and screen sharing uses the window's own
+picker. Push to talk works only while the Discord window is focused (Discord's
+own limit for its website), so use Voice Activity if you play with it in the
+background. Púca's own streams never carry the Discord window's sound.
+
+**Sign out and clear.** **Settings → Advanced → Desktop App → Sign out of
+Discord and clear its data on this PC** closes the Discord window and deletes
+what Discord keeps in it on this PC: your sign-in, cookies, cache and settings.
+Files you downloaded stay where you saved them, and your Discord account is not
+touched; you can sign in again later. To end the sign-in at Discord as well, use
+**Log Out** in Discord first. Turning **Show Discord in the server rail** off
+offers the same.
+
+**Good to know.**
+
+- Closing the window closes Discord. Quitting Púca does not close it: it is a
+  window of its own. Installing a Púca update closes it; open it again
+  afterwards.
+- It works the same in **Púca Lite**.
+- There is no Discord button in the web app or on phones. In a browser, a tab
+  of Discord's own site does this better (Discord's page cannot be shown inside
+  another site anyway), and on a phone Discord's own app does, with its own
+  notifications.
+- Púca shows no unread count from Discord: knowing it would mean reading
+  Discord's page.
 
 ---
 

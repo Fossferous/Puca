@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getProfile, updateProfile } from '../api/profile';
 import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
+import { discordWindowAvailable } from '../api/discordWindow';
+import { DiscordWindowSettings } from './DiscordWindowSettings';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
@@ -16,6 +18,7 @@ import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
+import { cameraDisplayName, camerasOf, type CameraInfo } from '../api/rtc/cameraChoice';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
@@ -24,8 +27,10 @@ import { markKeySpentByCapture, setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
-import { isTouchDevice, screenShareOffered, settingsSections } from './settingsModal.utils';
+import { isTouchDevice, pointInSelection, screenShareOffered, settingsSections, toggleSettingFromRow } from './settingsModal.utils';
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
+import { isIosDevice } from './shareAvailability';
+
 import { sendTestNotification } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
@@ -71,6 +76,10 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 import WebPushSetting from './WebPushSetting';
 import { askConfirm, tellUser } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
+
+/** An iPhone or iPad, an iPad asking for desktop sites included. */
+const iosHere = () => typeof navigator !== 'undefined' && isIosDevice(navigator.userAgent, navigator.maxTouchPoints);
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -284,6 +293,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         inputs: [],
         outputs: [],
     });
+    /** The cameras, for the Camera choice (named once the camera was allowed). */
+    const [cameraList, setCameraList] = useState<CameraInfo[]>([]);
     const [username, setUsername] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [email, setEmail] = useState('');
@@ -631,6 +642,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             .finally(() => setUnblocking(null));
     };
 
+    useBackClose(onClose, isOpen);
+    /** The last press in the body went down on words already selected (toggleSettingFromRow). */
+    const pressInSelection = useRef(false);
+
     // The header renders an "ESC" hint — make Escape actually close the modal.
     useEffect(() => {
         if (!isOpen) return;
@@ -835,6 +850,20 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                 })
                 .catch(console.error);
         }
+    }, [isOpen, activeSection]);
+
+    // The cameras, for the Camera choice: listed whatever became of the
+    // microphone (refused, or supplied by an embedding host). Only once the
+    // camera has been allowed in this page: before that a browser hands out
+    // no ids (nothing to choose by), so the list holds only Default. On a
+    // phone that is until the camera has been on since Púca was opened.
+    useEffect(() => {
+        if (!isOpen || activeSection !== 'voice') return;
+        let live = true;
+        navigator.mediaDevices?.enumerateDevices?.()
+            .then(devices => { if (live) setCameraList(camerasOf(devices).filter(c => c.deviceId)); })
+            .catch(() => { /* no device list in this browser: Default only */ });
+        return () => { live = false; };
     }, [isOpen, activeSection]);
 
     /** rAF meter loop on an analyser: average byte magnitude → 0..100. */
@@ -1347,12 +1376,19 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                     <div className="settings-header">
                         <h2>{sections.find(s => s.id === activeSection)?.label}</h2>
                         <button className="settings-close" onClick={onClose} aria-label="Close settings">
-                            <span>ESC</span>
+                            <span className="settings-close-hint">ESC</span>
                             <CloseIcon />
                         </button>
                     </div>
 
-                    <div className="settings-body">
+                    {/* A press on a setting's words toggles its checkbox: the
+                        labels name no control, so the 20px box alone answered
+                        (settingsModal.utils' toggleSettingFromRow). */}
+                    <div
+                        className="settings-body"
+                        onMouseDown={(e) => { pressInSelection.current = pointInSelection(document, e.clientX, e.clientY); }}
+                        onClick={(e) => { toggleSettingFromRow(e.target, { pressInSelection: pressInSelection.current && e.detail === 1 }); }}
+                    >
                         {/* My Account */}
                         {activeSection === 'account' && (
                             <div className="settings-section">
@@ -1818,10 +1854,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Hide Windows' "sharing your screen" bar</label>
                                             <span className="option-hint">
                                                 Windows shows a bar while you share your screen, and it can sit on top
-                                                of a fullscreen game. Hiding it also removes its "Stop sharing" button
-                                                and the clearest sign that a capture is running, so it stays off unless
-                                                you ask for it. Either way, the tray icon turns amber whenever anything
-                                                is recording or controlling this machine.
+                                                of a fullscreen game. This hides only Púca's own bar, never another
+                                                app's or the Discord window's. Hiding it also removes its "Stop
+                                                sharing" button and the clearest sign that a capture is running, so it
+                                                stays off unless you ask for it. Either way, the tray icon turns amber
+                                                whenever Púca is recording or someone is controlling this machine
+                                                through Púca.
                                             </span>
                                         </div>
                                         <input
@@ -2143,6 +2181,28 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     updateSetting('desktopNotifications', perm === 'granted');
                                                 });
                                             }}
+                                        />
+                                    </div>
+                                    )}
+                                    {/* One notification per conversation
+                                        (api/notifyGroups.ts). Not for an
+                                        embedding host, which shows its own. */}
+                                    {!isMobile() && !hostShowsNotifications() && (
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="settings-group-notifications">Group notifications by conversation</label>
+                                            <span className="option-hint">
+                                                One notification per channel or DM, which keeps count and
+                                                updates without popping up again while the conversation
+                                                goes on. Off: one notification for every message.
+                                            </span>
+                                        </div>
+                                        <input
+                                            id="settings-group-notifications"
+                                            type="checkbox"
+                                            checked={settings.groupNotifications}
+                                            disabled={!settings.desktopNotifications}
+                                            onChange={(e) => updateSetting('groupNotifications', e.target.checked)}
                                         />
                                     </div>
                                     )}
@@ -2563,6 +2623,44 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         </select>
                                     </div>
                                     <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="camera-device">Camera</label>
+                                            <span className="option-hint">
+                                                The camera your calls open. In a call, Flip on your own picture
+                                                switches between the front and rear cameras, and the menu beside the
+                                                camera button (or a tap on your picture) lists every camera; the one
+                                                you pick there is kept here too. Until Púca has been allowed to use the
+                                                camera, only Default is listed: on a phone, turn your camera on in a
+                                                call once after opening Púca, and every camera is listed here by name.
+                                            </span>
+                                        </div>
+                                        <select
+                                            id="camera-device"
+                                            data-testid="settings-camera"
+                                            value={settings.camera?.deviceId || 'default'}
+                                            onChange={(e) => {
+                                                const picked = cameraList.find(c => c.deviceId === e.target.value);
+                                                updateSetting('camera', picked
+                                                    ? { deviceId: picked.deviceId, label: picked.label, facing: picked.facing }
+                                                    : null);
+                                            }}
+                                        >
+                                            <option value="default">Default (the front camera on a phone)</option>
+                                            {cameraList.map(camera => (
+                                                <option key={camera.deviceId} value={camera.deviceId}>
+                                                    {cameraDisplayName(camera, cameraList)}
+                                                </option>
+                                            ))}
+                                            {/* Chosen before, and not in today's list (unplugged,
+                                                or not named yet): still shown as the choice. */}
+                                            {settings.camera?.deviceId && !cameraList.some(c => c.deviceId === settings.camera?.deviceId) && (
+                                                <option value={settings.camera.deviceId}>
+                                                    {settings.camera.label ? cameraDisplayName(settings.camera, []) : 'The camera chosen before'}
+                                                </option>
+                                            )}
+                                        </select>
+                                    </div>
+                                    <div className="settings-option">
                                         <label>Input Volume</label>
                                         <div className="slider-row">
                                             <input
@@ -2851,8 +2949,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     tablet mode, which shares under Automatic too, and in the
                                     Android app, which shares natively (nativeScreenShare.ts).
                                     A change reaches a running share at once
-                                    (sfuManager.followLadderSetting). */}
-                                {(screenShareOffered() || nativeScreenShareAvailable()) && (
+                                    (sfuManager.followLadderSetting). Not on an
+                                    iPhone or iPad, an iPad asking for desktop
+                                    sites included: the voice panel says it
+                                    cannot share there (shareAvailability). */}
+                                {((screenShareOffered() && !iosHere()) || nativeScreenShareAvailable()) && (
                                     <>
                                         <h3>Screen Sharing</h3>
                                         <div className="settings-card">
@@ -3158,6 +3259,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                         onChange={(e) => void toggleAutostart(e.target.checked)}
                                                     />
                                                 </div>
+                                            )}
+                                            {discordWindowAvailable() && (
+                                                <DiscordWindowSettings
+                                                    on={settings.showDiscordEntry}
+                                                    onChange={(on) => updateSetting('showDiscordEntry', on)}
+                                                />
                                             )}
                                         </div>
                                     </>

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useCountdown } from './useCountdown';
 import { MinusIcon, PlusIcon } from '../Icons';
 import { SmartAvatar } from '../SmartAvatar';
+import { useBackClose } from '../../hooks/useBackClose';
 
 /** The 30 s turn clock: a bar and the seconds left. */
 export function TurnClock({ ms, receivedAt, totalSecs, compact = false }: {
@@ -108,6 +109,7 @@ export function AmountSheet({ title, value, min, max, step, presets, confirmLabe
         inputRef.current?.select();
     }, []);
 
+    useBackClose(onClose);
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
         window.addEventListener('keydown', onKey);

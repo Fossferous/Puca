@@ -5,6 +5,7 @@ import { PERM, hasPerm } from '../api/permissionBits';
 import { CheckIcon, CloseIcon } from './Icons';
 import './Modal.css';
 import './EditChannelModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface EditChannelModalProps {
     isOpen: boolean;
@@ -45,6 +46,7 @@ type TriState = 'inherit' | 'allow' | 'deny';
 type OverwriteMap = Record<number, { allow: number; deny: number }>;
 
 export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, collections = [] }: EditChannelModalProps) {
+    useBackClose(onClose, isOpen);
     const [activeTab, setActiveTab] = useState<'general' | 'permissions'>('general');
     const [name, setName] = useState(channel.name);
     const [description, setDescription] = useState(channel.description || '');

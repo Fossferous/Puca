@@ -14,6 +14,7 @@ import { createReport, REPORT_REASON_MAX, REPORT_TYPES, type ReportType } from '
 import { statusOf } from '../api/client';
 import { CloseIcon, FlagIcon } from './Icons';
 import './ReportModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 export interface ReportTarget {
     serverId: string;
@@ -29,6 +30,7 @@ interface ReportModalProps {
 }
 
 export function ReportModal({ target, onClose }: ReportModalProps) {
+    useBackClose(onClose);
     const [type, setType] = useState<ReportType>('harassment');
     const [reason, setReason] = useState('');
     const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');

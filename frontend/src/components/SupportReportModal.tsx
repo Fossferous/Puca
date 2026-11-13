@@ -5,6 +5,7 @@ import { isTauri } from '../api/platform';
 import { CloseIcon } from './Icons';
 import './ForwardModal.css';
 import './SupportReportModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface SupportReportModalProps {
     servers: Server[];
@@ -20,6 +21,7 @@ interface SupportReportModalProps {
  * say what went wrong, send. Everything else is api/supportReport.ts.
  */
 export function SupportReportModal({ servers, currentUserId, preferredServerId, onClose }: SupportReportModalProps) {
+    useBackClose(onClose);
     const choices = useMemo(
         () => ownerChoices(servers, currentUserId, preferredServerId),
         [servers, currentUserId, preferredServerId],

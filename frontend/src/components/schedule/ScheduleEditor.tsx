@@ -31,6 +31,7 @@ import { parseWall, viewerZone, isInGap } from '../../utils/calendarMath';
 import { CalendarIcon, CloseIcon, EyeOffIcon, WarningIcon } from '../Icons';
 import './Schedule.css';
 import { askConfirm } from '../../api/appDialogs';
+import { useBackClose } from '../../hooks/useBackClose';
 
 export interface ScheduleEditorProps {
     /** An item, or a NOTE's own reminder (migration 068) — this editor only
@@ -76,6 +77,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
     });
     const [error, setError] = useState<string | null>(null);
     const set = (patch: Partial<ScheduleForm>) => { setForm(f => ({ ...f, ...patch })); setError(null); };
+    useBackClose(onClose, onScreen);
 
     useEffect(() => {
         // Hidden with Notes in the desktop app: not our key (portalTarget.ts).

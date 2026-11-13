@@ -4,6 +4,7 @@ import { getCachedPublicKey } from '../api/dms';
 import { getVerificationState, markVerified, clearVerified, identityPinConflicts, type VerificationState } from '../api/keyVerification';
 import { ShieldCheckIcon, CheckIcon, CloseIcon, WarningIcon } from './Icons';
 import './SafetyNumberModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface SafetyNumberModalProps {
     userId: number;
@@ -17,6 +18,7 @@ interface SafetyNumberModalProps {
  * prove no server-in-the-middle swapped either identity key.
  */
 export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberModalProps) {
+    useBackClose(onClose);
     const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
     const [theirKey, setTheirKey] = useState<string | null>(null);
     const [state, setState] = useState<VerificationState>('unverified');
