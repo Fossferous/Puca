@@ -12,9 +12,8 @@ production hosts, which is the gate `dual-ship.sh` enforces before it will
 deploy a backend. The `sovereign` checkout still exists and is still private;
 treat it as the archive it is becoming, not as somewhere to make changes.
 
-**This repository is PUBLISHED** to `github.com/Fossferous/Puca` (still private
-while it is reviewed, public after). Assume anything committed from now on is
-read by strangers.
+**This repository is PUBLISHED** to `github.com/Fossferous/Puca`, and the repository is
+PUBLIC. Anything committed and pushed is read by strangers.
 
 **PUSHING — read this before you type a git push.** This worktree shares one
 object store with the private Sovereign history: `main`, several work/archive
