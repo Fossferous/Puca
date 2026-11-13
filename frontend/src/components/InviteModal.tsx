@@ -9,6 +9,7 @@ import { statusOf } from '../api/client';
 import { CheckIcon, CloseIcon, TrashIcon } from './Icons';
 import './InviteModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface InviteModalProps {
     isOpen: boolean;
@@ -18,6 +19,7 @@ interface InviteModalProps {
 }
 
 export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteModalProps) {
+    useBackClose(onClose, isOpen);
     const [invites, setInvites] = useState<Invite[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isCreating, setIsCreating] = useState(false);

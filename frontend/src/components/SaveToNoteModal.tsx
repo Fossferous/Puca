@@ -51,6 +51,7 @@ import { isDefiniteRefusal } from '../api/client';
 import { newOpKey } from '../api/opKey';
 import { CloseIcon } from './Icons';
 import './SaveToNoteModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface SaveToNoteModalProps {
     /** Decrypted content of the message being kept. */
@@ -89,6 +90,7 @@ async function appendToNoteText(listId: number, current: string, rev: number | u
 }
 
 export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalProps) {
+    useBackClose(onClose);
     const [filter, setFilter] = useState('');
     const [lists, setLists] = useState<TaskList[] | null>(null);
     const [attachmentsSupported, setAttachmentsSupported] = useState(false);

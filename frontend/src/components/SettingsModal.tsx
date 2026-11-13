@@ -27,7 +27,7 @@ import { markKeySpentByCapture, setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
-import { isTouchDevice, screenShareOffered, settingsSections, toggleSettingFromRow } from './settingsModal.utils';
+import { isTouchDevice, pointInSelection, screenShareOffered, settingsSections, toggleSettingFromRow } from './settingsModal.utils';
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { isIosDevice } from './shareAvailability';
 
@@ -76,6 +76,7 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 import WebPushSetting from './WebPushSetting';
 import { askConfirm, tellUser } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 /** An iPhone or iPad, an iPad asking for desktop sites included. */
 const iosHere = () => typeof navigator !== 'undefined' && isIosDevice(navigator.userAgent, navigator.maxTouchPoints);
@@ -640,6 +641,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             })
             .finally(() => setUnblocking(null));
     };
+
+    useBackClose(onClose, isOpen);
+    /** The last press in the body went down on words already selected (toggleSettingFromRow). */
+    const pressInSelection = useRef(false);
 
     // The header renders an "ESC" hint — make Escape actually close the modal.
     useEffect(() => {
@@ -1377,7 +1382,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                     {/* A press on a setting's words toggles its checkbox: the
                         labels name no control, so the 20px box alone answered
                         (settingsModal.utils' toggleSettingFromRow). */}
-                    <div className="settings-body" onClick={(e) => { toggleSettingFromRow(e.target); }}>
+                    <div
+                        className="settings-body"
+                        onMouseDown={(e) => { pressInSelection.current = pointInSelection(document, e.clientX, e.clientY); }}
+                        onClick={(e) => { toggleSettingFromRow(e.target, { pressInSelection: pressInSelection.current && e.detail === 1 }); }}
+                    >
                         {/* My Account */}
                         {activeSection === 'account' && (
                             <div className="settings-section">

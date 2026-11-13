@@ -23,7 +23,7 @@
 }
 
 .presence-dot.is-offline {
-    background: var(--text-faint);
+    background: var(--faint-fill, var(--text-faint));
 }
 
 /* Away: the dot becomes a "zz" badge in the idle colour. The disc behind it

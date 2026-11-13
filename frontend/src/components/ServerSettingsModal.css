@@ -300,7 +300,7 @@
    green and grey are too pale on its pale pages, and High Contrast lifts --text-faint so
    far on a dark theme that the white knob vanishes into it. */
 .toggle-row {
-    --switch-off: var(--text-faint);
+    --switch-off: var(--faint-fill, var(--text-faint));
     --switch-on: var(--color-success);
 }
 

@@ -24,6 +24,7 @@ import {
 } from '../api/drawing';
 import './DrawingCanvas.css';
 import { askConfirm } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 const COLOR_NAMES: Record<string, string> = {
     '#202124': 'Black', '#d93025': 'Red', '#1a73e8': 'Blue', '#188038': 'Green', '#f29900': 'Orange', '#9334e6': 'Purple',
@@ -67,6 +68,7 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
         if (dirty && !await askConfirm('Discard the changes to this drawing?')) return;
         onCancel();
     }, [dirty, onCancel]);
+    useBackClose(() => { void cancel(); });
 
     useEffect(() => {
         // Hidden with Notes in the desktop app: not our key (portalTarget.ts)

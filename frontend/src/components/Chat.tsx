@@ -226,6 +226,7 @@ import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 import { useUnsentWork } from '../api/workInFlight';
 import { askConfirm, askText, leaveNotice, tellUser } from '../api/appDialogs';
+import { useBackClose } from '../hooks/useBackClose';
 
 /** A file that may be a HEIC (its type or name says so, or it has no type:
  *  what Windows gives a .heic); its first bytes decide (api/heif.ts). */
@@ -520,6 +521,7 @@ function MessageToolbar({ messageId, onQuote, onForward, onReply, onEdit, onPin,
     // Quote/Forward only need the content, so they stay live.
     const isLocal = messageId.startsWith('local_');
     const [showPicker, setShowPicker] = useState(false);
+    useBackClose(() => setShowPicker(false), showPicker);
     const triggerRef = useRef<HTMLButtonElement>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
     // Viewport-fixed picker position; null until measured.
@@ -1201,6 +1203,12 @@ export function Chat({ onLogout }: ChatProps) {
 
     // Context menu for text formatting
     const [formatMenu, setFormatMenu] = useState<{ x: number; y: number } | null>(null);
+    // Android's BACK closes what is open here first (hooks/useBackClose.ts).
+    useBackClose(() => setShowCreateModal(false), showCreateModal);
+    useBackClose(() => setNickEditServer(null), nickEditServer !== null);
+    // Pins are drawn only in a channel's header: a DM or the Friends page keeps showPins set.
+    useBackClose(() => setShowPins(false), showPins && !currentDM && currentChannel !== null);
+    useBackClose(() => setFormatMenu(null), formatMenu !== null);
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
 
     // Friends panel
@@ -5162,7 +5170,7 @@ export function Chat({ onLogout }: ChatProps) {
         <div className="search-bar">
             <input
                 type="text"
-                placeholder="Search this conversation..."
+                placeholder={isMobile ? 'Search' : 'Search this conversation...'}
                 value={searchQuery}
                 onChange={(e) => handleSearch(e.target.value)}
             />

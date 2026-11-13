@@ -1252,6 +1252,7 @@
 .voice-e2ee.partial { color: #ffe0a3; background: rgba(191, 149, 60, 0.18); }
 .voice-e2ee.off { color: #ffc4c4; background: rgba(191, 60, 60, 0.15); }
 .voice-e2ee { display: inline-flex; align-items: center; gap: 5px; }
+.voice-e2ee-lock { display: none; }
 .voice-e2ee:focus-visible { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35); }
 
 /* (i) affordance — a hint that the badge explains itself on hover/focus. */
@@ -1374,6 +1375,35 @@
        that gets crushed on a 320px screen. */
     .voice-panel-compact.vp-collapsed .voice-e2ee {
         flex-shrink: 0;
+    }
+
+    /* In the one-row bar the badge is its lock alone, in the badge's colour:
+       closed when every stream is encrypted, open when some or none are. Its
+       words ("Encrypted", 85 px with the (i)) squeezed the channel name to
+       "Lo…" at 390 px and to nothing at 360. A tap still opens the details,
+       the badge's name is unchanged for a screen reader, and the expanded
+       panel shows the words. */
+    .voice-panel-compact.vp-collapsed .voice-e2ee {
+        padding: 3px 6px;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-e2ee-lock {
+        display: inline-flex;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-e2ee-label,
+    .voice-panel-compact.vp-collapsed .e2ee-info {
+        display: none;
+    }
+
+    /* Under 380 px the green signal icon goes too (the badge's lock, in the
+       same green, says the call is up): its 27 px are the name's, which was
+       three letters at 360. No floor on the name: one that cannot fit pushes
+       the badge under Mute (it did, by 13 px at 360). */
+    @media (max-width: 379px) {
+        .voice-panel-compact.vp-collapsed .voice-connected-icon {
+            display: none;
+        }
     }
 
     .voice-panel-compact.vp-collapsed .voice-controls-compact {

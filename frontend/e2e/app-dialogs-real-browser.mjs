@@ -670,9 +670,9 @@ async function holdsUntilAnswered(page, site) {
             text('sheet\'s button', q('.notes-dialog-body .notes-textbtn:not(.primary)'), 4.5),
             text('sheet\'s Close', q('.notes-dialog-head .notes-iconbtn'), 3),
             // The app-wide tokens as text, on any surface of any theme: their own figures as
-            // a floor, none of which this surface can do anything about. --text-faint is
-            // 3.4 to 4:1, --brand-primary 4.15 to 4.3:1, and --color-danger over its own
-            // tint 4.45:1 on the yellow theme.
+            // a floor, none of which this surface can do anything about. --text-faint was
+            // 3.4 to 4:1 (4.5:1 or more since 2026-11-12, theme.css), --brand-primary 4.15
+            // to 4.3:1, and --color-danger over its own tint 4.45:1 on the yellow theme.
             text('sheet\'s hint', q('.notes-dialog-body .notes-labels-hint'), 3),
             text('sheet\'s main button', q('.notes-dialog-body .notes-textbtn.primary'), 4),
             text('sheet\'s error', q('.notes-send-error'), 4.4),

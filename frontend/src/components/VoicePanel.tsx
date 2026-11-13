@@ -88,6 +88,8 @@ import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { isTouchDevice } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
+import { useBackClose } from '../hooks/useBackClose';
+import { LockIcon, LockOpenIcon } from './Icons';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
 import { getClipProposalState } from '../api/clips/clipProposals';
@@ -347,6 +349,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // keyboard up left no room for messages at all (the "everything stacked
     // on top of each other while typing" report).
     const [controlsExpanded, setControlsExpanded] = useState(false);
+    // The phone's call bar opened to all its controls: Back folds it first.
+    useBackClose(() => setControlsExpanded(false), controlsExpanded && isPhonePanel && isInVoice);
     const panelRef = useRef<HTMLDivElement>(null);
 
     // Mobile: publish the panel's REAL height so mobile.css can reserve
@@ -3433,6 +3437,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const e2eeBadgeRef = useRef<HTMLSpanElement>(null);
     const e2eeTipRef = useRef<HTMLSpanElement>(null);
     const [e2eeTipOpen, setE2eeTipOpen] = useState(false);
+    useBackClose(() => setE2eeTipOpen(false), e2eeTipOpen);
     const [e2eeTipPos, setE2eeTipPos] = useState<{ top: number; left: number } | null>(null);
     const positionE2eeTip = useCallback(() => {
         const b = e2eeBadgeRef.current?.getBoundingClientRect();
@@ -3969,6 +3974,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     onFocus={() => setE2eeTipOpen(true)}
                                     onBlur={() => setE2eeTipOpen(false)}
                                 >
+                                    {/* The phone's one-row bar shows this alone (VoicePanel.css). */}
+                                    <span className="voice-e2ee-lock" aria-hidden="true">{e2eeBadge.cls === 'on' ? <LockIcon size={14} /> : <LockOpenIcon size={14} />}</span>
                                     <span className="voice-e2ee-label">{e2eeBadge.label}</span>
                                     <span className="e2ee-info" aria-hidden="true"><InfoIcon /></span>
                                 </span>

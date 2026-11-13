@@ -929,6 +929,28 @@
     padding: var(--message-pad) 0;
 }
 
+/* Android: a long press on a message, a member or a channel is Púca's menu
+   (the browser fires contextmenu for it), and the same press also selected
+   the word under the finger, with handles and Android's Copy bar under the
+   menu. Those rows take no selection there; the menu's Copy Text copies a
+   message. The message box and an edit field stay selectable (a text field
+   keeps its own selection). An iPhone is not marked: it has no long-press
+   menu, and selection is how it copies (components/longPressMenu.ts). */
+@media (pointer: coarse) {
+    [data-long-press-menu] .message,
+    [data-long-press-menu] .member-item,
+    [data-long-press-menu] .channel {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+
+    /* A field inside one, editing a message: Chromium inherits user-select. */
+    [data-long-press-menu] .message :is(input, textarea, [contenteditable="true"]) {
+        -webkit-user-select: text;
+        user-select: text;
+    }
+}
+
 /* Hover stretches the row's background to the list's edges: HORIZONTAL only.
    A hover that also set vertical padding overrode the grouped rows' (compact
    mode did, moving every row below the pointer by ~3px on each hover). */
@@ -1617,8 +1639,12 @@ button.message-attachment.error { color: #ffb4b4; }
     background: none; border: none; cursor: pointer;
     font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
 }
-.pins-toggle-btn:hover,
-.checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+/* Only where something can hover: a tap on a touch screen left the grey box
+   on the button until the next tap elsewhere (a sticky :hover). */
+@media (hover: hover) {
+    .pins-toggle-btn:hover,
+    .checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+}
 .pins-panel {
     /* Anchored LEFT so the panel grows INTO the chat column. The pins button
        sits near the left of the header, and .chat-main clips at overflow:
@@ -2129,7 +2155,10 @@ button.message-attachment.error { color: #ffb4b4; }
     background: var(--bg-quaternary);
 }
 
-.member-item.offline {
+/* Offline members read as dimmed by their name's colour (--text-faint,
+   below) and a faded avatar. The whole row at half opacity took the name to
+   1.8:1. */
+.member-item.offline .member-avatar {
     opacity: 0.5;
 }
 
@@ -3275,13 +3304,29 @@ body.voice-drag-active {
         min-height: 30px;
     }
 
-    .search-bar input {
-        width: 120px;
-        max-width: 30vw;
-        font-size: 16px;
+    /* The channel's name keeps its room in the header. At 360 px it was cut
+       to six letters ("announ…") behind a 120 px search box whose own words
+       were cut ("Search this c"); the box says "Search" on a phone now and
+       is that wide, and widens over the header when it takes the focus. The
+       name ellipsises, and never below four letters' room. Scoped to the
+       header: Friends' search boxes are .search-bar too, and took 88 px. */
+    .chat-header {
+        padding-left: 12px;
+        padding-right: 12px;
     }
 
-    .search-bar input:focus {
+    .chat-header h2 {
+        min-width: 4em;
+    }
+
+    .chat-header .search-bar input {
+        width: 88px;
+        max-width: 30vw;
+        font-size: 16px;
+        text-overflow: ellipsis;
+    }
+
+    .chat-header .search-bar input:focus {
         position: absolute;
         right: 0;
         width: calc(100vw - 24px);

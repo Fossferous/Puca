@@ -14,6 +14,7 @@ import { changeLiveShareQuality, liveShareQuality, shareCaptureSize, type LiveQu
 import { loadSettings, saveSettings } from './settingsStore';
 import { CloseIcon, InfoIcon } from './Icons';
 import './ScreenShareModal.css';
+import { useBackClose } from '../hooks/useBackClose';
 
 interface Props {
     isOpen: boolean;
@@ -46,6 +47,7 @@ function currentText(): string | null {
 }
 
 export function LiveShareQualityModal({ isOpen, onClose }: Props) {
+    useBackClose(onClose, isOpen);
     const [{ resolution, fps }, setQuality] = useState(() => liveShareQuality(rememberedQuality(loadSettings())));
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState<string | null>(null);

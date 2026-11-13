@@ -6,6 +6,7 @@ import { ACTIVITY_BLURB, ACTIVITY_KINDS, playingLabel } from '../../api/games/ac
 import { CloseIcon, RocketIcon } from '../Icons';
 import { ActivityArt } from './ActivityArt';
 import './Activities.css';
+import { useBackClose } from '../../hooks/useBackClose';
 
 interface ActivityPickerProps {
     /** A bottom sheet on a phone, a centred panel on a desktop. */
@@ -36,6 +37,7 @@ interface ActivityPickerProps {
  */
 export function ActivityPicker({ isPhone, channelName, running, canJoin, seated, onStart, onJoin, onWatch, onClose }: ActivityPickerProps) {
     const dialogRef = useRef<HTMLDivElement>(null);
+    useBackClose(onClose);
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
         document.addEventListener('keydown', onKey);

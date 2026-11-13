@@ -67,6 +67,14 @@ installIosStandalone()
 // (phoneLandscape.css, the stream takeover).
 import { installPhoneSideways } from './api/phoneSideways'
 installPhoneSideways()
+// <html data-long-press-menu>: on Android a long press is Púca's menu, so
+// messages, members and channels take no text selection there (Chat.css).
+import { markLongPressMenu } from './components/longPressMenu'
+markLongPressMenu(document.documentElement, navigator.userAgent)
+// <html data-keyboard-up>: the phone's bottom bar steps aside while the soft
+// keyboard is up for a text field (mobile.css).
+import { installKeyboardUp } from './api/keyboardUp'
+installKeyboardUp()
 
 // The download page's "Install Púca as an app" opens the web app with ?install=1 and
 // the browser's install event can fire before React mounts: wire both now

@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import './NotesDialog.css';
 import { CloseIcon } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 
 /**
  * The dialogs listening for Escape, by the order they opened. Stacked — the
@@ -67,6 +68,9 @@ export function NotesDialog({ title, onClose, children, escapeBlocked = false, b
     // and re-joining then would lift an older dialog over a newer one.
     const order = useRef(0);
     useEffect(() => { order.current = ++opened; }, []);
+    // Back is Escape's twin: a busy dialog, or one whose Escape belongs to a
+    // row inside it, stays open.
+    useBackClose(() => { if (!busy && !escapeBlocked) onClose(); }, onScreen);
     useEffect(() => {
         // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
         if (!onScreen) return;
