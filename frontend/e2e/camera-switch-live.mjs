@@ -328,7 +328,13 @@ async function encrypted(V, P, uidP, tag) {
     }
 }
 
-/** What LiveKit says the phone publishes (SFU=1 with LK_*), by source. */
+/**
+ * What LiveKit says each user publishes as a camera (SFU=1 with LK_*), keyed by USER id. LiveKit
+ * knows a caller by the identity the server minted, `u<id>#<nonce>` (src/sfu.rs,
+ * user_id_from_identity), one per connection; keyed by that identity the phone's user id never
+ * matched, and the swap check below was skipped on every run until an empty listing was made a
+ * FAIL (the 0.9.862 release walk).
+ */
 async function lkTracks(room) {
     if (!LK.api || !LK.key || !LK.secret) return null;
     const { createHmac } = await import('node:crypto');
@@ -340,7 +346,14 @@ async function lkTracks(room) {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` }, body: JSON.stringify({ room }),
     });
     if (!r.ok) return { error: r.status };
-    return Object.fromEntries(((await r.json()).participants || []).map(x => [x.identity, (x.tracks || []).filter(t => t.source === 'CAMERA' || t.source === 1).map(t => t.sid)]));
+    const byUser = {};
+    for (const x of (await r.json()).participants || []) {
+        const user = /^u(\d+)#/.exec(x.identity || '')?.[1];
+        if (!user) continue;
+        const cams = (x.tracks || []).filter(t => t.source === 'CAMERA' || t.source === 1).map(t => t.sid);
+        byUser[user] = [...(byUser[user] || []), ...cams];
+    }
+    return byUser;
 }
 
 /**
