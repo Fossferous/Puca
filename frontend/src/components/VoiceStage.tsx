@@ -16,6 +16,8 @@ import { ActivityTile, type ActivityTileProps } from './games/ActivityTile';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
 import { CameraVideo } from './CameraVideo';
+import { useLocalCamera } from './useLocalCamera';
+import { selfViewMirrored } from '../api/rtc/cameraChoice';
 
 interface VoiceStageProps {
     roomId: string;
@@ -63,6 +65,8 @@ export function VoiceStage({
     // their change events. Speaking now emits on every flip (voiceState.ts);
     // the slow poll stays only as a safety net for the other maps.
     const [, force] = useState(0);
+    // Your own camera is mirrored only while it faces you (cameraChoice).
+    const ownCamera = useLocalCamera();
     useEffect(() => {
         const bump = () => force(n => n + 1);
         const unsubVoice = subscribeToVoiceUsers(bump);
@@ -132,7 +136,7 @@ export function VoiceStage({
                                 {camStream ? (
                                     <CameraVideo
                                         stream={camStream}
-                                        mirrored={user.id === currentUserId}
+                                        mirrored={user.id === currentUserId && selfViewMirrored(ownCamera.facing)}
                                     />
                                 ) : (
                                     <div className={`vs-avatar ${speaking ? 'speaking' : ''}`}>

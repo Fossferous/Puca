@@ -21,6 +21,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { CameraVideo } from './CameraVideo';
+import { useLocalCamera } from './useLocalCamera';
+import { selfViewMirrored } from '../api/rtc/cameraChoice';
 import { FullscreenExitIcon, FullscreenIcon } from './Icons';
 import { enterMediaFullscreen, useAppMediaFullscreen } from './mediaFullscreen';
 import {
@@ -45,6 +47,8 @@ export function CameraRail({ currentUserId }: { currentUserId: number }) {
     // is deliberate for the same reason it is there: not every camera flip
     // emits.
     const [, force] = useState(0);
+    // Your own camera is mirrored only while it faces you (cameraChoice).
+    const ownCamera = useLocalCamera();
     useEffect(() => {
         const bump = () => force(n => n + 1);
         const unsubVoice = subscribeToVoiceUsers(bump);
@@ -112,7 +116,7 @@ export function CameraRail({ currentUserId }: { currentUserId: number }) {
                 const isMe = userId === currentUserId;
                 return (
                     <div className={`camera-rail-tile${appFullscreen === userId ? ' is-app-fullscreen' : ''}`} key={userId}>
-                        <CameraVideo stream={stream} mirrored={isMe} className="camera-rail-video" />
+                        <CameraVideo stream={stream} mirrored={isMe && selfViewMirrored(ownCamera.facing)} className="camera-rail-video" />
                         <button
                             className="camera-rail-fullscreen"
                             title={appFullscreen === userId ? 'Exit fullscreen' : `Fullscreen ${isMe ? 'your' : `${name}'s`} camera`}

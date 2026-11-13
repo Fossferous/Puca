@@ -34,6 +34,7 @@ Setup, done once by people rather than by the automation:
 |---|---|
 | `settings-join-without-mic` | **Settings → Voice & Video → Join voice without a microphone** |
 | `settings-auto-open-streams` | **Settings → Voice & Video → Open streams automatically** (`off`, `stream-only`, `all`) |
+| `settings-camera` | **Settings → Voice & Video → Camera**: `default`, or a camera's device id (its options); the camera a call opens |
 | `create-stream-only-role` | **+ Stream Only Role** in **Server Settings → Roles** |
 | `role-automated-streaming` | The role editor's **Automated Streaming** section |
 | `role-stream-only` | Its **Stream only** checkbox |

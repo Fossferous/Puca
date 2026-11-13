@@ -365,7 +365,8 @@ The voice panel's buttons, by tooltip:
 | **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **You joined without a microphone — nobody can hear you** when you joined without one on purpose, **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode. Mute now to stay muted when it comes back** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there. With no microphone the button, and your **Toggle Mute** key, still work (except while you are deafened, in an AFK channel, or without the Speak permission): they decide whether you come back muted when a microphone returns, and the button then reads **No microphone detected — you stay muted when it comes back. Click to unmute**; deafened, it reads **No microphone detected — you are deafened, so you stay muted when it comes back**. If you were muted or deafened when your microphone dropped out, you come back muted |
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
-| **Turn On Camera** / **Turn Off Camera** | Share your webcam |
+| **Turn On Camera** / **Turn Off Camera** | Share your camera. It opens the camera you used last on this device (see [Cameras: front, rear and the camera menu](#cameras-front-rear-and-the-camera-menu)) |
+| **Choose a camera** | The arrow beside the camera button, while it is on and there is more than one camera: the camera menu |
 | **Share Screen** / **Stop Sharing** | See [Screen Sharing](#screen-sharing) |
 | **Disconnect** | Leave voice |
 
@@ -378,6 +379,40 @@ are in the call, your microphone is closed at once and the status line
 changes. If it is given back, the panel says
 **You can speak in this channel now. Leave and rejoin it to use your microphone.**
 The microphone is not reopened mid-call; disconnect and join the channel again.
+
+### Cameras: front, rear and the camera menu
+With your camera on, your own picture sits in a small window you can drag
+anywhere.
+
+- **Flip**, the round button in the corner of your picture, switches between
+  the front and the rear camera: from the front camera to the phone's main rear
+  camera, and back. On a computer with more than one webcam it goes on to the
+  next one. It is shown only when there is another camera to go to.
+- **Tap your picture** (or click it), or use the arrow beside the camera button,
+  for the camera menu: every camera the device has, by its name, the one in use
+  ticked, then **Switch to the rear camera** (or the front), **Full screen** and
+  **Turn off camera**. An iPhone lists each of its rear lenses (**Back Camera**,
+  **Back Ultra Wide Camera**, **Back Telephoto Camera** and so on); an Android
+  phone lists the cameras its maker lets apps use, which on many phones is one
+  front and one rear camera. A webcam's name is shown without the numbers some
+  add in brackets.
+- **Full screen** shows your picture across the screen with **Flip Camera**,
+  **Cameras**, **Exit Fullscreen** and **Turn Off Camera**.
+- Your picture is shown as a mirror would show you only while the camera faces
+  you. A rear camera is shown as it is, so writing it films reads the right way
+  round. A webcam that does not say which way it faces is taken to face you.
+  Everyone else sees your camera as it is, whichever camera it is.
+- The camera you switch to is kept on that device: the next time you turn your
+  camera on, in any call, it is that one. **Settings → Voice & Video → Camera**
+  chooses it before a call; **Default** is the front camera on a phone. A
+  camera that is not there any more (a webcam unplugged) gives way to the
+  default one.
+- If the camera you pick cannot be opened (another app holds it), you stay on
+  the one you had and the panel says so.
+
+The other camera goes out on the same connection as the first, so it is
+end-to-end encrypted exactly as the first was, in an ordinary call and in an
+SFU channel alike; nobody else in the call has to do anything.
 
 ### Mute vs Deafen
 - **Mute**: others cannot hear you; you still hear them

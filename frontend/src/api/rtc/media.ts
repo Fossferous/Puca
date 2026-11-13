@@ -1,9 +1,22 @@
 import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNoiseSuppressionMode, cleanupNoiseFilter, selectedInputDeviceId, type NoiseSuppressionMode } from '../noiseFilter';
-import { inputGain } from '../../components/settingsStore';
+import { inputGain, rememberCamera, rememberedCamera } from '../../components/settingsStore';
+import {
+    cameraConstraints, facingOfSettings, flipTarget, isCameraUnavailable, listCameras, rememberedRequests,
+    setLocalCameraState, type CameraRequest, type Facing,
+} from './cameraChoice';
 import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
 import { SpeakingDecision, VAD_TICK_MS, vadWindowSize } from './speakingDecision';
 import { getDisplayMediaForShare, getUserMediaForMic } from '../embedHost';
 import { getNativeDisplayMedia, nativeScreenShareAvailable } from '../nativeScreenShare';
+
+/**
+ * What a camera switch did (MediaManager.switchCamera). `track` is the camera
+ * on NOW: the new one, or the one that was on before when the new one would
+ * not open (put back), or null when none could be (the camera is off).
+ */
+export type CameraSwitch =
+    | { ok: true; track: MediaStreamTrack }
+    | { ok: false; reason: 'no-camera' | 'only-one' | 'unavailable' | 'denied'; track: MediaStreamTrack | null };
 
 /** Errors that mean "the requested mic device can't be opened" — the cases
  *  where retrying on the OS default is the right degradation. Matched by NAME,
@@ -99,6 +112,14 @@ export class MediaManager {
      *  range fires `ended`/`mute` HERE while the published track keeps emitting
      *  silence forever. */
     private rawMicTrack: MediaStreamTrack | null = null;
+    /** Bumped whenever the camera is turned off or the call ends: a camera
+     *  switch still opening its new camera then puts nothing on. */
+    private cameraEpoch = 0;
+    /** The switch in progress (a second press waits for it, it does not start
+     *  a second one: two cameras opening at once is what a phone refuses). */
+    private switching: Promise<CameraSwitch> | null = null;
+    /** Answers the switch in progress at once, as "no camera" (dropSwitch). */
+    private abandonSwitch: (() => void) | null = null;
 
     /**
      * Get the current local stream
@@ -427,6 +448,11 @@ export class MediaManager {
             this.localStream.getTracks().forEach(track => track.stop());
             this.localStream = null;
         }
+        this.cameraEpoch++;
+        // A switch still opening belongs to the call that ended (it puts
+        // nothing on: cameraEpoch); the next call's first press is its own.
+        this.dropSwitch();
+        setLocalCameraState({ deviceId: null, trackId: null, facing: null });
         // Deliberate teardown: any late ended/mute from the old capture is
         // stale, not a device loss.
         this.rawMicTrack = null;
@@ -593,76 +619,244 @@ export class MediaManager {
         const videoTracks = this.localStream.getVideoTracks();
 
         if (enable && videoTracks.length === 0) {
-            // Need to add video track
+            // Need to add video track: the camera last chosen (the camera
+            // menu, Flip or Settings), else the default one (the front camera
+            // on a phone).
             try {
-                const videoStream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } }
-                });
-                const videoTrack = videoStream.getVideoTracks()[0];
+                const epoch = this.cameraEpoch;
+                const requests = rememberedRequests(await listCameras(), rememberedCamera());
+                let videoTrack: MediaStreamTrack | null = null;
+                for (const request of requests) {
+                    try {
+                        videoTrack = await this.openCamera(request);
+                        break;
+                    } catch (err) {
+                        // Not there any more (unplugged, or an id from before the
+                        // site's data was cleared): the next way to find it, and
+                        // then the default camera.
+                        if (!isCameraUnavailable(err)) throw err;
+                        console.warn('[WebRTC] The chosen camera could not be opened this way:', JSON.stringify(request), err);
+                    }
+                }
+                videoTrack ??= await this.openCamera(null);
                 // The stream can vanish DURING the getUserMedia await (leave /
                 // channel switch runs stopLocalStream). Stop the just-acquired
                 // track instead of orphaning it — an orphan keeps the camera
                 // LED lit with no reference anywhere until app restart.
-                if (!this.localStream) {
+                if (!this.localStream || this.cameraEpoch !== epoch) {
                     videoTrack.stop();
                     return null;
                 }
                 this.localStream.addTrack(videoTrack);
+                void this.noteCamera(videoTrack);
                 return videoTrack;
             } catch (err) {
                 console.error('Failed to enable video:', err);
                 return null;
             }
-        } else if (!enable && videoTracks.length > 0) {
-            // Remove video track
+        } else if (!enable) {
+            // Remove video track. Also with none in the stream: a camera
+            // switch in progress has taken the old one out, and must not put
+            // its new one on (cameraEpoch).
             videoTracks.forEach(track => {
                 track.stop();
                 this.localStream?.removeTrack(track);
             });
+            this.cameraEpoch++;
+            // A switch still opening puts nothing on now (cameraEpoch); the
+            // camera turned on again is not to wait on it, nor to be held as
+            // "a switch under way" by the encryption hold's sweep.
+            this.dropSwitch();
+            setLocalCameraState({ deviceId: null, trackId: null, facing: null });
             return null;
         }
 
         return null;
     }
 
-    /**
-     * Switch between front and back camera (mobile)
-     * Returns the new video track if successful
-     */
-    async switchCamera(currentFacingMode: 'user' | 'environment'): Promise<MediaStreamTrack | null> {
-        if (!this.localStream) return null;
+    /** Open one camera: exactly the one asked for (cameraChoice.cameraConstraints). */
+    private async openCamera(request: CameraRequest | null): Promise<MediaStreamTrack> {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(request) });
+        const track = stream.getVideoTracks()[0];
+        stream.getAudioTracks().forEach(t => t.stop());
+        if (!track) throw Object.assign(new Error('the camera gave no picture'), { name: 'NotFoundError' });
+        return track;
+    }
 
-        const videoTracks = this.localStream.getVideoTracks();
-        if (videoTracks.length === 0) return null;
-
-        // Stop current video track
-        videoTracks.forEach(track => {
-            track.stop();
-            this.localStream?.removeTrack(track);
-        });
-
-        // Get new video with opposite facing mode
-        const newFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
-
-        try {
-            const newVideoStream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    width: { ideal: 1280, max: 1920 },
-                    height: { ideal: 720, max: 1080 },
-                    frameRate: { ideal: 30, max: 30 },
-                    facingMode: newFacingMode,
-                }
-            });
-
-            const newVideoTrack = newVideoStream.getVideoTracks()[0];
-            this.localStream.addTrack(newVideoTrack);
-
-            console.log('[WebRTC] Camera switched to:', newFacingMode);
-            return newVideoTrack;
-        } catch (error) {
-            console.error('[WebRTC] Failed to switch camera:', error);
-            return null;
+    /** Tell the controls and the self-view which camera is on (cameraChoice's
+     *  store): its own word on the way it faces at once, so the self-view is
+     *  never drawn the wrong way round, then the full list of cameras. */
+    private async noteCamera(track: MediaStreamTrack | null): Promise<void> {
+        if (!track) {
+            setLocalCameraState({ deviceId: null, trackId: null, facing: null });
+            return;
         }
+        const settings = track.getSettings?.() ?? {};
+        const deviceId = settings.deviceId ?? null;
+        const said = facingOfSettings(settings);
+        setLocalCameraState({ deviceId, trackId: track.id, facing: said });
+        const cameras = await listCameras();
+        if (this.localStream?.getVideoTracks()[0] !== track) return; // switched again meanwhile
+        const listed = cameras.find(c => c.deviceId === deviceId);
+        setLocalCameraState({ deviceId, trackId: track.id, facing: said ?? listed?.facing ?? null, cameras });
+    }
+
+    /** The open camera's track, its id and the way it faces, as the track says. */
+    private openCameraNow(): { track: MediaStreamTrack; deviceId: string | null; facing: Facing } | null {
+        const track = this.localStream?.getVideoTracks()[0];
+        if (!track) return null;
+        const settings = track.getSettings?.() ?? {};
+        return { track, deviceId: settings.deviceId ?? null, facing: facingOfSettings(settings) };
+    }
+
+    /**
+     * Flip: from a front camera to the main rear one, from a rear one to the
+     * front, and on a machine whose cameras face no known way, to the next
+     * camera (cameraChoice.flipTarget). It used to ask for the FRONT camera
+     * every time — VoicePanel passed a constant "current facing mode" of
+     * 'environment', so the opposite was always 'user' — which reopened the
+     * selfie camera and looked like nothing more than a mirror.
+     */
+    async flipCamera(): Promise<CameraSwitch> {
+        if (this.switching) return this.switching;
+        const now = this.openCameraNow();
+        if (!now) return { ok: false, reason: 'no-camera', track: null };
+        const target = flipTarget(await listCameras(), { deviceId: now.deviceId, facing: now.facing });
+        if (!target) return { ok: false, reason: 'only-one', track: now.track };
+        return this.switchCamera(target);
+    }
+
+    /** Whether a camera switch is under way (its old camera already stopped). */
+    cameraSwitchInProgress(): boolean {
+        return this.switching !== null;
+    }
+
+    /**
+     * The camera turned off, or the call ended: the switch in progress is
+     * answered now, as "no camera", not when its camera opens (up to
+     * SWITCH_OPEN_TIMEOUT_MS later). Everything waiting on that answer
+     * waits no longer: the call manager's count of switches under way, and
+     * with it the encryption hold's sweep (whose stand-in of the old camera
+     * keeps that camera open), and the panel, which takes no press while a
+     * switch is under way. The open itself goes on; whatever it opens is
+     * stopped when it lands (doSwitchCamera's stale check).
+     */
+    private dropSwitch(): void {
+        const abandon = this.abandonSwitch;
+        this.switching = null;
+        this.abandonSwitch = null;
+        abandon?.();
+    }
+
+    /** How long a switch waits for a camera to open. A getUserMedia that never
+     *  settles (a permission doorhanger dismissed rather than answered, a
+     *  driver that hangs) kept the switch, and every press after it, waiting
+     *  for the rest of the session, with the old camera already stopped. */
+    static readonly SWITCH_OPEN_TIMEOUT_MS = 20_000;
+
+    /** openCamera, given up after SWITCH_OPEN_TIMEOUT_MS; a camera that opens
+     *  after that is stopped at once (its light would stay on). */
+    private openCameraInTime(request: CameraRequest | null): Promise<MediaStreamTrack> {
+        let late = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const opening = this.openCamera(request);
+        opening.then(t => { if (late) t.stop(); }, () => { /* the switch has its answer */ });
+        const limit = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+                late = true;
+                reject(Object.assign(new Error('the camera did not open in time'), { name: 'TimeoutError' }));
+            }, MediaManager.SWITCH_OPEN_TIMEOUT_MS);
+        });
+        return Promise.race([opening, limit]).finally(() => clearTimeout(timer));
+    }
+
+    /**
+     * Put another camera on: exactly the one asked for. The camera in use is
+     * stopped FIRST, because a phone cannot have two open (Android refuses the
+     * second with NotReadableError; iOS ends the first) — so when the new one
+     * will not open, the one that was on is opened again and the switch says
+     * it failed, rather than leaving the call with no camera. A second press
+     * while one is under way waits for it. A camera that opens is remembered
+     * for the next call (Settings' `camera`). Turned off meanwhile, it is
+     * answered at once (dropSwitch).
+     */
+    async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
+        if (this.switching) return this.switching;
+        let abandon!: () => void;
+        const abandoned = new Promise<CameraSwitch>(resolve => {
+            abandon = () => resolve({ ok: false, reason: 'no-camera', track: null });
+        });
+        const switching: Promise<CameraSwitch> = Promise.race([this.doSwitchCamera(request), abandoned]).finally(() => {
+            // Not a switch started after this one (the call ended meanwhile).
+            if (this.switching === switching) {
+                this.switching = null;
+                this.abandonSwitch = null;
+            }
+        });
+        this.switching = switching;
+        this.abandonSwitch = abandon;
+        return switching;
+    }
+
+    private async doSwitchCamera(request: CameraRequest): Promise<CameraSwitch> {
+        const stream = this.localStream;
+        const now = this.openCameraNow();
+        if (!stream || !now) return { ok: false, reason: 'no-camera', track: null };
+        if ('deviceId' in request && request.deviceId === now.deviceId && now.track.readyState === 'live') {
+            return { ok: true, track: now.track }; // already on
+        }
+        const epoch = this.cameraEpoch;
+        stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
+        const stale = () => this.localStream !== stream || this.cameraEpoch !== epoch;
+
+        let track: MediaStreamTrack | null = null;
+        let failure: unknown = null;
+        try {
+            track = await this.openCameraInTime(request);
+        } catch (err) {
+            failure = err;
+            // A camera just let go of can still be held for a moment by the
+            // phone's camera service: once more, a little later (unless the
+            // camera was turned off, or the call left, meanwhile).
+            const name = (err as { name?: string } | null)?.name;
+            if (!stale() && (name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError')) {
+                await new Promise(r => setTimeout(r, 400));
+                if (!stale()) {
+                    try {
+                        track = await this.openCameraInTime(request);
+                        failure = null;
+                    } catch { /* still refused */ }
+                }
+            }
+        }
+        if (!track && !stale()) {
+            // Put back the camera that was on.
+            try {
+                track = await this.openCameraInTime(now.deviceId ? { deviceId: now.deviceId } : now.facing ? { facing: now.facing } : null);
+            } catch (err) {
+                console.warn('[WebRTC] The camera that was on could not be opened again either:', err);
+            }
+        }
+        if (stale()) {
+            track?.stop();
+            return { ok: false, reason: 'no-camera', track: null };
+        }
+        if (track) stream.addTrack(track);
+        void this.noteCamera(track);
+        if (failure || !track) {
+            console.warn('[WebRTC] Failed to switch camera:', failure);
+            const name = (failure as { name?: string } | null)?.name;
+            return { ok: false, reason: name === 'NotAllowedError' || name === 'SecurityError' ? 'denied' : 'unavailable', track };
+        }
+        const settings = track.getSettings?.() ?? {};
+        const facing = facingOfSettings(settings) ?? ('facing' in request ? request.facing : null);
+        rememberCamera({
+            deviceId: settings.deviceId ?? ('deviceId' in request ? request.deviceId : ''),
+            label: track.label,
+            facing,
+        });
+        console.log(`[WebRTC] Camera switched to: ${track.label || 'a camera'}${facing ? ` (${facing})` : ''}`);
+        return { ok: true, track };
     }
 
     /**

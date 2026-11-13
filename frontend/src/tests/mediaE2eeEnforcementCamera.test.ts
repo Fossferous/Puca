@@ -63,7 +63,8 @@ type MediaStub = {
     getLocalStreamSync: () => unknown;
     getScreenShareStreamSync: () => unknown;
     toggleVideo: (on: boolean) => Promise<unknown>;
-    switchCamera: (mode: string) => Promise<unknown>;
+    switchCamera: (request: unknown) => Promise<unknown>;
+    flipCamera: () => Promise<unknown>;
 };
 
 const cameraTrack = { kind: 'video', id: 'v1', enabled: true, readyState: 'live', stop: () => {} };
@@ -83,7 +84,8 @@ function rig(opts: { supported: boolean; required: boolean }) {
     media.getLocalStreamSync = () => stream;
     media.getScreenShareStreamSync = () => screen;
     media.toggleVideo = async () => cameraTrack;
-    media.switchCamera = async () => cameraTrack;
+    media.switchCamera = async () => ({ ok: true, track: cameraTrack });
+    media.flipCamera = async () => ({ ok: true, track: cameraTrack });
     return mgr;
 }
 
@@ -120,7 +122,13 @@ describe('camera and screen share fail closed without Encoded Transform', () => 
 
     it('SECURITY: switchCamera publishes nothing when encryption is required and unsupported', async () => {
         const mgr = await joined({ supported: false, required: true });
-        await mgr.switchCamera('user');
+        await mgr.switchCamera({ facing: 'environment' });
+        expect(addedTracks).toEqual([]);
+    });
+
+    it('SECURITY: flipCamera (the path Flip takes) publishes nothing when encryption is required and unsupported', async () => {
+        const mgr = await joined({ supported: false, required: true });
+        await mgr.flipCamera();
         expect(addedTracks).toEqual([]);
     });
 
@@ -146,6 +154,12 @@ describe('camera and screen share fail closed without Encoded Transform', () => 
         await mgr.toggleVideo(true);
         await mgr.addScreenShareToPeers();
         expect(addedTracks, 'a supported browser must still publish, or the guard refuses everyone').toEqual(['video', 'video']);
+    });
+
+    it('CONTROL: flipCamera does put the camera on when the API IS available (the SECURITY case above is not vacuous)', async () => {
+        const mgr = await joined({ supported: true, required: true });
+        await mgr.flipCamera();
+        expect(addedTracks).toEqual(['video']);
     });
 
     it('CONTROL: the camera and the share publish when enforcement is OFF, even unsupported (documented downgrade)', async () => {
