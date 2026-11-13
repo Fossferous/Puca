@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.861 — 2026-11-13
 
+Newcomers can join voice channels, power off a PC from My Devices, pictures above the words, and Notes search on Android works again
 ### Added
 
 - **Power off a PC from My Devices.** Each online Windows PC's card in **Devices** has **Power off**, which shuts it down straight away without opening its screen. It asks first, naming the PC, because it is forced: Windows closes every app there without asking it to save, the way `shutdown /s /f /t 0` does, so anything unsaved on it is lost, in every account signed in to it (**More → Shut down…** in a session is still the gentle one). It is for a PC set up for unattended access: it asks for that PC's passphrase first, as Control does, and works while the PC is locked or at its sign-in screen when it has lock-screen access. A PC without unattended access refuses it, because whoever let the connection in there agreed to a connection, not to losing their work. The card then says how it went: that the PC is powering off, or why not — it is offline, it runs a Púca too old to know the command (update Púca on it, or use Control and **More → Shut down…**), it is in another remote session, it is not set up for unattended access, the passphrase was not given or not accepted, or Windows refused. It is a full shutdown, not Fast Startup's hybrid one, so **Wake & connect** can start it again where Wake-on-LAN is set up. A friend's PC shared with you with control has it too, when that PC is set up for unattended access; a view-only or files-only share does not. The PC being powered off needs this version of the desktop app (installer), its lock-screen service included; the button itself arrives with the ordinary update, and nothing changes on the server.

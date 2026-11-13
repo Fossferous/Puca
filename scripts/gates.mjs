@@ -32,7 +32,8 @@
  * gate re-audits itself every run (scopeAudit): an include_str!/include_bytes!/
  * CARGO_MANIFEST_DIR path that leaves its declared inputs widens it back to
  * the whole tree, loudly. For the TEST gates (`ignoreVersion`) the release
- * number is blanked out of the version carriers and CHANGELOG.md is left out:
+ * number is blanked out of the version carriers and CHANGELOG.md (and every
+ * changelog.d/ fragment a branch carries) is left out:
  * nothing those suites run reads either (audited 2026-10-22; vitest's
  * __APP_VERSION__ uses compare the constant with itself), and a version bump
  * is otherwise the whole of a release commit. The build, lint, typecheck and
@@ -76,6 +77,10 @@ const VERSION_CARRIERS = [
     'deploy/download-site/index.html',
 ];
 const CHANGELOG = 'CHANGELOG.md';
+/** A branch's changelog fragment (changelog.d/<topic>.md, folded into
+ *  CHANGELOG.md at release): like CHANGELOG.md, nothing a test gate runs reads
+ *  it, so a fragment does not re-run the suites. The README is not one. */
+const isChangelogFragment = (p) => /^changelog\.d\/[^/]+\.md$/.test(p) && p !== 'changelog.d/README.md';
 
 const javaHome = process.env.JAVA_HOME
     || (WIN ? 'C:\\Program Files\\Android\\Android Studio\\jbr' : undefined);
@@ -471,7 +476,7 @@ function gateKey(gate, tree, version) {
     // ...except for lint, whose checks walk the repository's files.
     const paths = [...tree.keys()].filter((p) => inScope(p, inputs) && (p !== SELF || gate.id === 'lint')).sort();
     for (const p of paths) {
-        if (gate.ignoreVersion && p === CHANGELOG) continue;
+        if (gate.ignoreVersion && (p === CHANGELOG || isChangelogFragment(p))) continue;
         const id = gate.ignoreVersion && VERSION_CARRIERS.includes(p) ? versionBlanked(p, version) : tree.get(p);
         h.update(`${p}\0${id}\n`);
     }

@@ -12,9 +12,8 @@ production hosts, which is the gate `dual-ship.sh` enforces before it will
 deploy a backend. The `sovereign` checkout still exists and is still private;
 treat it as the archive it is becoming, not as somewhere to make changes.
 
-**This repository is PUBLISHED** to `github.com/Fossferous/Puca` (still private
-while it is reviewed, public after). Assume anything committed from now on is
-read by strangers.
+**This repository is PUBLISHED** to `github.com/Fossferous/Puca`, and the repository is
+PUBLIC. Anything committed and pushed is read by strangers.
 
 **PUSHING — read this before you type a git push.** This worktree shares one
 object store with the private Sovereign history: `main`, several work/archive
@@ -102,6 +101,27 @@ Always run the gates after a merge, not just before it. Git resolves *textual*
 conflicts; it cannot see *semantic* ones — one branch renaming a function while
 another adds a call to the old name merges cleanly and breaks the build.
 
+**A branch never edits `CHANGELOG.md`.** Its user-facing entry goes in a file of
+its own, `changelog.d/<topic>.md` (format in `changelog.d/README.md`; `npm run
+lint` checks it), and the release bump folds every fragment into the release
+section and deletes it. Every branch used to add its bullet at the same place
+in `## Unreleased`, so every merge conflicted there: one release that merged
+five branches needed six hand resolutions of that section. For the same
+reason, write nothing in a shared file that counts what other branches add
+(this file used to say how many no-server scripts `gates.mjs` runs, and every
+branch that added one changed the number).
+
+**Done means reviewed and committed.** Before a session reports a task done, it
+runs ONE independent review of its own branch: a fresh subagent given the diff
+(`git diff puca-public...HEAD`) and the files, not the author's conclusions,
+asked for real defects with a concrete failure scenario. Check each finding in
+the code, fix what is real with a test that fails without the fix, and stop
+after a round that finds only lows (list those). Then commit everything, so
+nothing is left uncommitted, and report the SHAs and what the review found.
+When the review came only after the merge, each release took a further round
+trip: the 0.9.861 power-off's medium timer race was found then, after its
+session had already reported done.
+
 ## Two sessions at once — use worktrees
 
 Two sessions in the same folder share the same files on disk and will corrupt
@@ -119,6 +139,17 @@ sessions on **different areas of the codebase** — parallelism is safe when the
 work does not overlap, not because merging is clever.
 
 Each worktree needs its own `npm install` (`node_modules` is not shared).
+
+**At most three heavy sessions at once on one machine.** Heavy means a session
+running an emulator, a throwaway backend with LiveKit, or the full gates; the
+rest wait their turn. With five at once plus the gates, vitest's real-time
+tests time out and every run is slower.
+
+**Keep throwaway test infrastructure out of `%TEMP%`.** Windows' Storage Sense
+deletes files under Temp that have not changed for a day. On 2026-11-11 it took
+part of a throwaway Postgres cluster's `base/` and `global/`, so every
+`CREATE DATABASE` on it failed. Put a cluster, and any helper script you will
+want again tomorrow, in a folder outside Temp (and outside the repo).
 
 ---
 
@@ -431,7 +462,7 @@ cd frontend && node e2e/stream-volume-button-real-browser.mjs   # the touch scre
 **`node scripts/gates.mjs` runs every gate above that needs no backend, dev
 server or emulator** — typecheck, vitest, lint, build, the three cargo suites,
 the SQL bind check, both JUnit suites, the Steam Deck plugin's suite, the installer hooks, the third-party
-notices (and that the result is committed) and the twenty-nine no-server
+notices (and that the result is committed) and every no-server
 real-browser scripts — concurrently where they share no lock (cargo's
 `target/` is one lock; the real-browser scripts run one at a time, after
 vitest), compiles at below-normal priority, and NEVER a compile beside vitest
