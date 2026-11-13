@@ -59,4 +59,23 @@ ignore = [
     # goes with it. Re-evaluate at once if a client can ever drive or time one of
     # these crates' secret-key operations.
     "RUSTSEC-2026-0387",
+
+    # RUSTSEC-2026-0459 - SQLite before 3.54.0 can return uninitialised page-cache
+    # memory when a database is opened beside a crafted `-wal` file of another page
+    # size (CVE-2026-119375), in libsqlite3-sys 0.30.1's bundled SQLite; published
+    # 2026-10-30, fixed in libsqlite3-sys 0.39.0.
+    #
+    # NOT COMPILED: the crate is in Cargo.lock only because sqlx 0.8 lists its
+    # optional `sqlx-sqlite` driver there (a weak `sqlx-sqlite?/...` feature keeps it
+    # in the lock whether or not it is enabled). This repo enables sqlx's `postgres`
+    # feature and no other driver (Cargo.toml); `cargo tree -i libsqlite3-sys
+    # --workspace --target all` prints nothing, and neither the backend binary nor
+    # the desktop app contains SQLite code (checked 2026-11-13 on 0.9.861's builds;
+    # frontend/src-tauri/Cargo.lock does not list the crate at all). Nothing here
+    # opens a SQLite database, so there is no file for the bug to be reached through.
+    #
+    # NOT fixable by an update: sqlx-sqlite 0.8.6 requires libsqlite3-sys 0.30.
+    # Re-evaluate at once if any crate here enables SQLite, and drop this entry when
+    # sqlx moves to a libsqlite3-sys of 0.39 or later.
+    "RUSTSEC-2026-0459",
 ]

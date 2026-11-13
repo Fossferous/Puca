@@ -1794,6 +1794,18 @@ describe('what a message costs to read', () => {
         return best;
     };
     const WAIT = 60_000;
+    /**
+     * The bar each row is held to, on this machine or on CI. GitHub's runners read these
+     * slower than a quiet desktop does, under the whole suite: `[` before targets in another
+     * script, 9 ms quiet and 26 ms under the suite here, was 36.4 ms (0.9.859) and 36.5 ms
+     * (0.9.861) there, at its BEST over 20 s of tries, against a bar of 35. So where GitHub
+     * says CI (it sets CI=true), every bar is twice what it is here. The slowdowns these rows
+     * exist for are slower there in the same proportion (that row's 50 ms would read about
+     * 180 there, against 70), so they still fail on CI; a smaller one is the local gates'
+     * to catch, where the bars stay as written.
+     */
+    const CI_HEADROOM = process.env.CI === 'true' ? 2 : 1;
+    const bar = (ms: number) => ms * CI_HEADROOM;
 
     // A message is at most 8000 long, and is read on the UI thread, on receipt and on
     // every render of the chat. The first three took 1100, 500 and 60 ms with guards for
@@ -1809,14 +1821,14 @@ describe('what a message costs to read', () => {
     ])('%s', (_, content) => {
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 30)).toBeLessThan(30);
+        expect(fastest(content, bar(30))).toBeLessThan(bar(30));
     }, WAIT);
 
     it('a delimiter only the end of a link opens: every one closes at the next', () => {
         const content = '[x](http://a)_b '.repeat(490);
         expect(content.length).toBeLessThanOrEqual(8000);
         expect(parseMessage(content).filter(n => n.type === 'em')).toHaveLength(245);
-        expect(fastest(content, 10)).toBeLessThan(10);
+        expect(fastest(content, bar(10))).toBeLessThan(bar(10));
     }, WAIT);
 
     // Found by searching for what is cheap only because of this charge, with it taken out.
@@ -1824,7 +1836,7 @@ describe('what a message costs to read', () => {
         const content = `__${'](http://a||b)!#a_b]('.repeat(380)}* ||s||`;
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 12)).toBeLessThan(12);
+        expect(fastest(content, bar(12))).toBeLessThan(bar(12));
     }, WAIT);
 
     it('what turns out no link is paid for too: past the budget a `_` closes at the first one, as it used to', () => {
@@ -1851,13 +1863,13 @@ describe('what a message costs to read', () => {
     ])('%s', (_, content) => {
         expect(content.length).toBeGreaterThan(7000);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 30)).toBeLessThan(30);
+        expect(fastest(content, bar(30))).toBeLessThan(bar(30));
     }, WAIT);
 
     it.each(['[', '!['])('%s over and over: 3 ms, or 20 and more with a look at 512 characters for each', (open) => {
         const content = `_${open.repeat(7990 / open.length)}_ ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 12)).toBeLessThan(12);
+        expect(fastest(content, bar(12))).toBeLessThan(bar(12));
     }, WAIT);
 
     // A target is read one character at a time, up to its `)` or a space, as often as there is a `[`
@@ -1867,7 +1879,7 @@ describe('what a message costs to read', () => {
         const content = unit.repeat(Math.floor(8000 / unit.length));
         expect(content.length).toBeGreaterThan(7500);
         // 9 ms on a quiet machine and 26 under the whole suite: the bar sits between that and 50.
-        expect(fastest(content, 35)).toBeLessThan(35);
+        expect(fastest(content, bar(35))).toBeLessThan(bar(35));
     }, WAIT);
 
     it('`[` over and over with no `)` after them, and spoilers the readings disagree on: 7 ms, or 60 reading each target to its end', () => {
@@ -1875,7 +1887,7 @@ describe('what a message costs to read', () => {
         const content = `my_file ||a_b|| and ||c_d|| ${unit.repeat(233)} ||s||`;
         expect(content.length).toBeGreaterThan(7500);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 35)).toBeLessThan(35);
+        expect(fastest(content, bar(35))).toBeLessThan(bar(35));
     }, WAIT);
 
     it('a `[` with no `](` after it is no try at a link, so a list of them leaves a walk its budget', () => {
@@ -1888,19 +1900,19 @@ describe('what a message costs to read', () => {
     it('a walk that closes in an address pays for it: 3 ms, or 40 if only a walk that finds nothing does', () => {
         const content = `||s|| ${'_http://_'.repeat(488)}${'('.repeat(1800)}${')'.repeat(1800)}`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 20)).toBeLessThan(20);
+        expect(fastest(content, bar(20))).toBeLessThan(bar(20));
     }, WAIT);
 
     it('a run of one delimiter in an address: 1 ms, or 25 with no bound on what stands between a closer and an opener', () => {
         const content = `_https://example.org/${'_'.repeat(7900)}a ||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 10)).toBeLessThan(10);
+        expect(fastest(content, bar(10))).toBeLessThan(bar(10));
     }, WAIT);
 
     it('very short quotes and one small spoiler: 2 ms, or 116 if each quote reads all that is left of the text', () => {
         const content = `${'>\n\n'.repeat(2665)}||s||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 30)).toBeLessThan(30);
+        expect(fastest(content, bar(30))).toBeLessThan(bar(30));
     }, WAIT);
 
     // A link turned down for a `[` in its label is read again, as 0.9.857 read it, to hold the first to what
@@ -1920,13 +1932,13 @@ describe('what a message costs to read', () => {
     ])('behind a `[` it turns down, read again: %s', (_, content) => {
         expect(content.length).toBeGreaterThan(7000);
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 30)).toBeLessThan(30);
+        expect(fastest(content, bar(30))).toBeLessThan(bar(30));
     }, WAIT);
 
     it('a text of `[` it turns down, one link and two spoilers: read again at most', () => {
         const content = `${'[a [b](c) '.repeat(790)} ||s|| ||t||`;
         expect(content.length).toBeLessThanOrEqual(8000);
-        expect(fastest(content, 30)).toBeLessThan(30);
+        expect(fastest(content, bar(30))).toBeLessThan(bar(30));
     }, WAIT);
 
     it('CONTROL: what is cheap is still read in full: a list of addresses, all whole, and every name', () => {
