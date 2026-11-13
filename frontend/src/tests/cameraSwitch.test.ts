@@ -55,7 +55,7 @@ function named(name: string, message = name): Error {
 }
 
 /** A phone: `cameras`, at most one open at a time, and a log of what was asked. */
-function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; listFacing?: boolean; hang?: (cam: Cam) => Promise<void> | null } = {}) {
+function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; listFacing?: boolean; hang?: (cam: Cam) => Promise<void> | null; noIds?: boolean } = {}) {
     const asked: MediaTrackConstraints[] = [];
     const open = new Set<FakeTrack>();
     const lateTracks: FakeTrack[] = [];
@@ -89,8 +89,10 @@ function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; list
         open.add(t);
         return new FakeStream([t]);
     });
+    // noIds: the camera not yet allowed in this page, so the browser hands
+    // out neither ids nor names.
     const enumerateDevices = vi.fn(async () => cameras.map(cam => ({
-        kind: 'videoinput', deviceId: cam.deviceId, label: cam.label,
+        kind: 'videoinput', deviceId: opts.noIds ? '' : cam.deviceId, label: opts.noIds ? '' : cam.label,
         getCapabilities: () => (opts.listFacing === false || !cam.facing ? {} : { facingMode: [cam.facing] }),
     })));
     return {
@@ -212,6 +214,51 @@ describe('Flip on a phone', () => {
         await media.toggleVideo(true);
         expect(videoOf(media)[0].cam).toBe(BACK);
         expect(rig.asked[0].deviceId).toEqual({ exact: 'back' });
+    });
+
+    it('the first camera of a launch (no ids or names yet): the remembered MAIN rear camera, by its id, not the first rear one an engine finds', async () => {
+        // Chromium on Android lists the ultra wide before the main rear camera
+        // (descending camera numbers); asked only for "the rear camera" it
+        // takes the first. The stand-in does the same for an exact facingMode.
+        const ULTRA_FIRST: Cam = { deviceId: 'ultra', label: 'camera2 2, facing back', facing: 'environment' };
+        const MAIN: Cam = { deviceId: 'main', label: 'camera2 0, facing back', facing: 'environment' };
+        useCameras([FRONT, ULTRA_FIRST, MAIN], { noIds: true });
+        saveSettings({ ...loadSettings(), camera: { deviceId: 'main', label: 'camera2 0, facing back', facing: 'environment' } });
+        const media = inCall();
+        await media.toggleVideo(true);
+        expect(videoOf(media)[0].cam, 'the remembered main camera came back as the ultra wide').toBe(MAIN);
+        expect(rig.asked[0].deviceId).toEqual({ exact: 'main' });
+    });
+
+    it('a remembered id that no longer opens, with no list yet: the way it faced, then the default', async () => {
+        useCameras([FRONT, BACK], { noIds: true });
+        saveSettings({ ...loadSettings(), camera: { deviceId: 'an-old-id', label: 'camera2 0, facing back', facing: 'environment' } });
+        const media = inCall();
+        await media.toggleVideo(true);
+        expect(rig.asked.map(a => a.deviceId ?? a.facingMode)).toEqual([{ exact: 'an-old-id' }, { exact: 'environment' }]);
+        expect(videoOf(media)[0].cam).toBe(BACK);
+    });
+
+    it('a switch still opening when the call ended does not answer the next call\'s first press, nor count as under way there', async () => {
+        let letBackOpen!: () => void;
+        const backHangs = new Promise<void>(r => { letBackOpen = r; });
+        useCameras([FRONT, BACK], { hang: (cam) => (cam === BACK ? backHangs : null) });
+        const media = inCall();
+        await media.toggleVideo(true);
+        const old = media.flipCamera(); // the back camera never opens
+        await flush();
+        expect(media.cameraSwitchInProgress()).toBe(true);
+        media.stopLocalStream(); // the call ends
+        expect(media.cameraSwitchInProgress(), 'the next call starts with a switch under way').toBe(false);
+        (media as unknown as { localStream: FakeStream }).localStream = new FakeStream(); // the next call
+        await media.toggleVideo(true);
+        const next = await media.switchCamera({ deviceId: 'front' });
+        expect(next.ok, 'the next call\'s press was answered with the old call\'s switch').toBe(true);
+        letBackOpen();
+        const r = await old;
+        expect(r.ok).toBe(false);
+        expect(rig.lateTracks.map(t => t.readyState), 'the old switch\'s camera was left on').toEqual(['ended']);
+        expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
     });
 
     it('a remembered camera that is gone opens the default one instead of no camera', async () => {

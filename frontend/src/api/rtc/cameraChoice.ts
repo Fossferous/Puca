@@ -15,7 +15,7 @@
  *    front camera EVERY time (the button passed a constant "current facing
  *    mode" of 'environment', so the opposite was always 'user'), which reopened
  *    the selfie camera — the owner's "flip just mirrors the image";
- *  - the remembered choice (resolveRemembered): a camera picked in the menu is
+ *  - the remembered choice (rememberedRequests): a camera picked in the menu is
  *    found again by its id, else by its name (ids change when site data is
  *    cleared), else by the way it faced;
  *  - whether the self-view is mirrored (selfViewMirrored): your own FRONT
@@ -236,27 +236,34 @@ export function cameraConstraints(request: CameraRequest | null): MediaTrackCons
 }
 
 /**
- * The remembered camera, found in today's list: by id, by name, then the main
- * camera facing the way it faced. Without a list to look in (labels and ids
- * come only with permission) it asks for the way it faced, or the id itself.
+ * The remembered camera, as the requests to try, in order (the default camera
+ * after them all). In today's list: by id, by name, then the main camera
+ * facing the way it faced. Without a list to look in (a browser hands out
+ * ids and names only once the camera is allowed in that page: the first
+ * camera of every launch of the Android app, every load on an iPhone) its id
+ * FIRST, then the way it faced: asked only for "the rear camera", Chromium on
+ * Android takes the first rear one it lists, which is a secondary lens on a
+ * phone with several (see androidOrder).
  */
-export function resolveRemembered(cameras: CameraInfo[], remembered: RememberedCamera | null | undefined): CameraRequest | null {
-    if (!remembered) return null;
+export function rememberedRequests(cameras: CameraInfo[], remembered: RememberedCamera | null | undefined): CameraRequest[] {
+    if (!remembered) return [];
     const usable = cameras.filter(c => c.deviceId);
     if (usable.length > 0) {
         const byId = usable.find(c => c.deviceId === remembered.deviceId);
-        if (byId) return { deviceId: byId.deviceId };
+        if (byId) return [{ deviceId: byId.deviceId }];
         const byName = remembered.label ? usable.find(c => c.label === remembered.label) : undefined;
-        if (byName) return { deviceId: byName.deviceId };
+        if (byName) return [{ deviceId: byName.deviceId }];
         if (remembered.facing) {
             const main = mainCamera(usable, remembered.facing);
-            if (main) return { deviceId: main.deviceId };
+            if (main) return [{ deviceId: main.deviceId }];
         }
         // Gone: the default camera.
-        return null;
+        return [];
     }
-    if (remembered.facing) return { facing: remembered.facing };
-    return remembered.deviceId ? { deviceId: remembered.deviceId } : null;
+    const out: CameraRequest[] = [];
+    if (remembered.deviceId) out.push({ deviceId: remembered.deviceId });
+    if (remembered.facing) out.push({ facing: remembered.facing });
+    return out;
 }
 
 /** Your own camera is mirrored unless it faces away from you. */

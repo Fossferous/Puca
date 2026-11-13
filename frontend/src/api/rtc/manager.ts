@@ -738,7 +738,11 @@ export class WebRTCManager {
             // sender and went out on a NEW transceiver, which the other side's
             // tile never plays (black for the rest of the call), or, before
             // that nothing landed, onto this sender with no hold at all.
-            if (held.real?.kind === 'video' && !screen.includes(held.real) && this.media.cameraSwitchInProgress()) continue;
+            // Until EVERY peer has the new camera, not just until the media
+            // layer has it: putCameraOnPeers awaits each peer in turn, and a
+            // peer not yet reached still holds the stopped camera.
+            if (held.real?.kind === 'video' && !screen.includes(held.real)
+                && (this.cameraSwitchesUnderWay > 0 || this.media.cameraSwitchInProgress())) continue;
             const peer = this.peers.get(held.userId);
             const c = peer?.mediaCrypto;
             const onPeer = !!peer && peer.connection.getSenders().includes(sender);
@@ -1181,18 +1185,29 @@ export class WebRTCManager {
      * SFU path does the same through LiveKit (sfuManager.replaceCameraTrack).
      */
     async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
-        const result = await this.media.switchCamera(request);
-        // The track on now, also when the switch failed and the camera that
-        // was on was opened again (a new track all the same).
-        if (result.track) await this.putCameraOnPeers(result.track);
-        return result;
+        return this.cameraSwitch(() => this.media.switchCamera(request));
     }
 
     /** Flip (MediaManager.flipCamera), onto every peer like switchCamera. */
     async flipCamera(): Promise<CameraSwitch> {
-        const result = await this.media.flipCamera();
-        if (result.track) await this.putCameraOnPeers(result.track);
-        return result;
+        return this.cameraSwitch(() => this.media.flipCamera());
+    }
+
+    /** Camera switches under way here, from the media layer's start until
+     *  every peer has the new camera (sweepHeldSenders waits for them). */
+    private cameraSwitchesUnderWay = 0;
+
+    private async cameraSwitch(run: () => Promise<CameraSwitch>): Promise<CameraSwitch> {
+        this.cameraSwitchesUnderWay++;
+        try {
+            const result = await run();
+            // The track on now, also when the switch failed and the camera that
+            // was on was opened again (a new track all the same).
+            if (result.track) await this.putCameraOnPeers(result.track);
+            return result;
+        } finally {
+            this.cameraSwitchesUnderWay--;
+        }
     }
 
     private async putCameraOnPeers(newTrack: MediaStreamTrack): Promise<void> {

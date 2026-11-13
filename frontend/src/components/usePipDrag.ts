@@ -3,6 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 /** How far a press moves before it is a drag rather than a tap. */
 export const PIP_DRAG_SLOP = 8;
 
+/** How long after a touch the mouse events it brings with it are its own. */
+const TOUCH_MOUSE_MS = 800;
+
 /**
  * The self-view's drag (VoicePanel's camera window): where it is, whether it
  * is being dragged, the handlers for its container, and `isTap` for the click
@@ -29,6 +32,10 @@ export function usePipDrag(initial: { x: number; y: number } = { x: 20, y: 100 }
     /** The press under way, from its start; null when there is none. */
     const press = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null);
     const moved = useRef(false);
+    /** When the last touch press ended: the mousedown/mouseup a browser sends
+     *  after a touch it still counts as a tap are that touch, not a press of
+     *  their own (one reset `moved`, and a short drag then opened the menu). */
+    const lastTouchAt = useRef(-Infinity);
 
     const place = useCallback((x: number, y: number) => {
         setPosition({
@@ -60,8 +67,14 @@ export function usePipDrag(initial: { x: number; y: number } = { x: 20, y: 100 }
 
     const onTouchStart = useCallback((e: React.TouchEvent) => {
         const t = e.touches[0];
+        lastTouchAt.current = Date.now();
         if (t) start(t.clientX, t.clientY);
     }, [start]);
+
+    const onTouchEnd = useCallback(() => {
+        lastTouchAt.current = Date.now();
+        end();
+    }, [end]);
 
     const onTouchMove = useCallback((e: React.TouchEvent) => {
         const t = e.touches[0];
@@ -73,6 +86,7 @@ export function usePipDrag(initial: { x: number; y: number } = { x: 20, y: 100 }
     const onMouseDown = useCallback((e: React.MouseEvent) => {
         if (e.button !== 0) return;
         e.preventDefault();
+        if (Date.now() - lastTouchAt.current < TOUCH_MOUSE_MS) return; // the touch's own
         start(e.clientX, e.clientY);
         const move = (ev: MouseEvent) => moveTo(ev.clientX, ev.clientY);
         const up = () => {
@@ -98,7 +112,7 @@ export function usePipDrag(initial: { x: number; y: number } = { x: 20, y: 100 }
     return {
         position,
         isDragging,
-        handlers: { onTouchStart, onTouchMove, onTouchEnd: end, onTouchCancel: end, onMouseDown },
+        handlers: { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel: onTouchEnd, onMouseDown },
         isTap,
     };
 }

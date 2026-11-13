@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
     cameraConstraints, cameraDisplayName, camerasOf, canFlip, facingFromLabel, facingOf, flipLabel, flipTarget,
-    localCameraState, mainCamera, onLocalCameraState, resolveRemembered, selfViewMirrored, setLocalCameraState,
+    localCameraState, mainCamera, onLocalCameraState, rememberedRequests, selfViewMirrored, setLocalCameraState,
     type CameraInfo,
 } from '../api/rtc/cameraChoice';
 
@@ -199,29 +199,32 @@ describe('the constraints that open it', () => {
 
 describe('the remembered camera', () => {
     it('found by id', () => {
-        expect(resolveRemembered(ANDROID, { deviceId: 'a-back', label: 'x', facing: 'environment' })).toEqual({ deviceId: 'a-back' });
+        expect(rememberedRequests(ANDROID, { deviceId: 'a-back', label: 'x', facing: 'environment' })).toEqual([{ deviceId: 'a-back' }]);
     });
 
     it('found by name when the ids changed (site data cleared)', () => {
-        expect(resolveRemembered(IPHONE, { deviceId: 'gone', label: 'Back Telephoto Camera', facing: 'environment' })).toEqual({ deviceId: 'i-tele' });
+        expect(rememberedRequests(IPHONE, { deviceId: 'gone', label: 'Back Telephoto Camera', facing: 'environment' })).toEqual([{ deviceId: 'i-tele' }]);
     });
 
     it('found by the way it faced when neither is there', () => {
-        expect(resolveRemembered(IPHONE, { deviceId: 'gone', label: 'Rückkamera', facing: 'environment' })).toEqual({ deviceId: 'i-back' });
+        expect(rememberedRequests(IPHONE, { deviceId: 'gone', label: 'Rückkamera', facing: 'environment' })).toEqual([{ deviceId: 'i-back' }]);
     });
 
     it('gone altogether (a webcam unplugged): the default', () => {
-        expect(resolveRemembered(DESKTOP, { deviceId: 'gone', label: 'Old cam', facing: null })).toBeNull();
+        expect(rememberedRequests(DESKTOP, { deviceId: 'gone', label: 'Old cam', facing: null })).toEqual([]);
     });
 
-    it('no list to look in yet (no permission): the way it faced, else its id', () => {
-        expect(resolveRemembered([{ deviceId: '', label: 'Camera 1', facing: null }], { deviceId: 'a-back', label: 'camera2 0, facing back', facing: 'environment' }))
-            .toEqual({ facing: 'environment' });
-        expect(resolveRemembered([], { deviceId: 'd-2', label: 'BRIO', facing: null })).toEqual({ deviceId: 'd-2' });
+    it('no list to look in yet (the camera not yet allowed in this page): its id FIRST, then the way it faced', () => {
+        // Asked only for "the rear camera", Chromium on Android takes the first
+        // rear one it lists: a secondary lens on a phone with several.
+        expect(rememberedRequests([{ deviceId: '', label: 'Camera 1', facing: null }], { deviceId: 'a-back', label: 'camera2 0, facing back', facing: 'environment' }))
+            .toEqual([{ deviceId: 'a-back' }, { facing: 'environment' }]);
+        expect(rememberedRequests([], { deviceId: 'd-2', label: 'BRIO', facing: null })).toEqual([{ deviceId: 'd-2' }]);
+        expect(rememberedRequests([], { deviceId: '', label: '', facing: 'environment' })).toEqual([{ facing: 'environment' }]);
     });
 
     it('nothing remembered: the default', () => {
-        expect(resolveRemembered(ANDROID, null)).toBeNull();
+        expect(rememberedRequests(ANDROID, null)).toEqual([]);
     });
 });
 

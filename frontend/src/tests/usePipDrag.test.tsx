@@ -99,6 +99,15 @@ describe('the self-view drag', () => {
         expect(at()).toEqual({ x: 80, y: 180 });
     });
 
+    it('a short drag the browser still counts as a tap (it then sends mousedown, mouseup and click) moves the window and does NOT open the menu', () => {
+        press(el('open'), [[60, 180], [72, 180]]); // 12 px: past the slop, within an engine's tap tolerance
+        expect(at()).toEqual({ x: 32, y: 100 });
+        mouse(el('open'), 'mousedown', 72, 180);
+        mouse(document, 'mouseup', 72, 180);
+        click(el('open'), 1);
+        expect(lastTap, 'the drag also opened the menu').toBe(false);
+    });
+
     it("a key's press (a click with detail 0) after a drag that ended with no click of its own is still a press", () => {
         press(el('pip'), [[50, 150], [120, 240]]);
         click(el('open'), 0);

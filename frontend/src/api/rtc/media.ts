@@ -1,7 +1,7 @@
 import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNoiseSuppressionMode, cleanupNoiseFilter, selectedInputDeviceId, type NoiseSuppressionMode } from '../noiseFilter';
 import { inputGain, rememberCamera, rememberedCamera } from '../../components/settingsStore';
 import {
-    cameraConstraints, facingOfSettings, flipTarget, isCameraUnavailable, listCameras, resolveRemembered,
+    cameraConstraints, facingOfSettings, flipTarget, isCameraUnavailable, listCameras, rememberedRequests,
     setLocalCameraState, type CameraRequest, type Facing,
 } from './cameraChoice';
 import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
@@ -447,6 +447,9 @@ export class MediaManager {
             this.localStream = null;
         }
         this.cameraEpoch++;
+        // A switch still opening belongs to the call that ended (it puts
+        // nothing on: cameraEpoch); the next call's first press is its own.
+        this.switching = null;
         setLocalCameraState({ deviceId: null, trackId: null, facing: null });
         // Deliberate teardown: any late ended/mute from the old capture is
         // stale, not a device loss.
@@ -619,17 +622,21 @@ export class MediaManager {
             // on a phone).
             try {
                 const epoch = this.cameraEpoch;
-                const request = resolveRemembered(await listCameras(), rememberedCamera());
-                let videoTrack: MediaStreamTrack;
-                try {
-                    videoTrack = await this.openCamera(request);
-                } catch (err) {
-                    // The remembered camera is not there any more (unplugged, or
-                    // an id from before the site's data was cleared): the default.
-                    if (!request || !isCameraUnavailable(err)) throw err;
-                    console.warn('[WebRTC] The chosen camera could not be opened; opening the default one:', err);
-                    videoTrack = await this.openCamera(null);
+                const requests = rememberedRequests(await listCameras(), rememberedCamera());
+                let videoTrack: MediaStreamTrack | null = null;
+                for (const request of requests) {
+                    try {
+                        videoTrack = await this.openCamera(request);
+                        break;
+                    } catch (err) {
+                        // Not there any more (unplugged, or an id from before the
+                        // site's data was cleared): the next way to find it, and
+                        // then the default camera.
+                        if (!isCameraUnavailable(err)) throw err;
+                        console.warn('[WebRTC] The chosen camera could not be opened this way:', JSON.stringify(request), err);
+                    }
                 }
+                videoTrack ??= await this.openCamera(null);
                 // The stream can vanish DURING the getUserMedia await (leave /
                 // channel switch runs stopLocalStream). Stop the just-acquired
                 // track instead of orphaning it — an orphan keeps the camera
@@ -751,8 +758,12 @@ export class MediaManager {
 
     async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
         if (this.switching) return this.switching;
-        this.switching = this.doSwitchCamera(request).finally(() => { this.switching = null; });
-        return this.switching;
+        const switching: Promise<CameraSwitch> = this.doSwitchCamera(request).finally(() => {
+            // Not a switch started after this one (the call ended meanwhile).
+            if (this.switching === switching) this.switching = null;
+        });
+        this.switching = switching;
+        return switching;
     }
 
     private async doSwitchCamera(request: CameraRequest): Promise<CameraSwitch> {

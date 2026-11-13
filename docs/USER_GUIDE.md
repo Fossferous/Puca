@@ -366,7 +366,7 @@ The voice panel's buttons, by tooltip:
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
 | **Turn On Camera** / **Turn Off Camera** | Share your camera. It opens the camera you used last on this device (see [Cameras: front, rear and the camera menu](#cameras-front-rear-and-the-camera-menu)) |
-| **Choose a camera** | The arrow beside the camera button, while it is on: the camera menu |
+| **Choose a camera** | The arrow beside the camera button, while it is on and there is more than one camera: the camera menu |
 | **Share Screen** / **Stop Sharing** | See [Screen Sharing](#screen-sharing) |
 | **Disconnect** | Leave voice |
 
