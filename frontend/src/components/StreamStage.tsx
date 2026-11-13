@@ -39,6 +39,8 @@ import {
     offerControl,
     computeRmoveScale,
     getControlHostCapture,
+    getControlHostKind,
+    MAX_TEXT_EVENT,
     type ControlState,
 } from '../api/remoteControl';
 import { isMobile, isTauri, RC_ENABLED } from '../api/platform';
@@ -48,8 +50,8 @@ import { requestShareQualityPanel } from '../api/rtc/shareHealthLive';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, SlidersIcon, FullscreenExitIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
-    LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
+    ActivityIcon, ArrowLeftIcon, ChatIcon, CloseIcon, CrosshairIcon, SlidersIcon, FullscreenExitIcon, FullscreenIcon, GamepadIcon, GridIcon,
+    HomeIcon, KeyboardIcon, LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, RecentsIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
@@ -68,6 +70,7 @@ import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
 import { interceptBack } from '../api/mobileApp';
+import { phoneKeyText, phoneDropsKey, macKeyboard } from './phoneKeyText';
 
 const MOBILE = isMobile();
 
@@ -445,6 +448,10 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     useEffect(() => subscribeControl(setControl), []);
 
     const controlActive = control.controlling?.status === 'active';
+    // The host I control said it is a PHONE (remoteControl.ts HostInfo): its
+    // Back / Home / Recents get buttons, typed characters go as text, and
+    // Game mode (relative mouse) means nothing there.
+    const phoneHost = controlActive && getControlHostKind() === 'phone';
 
     // Pointer-lock lifecycle. Esc (or the browser) can drop the lock at any
     // time; track it so FPS mode never silently degrades to absolute moves.
@@ -1211,8 +1218,25 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         if (mine?.status === 'active') {
                                             return (
                                                 <>
-                                                    {/* FPS mode needs pointer lock (desktop only). */}
-                                                    {!MOBILE && (
+                                                    {/* A phone's own buttons (it has no keys to press). */}
+                                                    {phoneHost && ([
+                                                        ['back', 'Back', ArrowLeftIcon],
+                                                        ['home', 'Home', HomeIcon],
+                                                        ['recents', 'Recent apps', RecentsIcon],
+                                                    ] as const).map(([a, label, Icon]) => (
+                                                        <button
+                                                            key={a}
+                                                            className="tile-btn"
+                                                            data-testid={`rc-phone-${a}`}
+                                                            onClick={(e) => { e.stopPropagation(); sendControlEvent({ t: 'nav', a }); }}
+                                                            title={`${label} on ${data.username}'s phone`}
+                                                            aria-label={`${label} on ${data.username}'s phone`}
+                                                        >
+                                                            <Icon />
+                                                        </button>
+                                                    ))}
+                                                    {/* FPS mode needs pointer lock (desktop only), and a desktop host. */}
+                                                    {!MOBILE && !phoneHost && (
                                                         <button
                                                             className={`tile-btn ${fpsMode ? 'active' : ''}`}
                                                             onClick={(e) => { e.stopPropagation(); setFpsMode((f) => { saveFpsMode(!f); return !f; }); }}
@@ -1223,7 +1247,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                                     )}
                                                     {/* Sensitivity stepper: deltas are already scaled to host
                                                         pixels; this is the user's multiplier on top. */}
-                                                    {!MOBILE && fpsMode && (
+                                                    {!MOBILE && fpsMode && !phoneHost && (
                                                         <span className="fps-sens" onClick={(e) => e.stopPropagation()}>
                                                             <button
                                                                 className="tile-btn"
@@ -1267,8 +1291,16 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                             );
                                         }
                                         if (mine?.status === 'requesting') {
+                                            // Pressable: a host that never answers (no remote
+                                            // control in its build) must not hold the viewer here.
                                             return (
-                                                <button className="tile-btn" title="Waiting for approval…" disabled>
+                                                <button
+                                                    className="tile-btn"
+                                                    data-testid="rc-cancel-request"
+                                                    onClick={(e) => { e.stopPropagation(); stopControlling(); }}
+                                                    title="Waiting for approval… press to cancel the request"
+                                                    aria-label="Cancel the control request"
+                                                >
                                                     <PendingIcon />
                                                 </button>
                                             );
@@ -1363,7 +1395,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         // Without the lock send nothing — falling back to
                                         // absolute moves was the confusing "tiny movements"
                                         // degraded mode.
-                                        if (fpsMode) {
+                                        if (fpsMode && !phoneHost) { // Game mode means nothing to a phone
                                             if (document.pointerLockElement !== e.currentTarget) return;
                                             if (!e.movementX && !e.movementY) return;
                                             // Scale viewer CSS px → host source px (the video
@@ -1400,7 +1432,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         const el = e.currentTarget as HTMLDivElement;
                                         el.focus();
                                         // FPS mode: first click engages pointer lock (no click sent).
-                                        if (fpsMode && document.pointerLockElement !== el) {
+                                        if (fpsMode && !phoneHost && document.pointerLockElement !== el) {
                                             // Prefer RAW (unaccelerated) deltas so the host sees
                                             // physical motion, not the viewer OS's pointer
                                             // ballistics; retry without the option if the engine
@@ -1427,7 +1459,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         if (document.pointerLockElement !== el) {
                                             el.setPointerCapture(e.pointerId);
                                         }
-                                        if (!fpsMode) {
+                                        if (!fpsMode || phoneHost) {
                                             const v = videoRefs.current.get(userId);
                                             if (v) {
                                                 const n = normalizedOverVideo(v, e.clientX, e.clientY);
@@ -1468,6 +1500,16 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     onWheel={(e) => sendControlEvent({ t: 'wheel', dy: Math.round(-e.deltaY) })}
                                     onKeyDown={(e) => {
                                         e.preventDefault();
+                                        // A phone types characters, not keys: what this
+                                        // keyboard's layout makes of the key goes as text
+                                        // (and repeats, as typing does). Enter, Backspace,
+                                        // Escape and the rest still go as keys.
+                                        const typed = phoneHost ? phoneKeyText(e, macKeyboard()) : null;
+                                        if (typed !== null) {
+                                            sendControlEvent({ t: 'text', s: typed });
+                                            return;
+                                        }
+                                        if (phoneHost && phoneDropsKey(e, macKeyboard())) return;
                                         if (e.repeat) return;
                                         heldKeys.current.add(e.code);
                                         sendControlEvent({ t: 'key', code: e.code, down: true });
@@ -1478,7 +1520,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         sendControlEvent({ t: 'key', code: e.code, down: false });
                                     }}
                                 >
-                                    {fpsMode ? (
+                                    {fpsMode && !phoneHost ? (
                                         // Locked: stay out of the way. Unlocked: nothing is
                                         // being sent, so say exactly what to do about it.
                                         !pointerLocked && (
@@ -1488,8 +1530,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         )
                                     ) : (
                                         <div className="control-capture-hint">
-                                            <GamepadIcon /> Controlling {data.username}
-                                            {MOBILE
+                                            <GamepadIcon /> Controlling {data.username}{phoneHost ? '\u2019s phone' : ''}
+                                            {phoneHost
+                                                ? (MOBILE
+                                                    ? ' · tap = tap, drag = swipe' + (mobileKb ? ' · typing' : ' · keyboard button to type')
+                                                    : ' · click = tap, drag = swipe, right-click = long press, wheel = scroll')
+                                                : MOBILE
                                                 ? ' · tap = click, drag = move' + (mobileKb ? ' · typing' : ' · keyboard button to type')
                                                 : ' · Stop controlling above to release · Shift+right-click for stream options'}
                                         </div>
@@ -1510,6 +1556,18 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     onBeforeInput={(e) => {
                                         const data = (e.nativeEvent as InputEvent).data;
                                         if (!data) return;
+                                        if (phoneHost) {
+                                            // A phone takes the characters themselves:
+                                            // any script, any symbol, in pieces the wire
+                                            // allows (MAX_TEXT_EVENT UTF-16 units; a code
+                                            // point is at most two, and none is split).
+                                            const chars = [...data];
+                                            const per = MAX_TEXT_EVENT / 2;
+                                            for (let i = 0; i < chars.length; i += per) {
+                                                sendControlEvent({ t: 'text', s: chars.slice(i, i + per).join('') });
+                                            }
+                                            return;
+                                        }
                                         for (const ch of data) {
                                             const code = charToKeyCode(ch);
                                             if (code) {

@@ -7,7 +7,7 @@
  * e2e/stop-own-share-keeps-watching.mjs (red on 0.9.839).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { clearAllStreams, dropOwnStream, globalScreenSharers, globalSelectedStreams, globalStreamData } from '../components/voiceState';
+import { clearAllStreams, dropOwnStream, getCurrentStreamingUserId, globalScreenSharers, globalSelectedStreams, globalStreamData, setCurrentStreamingUser } from '../components/voiceState';
 import { useStreamStore } from '../stores/streamStore';
 
 const ME = 1, FRIEND = 2;
@@ -43,5 +43,23 @@ describe('dropOwnStream', () => {
     it('reports nothing left when you were watching only yourself', () => {
         globalSelectedStreams.delete(FRIEND);
         expect(dropOwnStream(ME)).toBe(0);
+    });
+    // Every way a share stops ends here (the voice panel's Stop, the stage's,
+    // the picture ending by itself, a share the SFU lost), so this is where
+    // remote control of it is told to end (remoteControl.endControlOfMyShare),
+    // and where "I am the one streaming" stops being true. The voice panel's
+    // own Stop never cleared it, and control's "still sharing" check passed.
+    it('says your share ended, and you are no longer the one streaming', () => {
+        const heard: string[] = [];
+        const listen = () => heard.push('ownShareEnded');
+        window.addEventListener('ownShareEnded', listen);
+        try {
+            setCurrentStreamingUser(ME);
+            dropOwnStream(ME);
+            expect(heard).toEqual(['ownShareEnded']);
+            expect(getCurrentStreamingUserId()).toBeNull();
+        } finally {
+            window.removeEventListener('ownShareEnded', listen);
+        }
     });
 });

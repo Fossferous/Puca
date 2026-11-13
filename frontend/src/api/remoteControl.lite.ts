@@ -90,6 +90,15 @@ export function getControlHostCapture(): { w: number; h: number } | null {
     return null;
 }
 
+/** No control session means no host to be a phone (StreamStage asks). */
+export function getControlHostKind(): 'phone' | null {
+    return null;
+}
+
+/** The wire's cap on one typed-text event; StreamStage chunks by it. The same
+ *  number as the real module's, though nothing is ever sent in this build. */
+export const MAX_TEXT_EVENT = 64;
+
 // Pure geometry, and the one thing here that is NOT a no-op: StreamStage
 // letterbox-fits a stream into its tile whether or not control is possible.
 // Re-exported from the shared module rather than copied — a copy of it in this

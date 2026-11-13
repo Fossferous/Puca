@@ -29,6 +29,8 @@ import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/input
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
 import { isTouchDevice, screenShareOffered, settingsSections, toggleSettingFromRow } from './settingsModal.utils';
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
+import { isIosDevice } from './shareAvailability';
+
 import { sendTestNotification } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
@@ -74,6 +76,9 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 import WebPushSetting from './WebPushSetting';
 import { askConfirm, tellUser } from '../api/appDialogs';
+
+/** An iPhone or iPad, an iPad asking for desktop sites included. */
+const iosHere = () => typeof navigator !== 'undefined' && isIosDevice(navigator.userAgent, navigator.maxTouchPoints);
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -2930,8 +2935,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     tablet mode, which shares under Automatic too, and in the
                                     Android app, which shares natively (nativeScreenShare.ts).
                                     A change reaches a running share at once
-                                    (sfuManager.followLadderSetting). */}
-                                {(screenShareOffered() || nativeScreenShareAvailable()) && (
+                                    (sfuManager.followLadderSetting). Not on an
+                                    iPhone or iPad, an iPad asking for desktop
+                                    sites included: the voice panel says it
+                                    cannot share there (shareAvailability). */}
+                                {((screenShareOffered() && !iosHere()) || nativeScreenShareAvailable()) && (
                                     <>
                                         <h3>Screen Sharing</h3>
                                         <div className="settings-card">

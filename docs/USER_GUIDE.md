@@ -536,7 +536,11 @@ can never be bought, sold or exchanged for anything.
 ### Start Sharing
 From the desktop app, a browser, or the Android app (see
 [From the Android app](#from-the-android-app) below). A phone's browser and
-the iPhone cannot share a screen.
+the iPhone cannot share a screen: browsers on Android have no screen sharing
+for web pages, and neither has Safari on iPhone and iPad before iOS 27
+(Púca does not offer the new iOS 27 one yet; it has not been tried). On those,
+**Share Screen** in the voice panel is dimmed, and pressing it says why; on an
+Android phone it points you to the Púca app for Android.
 
 Púca remembers the **Resolution**, **Frame Rate** and **Audio to share** you
 last picked, and **Share Screen** uses them without asking. So if you turn the
@@ -623,8 +627,86 @@ What is different from a computer:
 - **A still screen sends little.** Frames go out when something on the
   screen changes, plus about one a second while nothing does.
 - It needs the new Android app (a new install from the download page, not
-  only the in-app update), in Púca Lite too. In an older Android app the
-  button stays hidden.
+  only the in-app update), in Púca Lite too. In an older Android app,
+  **Share Screen** says so when you press it.
+
+### Let someone control your phone
+
+While you share your whole screen from the Android app, someone watching
+can ask to control the phone: to tap, swipe and type on whatever is on your
+screen, and press Back, Home and Recents. Nothing happens until you allow
+it, every time, twice: in Púca, and then in Android's own **Let "Name"
+control this phone?**, which Púca's page cannot answer for you.
+
+The first time, Android has to let Púca do it:
+
+1. When someone asks, Púca shows **Allow control of this phone?** (and a
+   notification, if you are in another app; tap it to open Púca)
+2. If it says to turn on **Púca remote control** first, tap **Open
+   Accessibility settings**, open **Púca remote control** and switch it on.
+   Android explains what an accessibility service can do; Púca uses it only
+   while you have allowed someone, and does not read your screen with it
+3. If Android says it is a **restricted setting** (Android 13 and later, for
+   an app installed from the download page): tap **Open App info** in Púca's
+   prompt, tap the menu at the top right, choose **Allow restricted
+   settings**, then switch **Púca remote control** on again
+4. Back in Púca, **Allow control** can now be pressed
+5. Android then asks **Let "Name" control this phone?**: **Allow** starts
+   it, **Cancel** turns them down (as **Deny** does). It waits half a
+   minute for an answer
+
+To turn it off again: Android's **Settings › Accessibility › Púca remote
+control**, off. Púca's prompt will then ask you to switch it on before anyone
+can control the phone.
+
+While someone is in control:
+
+- an orange frame goes round your screen, over every app, with **"Name" is
+  controlling this phone** and a **Stop** button at the top (your touches
+  go through the frame and the words to the app underneath; only Stop
+  takes a tap);
+- Púca's notification **Sharing your screen** says who, and has **Stop
+  control**;
+- in Púca, the banner at the top has **Stop control**.
+
+Any of those Stops ends it at once, and so does locking the phone, stopping
+the share (from Púca or the notification), or leaving the call. It never
+comes back by itself, not even when you share again: they have to ask
+again, and you to allow again.
+
+It works only while you share the **entire screen**. Shared one app
+(Android 14 and later), Púca refuses control, because the person watching
+could not see where a tap outside that app would land. Android does not say
+which you chose, so an app that fills the whole screen looks like the entire
+screen until you switch away from it, which ends control within a second; a
+tap sent in that moment can reach the app you switched to. Choose **Entire
+screen** to be sure. Typing goes into the
+text box you or they tapped; it does not type into password fields, and it
+does not press keyboard shortcuts.
+
+Control of a phone is in the full Púca app only, not in Púca Lite, and needs
+the new Android app (a new install from the download page). Phones running
+Android 7 cannot be controlled: Púca says so, and does not offer the switch
+in Android's settings.
+
+### Control someone's phone
+
+When the person sharing is on a phone, **Request control** on their stream
+asks them; once they allow it:
+
+- **click** (or tap, on a phone) is a tap on their screen, **drag** is a
+  swipe, a **right-click** is a long press, and the **mouse wheel** scrolls;
+- typing on your keyboard types into the text box they have open; Esc is Back.
+  Keyboard shortcuts do nothing on a phone, and neither do accents typed
+  with a dead key or text from an input method for Chinese, Japanese or
+  Korean;
+- the stream's buttons gain **Back**, **Home** and **Recent apps** for their
+  phone.
+
+While you wait for an answer, the request's button is a cancel button
+(after a cancel you can ask that person again after a short wait). If
+nobody answers for nearly three minutes (their app cannot be
+controlled at all, Púca Lite for instance), the request is dropped.
 
 ### How much a share sends
 
@@ -758,7 +840,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |
-| **Request Control** | Ask the sharer for keyboard and mouse control of their screen; they must accept |
+| **Request Control** | Ask the sharer for keyboard and mouse control of their screen (or touch control of their phone, see [Control someone's phone](#control-someones-phone)); they must accept. While waiting, the same button cancels the request |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
 | **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
 

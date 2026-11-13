@@ -61,6 +61,10 @@ const DETECTORS = [
     { s: 'Allow remote control with the lid closed', why: 'the lid-closed virtual screen option' },
     { s: 'no-screen:lid', why: 'the "that PC\'s screen is off" session end' },
     { s: 'force_power_off', why: 'the device card\'s forced Power off' },
+    // Control of a phone from a call (api/phoneControl.ts and the APK's
+    // :phone-control module): the plugin's name and the phone's own banner.
+    { s: 'SovereignPhoneControl', why: 'control of this phone from a call (the Android plugin)' },
+    { s: 'is controlling this phone', why: 'the phone host\'s control banner' },
 ];
 
 /**

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Control of this phone needs Android 8 (API 26): ControlGate.MIN_SDK.
+         Below it the service is not even offered in Accessibility settings. -->
+    <bool name="phone_control_supported">false</bool>
+</resources>

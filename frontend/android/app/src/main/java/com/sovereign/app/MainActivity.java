@@ -34,6 +34,10 @@ public class MainActivity extends BridgeActivity {
         // Keys on the remote-control notification. Not in Lite, which has no
         // remote control: there the page finds no plugin and offers none.
         if (!KeepAliveService.isLite()) registerPlugin(SovereignShadeKeysPlugin.class);
+        // Control of this phone from a call: the full build's registrar
+        // (src/full/java) registers it; Lite's (src/lite/java) does nothing,
+        // and Lite does not carry the module at all.
+        ControlRegistrar.register(this);
         super.onCreate(savedInstanceState);
     }
 

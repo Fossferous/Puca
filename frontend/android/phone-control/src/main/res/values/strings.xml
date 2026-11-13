@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="phone_control_label">Púca remote control</string>
+    <string name="phone_control_description">Lets a person in a Púca call tap, swipe and type on this phone while you share your whole screen with them, and press Back, Home and Recents. It does nothing until you press Allow on this phone for that person. It stops when you press Stop (at the top of the screen, in Púca, or in the share\'s notification), lock the phone, or stop sharing. Púca does not read what is on your screen with it: the only thing it looks for is the text box you are typing into while someone you allowed is typing. To turn it off, switch it off here.</string>
+    <!-- The native Allow (Consent.java), after the page's prompt. -->
+    <string name="phone_control_confirm_title">Let %1$s control this phone?</string>
+    <string name="phone_control_confirm_body">%1$s will be able to tap, swipe and type on anything on this screen, in any app, until you press Stop, lock the phone or stop sharing.</string>
+    <string name="phone_control_confirm_allow">Allow</string>
+    <string name="phone_control_confirm_cancel">Cancel</string>
+</resources>

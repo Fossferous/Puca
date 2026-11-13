@@ -65,6 +65,8 @@ vi.mock('../api/remoteControl', () => ({
     offerControl: vi.fn(),
     computeRmoveScale: () => 1,
     getControlHostCapture: () => null,
+    getControlHostKind: () => null,
+    MAX_TEXT_EVENT: 64,
 }));
 
 const setFocusedRemote = vi.fn();

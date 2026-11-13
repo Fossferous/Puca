@@ -139,10 +139,10 @@ async function activeHost(): Promise<Uint8Array> {
     return key!;
 }
 
-async function frameFor(key: Uint8Array, seq: number, kind = FRAME_SEALED_INPUT): Promise<ArrayBuffer> {
+async function frameFor(key: Uint8Array, seq: number, kind = FRAME_SEALED_INPUT, extra: Record<string, unknown> = {}): Promise<ArrayBuffer> {
     const body = kind === FRAME_HELLO
         ? JSON.stringify({ hello: 1 })
-        : JSON.stringify({ s: seq, e: { t: 'down', button: 0 } });
+        : JSON.stringify({ s: seq, e: { t: 'down', button: 0 }, ...extra });
     const bytes = await sealControlBytes(key, body);
     const wire = new Uint8Array(bytes.length + 1);
     wire[0] = kind;
@@ -178,6 +178,25 @@ describe('what the host will and will not inject from a data channel', () => {
         raw.onmessage!({ data: await frameFor(key, 2) } as MessageEvent);
         await settle();
         expect(injected, 'POSITIVE CONTROL: forward still lands').toHaveLength(2);
+    });
+
+    // The lanes count separately: a frame sealed for the RELAY (l:'r'),
+    // lifted off the server and sent down the SFU's data path (or the other
+    // way round), would pass this lane's counter. Only its own lane's frames,
+    // or an older viewer's untagged ones, land (remoteControl.laneOk).
+    it('a frame sealed for the relay injects nothing here; one sealed for this lane, or untagged, does', async () => {
+        const key = await activeHost();
+        const { dc, raw } = fakeDc();
+        registerControlChannel(VIEWER, dc);
+        raw.onmessage!({ data: await frameFor(key, 1, FRAME_SEALED_INPUT, { l: 'r' }) } as MessageEvent);
+        await settle();
+        expect(injected, 'a relay frame on the data lane').toHaveLength(0);
+        raw.onmessage!({ data: await frameFor(key, 2, FRAME_SEALED_INPUT, { l: 'p' }) } as MessageEvent);
+        await settle();
+        expect(injected, 'POSITIVE CONTROL: its own lane lands').toHaveLength(1);
+        raw.onmessage!({ data: await frameFor(key, 3) } as MessageEvent);
+        await settle();
+        expect(injected, 'an older viewer, untagged, still lands').toHaveLength(2);
     });
 
     it('a frame sealed under the WRONG key injects nothing — the server cannot type', async () => {

@@ -748,6 +748,15 @@ export const SendIcon = makeIcon('SendIcon', <>
     <path d="M20.5 3.5 10.5 13.25" />
 </>);
 
+/** A phone's recent-apps button: the newest card with two behind it.
+ *  Drawn for controlling a phone from a call (StreamStage); no classic glyph
+ *  (a brand-new icon, docs/ICON_LANGUAGE.md section 6). */
+export const RecentsIcon = makeIcon('RecentsIcon', <>
+    <rect x="4.75" y="8.75" width="14.5" height="11.5" rx="2" />
+    <path d="M7 5.75h10" />
+    <path d="M9.25 2.75h5.5" />
+</>);
+
 export const CopyIcon = makeIcon('CopyIcon', <>
     <rect x="8.75" y="8.75" width="12" height="12" rx="2" />
     <path d="M5.25 15.25h-.5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v.5" />
@@ -1348,6 +1357,7 @@ export const ICONS = {
     trash: TrashIcon,
     paperclip: PaperclipIcon,
     copy: CopyIcon,
+    recents: RecentsIcon,
     image: ImageIcon,
     link: LinkIcon,
     search: SearchIcon,

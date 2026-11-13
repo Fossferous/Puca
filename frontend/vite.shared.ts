@@ -65,6 +65,10 @@ export const src = (p: string) => fileURLToPath(new URL('./src/' + p, import.met
 export const RC_MODULE_PATTERNS: RegExp[] = [
   /[\\/]src[\\/]api[\\/]devices[\\/]/,
   /[\\/]src[\\/]api[\\/]remoteControl\.ts$/,
+  // Control of THIS phone from a call (the Android app's AccessibilityService
+  // plugin). Only remoteControl.ts imports it; listed so a preserved module
+  // that ever does fails the lite build instead of shipping it.
+  /[\\/]src[\\/]api[\\/]phoneControl\.ts$/,
   // The P2P input lanes (remote-control frames over the call's own data
   // channels). Inert without remote control, but inert is not excluded.
   /[\\/]src[\\/]api[\\/]rtc[\\/]controlDc\.ts$/,
