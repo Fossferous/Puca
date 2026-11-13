@@ -62,7 +62,7 @@ const STALE = [
     ['heading, or what you had typed there', 'what is typed there comes FIRST, then the heading, then the first step'],
     ['paste as its one item', '"Add as one item" from a name field (the New list name, an open note\'s title) is the clean steps on one line (usePasteItems checklistOnly), not the raw paste'],
 ];
-const docFiles = tracked(['docs/*.md', 'deploy/**', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md', '.env.example'])
+const docFiles = tracked(['docs/*.md', 'deploy/**', 'README.md', 'CHANGELOG.md', 'changelog.d/*.md', 'SECURITY.md', 'CONTRIBUTING.md', '.env.example'])
     .filter((f) => /\.(md|html|conf|snippet|example|service|cron|py|sh|json)$|Caddyfile/.test(f));
 for (const f of docFiles) {
     if (f === 'scripts/check-docs-consistency.mjs') continue;
@@ -306,6 +306,56 @@ for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
                 fail(`CHANGELOG.md:${b.endAt}`, `"${b.head}" ends mid-sentence ("…${b.endText.slice(-40)}") — restore the rest of it, or fold it into the bullet that has it`);
             }
         }
+    }
+}
+// A branch's changelog FRAGMENT (changelog.d/<topic>.md; changelog.d/README.md
+// says why): the release script folds each one into CHANGELOG.md at bump time,
+// so a fragment holds only what a release section's body holds —
+// `### Added|Changed|Fixed|Removed|Security` headings and bold-lead bullets —
+// and the rules above apply to it as to the section it joins: one bullet per
+// subject across every fragment and the Unreleased section, and no bullet that
+// stops mid-sentence.
+{
+    const SECTIONS = /^### (Added|Changed|Fixed|Removed|Security)$/;
+    const seen = new Map();
+    const cl = read('CHANGELOG.md').split('\n');
+    const un = cl.findIndex((l) => /^## Unreleased\s*$/.test(l));
+    if (un !== -1) {
+        let end = cl.findIndex((l, i) => i > un && /^## /.test(l));
+        if (end === -1) end = cl.length;
+        for (let i = un; i < end; i++) {
+            const m = /^- \*\*([^*]+)\*\*/.exec(cl[i]);
+            if (m) seen.set(m[1].trim().replace(/[.:]$/, ''), `CHANGELOG.md:${i + 1}`);
+        }
+    }
+    for (const f of tracked(['changelog.d/*.md']).filter((p) => p !== 'changelog.d/README.md')) {
+        const lines = read(f).replace(/\r\n/g, '\n').split('\n');
+        let bullets = 0;
+        let inBullet = false;
+        let section = false;
+        for (let i = 0; i < lines.length; i++) {
+            const l = lines[i];
+            if (l.trim() === '') { inBullet = false; continue; }
+            if (SECTIONS.test(l)) { section = true; inBullet = false; continue; }
+            const m = /^- \*\*([^*]+)\*\*/.exec(l);
+            if (m) {
+                if (!section) fail(`${f}:${i + 1}`, 'a bullet before any "### Added|Changed|Fixed|Removed|Security" heading');
+                bullets++;
+                inBullet = true;
+                const head = m[1].trim().replace(/[.:]$/, '');
+                const was = seen.get(head);
+                if (was) fail(`${f}:${i + 1}`, `"${head}" is already a bullet at ${was}: one bullet per subject in a release`);
+                else seen.set(head, `${f}:${i + 1}`);
+                let last = i;
+                while (last + 1 < lines.length && /^ {2}\S/.test(lines[last + 1])) last++;
+                const endText = lines[last].trim();
+                if (!/[.!?:)\]»”"`…]$/.test(endText)) fail(`${f}:${last + 1}`, `"${head}" ends mid-sentence ("…${endText.slice(-40)}")`);
+                continue;
+            }
+            if (inBullet && /^ {2}\S/.test(l)) continue;
+            fail(`${f}:${i + 1}`, 'a fragment holds only "### Added|Changed|Fixed|Removed|Security" headings and "- **Lead.** ..." bullets (no "## " release heading: the release script writes that)');
+        }
+        if (bullets === 0) fail(f, 'a fragment with no bullet: delete it, or write the entry');
     }
 }
 {
