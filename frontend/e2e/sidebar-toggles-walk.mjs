@@ -926,7 +926,9 @@ try {
     check('asked for by number it is refused as one that does not exist', refused === '404', refused);
     check('control: the channel inside with an allow of its own is listed to them', listedForThem.includes('taken-back'), listedForThem);
     check('and drawn at the top, its collection not being theirs to see', !!await until(async () => named(await sidebarRows(B), 'taken-back').length === 1 && named(await sidebarRows(B), 'taken-back')[0].sub === false, 8000), named(await sidebarRows(B), 'taken-back'));
-    check('control: someone who can see the collection keeps it there, under it', named(await sidebarRows(A), 'denied-notes')[0]?.sub === true, named(await sidebarRows(A), 'denied-notes'));
+    // Waited for like the checks beside it: the owner's list refetches on the same overwrite
+    // events, and one read raced that once (0.9.862's release walk: [] there, 292/292 on the re-run).
+    check('control: someone who can see the collection keeps it there, under it', !!await until(async () => named(await sidebarRows(A), 'denied-notes')[0]?.sub === true, 8000), named(await sidebarRows(A), 'denied-notes'));
     await api(A, 'DELETE', `/channels/${deniedOne.id}`);
 
     // ── A7. The phone.
