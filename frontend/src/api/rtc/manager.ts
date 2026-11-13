@@ -1225,6 +1225,12 @@ export class WebRTCManager {
         // guard, so it is left alone.
         for (const [userId, peer] of [...this.peers]) {
             if (this.publishBlockedByEnforcement()) return;
+            // Turned off (or the call left) while an earlier peer took it:
+            // the peers not reached yet are given nothing. A peer with no
+            // camera sender would get a new transceiver for a camera that is
+            // off, and turned on again meanwhile, a peer's live camera would
+            // be swapped for this stopped one (frozen for them).
+            if (newTrack.readyState !== 'live') return;
             if (this.peers.get(userId) !== peer) continue;
             if (!this.sendsTo(userId)) continue;
             const senders = peer.connection.getSenders();
