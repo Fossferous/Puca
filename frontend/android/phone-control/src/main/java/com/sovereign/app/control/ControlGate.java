@@ -31,6 +31,18 @@ final class ControlGate {
     static final String SERVICE_SUSPENDED = "service-suspended";
     static final String LOCKED = "locked";
     static final String SCREEN_OFF = "screen-off";
+    /** Android 7 (API 24, 25): a press is played live as continued strokes
+     *  (GestureDescription.StrokeDescription with willContinue, and
+     *  continueStroke), which Android has only from 8.0 (API 26). Calling
+     *  them on 7 throws NoSuchMethodError, an Error no catch here takes: the
+     *  app, and the call with it, went down on the first tap. */
+    static final String UNSUPPORTED = "unsupported";
+    static final int MIN_SDK = 26;
+
+    /** Whether this Android can be controlled at all. */
+    static boolean supported(int sdk) {
+        return sdk >= MIN_SDK;
+    }
 
     /**
      * The refusal for input now, or null. In order: no session the person

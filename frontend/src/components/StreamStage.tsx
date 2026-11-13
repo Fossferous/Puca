@@ -70,6 +70,7 @@ import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
 import { interceptBack } from '../api/mobileApp';
+import { phoneKeyText, macKeyboard } from './phoneKeyText';
 
 const MOBILE = isMobile();
 
@@ -1503,8 +1504,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         // keyboard's layout makes of the key goes as text
                                         // (and repeats, as typing does). Enter, Backspace,
                                         // Escape and the rest still go as keys.
-                                        if (phoneHost && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                                            sendControlEvent({ t: 'text', s: e.key });
+                                        const typed = phoneHost ? phoneKeyText(e, macKeyboard()) : null;
+                                        if (typed !== null) {
+                                            sendControlEvent({ t: 'text', s: typed });
                                             return;
                                         }
                                         if (e.repeat) return;

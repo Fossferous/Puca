@@ -21,6 +21,9 @@ android {
 
 dependencies {
     implementation project(':capacitor-android')
+    // Plugin.getActivity() is an AppCompatActivity (Android's own Allow
+    // dialog is shown over it); the app already ships this, same version.
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     testImplementation "junit:junit:$junitVersion"
     // Real org.json for the unit tests (the android.jar stub throws), as in :app.
     testImplementation 'org.json:json:20240303'

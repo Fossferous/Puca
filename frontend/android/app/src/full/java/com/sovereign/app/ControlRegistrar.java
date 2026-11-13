@@ -11,9 +11,10 @@ import com.sovereign.app.control.SovereignPhoneControlPlugin;
  * module) into the app. Lite compiles src/lite/java's ControlRegistrar
  * instead, which does nothing, and never sees the module (app/build.gradle).
  *
- * The module needs two things from the app's screen share, and gets them
- * through {@link ShareHost}: what the share captures right now, and a line
- * with an action on the share's notification while someone is in control.
+ * The module needs three things from the app's screen share, and gets them
+ * through {@link ShareHost}: what the share captures right now, a line with
+ * an action on the share's notification while someone is in control, and
+ * word of the share ending.
  */
 final class ControlRegistrar {
 
@@ -31,6 +32,11 @@ final class ControlRegistrar {
             @Override
             public void setShareNotice(String line, String actionLabel, PendingIntent action) {
                 ScreenShareService.setNotice(line, actionLabel, action);
+            }
+
+            @Override
+            public void watchShareEnd(Runnable whenEnded) {
+                ScreenShareService.setEndWatcher(whenEnded);
             }
         });
     }

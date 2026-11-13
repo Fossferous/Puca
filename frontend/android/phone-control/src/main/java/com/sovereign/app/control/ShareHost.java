@@ -21,4 +21,11 @@ public interface ShareHost {
      * control, with a way to stop it), or take them off again (all null).
      */
     void setShareNotice(String line, String actionLabel, PendingIntent action);
+
+    /**
+     * Run {@code whenEnded} every time a share ends, however it ends (Stop
+     * sharing in the notification or the app, Android ending the projection,
+     * a failure), from whatever thread ended it.
+     */
+    void watchShareEnd(Runnable whenEnded);
 }

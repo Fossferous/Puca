@@ -51,6 +51,21 @@ function killSwitchHint(): string {
         : `${base} stops it instantly`;
 }
 
+/** Allow works only this long after a prompt for THIS requester appears. A
+ *  request withdrawn and another sent at once used to re-render the same
+ *  prompt with the new name, Allow enabled, under a finger already on its
+ *  way to it. Each prompt is keyed by who asks, so a new one waits again. */
+export const ALLOW_ARM_MS = 800;
+
+function useArmed(ms: number): boolean {
+    const [armed, setArmed] = useState(false);
+    useEffect(() => {
+        const t = setTimeout(() => setArmed(true), ms);
+        return () => clearTimeout(t);
+    }, [ms]);
+    return armed;
+}
+
 /** How often an open phone prompt asks the phone whether Allow can work yet
  *  (the person may be switching the service on in Android's settings). */
 const PHONE_STATUS_POLL_MS = 1500;
@@ -85,6 +100,7 @@ function PhoneControlPrompt({ username }: { username: string }) {
     // until "Allow restricted settings" in its App info.
     const restricted = serviceOff && (status?.sdk ?? 0) >= 33;
     const ready = !!status && refusal === null;
+    const armed = useArmed(ALLOW_ARM_MS);
     return (
         <div className="rc-prompt" role="dialog" aria-modal="true" aria-labelledby="rc-phone-title" data-testid="rc-phone-prompt">
             <div className="rc-prompt-icon"><GamepadIcon size={40} /></div>
@@ -140,9 +156,41 @@ function PhoneControlPrompt({ username }: { username: string }) {
                 <button
                     className="rc-btn rc-allow"
                     data-testid="rc-phone-allow"
-                    disabled={!ready}
+                    disabled={!ready || !armed}
                     onClick={() => respondToControlRequest(true)}
                 >
+                    Allow control
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function DesktopControlPrompt({ username }: { username: string }) {
+    const armed = useArmed(ALLOW_ARM_MS);
+    return (
+        <div className="rc-prompt" role="dialog" aria-modal="true">
+            <div className="rc-prompt-icon"><GamepadIcon size={40} /></div>
+            <h3>Allow remote control?</h3>
+            <p>
+                <strong>{username}</strong> is asking to control your
+                shared screen with their mouse and keyboard.
+            </p>
+            <p className="rc-prompt-warn">
+                They'll be able to act on your computer as if sitting at it. Only allow
+                someone you trust — stop anytime with the button, Esc, or by touching
+                your own mouse/keyboard.
+            </p>
+            <p className="rc-prompt-note">
+                Works for ordinary desktop apps and many games. It can't drive
+                administrator/UAC prompts, and some games ignore or restrict remote
+                input — anti-cheat titles are blocked and may still ban injected input.
+            </p>
+            <div className="rc-prompt-actions">
+                <button className="rc-btn rc-deny" onClick={() => respondToControlRequest(false)}>
+                    Deny
+                </button>
+                <button className="rc-btn rc-allow" disabled={!armed} onClick={() => respondToControlRequest(true)}>
                     Allow control
                 </button>
             </div>
@@ -173,37 +221,12 @@ export function RemoteControlOverlay() {
             {/* Approval prompt (host): a phone's own, or the desktop's */}
             {ctrl.incomingRequest && phoneHostPossible() && (
                 <div className="rc-prompt-backdrop">
-                    <PhoneControlPrompt username={ctrl.incomingRequest.username} />
+                    <PhoneControlPrompt key={ctrl.incomingRequest.userId} username={ctrl.incomingRequest.username} />
                 </div>
             )}
             {ctrl.incomingRequest && !phoneHostPossible() && (
                 <div className="rc-prompt-backdrop">
-                    <div className="rc-prompt" role="dialog" aria-modal="true">
-                        <div className="rc-prompt-icon"><GamepadIcon size={40} /></div>
-                        <h3>Allow remote control?</h3>
-                        <p>
-                            <strong>{ctrl.incomingRequest.username}</strong> is asking to control your
-                            shared screen with their mouse and keyboard.
-                        </p>
-                        <p className="rc-prompt-warn">
-                            They'll be able to act on your computer as if sitting at it. Only allow
-                            someone you trust — stop anytime with the button, Esc, or by touching
-                            your own mouse/keyboard.
-                        </p>
-                        <p className="rc-prompt-note">
-                            Works for ordinary desktop apps and many games. It can't drive
-                            administrator/UAC prompts, and some games ignore or restrict remote
-                            input — anti-cheat titles are blocked and may still ban injected input.
-                        </p>
-                        <div className="rc-prompt-actions">
-                            <button className="rc-btn rc-deny" onClick={() => respondToControlRequest(false)}>
-                                Deny
-                            </button>
-                            <button className="rc-btn rc-allow" onClick={() => respondToControlRequest(true)}>
-                                Allow control
-                            </button>
-                        </div>
-                    </div>
+                    <DesktopControlPrompt key={ctrl.incomingRequest.userId} username={ctrl.incomingRequest.username} />
                 </div>
             )}
 

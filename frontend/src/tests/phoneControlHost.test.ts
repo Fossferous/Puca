@@ -14,6 +14,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { cryptoInFlight, trackCrypto } from './fixtures/cryptoInFlight';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+/** Everything the page did, in order, across the socket and the native side. */
+const order: string[] = [];
 type Handler = (m: unknown) => void;
 const handlers = new Map<string, Handler>();
 
@@ -21,7 +23,7 @@ vi.mock('../api/websocket', () => ({
     wsClient: {
         isConnected: true,
         on: (t: string, h: Handler) => { handlers.set(t, h); },
-        send: (m: { type: string; payload?: Record<string, unknown> }) => { sent.push(m); },
+        send: (m: { type: string; payload?: Record<string, unknown> }) => { sent.push(m); order.push(`ws:${m.type}`); },
         bufferedAmount: () => 0,
     },
 }));
@@ -63,7 +65,13 @@ vi.mock('../api/phoneControl', async () => {
         refusalWords: real.refusalWords,
         endedWords: real.endedWords,
         phoneHostPossible: () => phone.possible,
-        beginPhoneControl: async (viewer: string) => { phone.begun.push(viewer); if (phone.gate) await phone.gate; return phone.begin; },
+        beginPhoneControl: async (viewer: string) => {
+            phone.begun.push(viewer);
+            order.push('native:begin');
+            if (phone.gate) await phone.gate;
+            order.push('native:begun');
+            return phone.begin;
+        },
         endPhoneControl: () => { phone.ended++; },
         injectPhoneControl: async (events: Array<Record<string, unknown>>) => { phone.injected.push(...events); },
         onPhoneControlEnded: (cb: (reason: string) => void) => { phone.endedCb = cb; return () => {}; },
@@ -115,11 +123,23 @@ async function allowed(): Promise<Uint8Array> {
     return key!;
 }
 
-/** The viewer's sealed input arriving over the relay. */
-async function input(key: Uint8Array, s: number, e: Record<string, unknown>) {
-    const sealed = await sealControl(key, JSON.stringify({ s, e }));
+/** The viewer's sealed input arriving over the relay (`extra`: more of the
+ *  sealed plaintext, such as the lane tag). */
+async function input(key: Uint8Array, s: number, e: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    const sealed = await sealControl(key, JSON.stringify({ s, e, ...extra }));
     handlers.get('ControlInput')!({ payload: { from_user: VIEWER, event: sealed } });
     await settle();
+}
+
+/** The HostInfo frames sent to the viewer so far, opened. */
+async function hostInfos(key: Uint8Array) {
+    const out: unknown[] = [];
+    for (const m of sent) {
+        if (m.type !== 'ControlInput' || m.payload?.target_user !== VIEWER) continue;
+        const plain = await openControl(key, m.payload.event as string);
+        if (plain) out.push(JSON.parse(plain));
+    }
+    return out;
 }
 
 let untrack: () => void = () => {};
@@ -128,6 +148,7 @@ beforeEach(async () => {
     const rc = await import('../api/remoteControl');
     rc.resetRemoteControl();
     sent.length = 0;
+    order.length = 0;
     notified.length = 0;
     sharing = true;
     phone.possible = true;
@@ -158,6 +179,13 @@ describe('a phone sharing its screen, as the host', () => {
     it('Allow starts the native session for THAT viewer before the grant goes out', async () => {
         await allowed();
         expect(phone.begun).toEqual(['Aoife']);
+        // The ORDER is the point: a grant before the native session had
+        // started would hand the viewer a key while nothing could land, or
+        // while the native side was still free to refuse.
+        const begun = order.indexOf('native:begun');
+        const grant = order.lastIndexOf('ws:ControlResponse');
+        expect(begun, 'the native session started').toBeGreaterThanOrEqual(0);
+        expect(grant, 'the grant went out after it').toBeGreaterThan(begun);
     });
 
     it('the native side refusing (the Accessibility switch off) grants nothing', async () => {
@@ -245,12 +273,164 @@ describe('a phone sharing its screen, as the host', () => {
         expect(phone.begun, 'the native session is starting').toEqual(['Aoife']);
         // The viewer cancels meanwhile.
         handlers.get('ControlEnded')!({ payload: { from_user: VIEWER } });
+        expect(phone.ended, 'Android\'s dialog, still asking, is taken down at once').toBe(1);
         release();
         await answered;
         await settle();
         expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant to nobody').toBe(false);
         expect(rc.getControlState().controlledBy).toBeNull();
-        expect(phone.ended, 'the native session is taken down').toBe(1);
+        expect(phone.ended, 'and the native session with it').toBeGreaterThanOrEqual(1);
+    });
+
+    it('the share ending ends control at once, natively too, and sharing again gives nothing back', async () => {
+        const key = await allowed();
+        await input(key, 1, { t: 'down', button: 0 });
+        expect(phone.injected, 'POSITIVE CONTROL: in control before').toHaveLength(1);
+        const rc = await import('../api/remoteControl');
+        sent.length = 0;
+        const endedBefore = phone.ended;
+        // Any way a share stops ends in voiceState.dropOwnStream, which says so.
+        sharing = false;
+        window.dispatchEvent(new CustomEvent('ownShareEnded'));
+        await settle();
+        expect(sent.some(m => m.type === 'ControlEnd' && m.payload?.target_user === VIEWER), 'the viewer is told').toBe(true);
+        expect(rc.getControlState().controlledBy, 'no session').toBeNull();
+        expect(phone.ended, 'the native session ended').toBeGreaterThan(endedBefore);
+        // Sharing again: the old session must not come back.
+        sharing = true;
+        await input(key, 2, { t: 'up', button: 0 });
+        await input(key, 3, { t: 'down', button: 0 });
+        expect(phone.injected, 'nothing lands without a new Allow').toHaveLength(1);
+    });
+
+    it('a request waiting when the share ends is answered No and its prompt goes', async () => {
+        const { rc } = await request();
+        expect(rc.getControlState().incomingRequest).not.toBeNull();
+        sharing = false;
+        window.dispatchEvent(new CustomEvent('ownShareEnded'));
+        await settle();
+        expect(rc.getControlState().incomingRequest).toBeNull();
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
+        expect(phone.begun).toHaveLength(0);
+    });
+
+    it('Allow pressed after the share ended under the prompt grants nothing', async () => {
+        const { rc } = await request();
+        sharing = false; // no event: the prompt is still up
+        await rc.respondToControlRequest(true);
+        await settle();
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
+        expect(phone.begun, 'no native session').toHaveLength(0);
+        expect(rc.getControlState().controlledBy).toBeNull();
+    });
+
+    it('the share ending while the native session starts gets a No, and the session is taken down', async () => {
+        let release: () => void = () => {};
+        phone.gate = new Promise<void>(r => { release = r; });
+        const { rc } = await request();
+        const answered = rc.respondToControlRequest(true);
+        await settle();
+        sharing = false;
+        release();
+        await answered;
+        await settle();
+        expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true)).toBe(false);
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
+        expect(phone.ended).toBeGreaterThanOrEqual(1);
+        expect(rc.getControlState().controlledBy).toBeNull();
+    });
+
+    it('says what it is again once the viewer proves it has the key, and only once', async () => {
+        const key = await allowed();
+        expect(await hostInfos(key), 'the one sent with the grant').toHaveLength(1);
+        await input(key, 1, { t: 'move', x: 0.5, y: 0.5 });
+        const infos = await hostInfos(key);
+        expect(infos, 'again on the first input (the first may have reached a viewer with no key yet)').toHaveLength(2);
+        expect(infos[1]).toEqual({ n: 2, i: { kind: 'phone' } });
+        await input(key, 2, { t: 'move', x: 0.4, y: 0.5 });
+        await input(key, 3, { t: 'move', x: 0.3, y: 0.5 });
+        expect(await hostInfos(key), 'not on every input').toHaveLength(2);
+    });
+
+    it('takes relay input sealed for the relay (or by an older viewer, untagged), never a frame sealed for the data lane', async () => {
+        const key = await allowed();
+        // A frame from the SFU's data path, replayed on the relay by the
+        // server: its number is far ahead of the relay's counter.
+        await input(key, 5000, { t: 'down', button: 0 }, { l: 'p' });
+        expect(phone.injected, 'a data-lane frame on the relay is dropped').toHaveLength(0);
+        await input(key, 1, { t: 'down', button: 0 }, { l: 'r' });
+        expect(phone.injected, 'POSITIVE CONTROL: a relay frame lands').toHaveLength(1);
+        await input(key, 2, { t: 'up', button: 0 });
+        expect(phone.injected, 'an older viewer, with no tag, still works').toHaveLength(2);
+        const { laneOk } = await import('../api/remoteControl');
+        expect(laneOk({ l: 'r' }, 'p')).toBe(false);
+        expect(laneOk({ l: 'p' }, 'p')).toBe(true);
+        expect(laneOk({ l: 'x' }, 'r')).toBe(false);
+        expect(laneOk({}, 'p')).toBe(true);
+    });
+
+    it('a viewer who withdraws while the phone starts an OFFERED session gets no grant, and the session is taken down', async () => {
+        const rc = await import('../api/remoteControl');
+        const me = makeIdentity(new Uint8Array(32).fill(3));
+        const viewer = makeIdentity(new Uint8Array(32).fill(4));
+        setActiveIdentity(me);
+        peerIdentityPub = viewer.publicKeyEncoded;
+        rc.initRemoteControl();
+        rc.offerControl(VIEWER, 'Aoife');
+        sent.length = 0;
+        let release: () => void = () => {};
+        phone.gate = new Promise<void>(r => { release = r; });
+        // The viewer takes the offer: its request is the acceptance.
+        handlers.get('ControlRequested')!({
+            payload: { from_user: VIEWER, from_username: 'Aoife', eph: generateControlEphemeral().pubEncoded },
+        });
+        await settle();
+        expect(phone.begun, 'the native session is starting').toEqual(['Aoife']);
+        handlers.get('ControlEnded')!({ payload: { from_user: VIEWER } });
+        release();
+        await settle();
+        expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant to nobody').toBe(false);
+        expect(rc.getControlState().controlledBy).toBeNull();
+        expect(phone.ended, 'the native session is taken down').toBeGreaterThanOrEqual(1);
+    });
+
+    it('a second request while a phone is still starting the session it allowed is refused', async () => {
+        let release: () => void = () => {};
+        phone.gate = new Promise<void>(r => { release = r; });
+        const { rc } = await request();
+        const answered = rc.respondToControlRequest(true);
+        await settle();
+        sent.length = 0;
+        handlers.get('ControlRequested')!({
+            payload: { from_user: 77, from_username: 'Other', eph: generateControlEphemeral().pubEncoded },
+        });
+        await settle();
+        expect(sent.find(m => m.payload?.target_user === 77)?.payload?.granted, 'refused at once').toBe(false);
+        expect(rc.getControlState().incomingRequest, 'no second prompt').toBeNull();
+        release();
+        await answered;
+        await settle();
+        expect(rc.getControlState().controlledBy?.userId, 'the first one goes on').toBe(VIEWER);
+    });
+
+    it('Cancel in Android\'s own dialog is a Deny: no grant, and the next request is refused without a prompt', async () => {
+        phone.begin = { ok: false, refusal: 'declined' };
+        const rc = await import('../api/remoteControl');
+        rc.initRemoteControl();
+        sent.length = 0;
+        handlers.get('ControlRequested')!({ payload: { from_user: 99, from_username: 'Cian', eph: 'x' } });
+        await settle();
+        await rc.respondToControlRequest(true);
+        await settle();
+        expect(phone.begun, 'the page asked the phone').toEqual(['Cian']);
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
+        expect(rc.getControlState().controlledBy).toBeNull();
+        expect(rc.getControlState().notice).toBe('Control not started: you chose Cancel.');
+        sent.length = 0;
+        handlers.get('ControlRequested')!({ payload: { from_user: 99, from_username: 'Cian', eph: 'x' } });
+        await settle();
+        expect(rc.getControlState().incomingRequest, 'on the denial ladder: no prompt').toBeNull();
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
     });
 
     it('input after the share stopped is not injected', async () => {
@@ -318,6 +498,18 @@ describe('the viewer of a phone', () => {
         expect(rc.getControlHostKind()).toBe('phone');
     });
 
+    it('seals its relay input with the relay\'s lane tag', async () => {
+        const key = await viewing();
+        const rc = await import('../api/remoteControl');
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        const frame = sent.find(m => m.type === 'ControlInput' && m.payload?.target_user === HOST);
+        expect(frame, 'sent on the relay').toBeDefined();
+        const plain = await openControl(key, frame!.payload!.event as string);
+        expect(JSON.parse(plain!)).toMatchObject({ s: 1, l: 'r', e: { t: 'down', button: 0 } });
+    });
+
     it('forgets it when the session ends', async () => {
         const key = await viewing();
         const rc = await import('../api/remoteControl');
@@ -357,6 +549,34 @@ describe('a request nobody answers', () => {
             sent.length = 0;
             vi.advanceTimersByTime(rc.VIEWER_REQUEST_TIMEOUT_MS * 2);
             expect(sent.some(m => m.type === 'ControlEnd'), 'no stray withdrawal after a refusal').toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
+describe('a phone prompt\'s deadline', () => {
+    it('is extended for Android\'s settings to 120 s from the REQUEST, however often the button is pressed', async () => {
+        vi.useFakeTimers();
+        try {
+            const rc = await import('../api/remoteControl');
+            rc.initRemoteControl();
+            sent.length = 0;
+            // No await on this path: it runs to the end at once.
+            handlers.get('ControlRequested')!({ payload: { from_user: 88, from_username: 'Slow', eph: 'x' } });
+            expect(rc.getControlState().incomingRequest?.userId).toBe(88);
+            vi.advanceTimersByTime(30_000);
+            rc.extendControlPrompt(); // went to Android's settings
+            vi.advanceTimersByTime(80_000);
+            rc.extendControlPrompt(); // and again, at 110 s
+            vi.advanceTimersByTime(10_000 - 1);
+            expect(rc.getControlState().incomingRequest, 'still up just before 120 s').not.toBeNull();
+            vi.advanceTimersByTime(1);
+            expect(rc.getControlState().incomingRequest, 'gone at 120 s, inside the viewer\'s own wait').toBeNull();
+            expect(sent.find(m => m.payload?.target_user === 88)?.payload?.granted).toBe(false);
+            // Android's own dialog can open as late as that, and the viewer
+            // must still be waiting when it is answered.
+            expect(rc.PHONE_SETTINGS_DEADLINE_MS + rc.PHONE_CONFIRM_MS).toBeLessThan(rc.VIEWER_REQUEST_TIMEOUT_MS);
         } finally {
             vi.useRealTimers();
         }

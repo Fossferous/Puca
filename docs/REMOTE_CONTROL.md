@@ -30,7 +30,7 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   AccessibilityService (see [Controlling a phone](#controlling-a-phone)).
   Browser hosts, the iPhone and an Android app without the control module
   auto-deny requests. A Lite host does not answer at all, so the viewer gives
-  up by itself after `VIEWER_REQUEST_TIMEOUT_MS` (135 s), and can cancel a
+  up by itself after `VIEWER_REQUEST_TIMEOUT_MS` (165 s), and can cancel a
   pending request from its tile before that.
 - **Roles:** the controller (viewer) can be on any platform; the host must be
   the Windows desktop app or the full Android app.
@@ -202,12 +202,18 @@ is read out, logged or sent.
   older host's `validEvent` drops them, and a desktop host ignores them before
   its batch injector, which would refuse the whole batch over one of them.
 - **Where a point lands** (`ScreenMap.java`): by its fractions of the screen as
-  it is turned now, and only while the share is of the WHOLE screen (Android
-  14+ "Share one app" is refused: its window can be anywhere), what it
-  captures is visible (one app shared and another in front: dropped), and the
-  picture has settled for 1 s after the screen turned (the viewer is looking
-  at a picture a network trip old). A press that began before the picture
-  last changed shape is abandoned.
+  it is turned now, and only while the share is of the WHOLE screen, what it
+  captures is visible, and the picture has settled for 1 s after the screen
+  turned (the viewer is looking at a picture a network trip old). A press that
+  began before the picture last changed shape is abandoned. Android 14+
+  "Share one app" is told apart by what Android reports: a shared app whose
+  window is not the screen's size is refused at Allow, and one that IS (an app
+  filling the screen, Púca itself among them) passes until Android says its
+  window is hidden behind another app, which ends the session. Android gives
+  no other way to know which was chosen, and that callback arrives a moment
+  after the switch, so a tap the viewer sends in that moment can land on the
+  app now in front. Share the entire screen to be sure what the viewer
+  reaches.
 - **HostInfo.** The phone tells its viewer it is a phone (so the viewer offers
   Back, Home and Recents and sends typed characters as text) in a sealed
   `ControlInput` the other way, `{n, i: {kind: 'phone'}}`, under the session
@@ -221,21 +227,58 @@ is read out, logged or sent.
 **What keeps it in bounds** (`PhoneControl.java`, `ControlGate.java`):
 
 - Nothing is injected outside a session, and a session starts only when the
-  person at the phone presses **Allow** for that one viewer, in Púca, with the
-  service switched on and the whole screen shared. Every request is asked
-  again; an offer (the phone's person offering control) counts as their
-  consent, as on a desktop. The prompt says what control of a phone means
+  person at the phone presses **Allow** for that one viewer twice: in Púca's
+  prompt, and then in Android's own dialog, *Let X control this phone?*
+  (`Consent.java`, shown by the plugin over Púca), with the service switched
+  on and the whole screen shared. The page alone cannot start one: it is
+  JavaScript, and anything that ever ran in it (a rendering bug that let a
+  message run script, an update signed with a stolen key) could otherwise
+  call `begin` and `inject` and drive every app on the phone; script in a
+  WebView cannot press a native dialog. That dialog takes no press for its
+  first 800 ms (a dialog that pops up under a moving finger is not answered
+  by it), lets no other app's window click through it, is never asked while a
+  session lasts, and is a No after 30 s; its Cancel is a Deny (the denial
+  ladder). Every request is asked again; an offer (the phone's person
+  offering control) counts as the page's half of the consent, and Android's
+  dialog still asks. The page's own Allow, on a phone and a desktop alike,
+  also takes no press for 800 ms after a prompt for a NEW requester appears
+  (the prompt is keyed by who asks). The prompt says what control of a phone means
   and, with the service off, how to switch it on (with Android 13+'s *Allow
   restricted settings* for an APK installed from outside a store), and Allow
   stays disabled until the phone says it can. Opening the settings from the
-  prompt extends its deadline to 120 s.
+  prompt extends its deadline to 120 s from when the request arrived (however
+  often it is pressed), inside the viewer's own wait of 165 s (120 s, 30 s for
+  Android's dialog, 15 s to spare).
 - A request reaches a phone that is showing another app as a notification
   (*X wants to control this phone*), one at a time under one key (a new one
   replaces the last); the denial ladder throttles repeat requests before they
   get that far, as it does on a desktop.
-- A viewer who withdraws while the phone is still starting its native
-  session (after Allow) gets no grant: the phone takes the session down
-  again rather than grant it to nobody.
+- A viewer who withdraws while the phone is still asking or starting its
+  native session (after the page's Allow, on an offer too) gets no grant:
+  Android's dialog is taken down, and a session that started is ended rather
+  than granted to nobody. No second request is taken meanwhile.
+- **The share ending ends control, on a desktop too**, however it ends: Stop
+  in the voice panel or on the stage, Stop sharing in the notification, the
+  picture ending by itself, a share the SFU lost. All of them pass through
+  `voiceState.dropOwnStream`, which fires `ownShareEnded`, and
+  `remoteControl.endControlOfMyShare` ends the session and answers a waiting
+  request No; on a phone the share's own end ends the native session too
+  (`ShareHost.watchShareEnd`), whatever the page does. Up to 0.9.860 only the
+  stage's Stop did: sharing again within the 90 s inactivity window handed
+  the same viewer control of the new share with no new Allow, and the
+  phone's frame stayed up in between. A share started again is a new one,
+  that nobody has been allowed into.
+- **Which lane.** Input sealed for the P2P lane (the mesh data channel or the
+  SFU data path) and for the relay is tagged inside the sealed plaintext,
+  `l: 'p'` or `l: 'r'`, and a host takes a frame only on the lane it was
+  sealed for. The lanes count separately, so without the tag a frame lifted
+  from an SFU call's data path (its operator sees them all) and sent again on
+  the relay passed the relay's counter, and replayed the viewer's real taps
+  and typing. A viewer older than the tag seals none and is taken as before.
+- **HostInfo again.** The first HostInfo can reach a viewer that is still
+  fetching the phone's identity key, which must drop what it cannot open: the
+  phone sends it once more when the viewer proves it holds the key (its hello
+  opens, or its first input does).
 - While it lasts, an orange frame round the whole screen and "X is
   controlling this phone" with a red **Stop** beside it sit over every app
   (accessibility overlays, so they are in the shared picture too), the
@@ -274,8 +317,10 @@ stay silent on Lite). The page side, `api/phoneControl.ts`, is imported only by
 `remoteControl.ts`, which Lite aliases away; `RC_MODULE_PATTERNS` and
 `check-no-rc.mjs` back that up.
 
-**Not covered.** Android 7 (API 24/25) cannot continue a stroke and is not
-supported. Typing is text, not keys: shortcuts, Tab and the arrows do nothing,
+**Not covered.** Android 7 (API 24/25) cannot continue a stroke: the service is
+not offered in its Accessibility settings at all (`android:enabled` from API
+26), and the prompt says control needs Android 8 or newer
+(`ControlGate.UNSUPPORTED`) rather than crash on the first tap, as it did. Typing is text, not keys: shortcuts, Tab and the arrows do nothing,
 and an app that reads only key events (some games, terminals) gets nothing.
 Media keys, volume and the power button are not offered. My Devices does not
 control a phone yet (`api/devices/hostCapacitor.ts`); this is control from a

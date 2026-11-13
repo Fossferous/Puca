@@ -600,7 +600,8 @@ What is different from a computer:
 While you share your whole screen from the Android app, someone watching
 can ask to control the phone: to tap, swipe and type on whatever is on your
 screen, and press Back, Home and Recents. Nothing happens until you allow
-it, every time.
+it, every time, twice: in Púca, and then in Android's own **Let "Name"
+control this phone?**, which Púca's page cannot answer for you.
 
 The first time, Android has to let Púca do it:
 
@@ -615,6 +616,9 @@ The first time, Android has to let Púca do it:
    prompt, tap the menu at the top right, choose **Allow restricted
    settings**, then switch **Púca remote control** on again
 4. Back in Púca, **Allow control** can now be pressed
+5. Android then asks **Let "Name" control this phone?**: **Allow** starts
+   it, **Cancel** turns them down (as **Deny** does). It waits half a
+   minute for an answer
 
 To turn it off again: Android's **Settings › Accessibility › Púca remote
 control**, off. Púca's prompt will then ask you to switch it on before anyone
@@ -631,18 +635,24 @@ While someone is in control:
 - in Púca, the banner at the top has **Stop control**.
 
 Any of those Stops ends it at once, and so does locking the phone, stopping
-the share, or leaving the call. It never comes back by itself: they have to
-ask again, and you to allow again.
+the share (from Púca or the notification), or leaving the call. It never
+comes back by itself, not even when you share again: they have to ask
+again, and you to allow again.
 
 It works only while you share the **entire screen**. Shared one app
 (Android 14 and later), Púca refuses control, because the person watching
-could not see where a tap outside that app would land. Typing goes into the
+could not see where a tap outside that app would land. Android does not say
+which you chose, so an app that fills the whole screen looks like the entire
+screen until you switch away from it, which ends control; a tap sent in that
+moment can reach the app you switched to. Choose **Entire screen** to be
+sure. Typing goes into the
 text box you or they tapped; it does not type into password fields, and it
 does not press keyboard shortcuts.
 
 Control of a phone is in the full Púca app only, not in Púca Lite, and needs
 the new Android app (a new install from the download page). Phones running
-Android 7 cannot be controlled.
+Android 7 cannot be controlled: Púca says so, and does not offer the switch
+in Android's settings.
 
 ### Control someone's phone
 
@@ -656,7 +666,7 @@ asks them; once they allow it:
   phone.
 
 While you wait for an answer, the request's button is a cancel button. If
-nobody answers for a little over two minutes (their app cannot be
+nobody answers for nearly three minutes (their app cannot be
 controlled at all, Púca Lite for instance), the request is dropped.
 
 ### How much a share sends

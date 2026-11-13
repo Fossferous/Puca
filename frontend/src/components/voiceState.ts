@@ -422,7 +422,15 @@ export function dropOwnStream(userId: number): number {
     // are still watched, so a report of one closing can be checked.
     const left = globalSelectedStreams.size;
     logRtcEvent(`[stream-watch] own share stopped: ${left} other stream${left === 1 ? '' : 's'} still watched`);
+    // No longer the one streaming: the voice panel's own Stop never said so
+    // (only the stop through StreamStage did), and remote control's "still
+    // sharing" check kept passing after it.
+    if (currentStreamingUserId === userId) currentStreamingUserId = null;
     notifyStreamStateChange();
+    // Anyone controlling this share loses it now, whichever way it stopped
+    // (remoteControl.endControlOfMyShare). Narrower than voiceControlReset,
+    // which also ends a screen I am controlling of somebody else's.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('ownShareEnded'));
     return left;
 }
 

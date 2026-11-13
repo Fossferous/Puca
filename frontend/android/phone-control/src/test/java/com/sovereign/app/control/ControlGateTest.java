@@ -74,4 +74,14 @@ public class ControlGateTest {
         assertFalse(ControlGate.ends(null));
         assertFalse(ControlGate.ends(ControlGate.NO_SESSION));
     }
+
+    @Test
+    public void android7CannotBeControlled() {
+        // Continued strokes (willContinue, continueStroke) are API 26.
+        assertFalse(ControlGate.supported(24));
+        assertFalse(ControlGate.supported(25));
+        assertTrue(ControlGate.supported(26));
+        assertTrue(ControlGate.supported(36));
+        assertEquals(26, ControlGate.MIN_SDK);
+    }
 }

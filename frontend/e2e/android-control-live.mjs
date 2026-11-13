@@ -18,7 +18,11 @@
 //     viewer's cancel takes the prompt down (NEGATIVE CONTROL: nothing granted);
 //   - switched on, a request the person DENIES grants nothing, and a click on
 //     the viewer's picture changes nothing on the phone (NEGATIVE CONTROL);
-//   - ALLOWED: the phone shows the orange frame over every app (screencap), the
+//   - Allow in the page alone starts nothing: Android's own dialog asks
+//     again, naming the viewer (Consent.java), and its Cancel grants nothing
+//     and a click then changes nothing (NEGATIVE CONTROL);
+//   - ALLOWED (in the page, then in Android's dialog): the phone shows the
+//     orange frame over every app (screencap), the
 //     notification says who and offers Stop control, the viewer gets the
 //     phone's Back / Home / Recents (the sealed HostInfo arrived), and then,
 //     with Android's Settings in front:
@@ -29,8 +33,10 @@
 //       still lands on the row it was aimed at;
 //   - REVOKED from the notification's Stop control: the frame goes, the viewer
 //     is told, and a click aimed at the same row changes nothing (NEGATIVE
-//     CONTROL); from the frame's own Stop on the screen; and by LOCKING the
-//     phone, after which nothing resumes on unlock.
+//     CONTROL); from the frame's own Stop on the screen; by STOPPING THE
+//     SHARE from its notification (and sharing again gives no control back:
+//     a click changes nothing, NEGATIVE CONTROL); and by LOCKING the phone,
+//     after which nothing resumes on unlock.
 //
 // Needs: the same rig as e2e/android-share-live.mjs (read its header: a
 // THROWAWAY backend + Postgres as API, a vite dev server of this tree at APP
@@ -400,7 +406,33 @@ const onMainList = (d) => d.texts.some(t => MAIN_LIST.test(t));
 /** Throws unless the attached phone page is still this run's. */
 let mine = async () => {};
 
-/** Ask for control from the viewer's tile, and answer on the phone. */
+/** The viewer's name, as the phone's dialogs show it. */
+let viewerName = '';
+
+/**
+ * Android's own Allow (Consent.java), which the page's Allow only asks for:
+ * its dialog, over Púca, names the viewer. Read with a dump (the dialog is a
+ * native view, outside the WebView), answered with a real tap.
+ */
+async function nativeConsent(answer) {
+    const isTitle = (n) => n.pkg === PKG && /control this phone\?$/.test(n.text);
+    const d = await dumpUntil((x) => x.nodes.some(isTitle), 4, 1500);
+    if (!d) return { shown: false };
+    const title = d.nodes.find(isTitle);
+    const btn = d.nodes.find(n => n.pkg === PKG && (answer === 'allow' ? /^allow$/i : /^cancel$/i).test(n.text));
+    const named = title.text.includes(viewerName);
+    if (!btn) return { shown: true, named, pressed: false };
+    // That dump unbound the service, and Allow refuses until Android binds
+    // it again; Allow also takes no press in its first 800 ms.
+    if (answer === 'allow') await until(() => bound(), 10000, 250);
+    await sleep(900);
+    tapAt(btn);
+    return { shown: true, named, pressed: true, title: title.text };
+}
+
+/** Ask for control from the viewer's tile, and answer on the phone:
+ *  'none', 'deny', 'allow' (the page's Allow, then Android's), or
+ *  'native-cancel' (the page's Allow, then Cancel in Android's dialog). */
 async function requestControl(V, P, answer) {
     await mine();
     await V.evaluate(() => document.querySelector('button[title="Request control of this screen"]')?.click());
@@ -413,8 +445,9 @@ async function requestControl(V, P, answer) {
     // Allow waits for the phone's own answer (the service on), and the
     // service bound (an earlier dump may still be holding it away).
     const ready = await until(() => P.evaluate((s) => { const b = document.querySelector(s); return !!b && !b.disabled; }, SEL.allow), 8000);
-    if (answer === 'allow') await until(() => bound(), 10000, 250);
-    const sel = answer === 'allow' ? SEL.allow : '.rc-prompt .rc-deny';
+    const allowing = answer === 'allow' || answer === 'native-cancel';
+    if (allowing) await until(() => bound(), 10000, 250);
+    const sel = allowing ? SEL.allow : '.rc-prompt .rc-deny';
     let tapped = !!await realTap(P, sel);
     // The prompt can be taller than the screen, its buttons at the very
     // bottom: a tap that missed leaves it up. Once more, then report.
@@ -422,7 +455,61 @@ async function requestControl(V, P, answer) {
         await sleep(500);
         tapped = !!await realTap(P, sel);
     }
-    return { prompt: true, noticed, ready: !!ready, tapped };
+    if (!allowing) return { prompt: true, noticed, ready: !!ready, tapped };
+    // The page's Allow alone: still only asking.
+    const pageOnly = (await viewerControl(V)).controlling?.status === 'requesting';
+    const native = await nativeConsent(answer === 'allow' ? 'allow' : 'cancel');
+    return { prompt: true, noticed, ready: !!ready, tapped: tapped && !!native.pressed, pageOnly, native };
+}
+
+/** The phone shares its whole screen from the app (Android's consent
+ *  answered "Share entire screen"); true when it is live. */
+async function shareWholeScreen(P, tag) {
+    let started = { shown: false };
+    for (let attempt = 1; attempt <= 2 && !started.shown; attempt++) {
+        // Púca in front: a tap is placed by the WebView's place on screen,
+        // and another app left in front (Settings, from an earlier run) takes it.
+        pucaFront();
+        await sleep(1500);
+        await answerSystemDialogs();
+        // The app's own late questions (a recovery code never saved) sit over
+        // the voice bar and take the tap.
+        await dismiss(P);
+        await P.evaluate(() => { if (!document.querySelector('[data-testid="voice-share-screen"]')?.offsetParent) document.querySelector('button[aria-label="More voice controls"]')?.click(); });
+        await sleep(800);
+        save(`05-before-share-${tag}-${attempt}.png`, screencap());
+        const where = await P.evaluate((s) => {
+            const e = document.querySelector(s);
+            if (!e) return 'no button';
+            const b = e.getBoundingClientRect();
+            return { visible: e.offsetParent !== null, x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) };
+        }, SEL.share);
+        console.log(`  (share button, ${tag} attempt ${attempt}: ${JSON.stringify(where)})`);
+        if (!await realTap(P, SEL.share)) await P.locator(SEL.share).first().click({ timeout: 10000 }).catch(() => {});
+        started = await consent('start');
+        if (!started.shown) {
+            save(`05-no-consent-${tag}-${attempt}.png`, screencap());
+            dump(`no-consent-${tag}-${attempt}`);
+            // A modal (the share settings, a system question) may be in the way: close it and retry.
+            await P.evaluate(() => document.querySelector('.stream-modal .stream-btn-secondary')?.click());
+            await sleep(1000);
+        }
+    }
+    check(`Android's consent, "Share entire screen" (${tag})`, started.shown && started.pressed, started);
+    const live = !!await until(async () => (await P.locator(SEL.stop).count()) > 0, 20000);
+    check(`the phone is live (${tag})`, live);
+    return live;
+}
+
+/** The viewer opens the phone's stream; true once its picture plays and the
+ *  tile offers Request control. */
+async function watchPhone(V, voiceId) {
+    await V.evaluate((id) => document.querySelector(`[data-testid="voice-channel"][data-channel-id="${id}"]`)?.click(), voiceId);
+    await sleep(800);
+    await until(() => V.evaluate(() => { const x = document.querySelector('.watch-live-btn'); if (x) { x.click(); return true; } return false; }), 8000);
+    await sleep(600);
+    await until(() => V.evaluate(() => { const x = [...document.querySelectorAll('button')].find(e => /^watch/i.test((e.textContent || '').trim())); if (x) { x.click(); return true; } return false; }), 4000);
+    return !!await until(() => V.evaluate(() => !!document.querySelector('button[title="Request control of this screen"]') && (document.querySelector('video.stream-video')?.videoWidth ?? 0) > 0), 30000);
 }
 
 let forwarded = false;
@@ -478,7 +565,8 @@ try {
     await V.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 300000 });
 
     step('signing up both, a server with a voice channel');
-    await signUp(V, `ctlv_${stamp}`);
+    viewerName = `ctlv_${stamp}`;
+    await signUp(V, viewerName);
     await signUp(P, `ctlp_${stamp}`);
     const uid = { V: await uidOf(V), P: await uidOf(P) };
     const srv = await api(V, 'POST', '/servers', { name: 'PC ' + stamp.slice(-4) });
@@ -498,45 +586,8 @@ try {
     await answerSystemDialogs();
 
     step('the phone shares its whole screen');
-    let started = { shown: false };
-    for (let attempt = 1; attempt <= 2 && !started.shown; attempt++) {
-        // Púca in front: a tap is placed by the WebView's place on screen,
-        // and another app left in front (Settings, from an earlier run) takes it.
-        pucaFront();
-        await sleep(1500);
-        await answerSystemDialogs();
-        // The app's own late questions (a recovery code never saved) sit over
-        // the voice bar and take the tap.
-        await dismiss(P);
-        await P.evaluate(() => { if (!document.querySelector('[data-testid="voice-share-screen"]')?.offsetParent) document.querySelector('button[aria-label="More voice controls"]')?.click(); });
-        await sleep(800);
-        save(`05-before-share-${attempt}.png`, screencap());
-        const where = await P.evaluate((s) => {
-            const e = document.querySelector(s);
-            if (!e) return 'no button';
-            const b = e.getBoundingClientRect();
-            return { visible: e.offsetParent !== null, x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) };
-        }, SEL.share);
-        console.log(`  (share button, attempt ${attempt}: ${JSON.stringify(where)})`);
-        if (!await realTap(P, SEL.share)) await P.locator(SEL.share).first().click({ timeout: 10000 }).catch(() => {});
-        started = await consent('start');
-        if (!started.shown) {
-            save(`05-no-consent-${attempt}.png`, screencap());
-            dump(`no-consent-${attempt}`);
-            // A modal (the share settings, a system question) may be in the way: close it and retry.
-            await P.evaluate(() => document.querySelector('.stream-modal .stream-btn-secondary')?.click());
-            await sleep(1000);
-        }
-    }
-    check('Android\'s consent, "Share entire screen"', started.shown && started.pressed, started);
-    check('the phone is live', !!await until(async () => (await P.locator(SEL.stop).count()) > 0, 20000));
-    await V.evaluate((id) => document.querySelector(`[data-testid="voice-channel"][data-channel-id="${id}"]`)?.click(), voice.id);
-    await sleep(800);
-    await until(() => V.evaluate(() => { const x = document.querySelector('.watch-live-btn'); if (x) { x.click(); return true; } return false; }), 8000);
-    await sleep(600);
-    await until(() => V.evaluate(() => { const x = [...document.querySelectorAll('button')].find(e => /^watch/i.test((e.textContent || '').trim())); if (x) { x.click(); return true; } return false; }), 4000);
-    check('the viewer watches the phone, the request button on its tile',
-        !!await until(() => V.evaluate(() => !!document.querySelector('button[title="Request control of this screen"]') && (document.querySelector('video.stream-video')?.videoWidth ?? 0) > 0), 30000));
+    await shareWholeScreen(P, 'first');
+    check('the viewer watches the phone, the request button on its tile', await watchPhone(V, voice.id));
 
     // ---- 1. Púca remote control OFF: the prompt says how, Allow cannot be pressed
     settingsFront();
@@ -585,11 +636,30 @@ try {
     check('NEGATIVE CONTROL: a click on the picture after a denial changes nothing on the phone',
         !!rowN && onMainList(after) && !onRowPage(after), { row: !!rowN, main: onMainList(after) });
 
-    // ---- 3. ALLOWED
+    // ---- 2b. Allow in the page, CANCEL in Android's own dialog: nothing lands
     step('waiting out the denial cooldown');
     await sleep(11000);
+    step('the page\'s Allow, then Cancel in Android\'s dialog');
+    const r2b = await requestControl(V, P, 'native-cancel');
+    check('the page\'s Allow alone starts nothing: the viewer is still asking', r2b.prompt && r2b.ready && !!r2b.pageOnly, r2b);
+    check('Android\'s own dialog asks, naming the viewer', !!r2b.native?.shown && !!r2b.native?.named, r2b.native);
+    const cancelled = await until(async () => { const s = await viewerControl(V); return !s.controlling ? s : null; }, 10000);
+    check('Cancel there: the viewer is told no', !!cancelled && r2b.tapped, cancelled);
+    settingsFront();
+    await sleep(2500);
+    const cBefore = dump('native-cancel-before');
+    const cRow = cBefore.nodes.find(n => ROW.test(n.text));
+    if (cRow) await viewerClick(V, ...norm(cRow, cBefore));
+    await sleep(2500);
+    const cAfter = dump('native-cancel-after');
+    check('NEGATIVE CONTROL: after Cancel in Android\'s dialog, a click changes nothing on the phone',
+        !!cRow && onMainList(cAfter) && !onRowPage(cAfter), { row: !!cRow, main: onMainList(cAfter) });
+
+    // ---- 3. ALLOWED
+    step('waiting out the second denial\'s cooldown');
+    await sleep(31000);
     const r3 = await requestControl(V, P, 'allow');
-    check('a third request, allowed on the phone', r3.prompt && r3.ready && r3.tapped, r3);
+    check('a third request, allowed on the phone (the page, then Android\'s dialog)', r3.prompt && r3.ready && r3.tapped && !!r3.native?.named, r3);
     const active = await until(async () => { const s = await viewerControl(V); return s.controlling?.status === 'active' && s.kind === 'phone' ? s : null; }, 15000);
     check('the viewer is in control, and knows its host is a phone (the sealed HostInfo)', !!active, await viewerControl(V));
     liveSession = true;
@@ -774,6 +844,49 @@ try {
     const ended5 = await until(async () => { const s = await viewerControl(V); return !s.controlling ? s : null; }, 10000);
     liveSession = false;
     check('the Stop on the phone\'s screen ends it for the viewer', !!(pillStop || red) && !!ended5, { inDump: !!pillStop, red });
+
+    // ---- 5b. STOPPING THE SHARE ends it; sharing again gives nothing back
+    step('the share stopped from its notification');
+    const r7 = await requestControl(V, P, 'allow');
+    check('allowed for the share-stop', r7.tapped && !!await until(async () => (await viewerControl(V)).controlling?.status === 'active', 15000), r7);
+    liveSession = true;
+    settingsFront();
+    await sleep(1500);
+    sh('cmd statusbar expand-notifications');
+    await sleep(1500);
+    for (let i = 0; i < 3 && !findNode(/^Stop sharing$/i); i++) {
+        const nodes = uiNodes();
+        const title = nodes.find(n => n.text === 'Sharing your screen');
+        const expand = title && nodes.filter(n => n.id === 'android:id/expand_button' && n.y >= title.y - 120).sort((a, c) => a.y - c.y)[0];
+        if (expand) tapAt(expand); else break;
+        await sleep(1000);
+    }
+    const shareStopped = await tapText(/^Stop sharing$/i, 6000);
+    sh('cmd statusbar collapse');
+    check('the notification\'s Stop sharing is there and pressed', shareStopped);
+    // The stream's tile closes with the share, taking the capture surface
+    // with it whatever the control state is: what says the session ended is
+    // the viewer's own notice (its ControlEnded).
+    const ended7 = await until(async () => { const s = await viewerControl(V); return !s.controlling && /ended/i.test(s.notice || '') ? s : null; }, 12000, 200);
+    liveSession = false;
+    check('stopping the share ends control: the viewer is told', !!ended7, ended7 ?? await viewerControl(V));
+    check('and the phone stopped sharing', !!await until(async () => (await P.locator(SEL.stop).count()) === 0, 10000));
+    const off7 = await until(async () => { const f = await frameOnScreen(V); return !f.on ? f : null; }, 6000, 700);
+    check('the orange frame is gone with the share', !!off7);
+    check('the notification no longer says anyone is in control', !/is controlling this phone/.test(notifications()));
+    step('sharing again');
+    await shareWholeScreen(P, 'again');
+    check('the viewer watches the new share', await watchPhone(V, voice.id));
+    check('the viewer is NOT in control of the new share', !(await viewerControl(V)).controlling);
+    settingsFront();
+    await sleep(2500);
+    const sBefore = dump('reshare-before');
+    const sRow = sBefore.nodes.find(n => ROW.test(n.text));
+    if (sRow) await viewerClick(V, ...norm(sRow, sBefore));
+    await sleep(2500);
+    const sAfter = dump('reshare-after');
+    check('NEGATIVE CONTROL: on the new share, a click aimed at the row changes nothing without a new Allow',
+        !!sRow && onMainList(sAfter) && !onRowPage(sAfter), { row: !!sRow, main: onMainList(sAfter) });
 
     // ---- 6. LOCKING the phone ends it, and nothing resumes on unlock
     step('the phone locked');

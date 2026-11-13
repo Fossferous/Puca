@@ -10,7 +10,9 @@
  * The rules, all enforced natively too (PhoneControl.java):
  *   - offered only while this phone shares its WHOLE screen from the app;
  *   - a session starts only when the person at the phone presses Allow for
- *     that one viewer, and the service is switched on in Android's settings;
+ *     that one viewer, in the page's prompt AND then in Android's own dialog
+ *     naming them (Consent.java: nothing the page can do presses that one),
+ *     and the service is switched on in Android's settings;
  *   - while it lasts the phone shows who is in control over every app, with
  *     a Stop; the share's notification has "Stop control";
  *   - locking the phone, its screen going off, the service being switched
@@ -29,6 +31,11 @@ export type PhoneControlRefusal =
     | 'locked'
     | 'screen-off'
     | 'no-indicator'     // the on-screen sign of control could not be shown
+    | 'unsupported'      // Android 7: no continued strokes (ControlGate.MIN_SDK)
+    | 'declined'         // Cancel in Android's own dialog (Consent)
+    | 'not-confirmed'    // that dialog unanswered, or it could not be shown
+    | 'withdrawn'        // the page took the request back while it asked
+    | 'busy'             // a session, or another question, already there
     | string;
 
 export interface PhoneControlStatus {
@@ -96,6 +103,16 @@ export function refusalWords(r: PhoneControlRefusal | null | undefined): string 
             return 'Unlock the phone first.';
         case 'no-indicator':
             return 'Android did not let Púca show who is in control on the screen, so control cannot start.';
+        case 'unsupported':
+            return 'Control of a phone needs Android 8 or newer.';
+        case 'declined':
+            return 'you chose Cancel.';
+        case 'not-confirmed':
+            return 'it was not confirmed on the phone in time.';
+        case 'withdrawn':
+            return 'the request was taken back.';
+        case 'busy':
+            return 'someone is already in control of this phone.';
         default:
             return 'Control of this phone is not available right now.';
     }
@@ -133,7 +150,9 @@ export async function openPhoneControlSettings(page: 'accessibility' | 'app'): P
     }
 }
 
-/** Start a session for this viewer: the person pressed Allow. */
+/** The person pressed Allow in the page for this viewer: Android's own
+ *  dialog asks them again (up to PHONE_CONFIRM_MS), and its Allow starts the
+ *  session. */
 export async function beginPhoneControl(viewer: string): Promise<{ ok: boolean; refusal: PhoneControlRefusal | null }> {
     if (!phoneControlInstalled()) return { ok: false, refusal: 'not-sharing' };
     try {

@@ -140,6 +140,14 @@ public class ScreenShareService extends Service {
         }
     }
 
+    /** Told every time a share ends (teardown), from the thread that ended
+     *  it. The full build's control of this phone ends with the share. */
+    private static volatile Runnable endWatcher;
+
+    static void setEndWatcher(Runnable r) {
+        endWatcher = r;
+    }
+
     /** The running share's id, or 0. */
     static long sharingId() {
         ScreenShareService s = current;
@@ -519,6 +527,14 @@ public class ScreenShareService extends Service {
         noticeLine = null;
         noticeActionLabel = null;
         noticeAction = null;
+        Runnable w = endWatcher;
+        if (w != null) {
+            try {
+                w.run();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "share-end watcher failed", e);
+            }
+        }
         if (displayListener != null) {
             DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
             if (dm != null) dm.unregisterDisplayListener(displayListener);

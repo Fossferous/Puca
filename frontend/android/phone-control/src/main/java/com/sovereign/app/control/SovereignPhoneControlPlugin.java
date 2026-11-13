@@ -1,11 +1,15 @@
 package com.sovereign.app.control;
 
+import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.widget.Button;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -29,11 +33,14 @@ import org.json.JSONObject;
  *   <li>{@code openSettings({page})} — 'accessibility' (Púca's own entry where
  *       Android has one, else the list) or 'app' (Púca's App info, where
  *       Android 13+ keeps "Allow restricted settings").</li>
- *   <li>{@code begin({viewer})} — the person pressed Allow for this viewer:
- *       {ok, refusal}.</li>
+ *   <li>{@code begin({viewer})} — the person pressed Allow in the page for this
+ *       viewer: Android's own dialog then asks them again, naming the viewer
+ *       ({@link Consent}), and only its Allow starts a session: {ok,
+ *       refusal}.</li>
  *   <li>{@code inject({events})} — the granted viewer's input, in order, each
  *       with the page's arrival time {@code at} (ms).</li>
- *   <li>{@code end()} — the page ended the session.</li>
+ *   <li>{@code end()} — the page ended the session (or took back a request
+ *       whose dialog is still open).</li>
  *   <li>events {@code controlEnded {reason}} (a native end: notification,
  *       indicator, locked, screen-off, service-off, not-sharing, one-app) and
  *       {@code statusChanged} (the service came or went).</li>
@@ -45,9 +52,15 @@ public class SovereignPhoneControlPlugin extends Plugin {
     /** The most events one call may carry (the page sends a coalesced batch). */
     private static final int MAX_BATCH = 256;
 
+    private PhoneControl.Listener listener;
+    /** Main thread only, like PhoneControl. */
+    private final Consent consent = new Consent();
+    private AlertDialog dialog;
+    private final Runnable consentTimeout = () -> consent.expire(SystemClock.elapsedRealtime());
+
     @Override
     public void load() {
-        PhoneControl.setListener(new PhoneControl.Listener() {
+        listener = new PhoneControl.Listener() {
             @Override
             public void ended(String reason) {
                 JSObject o = new JSObject();
@@ -59,13 +72,20 @@ public class SovereignPhoneControlPlugin extends Plugin {
             public void statusChanged() {
                 notifyListeners("statusChanged", new JSObject());
             }
-        });
+        };
+        PhoneControl.setListener(listener);
     }
 
     @Override
     protected void handleOnDestroy() {
-        // The page that granted the session is gone: so is the session.
+        // The page that granted the session is gone: so is the session, and
+        // a question it asked.
+        consent.withdraw();
+        closeDialog();
         PhoneControl.end("page-gone", false);
+        // The static must not hold this plugin, its bridge and the destroyed
+        // activity (the service keeps the process alive after it).
+        PhoneControl.clearListener(listener);
         super.handleOnDestroy();
     }
 
@@ -117,17 +137,93 @@ public class SovereignPhoneControlPlugin extends Plugin {
     public void begin(PluginCall call) {
         String viewer = call.getString("viewer", "");
         PhoneControl.main().post(() -> {
-            String r = PhoneControl.begin(viewer);
-            JSObject o = new JSObject();
-            o.put("ok", r == null);
-            o.put("refusal", r == null ? JSObject.NULL : r);
-            call.resolve(o);
+            String r = PhoneControl.beginRefusal();
+            // One question at a time, and none while someone is in control.
+            if (r == null && (PhoneControl.active() || consent.open())) r = Consent.BUSY;
+            Activity act = getActivity();
+            if (r == null && (act == null || act.isFinishing() || act.isDestroyed())) r = Consent.NOT_CONFIRMED;
+            if (r != null) {
+                answer(call, r);
+                return;
+            }
+            boolean asked = consent.ask(PhoneControl.active(), SystemClock.elapsedRealtime(), (allowed, why) -> {
+                PhoneControl.main().removeCallbacks(consentTimeout);
+                closeDialog();
+                // Allowed here, in Android's own dialog: only now does a
+                // session start (and PhoneControl.begin checks everything
+                // again, as the question may have been open for a while).
+                answer(call, allowed ? PhoneControl.begin(viewer) : why);
+            });
+            if (!asked) {
+                answer(call, Consent.BUSY);
+                return;
+            }
+            try {
+                showConsent(act, PhoneControl.label(viewer));
+            } catch (RuntimeException e) {
+                consent.expire(Long.MAX_VALUE); // a No: nothing could be asked
+                return;
+            }
+            PhoneControl.main().postDelayed(consentTimeout, Consent.TIMEOUT_MS);
         });
+    }
+
+    private static void answer(PluginCall call, String refusal) {
+        JSObject o = new JSObject();
+        o.put("ok", refusal == null);
+        o.put("refusal", refusal == null ? JSObject.NULL : refusal);
+        call.resolve(o);
+    }
+
+    /**
+     * Android's dialog over Púca, naming who asked. The page cannot press it
+     * (WebView script reaches no native view), no viewer can (no session yet,
+     * and none is asked while one lasts), another app's window drawn over it
+     * cannot click through it, and Allow takes no press for
+     * {@link Consent#ARM_MS}.
+     */
+    private void showConsent(Activity act, String name) {
+        AlertDialog d = new AlertDialog.Builder(act)
+                .setTitle(act.getString(R.string.phone_control_confirm_title, name))
+                .setMessage(act.getString(R.string.phone_control_confirm_body, name))
+                .setNegativeButton(R.string.phone_control_confirm_cancel, (x, which) -> consent.decline())
+                .setPositiveButton(R.string.phone_control_confirm_allow, null)
+                .setOnCancelListener(x -> consent.decline())
+                .create();
+        d.setOnShowListener(x -> {
+            Button allow = d.getButton(DialogInterface.BUTTON_POSITIVE);
+            Button cancel = d.getButton(DialogInterface.BUTTON_NEGATIVE);
+            if (cancel != null) cancel.setFilterTouchesWhenObscured(true);
+            if (allow == null) return;
+            allow.setFilterTouchesWhenObscured(true);
+            allow.setEnabled(false);
+            PhoneControl.main().postDelayed(() -> allow.setEnabled(true), Consent.ARM_MS);
+            // Set here, not on the builder: the builder's listener closes the
+            // dialog on every press, including one that did not count.
+            allow.setOnClickListener(v -> consent.allow(SystemClock.elapsedRealtime()));
+        });
+        dialog = d;
+        d.show();
+    }
+
+    private void closeDialog() {
+        AlertDialog d = dialog;
+        dialog = null;
+        if (d == null) return;
+        try {
+            d.dismiss();
+        } catch (RuntimeException ignored) {
+            // The activity is already gone.
+        }
     }
 
     @PluginMethod
     public void end(PluginCall call) {
-        PhoneControl.end("page", false);
+        PhoneControl.main().post(() -> {
+            // A request taken back while Android's dialog is still asking.
+            consent.withdraw();
+            PhoneControl.end("page", false);
+        });
         call.resolve();
     }
 

@@ -66,10 +66,21 @@ public final class PhoneControl {
     public static void install(Context context, ShareHost shareHost) {
         app = context.getApplicationContext();
         host = shareHost;
+        // The share ending ends control at once, here, whatever the page
+        // does (it may be slow, or gone): control is of a share, and a share
+        // started again later is a new one nobody has been allowed into.
+        shareHost.watchShareEnd(() -> end(ScreenMap.NOT_SHARING, true));
     }
 
     static void setListener(Listener l) {
         listener = l;
+    }
+
+    /** Forget {@code l}, if it is still the one listening (a plugin of a
+     *  destroyed activity must not be held by this static, and must not
+     *  take away the next activity's). */
+    static void clearListener(Listener l) {
+        if (listener == l) listener = null;
     }
 
     static Handler main() {
@@ -137,6 +148,7 @@ public final class PhoneControl {
 
     /** Why input may not land now (ControlGate), or null. Main thread. */
     static String refusal() {
+        if (!ControlGate.supported(Build.VERSION.SDK_INT)) return ControlGate.UNSUPPORTED;
         int[] s = screenSize();
         boolean connected = serviceConnected();
         // Back from being taken away, but its frame not on screen again yet:
@@ -148,6 +160,7 @@ public final class PhoneControl {
 
     /** Why a session cannot start now, or null when Allow may start it. */
     static String beginRefusal() {
+        if (!ControlGate.supported(Build.VERSION.SDK_INT)) return ControlGate.UNSUPPORTED;
         if (!installed()) return ScreenMap.NOT_SHARING;
         int[] s = screenSize();
         boolean connected = serviceConnected();
@@ -168,6 +181,12 @@ public final class PhoneControl {
 
     // ---- a session -------------------------------------------------------
 
+    /** The name shown for a viewer: trimmed, at most 64 characters. */
+    static String label(String viewerName) {
+        String v = viewerName == null || viewerName.trim().isEmpty() ? "Someone" : viewerName.trim();
+        return v.length() > 64 ? v.substring(0, 64) : v;
+    }
+
     /** Start a session for {@code viewerName}. Main thread. Null when it
      *  started, else why not (nothing started). */
     static String begin(String viewerName) {
@@ -176,8 +195,7 @@ public final class PhoneControl {
         PhoneControlService svc = PhoneControlService.current;
         if (svc == null) return ControlGate.SERVICE_OFF;
         if (active) end(null, false); // one at a time: a new grant replaces the old
-        viewer = viewerName == null || viewerName.trim().isEmpty() ? "Someone" : viewerName.trim();
-        if (viewer.length() > 64) viewer = viewer.substring(0, 64);
+        viewer = label(viewerName);
         indicator = new Indicator(svc);
         indicator.show(viewer, () -> end(STOPPED_INDICATOR, true));
         if (!indicator.showing()) {

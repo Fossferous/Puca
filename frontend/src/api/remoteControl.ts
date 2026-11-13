@@ -85,14 +85,20 @@ export const HOST_CONSENT_DEADLINE_MS = 45_000;
  *  the control service on: long enough to find it, and still short of the
  *  viewer's own wait (VIEWER_REQUEST_TIMEOUT_MS). */
 export const PHONE_SETTINGS_DEADLINE_MS = 120_000;
+/** A phone's own Allow, Android's dialog after the page's (Consent.java's
+ *  TIMEOUT_MS): it can open as late as the prompt's deadline. */
+export const PHONE_CONFIRM_MS = 30_000;
 /** VIEWER: how long a request may go unanswered. A host whose build has no
  *  remote control at all (Lite) never answers, and the request used to wait
  *  for ever. Longer than any host's own deadline, which does answer. */
-export const VIEWER_REQUEST_TIMEOUT_MS = PHONE_SETTINGS_DEADLINE_MS + 15_000;
+export const VIEWER_REQUEST_TIMEOUT_MS = PHONE_SETTINGS_DEADLINE_MS + PHONE_CONFIRM_MS + 15_000;
 let consentDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 /** The notification a phone host is shown for a request (it is usually in
  *  another app while it shares), taken down once the prompt is answered. */
 const PHONE_REQUEST_NOTICE = 'rc-request';
+let phoneRequestNoticeUp = false;
+/** HOST: when the pending request arrived (Date.now), for its deadline. */
+let incomingRequestAt = 0;
 
 /** Clear the consent deadline and drop the surfaced window's TOPMOST bit.
  *  Runs on EVERY exit from the prompt: allow, deny, auto-deny, viewer gone. */
@@ -101,7 +107,12 @@ function clearConsentAttention() {
         clearTimeout(consentDeadlineTimer);
         consentDeadlineTimer = null;
     }
-    if (phoneHostPossible()) void clearMobileNotifications(PHONE_REQUEST_NOTICE);
+    // Whether or not this page can still host a phone: the share may have
+    // ended under the prompt, and the line would stay in the shade.
+    if (phoneRequestNoticeUp) {
+        phoneRequestNoticeUp = false;
+        void clearMobileNotifications(PHONE_REQUEST_NOTICE);
+    }
     if (isTauri()) {
         void tauriCore()
             .then(({ invoke }) => invoke('release_attention_topmost'))
@@ -209,7 +220,7 @@ let viewerCrypto:
     | { peerId: number; key: Uint8Array; seq: number; dcSeq: number; infoN: number; helloEchoed?: boolean }
     | null = null;
 let hostCrypto:
-    | { peerId: number; key: Uint8Array; recvSeq: number; dcRecvSeq: number; infoN: number; helloEchoed?: boolean }
+    | { peerId: number; key: Uint8Array; recvSeq: number; dcRecvSeq: number; infoN: number; helloEchoed?: boolean; infoConfirmed?: boolean }
     | null = null;
 // HOST: this page is a phone in a control session the person allowed (the
 // native session is live). Every host-session end clears it (endHostSession).
@@ -751,6 +762,33 @@ async function sendHostInfo(cc: NonNullable<typeof hostCrypto>, info: HostInfo):
     } catch { /* the viewer then treats this host as a desktop */ }
 }
 
+/** HOST, a phone: say again what this host is, ONCE, when the viewer proves
+ *  it holds the session key (its hello opened here, or its first input
+ *  did). The HostInfo sent with the grant reaches a viewer that is still
+ *  fetching my identity key (an await before it derives the key) as a frame
+ *  it cannot open, which it must drop, and nothing sent it again: that
+ *  viewer had no Back / Home / Recents, typed key codes, and was offered
+ *  Game mode against a phone. */
+function confirmHostInfo(cc: NonNullable<typeof hostCrypto>): void {
+    if (!phoneHostSession || cc.infoConfirmed) return;
+    cc.infoConfirmed = true;
+    void sendHostInfo(cc, { kind: 'phone' });
+}
+
+/** The lane an input frame was sealed for, inside the sealed plaintext as
+ *  `l`: 'p' (the mesh data channel or the SFU data path, which share one
+ *  namespace) or 'r' (the relay). The lanes count separately, so a frame
+ *  lifted from one and sent again on the other passed the other's counter:
+ *  the operator of an SFU sees every data frame of a call through it, and
+ *  the server relays ControlInput from anyone in the room, so it could
+ *  replay a viewer's real taps and typing on the relay in any rising order.
+ *  A viewer older than the tag seals none: accepted, as before (its frames
+ *  stay replayable; a new viewer's are not, and the tag cannot be taken off
+ *  a sealed frame). */
+export function laneOk(obj: { l?: unknown }, lane: 'p' | 'r'): boolean {
+    return obj.l === undefined || obj.l === lane;
+}
+
 /** VIEWER: what the host I am controlling said it is: 'phone', or null. */
 export function getControlHostKind(): 'phone' | null {
     return state.controlling?.status === 'active' ? controlHostKind : null;
@@ -781,7 +819,12 @@ function armRequestTimer(hostUserId: number): void {
 export function extendControlPrompt(): void {
     const req = state.incomingRequest;
     if (!req) return;
-    armConsentDeadline(req.userId, PHONE_SETTINGS_DEADLINE_MS);
+    // From when the request ARRIVED, never from this press: re-arming from
+    // each press let a prompt outlive the viewer's own wait
+    // (VIEWER_REQUEST_TIMEOUT_MS), whose withdrawal then took it away while
+    // the person was still in Android's settings.
+    const left = incomingRequestAt + PHONE_SETTINGS_DEADLINE_MS - Date.now();
+    armConsentDeadline(req.userId, Math.max(0, left));
 }
 
 /** HOST: answer the pending prompt No by itself after `ms` (see
@@ -805,14 +848,17 @@ function armConsentDeadline(fromUser: number, ms: number): void {
     }, ms);
 }
 
-/** HOST, a phone: start the native session for this viewer. Null when it
- *  started, else the words for why not (nothing started). */
+/** HOST, a phone: start the native session for this viewer, which asks the
+ *  person again in Android's own dialog. Null when it started, else the
+ *  words for why not (nothing started). A Cancel in that dialog is a Deny,
+ *  denial ladder and all. */
 async function beginPhoneSession(viewer: { userId: number; username: string }): Promise<string | null> {
     const r = await beginPhoneControl(viewer.username);
     if (r.ok) {
         phoneHostSession = true;
         return null;
     }
+    if (r.refusal === 'declined') bumpDenial(hostDenials, viewer.userId);
     return refusalWords(r.refusal) ?? 'Control of this phone could not start.';
 }
 
@@ -1016,7 +1062,7 @@ function rawSend(event: ControlEvent) {
             if (viewerCrypto !== cc) return; // session torn down mid-flight
             if (viaDc || viaSfu) {
                 const bytes = await sealControlBytes(
-                    cc.key, JSON.stringify({ s: cc.dcSeq + 1, e: event }),
+                    cc.key, JSON.stringify({ s: cc.dcSeq + 1, e: event, l: 'p' }),
                 );
                 if (viaDc && sendControlFrame(targetId, FRAME_SEALED_INPUT, bytes)) {
                     cc.dcSeq++;
@@ -1049,7 +1095,7 @@ function rawSend(event: ControlEvent) {
                 forgetSfuControl(targetId, 'viewer');
             }
             const sealed = await sealControl(
-                cc.key, JSON.stringify({ s: ++cc.seq, e: event }),
+                cc.key, JSON.stringify({ s: ++cc.seq, e: event, l: 'r' }),
             );
             wsClient.send({ type: 'ControlInput', payload: { target_user: targetId, event: sealed } });
         })
@@ -1146,6 +1192,8 @@ function wireControlDc(): void {
                 //
                 // Echoing when a hello OPENS closes that gap in one round trip,
                 // and only once per session key, so two peers cannot ping-pong.
+                // The viewer's hello opening proves it holds the key now.
+                if (role === 'host' && asHost) confirmHostInfo(asHost);
                 const mine = role === 'host' ? asHost : asViewer;
                 if (mine && !mine.helloEchoed) {
                     mine.helloEchoed = true;
@@ -1169,11 +1217,14 @@ function wireControlDc(): void {
                 if (plain == null) return;
                 let parsed: unknown;
                 try { parsed = JSON.parse(plain); } catch { return; }
-                const obj = parsed as { s?: unknown; e?: unknown };
-                // The DC's OWN namespace — never the relay's counter.
+                const obj = parsed as { s?: unknown; e?: unknown; l?: unknown };
+                // Sealed for THIS lane (laneOk), and the DC's OWN namespace —
+                // never the relay's counter.
+                if (!laneOk(obj, 'p')) return;
                 if (typeof obj.s !== 'number' || !Number.isInteger(obj.s) || obj.s <= cc.dcRecvSeq) return;
                 cc.dcRecvSeq = obj.s;
                 if (!validEvent(obj.e)) return;
+                confirmHostInfo(cc);
                 armInactivity();
                 // The SAME entry the relay handler uses — it carries the
                 // MAX_EVENTS_PER_SEC cap and the coalescing, so both
@@ -1304,6 +1355,18 @@ export async function respondToControlRequest(granted: boolean) {
     emit();
 
     if (granted) {
+        // Control is of a share: one that ended under the prompt (or after
+        // either await below) gets a No, not a grant for nothing to inject
+        // into. A phone whose share ended is no host at all any more, and a
+        // grant here used to send the viewer a key it then "controlled" with.
+        const notSharing = () => {
+            if (getCurrentStreamingUserId() != null && hostKind() != null) return false;
+            wsClient.send({ type: 'ControlResponse', payload: { target_user: req.userId, granted: false } });
+            setNotice('Control not started: you are not sharing your screen any more.');
+            emit();
+            return true;
+        };
+        if (notSharing()) return;
         // Refuse while an anti-cheat is running: injected input won't work and
         // can get the host banned.
         const ac = await listAnticheat();
@@ -1312,6 +1375,7 @@ export async function respondToControlRequest(granted: boolean) {
             setNotice(`Control blocked — ${ac.join(', ')} is running (injected input risks a ban).`);
             return;
         }
+        if (notSharing()) return;
         // A phone: the native session first (the service on, the whole
         // screen shared, the indicator up), or no grant at all.
         if (hostKind() === 'phone') {
@@ -1319,18 +1383,24 @@ export async function respondToControlRequest(granted: boolean) {
             answering = ticket;
             const why = await beginPhoneSession(req);
             if (answering === ticket) answering = null;
+            if (ticket.withdrawn) {
+                // The viewer left (or cancelled) while the phone asked or
+                // started its session: a grant now would land on nobody, and
+                // read to them as an offer. Take the native session down.
+                phoneHostSession = false;
+                endPhoneControl();
+                return;
+            }
+            if (getCurrentStreamingUserId() == null) {
+                phoneHostSession = false;
+                endPhoneControl();
+                notSharing();
+                return;
+            }
             if (why) {
                 wsClient.send({ type: 'ControlResponse', payload: { target_user: req.userId, granted: false } });
                 setNotice(`Control not started: ${why}`);
                 emit();
-                return;
-            }
-            if (ticket.withdrawn) {
-                // The viewer left (or cancelled) while the phone started its
-                // session: a grant now would land on nobody, and read to
-                // them as an offer. Take the native session down again.
-                phoneHostSession = false;
-                endPhoneControl();
                 return;
             }
         }
@@ -1434,6 +1504,11 @@ export function offerControl(viewerUserId: number, viewerUsername: string) {
 export function initRemoteControl() {
     if (wired) return;
     wired = true;
+    // A page that is starting has no session, so the phone must not have one
+    // either: a reload (the ErrorBoundary's, an OTA's) left the native one up
+    // with its frame and Stop control, and nothing in the page that could
+    // end it or would ever send it input. Nothing to end on a desktop.
+    endPhoneControl();
     wireControlDc();
     diag((m) => m.setStreamDiagProbe(laneProbe));
 
@@ -1451,7 +1526,7 @@ export function initRemoteControl() {
         }
         // If I proactively offered this viewer control, their request IS the
         // acceptance — auto-approve it (no second prompt for me).
-        if (offeredTo === p.from_user && !state.controlledBy) {
+        if (offeredTo === p.from_user && !state.controlledBy && !answering) {
             // Enforce the SAME anti-cheat gate as the manual grant path (audit
             // M10): injected input won't work under an anti-cheat product and can
             // get the host banned, so refuse even on the auto-approve path.
@@ -1466,8 +1541,21 @@ export function initRemoteControl() {
             clearOffered();
             if (kind === 'phone') {
                 // The person at the phone offered: that is the consent. The
-                // native session still has to start (service, whole screen).
+                // native session still has to start (service, whole screen),
+                // and the viewer can go, or the share end, while it does —
+                // the same ticket the manual Allow holds.
+                const ticket = { userId: p.from_user, withdrawn: false };
+                answering = ticket;
                 const why = await beginPhoneSession({ userId: p.from_user, username: p.from_username });
+                if (answering === ticket) answering = null;
+                if (ticket.withdrawn || getCurrentStreamingUserId() == null) {
+                    phoneHostSession = false;
+                    endPhoneControl();
+                    if (!ticket.withdrawn) {
+                        wsClient.send({ type: 'ControlResponse', payload: { target_user: p.from_user, granted: false } });
+                    }
+                    return;
+                }
                 if (why) {
                     wsClient.send({ type: 'ControlResponse', payload: { target_user: p.from_user, granted: false } });
                     setNotice(`Control not started: ${why}`);
@@ -1487,8 +1575,9 @@ export function initRemoteControl() {
             emit();
             return;
         }
-        if (state.controlledBy || state.incomingRequest) {
-            // Already controlled / another request pending — refuse (one at a time).
+        if (state.controlledBy || state.incomingRequest || answering) {
+            // Already controlled / another request pending / a phone still
+            // starting the session it just allowed — refuse (one at a time).
             wsClient.send({ type: 'ControlResponse', payload: { target_user: p.from_user, granted: false } });
             return;
         }
@@ -1502,6 +1591,7 @@ export function initRemoteControl() {
         // Keep the viewer's ephemeral until I decide; the grant completes the handshake.
         pendingViewerEph = { userId: p.from_user, ephPub: p.eph };
         state.incomingRequest = { userId: p.from_user, username: p.from_username };
+        incomingRequestAt = Date.now();
         // SURFACE the window — visible on top of the game WITHOUT activating
         // it. The old path (unminimize + set_focus behind an always-on-top
         // toggle) was a forced foreground steal: it tabbed a borderless-
@@ -1540,6 +1630,7 @@ export function initRemoteControl() {
         // replaces the last instead of stacking). Only the name: the
         // notification asks nothing, Púca does.
         if (kind === 'phone') {
+            phoneRequestNoticeUp = true;
             void postMobileNotification(PHONE_REQUEST_NOTICE,
                 `${p.from_username} wants to control this phone`, 'Open Púca to allow or deny.');
         }
@@ -1692,11 +1783,14 @@ export function initRemoteControl() {
                 }
                 let parsed: unknown;
                 try { parsed = JSON.parse(plain); } catch { return; }
-                const obj = parsed as { s?: unknown; e?: unknown };
-                // Replay / reorder protection: strictly increasing sequence.
+                const obj = parsed as { s?: unknown; e?: unknown; l?: unknown };
+                // Sealed for the relay (laneOk), then replay / reorder
+                // protection: strictly increasing sequence.
+                if (!laneOk(obj, 'r')) return;
                 if (typeof obj.s !== 'number' || !Number.isInteger(obj.s) || obj.s <= cc.recvSeq) return;
                 cc.recvSeq = obj.s;
                 if (!validEvent(obj.e)) return;
+                confirmHostInfo(cc);
                 armInactivity(); // any valid input keeps the session alive
                 handleIncomingInput(obj.e);
             })
@@ -1731,6 +1825,8 @@ export function initRemoteControl() {
         // Leaving voice / stopping the share tears down any session (voiceState
         // fires this — a window event avoids a circular import).
         window.addEventListener('voiceControlReset', () => resetRemoteControl());
+        // My own share ending, by any path (endControlOfMyShare).
+        window.addEventListener('ownShareEnded', () => endControlOfMyShare());
 
         // The host's own WS dropping ends control and releases held input — no
         // relay means no more input, and we must not leave a key stuck down.
@@ -1813,7 +1909,11 @@ function loadKillKey(): { keyCode: number; ctrl: boolean; alt: boolean; shift: b
 /** Clear whatever control relationship we have with `userId`, with a notice. */
 function teardownPartner(userId: number, controllingNotice: string) {
     let changed = false;
-    if (answering?.userId === userId) answering.withdrawn = true;
+    if (answering?.userId === userId) {
+        // Android's dialog may still be asking about them: take it down.
+        answering.withdrawn = true;
+        endPhoneControl();
+    }
     if (state.controlledBy?.userId === userId) {
         state.controlledBy = null;
         endHostSession();
@@ -1851,6 +1951,43 @@ function teardownPartner(userId: number, controllingNotice: string) {
     if (changed) emit();
 }
 
+/**
+ * HOST: my share ended — its Stop in the voice panel or on the stage, the
+ * notification's Stop sharing, the picture ending by itself, a share the SFU
+ * lost (voiceState.dropOwnStream fires `ownShareEnded` for every one of
+ * them). Control of it ends now, and a request for it is answered No:
+ * control is of a share, and a share started again later is a new one that
+ * nobody has been allowed into.
+ *
+ * Before this only the stage's own Stop reset control. The voice panel's
+ * Stop and the source ending left the session up, held off only by the
+ * "still sharing" check on each input: sharing again within the inactivity
+ * window handed the same viewer control back with no new Allow, and on a
+ * phone the native session (and its frame) never ended.
+ *
+ * Only the HOST side: a screen I am controlling is someone else's share and
+ * goes on.
+ */
+export function endControlOfMyShare(): void {
+    const req = state.incomingRequest;
+    if (req) {
+        // Not the viewer's doing: no step on the denial ladder.
+        state.incomingRequest = null;
+        if (pendingViewerEph?.userId === req.userId) pendingViewerEph = null;
+        wsClient.send({ type: 'ControlResponse', payload: { target_user: req.userId, granted: false } });
+        clearConsentAttention();
+        emit();
+    }
+    if (offeredTo != null) clearOffered();
+    // Android's dialog may be asking about a request for this share: take
+    // it down (the Allow path then answers No, as nothing is shared).
+    if (answering) endPhoneControl();
+    if (state.controlledBy) {
+        setNotice('You stopped sharing your screen, so remote control ended.');
+        revokeControl();
+    }
+}
+
 /** Tear down all control state (e.g. when leaving voice / stopping the share). */
 export function resetRemoteControl() {
     if (state.controlledBy) {
@@ -1872,7 +2009,10 @@ export function resetRemoteControl() {
     controlHostCapture = null;
     controlHostKind = null;
     clearRequestTimer();
-    if (answering) answering.withdrawn = true;
+    if (answering) {
+        answering.withdrawn = true;
+        endPhoneControl(); // a question Android's dialog may still be asking
+    }
     rmoveAccum = { dx: 0, dy: 0 };
     pendingAbsMove = null;
     clearOffered();
