@@ -1037,7 +1037,14 @@ mod tests {
   // as Tauri's asset protocol would, and only a network error rejects. An image,
   // because Chromium's opaque-response blocking may turn an HTML answer into a
   // network error; the question is only whether anything answers at all.
+  // The IPC once more in no-cors: in cors mode an intercepted IPC that answers
+  // without Tauri's CORS headers reads as an error whatever its status, yet the
+  // page reached the host.
+  r.ipcNoCors = await probe('http://ipc.localhost/plugin%3Aapp%7Cversion', { method: 'POST', body: '{}', mode: 'no-cors' });
   r.assetFetch = await probe('http://tauri.localhost/assets/probe.png', { mode: 'no-cors' });
+  // And a picture Púca's own files really have: a folder mapped onto the name
+  // answers a file it does not have with a network error, not a 404.
+  r.iconFetch = await probe('http://tauri.localhost/apple-touch-icon.png', { mode: 'no-cors' });
   document.title = 'RESULT:' + JSON.stringify(r);
 })();"#;
 
@@ -1193,10 +1200,11 @@ mod tests {
         // web messaging off, nothing the page posts reaches the host.
         assert_eq!(*plain.messages.borrow(), 0, "a web message reached the host: {seen}");
         // Nothing answers on Tauri's IPC or asset names: no bridge, no Púca files.
-        // Any answer at all fails this, a 404 included (an intercepted name that
-        // answered "not found" would still be a way in); a web server on this
-        // PC's port 80 cannot answer, because the names resolve to nothing.
-        for key in ["ipcFetch", "assetFetch"] {
+        // The no-cors probes fail on any answer at all, a 404 included (an
+        // intercepted name that answered "not found" would still be a way in);
+        // the cors one reads Tauri's own header. A web server on this PC's port
+        // 80 cannot answer any of them: the names resolve to nothing.
+        for key in ["ipcFetch", "ipcNoCors", "assetFetch", "iconFetch"] {
             assert_eq!(seen[key], "error", "{key} was answered: {seen}");
         }
 
@@ -1288,6 +1296,8 @@ mod tests {
         assert_eq!(seen["ipcFetch"], "answered:ok:200", "control: an intercepted IPC is seen: {seen}");
         // An opaque answer: no headers, status 0, but an answer.
         assert_eq!(seen["assetFetch"], "answered::0", "control: an intercepted asset server is seen: {seen}");
+        assert_eq!(seen["ipcNoCors"], "answered::0", "control: an intercepted IPC is seen in no-cors too: {seen}");
+        assert_eq!(seen["iconFetch"], "answered::0", "control: a file asked for by name is seen: {seen}");
         drop(bridged);
         drop(plain);
 
