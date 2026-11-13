@@ -624,9 +624,13 @@ export class MediaManager {
             // on a phone).
             try {
                 const epoch = this.cameraEpoch;
+                // Turned off, or the call left, while a camera was being
+                // opened: no other is tried (each one opened lights the camera).
+                const stale = () => !this.localStream || this.cameraEpoch !== epoch;
                 const requests = rememberedRequests(await listCameras(), rememberedCamera());
                 let videoTrack: MediaStreamTrack | null = null;
                 for (const request of requests) {
+                    if (stale()) return null;
                     try {
                         videoTrack = await this.openCamera(request);
                         break;
@@ -638,12 +642,15 @@ export class MediaManager {
                         console.warn('[WebRTC] The chosen camera could not be opened this way:', JSON.stringify(request), err);
                     }
                 }
-                videoTrack ??= await this.openCamera(null);
+                if (!videoTrack) {
+                    if (stale()) return null;
+                    videoTrack = await this.openCamera(null);
+                }
                 // The stream can vanish DURING the getUserMedia await (leave /
                 // channel switch runs stopLocalStream). Stop the just-acquired
                 // track instead of orphaning it — an orphan keeps the camera
                 // LED lit with no reference anywhere until app restart.
-                if (!this.localStream || this.cameraEpoch !== epoch) {
+                if (stale()) {
                     videoTrack.stop();
                     return null;
                 }

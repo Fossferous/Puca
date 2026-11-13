@@ -853,8 +853,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     }, [isOpen, activeSection]);
 
     // The cameras, for the Camera choice: listed whatever became of the
-    // microphone (refused, or supplied by an embedding host). Named only once
-    // the camera has been allowed; until then "Camera 1" and so on.
+    // microphone (refused, or supplied by an embedding host). Only once the
+    // camera has been allowed in this page: before that a browser hands out
+    // no ids (nothing to choose by), so the list holds only Default. On a
+    // phone that is until the camera has been on since Púca was opened.
     useEffect(() => {
         if (!isOpen || activeSection !== 'voice') return;
         let live = true;
@@ -2627,8 +2629,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 The camera your calls open. In a call, Flip on your own picture
                                                 switches between the front and rear cameras, and the menu beside the
                                                 camera button (or a tap on your picture) lists every camera; the one
-                                                you pick there is kept here too. Names show once Púca has been allowed
-                                                to use the camera.
+                                                you pick there is kept here too. Until Púca has been allowed to use the
+                                                camera, only Default is listed: on a phone, turn your camera on in a
+                                                call once after opening Púca, and every camera is listed here by name.
                                             </span>
                                         </div>
                                         <select

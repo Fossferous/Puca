@@ -84,6 +84,9 @@ function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; list
         const hung = opts.hang?.(cam);
         if (hung) {
             await hung;
+            // A slow camera can refuse in the end, too.
+            const lateRefusal = opts.refuse?.(cam);
+            if (lateRefusal) throw lateRefusal;
             const late = new FakeTrack(cam, (x) => open.delete(x));
             open.add(late);
             lateTracks.push(late);
@@ -322,6 +325,43 @@ describe('Flip on a phone', () => {
         } finally {
             mgr.closeAll();
         }
+    });
+
+    it('turned off while a remembered camera is slow to refuse: no other camera is tried (no camera light after Turn off)', async () => {
+        let letBackRefuse!: () => void;
+        const backSlow = new Promise<void>(r => { letBackRefuse = r; });
+        useCameras([FRONT, BACK], {
+            hang: (cam) => (cam === BACK ? backSlow : null),
+            refuse: (cam) => (cam === BACK ? named('NotReadableError') : null),
+        });
+        saveSettings({ ...loadSettings(), camera: { deviceId: 'back', label: BACK.label, facing: 'environment' } });
+        const media = inCall();
+        const turningOn = media.toggleVideo(true);
+        await settle();
+        expect(rig.asked.map(a => a.deviceId), 'precondition: the remembered camera is being opened').toEqual([{ exact: 'back' }]);
+        await media.toggleVideo(false);
+        letBackRefuse();
+        expect(await turningOn).toBeNull();
+        await settle();
+        expect(rig.asked.length, 'the default camera was opened after the camera was turned off').toBe(1);
+        expect(rig.open.size).toBe(0);
+        expect(videoOf(media)).toEqual([]);
+    });
+
+    it('CONTROL: left on, the same slow refusal does open the default camera', async () => {
+        let letBackRefuse!: () => void;
+        const backSlow = new Promise<void>(r => { letBackRefuse = r; });
+        useCameras([FRONT, BACK], {
+            hang: (cam) => (cam === BACK ? backSlow : null),
+            refuse: (cam) => (cam === BACK ? named('NotReadableError') : null),
+        });
+        saveSettings({ ...loadSettings(), camera: { deviceId: 'back', label: BACK.label, facing: 'environment' } });
+        const media = inCall();
+        const turningOn = media.toggleVideo(true);
+        await settle();
+        letBackRefuse();
+        expect(await turningOn).not.toBeNull();
+        expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
     });
 
     it('a remembered camera that is gone opens the default one instead of no camera', async () => {

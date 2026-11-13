@@ -148,7 +148,12 @@ const CAMERAS = (cfg) => {
         if (c.audio) (await realGUM({ audio: c.audio })).getAudioTracks().forEach(x => vs.addTrack(x));
         return vs;
     };
+    // A camera plugged in while the page is open, and a list that is slow to
+    // come (so the camera menu draws, and measures itself, before it).
+    state.plug = (cam) => { cfg.cams.push(cam); };
+    state.unplug = (id) => { const i = cfg.cams.findIndex(x => x.deviceId === id); if (i >= 0) cfg.cams.splice(i, 1); };
     md.enumerateDevices = async () => {
+        if (state.listDelayMs) await new Promise(r => setTimeout(r, state.listDelayMs));
         const real = (await realEnum()).filter(d => d.kind !== 'videoinput');
         return [...real, ...cfg.cams.map(cam => {
             const d = { kind: 'videoinput', deviceId: cam.deviceId, groupId: '', label: cam.label };
@@ -567,6 +572,26 @@ try {
     const dBack = await until(() => D.evaluate(() => (document.querySelector('.camera-preview-mini') && !document.querySelector('.camera-fullscreen')) ? true : document.querySelector('.camera-fullscreen') ? 'full screen' : null), 8000);
     check('desktop: turned on again, the camera opens in its small window, not straight into full screen', dBack === true, { dBack });
     await D.evaluate(() => [...document.querySelectorAll('.camera-fullscreen-controls .exit-btn')].forEach(b => b.click()));
+
+    step('phone: cameras plugged in since, the menu opened low on the screen');
+    await expandPhonePanel(P);
+    await P.evaluate(() => {
+        window.__cams.plug({ deviceId: 'cam-usb-1', label: 'USB Camera (1234:0001)', facing: null, color: '#808080', name: 'grey' });
+        window.__cams.plug({ deviceId: 'cam-usb-2', label: 'USB Camera (1234:0002)', facing: null, color: '#606060', name: 'grey2' });
+        window.__cams.listDelayMs = 400;
+    });
+    const lowArrow = await geometry(P, '[data-testid="camera-options"]');
+    await press(P, '[data-testid="camera-options"]');
+    const grown = await until(() => P.evaluate(() => [...document.querySelectorAll('[data-testid="camera-option"]')].filter(e => e.getClientRects().length > 0).length >= 5 || null), 6000);
+    await sleep(700);
+    const lowRows = [];
+    for (const e of await P.locator('.camera-menu .context-menu-item').all()) lowRows.push(await e.evaluate((el) => { const b = el.getBoundingClientRect(); const h = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2); return { t: el.textContent.trim(), top: Math.round(b.top), bottom: Math.round(b.bottom), on: b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight, hits: !!h && el.contains(h) }; }));
+    check('phone: rows that arrive after the menu opened (two cameras plugged in) keep every row inside the window and what a tap hits, Turn off camera too',
+        !!grown && lowRows.length >= 8 && lowRows.every(r => r.on && r.hits) && lowRows.some(r => r.t === 'Turn off camera'), { arrowTop: lowArrow && Math.round(lowArrow.cy), lowRows });
+    if (OUT) save('phone-menu-grown.png', await P.screenshot());
+    await P.keyboard.press('Escape');
+    await until(() => P.evaluate(() => !document.querySelector('.camera-menu')), 3000);
+    await P.evaluate(() => { window.__cams.listDelayMs = 0; window.__cams.unplug('cam-usb-1'); window.__cams.unplug('cam-usb-2'); });
 
     // ---- themes: the menu's words, the controls' icons ----
     step('all eight themes, with and without high contrast');

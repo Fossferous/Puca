@@ -408,9 +408,11 @@ anywhere.
   Everyone else sees your camera as it is, whichever camera it is.
 - The camera you switch to is kept on that device: the next time you turn your
   camera on, in any call, it is that one. **Settings → Voice & Video → Camera**
-  chooses it before a call; **Default** is the front camera on a phone. A
-  camera that is not there any more (a webcam unplugged) gives way to the
-  default one.
+  chooses it before a call, but only once Púca has been allowed to use the
+  camera: until then it lists only **Default** (the front camera on a phone).
+  On a phone that means turning your camera on in a call once after opening
+  Púca; the cameras are then listed by name. A camera that is not there any
+  more (a webcam unplugged) gives way to the default one.
 - If the camera you pick cannot be opened (another app holds it), you stay on
   the one you had and the panel says so.
 

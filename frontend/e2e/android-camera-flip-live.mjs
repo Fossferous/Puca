@@ -83,8 +83,15 @@ const save = (name, bytes) => { if (OUT) { fs.mkdirSync(OUT, { recursive: true }
 // ---- the phone's own UI ------------------------------------------------------
 
 function uiNodes() {
-    sh('uiautomator dump /sdcard/puca-ui.xml >/dev/null 2>&1');
-    const xml = sh('cat /sdcard/puca-ui.xml');
+    // uiautomator can refuse a dump while the screen is busy (it waits for an
+    // idle UI): once more, and then nothing found rather than the run ended.
+    let xml = '';
+    for (let i = 0; i < 2 && !xml; i++) {
+        try {
+            sh('uiautomator dump /sdcard/puca-ui.xml >/dev/null 2>&1');
+            xml = sh('cat /sdcard/puca-ui.xml');
+        } catch { /* busy: again, or nothing */ }
+    }
     const nodes = [];
     for (const m of xml.matchAll(/<node [^>]*>/g)) {
         const a = (k) => (new RegExp(`${k}="([^"]*)"`).exec(m[0]) || [])[1] || '';
@@ -103,7 +110,16 @@ async function tapText(re, ms = 10000) {
     return true;
 }
 async function answerSystemDialogs() {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
+        // On a busy machine Android can put "System UI isn't responding" over
+        // everything (a cold-booted emulator did, over the prompt below): Wait
+        // is the answer that closes nothing.
+        if (findNode(/isn.t responding/i)) {
+            console.log('      (Android said its System UI is not responding; answered Wait)');
+            await tapText(/^Wait$/i, 2000);
+            await sleep(1500);
+            continue;
+        }
         if (!findNode(/always run in background|battery optimi[sz]ation/i)) return;
         await tapText(/^(Deny|Don.t allow|No)$/i, 2000);
         await sleep(800);
@@ -383,7 +399,10 @@ try {
     await until(() => sh('cat /proc/net/unix').includes(`webview_devtools_remote_${pid}`), 30000);
     adb('forward', `tcp:${CDP_PORT}`, `localabstract:webview_devtools_remote_${pid}`);
     forwarded = true;
-    const wvBrowser = await until(() => chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`), 30000, 1000);
+    // A cold-booted emulator on a busy machine can take more than a minute to
+    // bring the app's WebView up.
+    const wvBrowser = await until(() => chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`), 90000, 1000);
+    if (!wvBrowser) throw new Error("the app's WebView did not answer DevTools (the emulator still busy booting?)");
     browsers.push(wvBrowser);
     const P = await until(() => wvBrowser.contexts().flatMap(c => c.pages()).find(p => p.url().startsWith('https://localhost')), 30000);
     if (!P) throw new Error('the page of the app did not appear');

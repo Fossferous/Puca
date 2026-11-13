@@ -70,12 +70,17 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
     useBackClose(onClose);
 
     useEffect(() => {
-        // Adjust position to stay within viewport
-        if (menuRef.current) {
+        // Adjust position to stay within viewport: as it is first drawn, and again whenever it
+        // changes size. A row that arrives after it opened (the camera menu looks at the cameras
+        // again as it opens, and a webcam plugged in since adds one) grew a menu measured only once
+        // past the window's edge, its last row (Turn off camera) out of reach.
+        const menu = menuRef.current;
+        if (!menu) return;
+        const fit = () => {
             // offsetWidth/Height, not getBoundingClientRect: the menu is scaling in
             // from 95% right now, and a rect would measure it 5% short and leave its
             // end past the window's edge.
-            const { offsetWidth, offsetHeight } = menuRef.current;
+            const { offsetWidth, offsetHeight } = menu;
             const viewportWidth = window.innerWidth;
             const viewportHeight = window.innerHeight;
 
@@ -89,9 +94,13 @@ export function ContextMenu({ items, position, onClose, opener, label, fromKeybo
                 y = viewportHeight - offsetHeight - 8;
             }
 
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- reposition after measuring the rendered menu
-            setAdjustedPosition({ x, y });
-        }
+            setAdjustedPosition(prev => (prev.x === x && prev.y === y ? prev : { x, y }));
+        };
+        fit();
+        if (typeof ResizeObserver === 'undefined') return;
+        const resized = new ResizeObserver(fit);
+        resized.observe(menu);
+        return () => resized.disconnect();
     }, [position]);
 
     useEffect(() => {
