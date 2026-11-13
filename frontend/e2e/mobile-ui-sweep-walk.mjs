@@ -14,10 +14,12 @@
 //              so a phone had a lone 20px box), and a tap on the box still toggles it once. No
 //              "ESC" key hint on the phone's close button, and its X still drawn with Classic icons
 //              (an emoji <span>). On the desktop, a mouse drag selecting a hint's words leaves the
-//              setting alone, as a native label does (CONTROL: a plain click toggles it).
+//              setting alone, as a native label does (CONTROL: a plain click toggles it), and a
+//              single click on words already selected toggles it at the first click.
 //   toggle     The chat header's checklist button has no background or border, like the pin button
 //              beside it (it was the browser's own grey button on every theme). CONTROL: an
-//              unstyled button in the same header must be caught.
+//              unstyled button in the same header must be caught. Just tapped, it paints no box
+//              (a sticky :hover on touch left the grey one).
 //   header     A message from a 32-character name: its time is whole, on one line, inside the
 //              message and the window (it was "Today / at / 17:54" down the edge at 390, and off
 //              the screen at 360).
@@ -37,7 +39,24 @@
 //              and every control in it is on screen and hit. The phone here keeps Playwright's
 //              desktop user agent, so it is offered Share Screen like the Android app with its own
 //              share or a touch laptop: the share's chevron was a fifth button in a bar sized for
-//              four, and the encryption badge slid under Mute.
+//              four, and the encryption badge slid under Mute. The bar and the call view's header
+//              show the room's whole name (the Encrypted badge cut it to "Lo..." at 390, to nothing
+//              at 360: it is its lock there, named in full), the LIVE badge stays clear of the
+//              button in the in-app fullscreen too, and SIDEWAYS (the phone turned, watching the
+//              stream with the owner's camera on) the camera strip and the floating call bar do not
+//              overlap, and the strip goes back down when a tap hides the controls.
+//   friends    Friends' Add Friend tab is whole on screen, left of the close button, with no sideways
+//              scroll (it was cut at the edge at 390, mostly hidden at 360).
+//   names      The channel header's search box says its whole word ("Search this c" before) and
+//              the channel's name keeps four letters' room, even with 220px more beside it.
+//   keyboard   With the soft keyboard up (<html data-keyboard-up>, api/keyboardUp.ts) the bottom
+//              bar is gone and the chat comes down to the keyboard; down, it is back. CONTROL:
+//              the box focused with no keyboard keeps the bar.
+//   longpress  As Android (its user agent), a message, a member and a channel take no text
+//              selection (a long press is Púca's menu there and also selected a word under it);
+//              as an iPhone they do (no menu: selection is how it copies). The box keeps its own.
+//   faint      --text-faint is 4.5:1 on every surface it rests on, and an offline member's name
+//              (the row was at half opacity: 1.8:1) too, on all eight themes x contrast.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
 // locator.click(), which scrolls first and false-passes a covered control).
@@ -249,6 +268,18 @@ try {
         await O.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
         await sleep(300);
         check('desktop settings: CONTROL - a plain click on the hint toggles it', (await box.isChecked()) !== preClick);
+        // A single click on words that are ALREADY selected toggles it, as a native label does
+        // (Chromium skips only the click that ended a drag): the guard skipped it too (review low).
+        const preSecond = await box.isChecked();
+        await O.mouse.move(b.x + 3, b.y + b.height / 2);
+        await O.mouse.down();
+        await O.mouse.move(b.x + b.width * 0.6, b.y + b.height / 2, { steps: 8 });
+        await O.mouse.up();
+        await sleep(300);
+        check('desktop settings: dragged across the hint again, its words selected, the setting left alone', (await O.evaluate(() => String(getSelection()))).trim().length > 3 && (await box.isChecked()) === preSecond);
+        await O.mouse.click(b.x + b.width * 0.3, b.y + b.height / 2);
+        await sleep(300);
+        check('desktop settings: a single click on those selected words toggles it, at the first click', (await box.isChecked()) !== preSecond);
         if ((await box.isChecked()) !== before) { await box.click(); await sleep(300); }
         check('desktop settings: the setting is back as it was', (await box.isChecked()) === before);
         await O.locator('.settings-close').first().click();
@@ -468,6 +499,24 @@ try {
             await sleep(400);
             await tap(P, P.locator('.chat-header .checklist-toggle-btn')).catch(() => {});
             await sleep(300);
+            // The tapped button keeps :hover on a touch screen until the next tap elsewhere: it must
+            // not paint a box then (it drew the grey hover box). What it may paint is the header's
+            // own colour (mobile.css: a touch button's :hover inherits), which is no box at all.
+            // A headless tap leaves no :hover behind (review: the check passed either way), so the
+            // state a real phone keeps is forced on the button through DevTools.
+            const cdp = await P.context().newCDPSession(P);
+            await cdp.send('DOM.enable');
+            await cdp.send('CSS.enable');
+            const { root: doc } = await cdp.send('DOM.getDocument', { depth: 0 });
+            const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: doc.nodeId, selector: '.chat-header .checklist-toggle-btn' });
+            await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+            const after = await P.evaluate(() => {
+                const btn = document.querySelector('.chat-header .checklist-toggle-btn');
+                return { hovered: btn.matches(':hover'), bg: getComputedStyle(btn).backgroundColor, header: getComputedStyle(document.querySelector('.chat-header')).backgroundColor };
+            });
+            await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] });
+            await cdp.detach();
+            check(`${size} toggle: with the :hover a tap leaves on a touch screen, the checklist button paints no box`, after.hovered && (/rgba\(0, 0, 0, 0\)|transparent/.test(after.bg) || after.bg === after.header), after);
             await shot(P, `toggle-${size}`);
         }
 
@@ -599,6 +648,196 @@ try {
             await box.fill('');
         }
 
+        // ── friends: Friends' Add Friend tab is whole on screen, with no scrolling
+        if (want('friends')) {
+            await nav(P, 'Servers');
+            await tap(P, P.locator('.server-icon.home-button').first());
+            await sleep(900);
+            const addShown = () => P.evaluate(() => {
+                const bar = [...document.querySelectorAll('.friends-header-bar')].find((x) => x.querySelector('.add-friend-btn'));
+                const r = bar?.getBoundingClientRect();
+                return !!r && r.width > 0 && r.top >= 0 && r.bottom <= innerHeight;
+            });
+            if (!await until(addShown, 3000)) await nav(P, 'Chat');
+            check(`${size} friends: the Friends page is on screen`, !!await until(addShown, 6000));
+            const m = await P.evaluate(() => {
+                const bar = [...document.querySelectorAll('.friends-header-bar')].find((x) => x.querySelector('.add-friend-btn'));
+                if (!bar) return null;
+                const add = bar.querySelector('.add-friend-btn'), row = bar.querySelector('.header-left'), acts = bar.querySelector('.header-actions');
+                const a = add.getBoundingClientRect(), rr = row.getBoundingClientRect(), x = acts.getBoundingClientRect();
+                const h = document.elementFromPoint(a.left + a.width / 2, a.top + a.height / 2);
+                return { vw: innerWidth, add: { l: a.left, r: a.right }, row: { r: rr.right, scroll: row.scrollWidth - row.clientWidth, left: row.scrollLeft }, actionsLeft: x.left, hit: !!h && (h === add || add.contains(h)) };
+            });
+            check(`${size} friends: Add Friend is whole, inside the window and its row, left of the close button`, !!m && m.add.l >= 0 && m.add.r <= m.vw && m.add.r <= m.row.r + 0.5 && m.add.r <= m.actionsLeft + 0.5, m);
+            check(`${size} friends: the tab row needs no sideways scroll to show it`, !!m && m.row.scroll <= 1 && m.row.left === 0, m);
+            check(`${size} friends: the middle of Add Friend is Add Friend (a tap lands on it)`, !!m && m.hit, m);
+            await shot(P, `friends-${size}`);
+            // Friends' own search box (the All tab) takes its row: it shares .search-bar with the
+            // chat header, whose phone width (88px, 120px before) reached it (review finding).
+            await tap(P, P.locator('.friends-header-bar .header-tab', { hasText: /^All$/ }).first());
+            await sleep(500);
+            const fsb = await P.evaluate(() => {
+                const i = [...document.querySelectorAll('.friends-dashboard .search-bar input')].find((x) => x.getBoundingClientRect().width > 0);
+                const c = i?.closest('.friends-content') ?? i?.parentElement?.parentElement;
+                if (!i || !c) return null;
+                const cs = getComputedStyle(c);
+                return { input: Math.round(i.getBoundingClientRect().width), room: Math.round(c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) };
+            });
+            check(`${size} friends: the All tab's search box takes its row`, !!fsb && fsb.input >= fsb.room - 2, fsb);
+            await openServer(srv.id);
+            await openChannel(general.name);
+        }
+
+        // ── names: the channel's name in the header keeps its room; the search box's word fits
+        if (want('names')) {
+            await openChannel(longName);
+            const hd = await P.evaluate(() => {
+                const hdr = document.querySelector('.chat-header'), h2 = hdr.querySelector('h2'), inp = hdr.querySelector('.search-bar input');
+                // The box's own words, put in it as its value (the placeholder is drawn in the
+                // same place): cut off when the text runs wider than the box. Set and taken out
+                // without an input event, so nothing is searched.
+                const before = inp.value;
+                inp.value = inp.placeholder;
+                const fit = { sw: inp.scrollWidth, cw: inp.clientWidth };
+                inp.value = before;
+                return { name: h2.getBoundingClientRect().width, em: parseFloat(getComputedStyle(h2).fontSize), placeholder: inp.placeholder, ...fit };
+            });
+            check(`${size} names: the search box's own words fit in it ("${hd.placeholder}")`, hd.sw <= hd.cw + 1, hd);
+            check(`${size} names: the channel's name keeps at least four letters' room`, hd.name >= 4 * hd.em - 1, hd);
+            // Under pressure: something wide beside it must not squeeze the name to nothing.
+            const pressed = await P.evaluate(() => {
+                const hdr = document.querySelector('.chat-header'), h2 = hdr.querySelector('h2');
+                const wide = document.createElement('span');
+                wide.style.cssText = 'flex: 0 0 auto; width: 220px; height: 10px;';
+                h2.after(wide);
+                const r = { name: h2.getBoundingClientRect().width, em: parseFloat(getComputedStyle(h2).fontSize) };
+                wide.remove();
+                return r;
+            });
+            check(`${size} names: ...with something 220px wide beside it, still four letters`, pressed.name >= 4 * pressed.em - 1, pressed);
+            await shot(P, `names-header-${size}`);
+            await openChannel(general.name);
+        }
+
+        // ── keyboard: the bottom bar steps aside while the soft keyboard is up for a text field
+        if (want('keyboard')) {
+            const box = P.locator(COMPOSER);
+            await tap(P, box);
+            await sleep(300);
+            const s0 = await P.evaluate(() => ({ focused: document.activeElement?.tagName, up: 'keyboardUp' in document.documentElement.dataset, nav: getComputedStyle(document.querySelector('.mobile-bottom-nav')).display }));
+            check(`${size} keyboard: CONTROL - the box focused and no keyboard (a hardware one): the bar stays`, s0.focused === 'TEXTAREA' && !s0.up && s0.nav !== 'none', s0);
+            // <html data-keyboard-up> is what api/keyboardUp.ts sets when the Android app or the
+            // visual viewport says the keyboard is up (keyboardUp.test.ts); a headless browser has no
+            // soft keyboard, so this measures the layout it gives through the real stylesheet.
+            const s1 = await P.evaluate(async () => {
+                const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+                document.documentElement.dataset.keyboardUp = '';
+                await frame();
+                const nav = document.querySelector('.mobile-bottom-nav'), main = document.querySelector('.chat-main'), form = document.querySelector('form.message-form');
+                const out = { nav: getComputedStyle(nav).display, mainGap: Math.round(innerHeight - main.getBoundingClientRect().bottom), formGap: Math.round(innerHeight - form.getBoundingClientRect().bottom) };
+                delete document.documentElement.dataset.keyboardUp;
+                await frame();
+                out.navAfter = getComputedStyle(nav).display;
+                out.mainGapAfter = Math.round(innerHeight - main.getBoundingClientRect().bottom);
+                return out;
+            });
+            check(`${size} keyboard: with the keyboard up the bottom bar is gone`, s1.nav === 'none', s1);
+            check(`${size} keyboard: ...and the chat, its message box with it, comes down to the keyboard`, s1.mainGap <= 1 && s1.formGap <= 12, s1);
+            check(`${size} keyboard: with it down again the bar is back and the chat above it`, s1.navAfter !== 'none' && s1.mainGapAfter >= 40, s1);
+            await box.evaluate((el) => el.blur());
+        }
+
+        // ── longpress: on Android a long press is the message menu, so the rows take no selection
+        if (want('longpress') && first) {
+            if ((await rowCount(P)) === 0) await say(P, 'Long press check');
+            const UAS = [
+                ['Android', 'Mozilla/5.0 (Linux; Android 16; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36', true],
+                ['iPhone', 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1', false],
+            ];
+            for (const [label, ua, android] of UAS) {
+                const c = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: true, isMobile: true, deviceScaleFactor: 2, userAgent: ua });
+                const A = await signIn(c, phoneName, `${label} ${size}`, false);
+                await nav(A, 'Servers');
+                await tap(A, A.locator(`.server-icon[data-server-id="${srv.id}"]`).first());
+                await sleep(1000);
+                await nav(A, 'Channels');
+                await tap(A, A.locator('.sidebar .channel-list .channel').filter({ has: A.locator(`.channel-name:text-is("${general.name}")`) }).first());
+                await sleep(1500);
+                const st = await A.evaluate(() => {
+                    const us = (q) => { const e = document.querySelector(q); if (!e) return 'absent'; const cs = getComputedStyle(e); return cs.userSelect || cs.webkitUserSelect; };
+                    // A field inside a message, as editing one puts there: Chromium inherits
+                    // user-select, so it must be given back its own (the composer is not inside one).
+                    const row = document.querySelector('.messages-container > .message');
+                    const edit = document.createElement('textarea');
+                    row?.appendChild(edit);
+                    const inMessage = row ? (getComputedStyle(edit).userSelect || getComputedStyle(edit).webkitUserSelect) : 'absent';
+                    edit.remove();
+                    return { marked: 'longPressMenu' in document.documentElement.dataset, message: us('.messages-container > .message'), member: us('.member-item'), channel: us('.sidebar .channel-list .channel'), composer: us('form.message-form textarea'), inMessage };
+                });
+                if (android) check(`${size} longpress: Android - a message, a member and a channel take no text selection`, st.marked && st.message === 'none' && st.member === 'none' && st.channel === 'none', st);
+                else check(`${size} longpress: an iPhone still selects a message's words (no long-press menu there: it is how it copies)`, !st.marked && st.message !== 'none' && st.message !== 'absent', st);
+                check(`${size} longpress: ${label} - a field inside a message (editing it) and the message box keep their own selection`, st.inMessage !== 'none' && st.inMessage !== 'absent' && st.composer !== 'none' && st.composer !== 'absent', st);
+                await c.close();
+            }
+        }
+
+        // ── faint: hints, timestamps and offline members at 4.5:1, all eight themes x contrast
+        if (want('faint') && first) {
+            const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
+            const bad = [];
+            let readings = 0;
+            for (const theme of THEMES) for (const hc of [false, true]) {
+                await P.evaluate(([theme, hc]) => {
+                    document.documentElement.setAttribute('data-theme', theme);
+                    document.documentElement.setAttribute('data-contrast', hc ? 'high' : 'normal');
+                }, [theme, hc]);
+                await sleep(120);
+                const r = await P.evaluate((theme) => {
+                    const c = document.createElement('canvas'); c.width = c.height = 1;
+                    const g = c.getContext('2d', { willReadFrequently: true });
+                    const rgba = (s) => { g.clearRect(0, 0, 1, 1); g.fillStyle = 'rgba(0,0,0,0)'; g.fillStyle = s; g.fillRect(0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+                    const lin = (v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; };
+                    const lum = ([r, gr, b]) => 0.2126 * lin(r) + 0.7152 * lin(gr) + 0.0722 * lin(b);
+                    const ratio = (x, y) => { const [hi, lo] = [lum(x), lum(y)].sort((p, q) => q - p); return (hi + 0.05) / (lo + 0.05); };
+                    const over = (t, u) => [0, 1, 2].map((i) => t[i] * t[3] + u[i] * (1 - t[3])).concat(1);
+                    const probe = (token, prop) => { const e = document.createElement('span'); e.style[prop] = `var(${token})`; document.body.appendChild(e); const v = getComputedStyle(e)[prop]; e.remove(); return v; };
+                    const faint = rgba(probe('--text-faint', 'color'));
+                    // The surfaces its words sit on at rest. Light's --bg-quaternary is a hover and
+                    // pressed shade, not a surface words rest on: read and printed, not held to 4.5.
+                    const surfaces = ['--bg-primary', '--bg-secondary', '--bg-tertiary', '--bg-floating', '--bg-hover', '--input-bg', '--bg-quaternary'];
+                    const out = surfaces.map((sf) => ({ sf, ratio: ratio(faint, over(rgba(probe(sf, 'backgroundColor')), [0, 0, 0, 1])), held: !(theme === 'light' && sf === '--bg-quaternary') }));
+                    // An offline member, as Chat.tsx draws one, in the real member list.
+                    const list = document.querySelector('.member-sidebar ul');
+                    let offline = null;
+                    if (list) {
+                        const li = document.createElement('li');
+                        li.className = 'member-item offline clickable';
+                        li.innerHTML = '<div class="member-avatar"><span>O</span></div><span class="member-name">offline_member</span>';
+                        list.appendChild(li);
+                        const name = li.querySelector('.member-name');
+                        let op = 1;
+                        for (let e = name; e; e = e.parentElement) op *= parseFloat(getComputedStyle(e).opacity);
+                        let bg = [0, 0, 0, 1];
+                        for (let e = li; e; e = e.parentElement) { const col = rgba(getComputedStyle(e).backgroundColor); if (col[3] > 0) { bg = over(col, [0, 0, 0, 1]); break; } }
+                        const col = rgba(getComputedStyle(name).color);
+                        offline = ratio(over([col[0], col[1], col[2], col[3] * op], bg), bg);
+                        li.remove();
+                    }
+                    return { out, offline };
+                }, theme);
+                const tag = `${theme}${hc ? '+hc' : ''}`;
+                for (const o of r.out) {
+                    readings++;
+                    if (o.held && o.ratio < 4.5) bad.push(`${tag} faint on ${o.sf} ${o.ratio.toFixed(2)}`);
+                    if (!o.held) console.log(`  (read, not held) ${tag} faint on ${o.sf} ${o.ratio.toFixed(2)}`);
+                }
+                readings++;
+                if (r.offline === null || r.offline < 4.5) bad.push(`${tag} offline member ${r.offline === null ? 'not drawn' : r.offline.toFixed(2)}`);
+            }
+            await P.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
+            check(`${size} faint: --text-faint 4.5:1 on every surface it rests on, an offline member's name 4.5:1, all eight themes x contrast (${readings} readings)`, bad.length === 0, bad.slice(0, 10));
+        }
+
         // ── live: a streaming member's camera tile keeps its LIVE badge clear of the fullscreen button
         if (want('live') && ownerLive) {
             await nav(P, 'Channels');
@@ -625,6 +864,30 @@ try {
                 check(`${size} live: the button is what a tap on it hits, and 44px`, m.buttonHit && (m.button.r - m.button.l) >= 43.5 && (m.button.b - m.button.t) >= 43.5, m.button);
                 check(`${size} live: the badge is inside the tile`, m.badge.l >= m.tile.l && m.badge.r <= m.tile.r, m);
                 await shot(P, `live-${size}`);
+                // The in-app fullscreen (mediaFullscreen.ts route 3, where nothing can go fullscreen:
+                // an iPhone) moves the button inside the safe areas at 44px. Its state put on this
+                // tile through the real stylesheet: the badge must follow (it sat on the button).
+                const fs = await tile.evaluate(async (t) => {
+                    const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+                    // A phone turned with its notch to the right: the button moves 40px in. With
+                    // no inset the old rule kept them apart by luck, and could not fail (review).
+                    document.documentElement.style.setProperty('--safe-area-right', '40px');
+                    document.documentElement.dataset.mediaFullscreen = '';
+                    t.classList.add('is-app-fullscreen');
+                    await frame();
+                    const box = (el) => { const r = el.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+                    const a = box(t.querySelector('.vs-live-badge')), b = box(t.querySelector('.vs-fullscreen-btn'));
+                    const overlap = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l)) * Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+                    t.classList.remove('is-app-fullscreen');
+                    delete document.documentElement.dataset.mediaFullscreen;
+                    document.documentElement.style.removeProperty('--safe-area-right');
+                    await frame();
+                    return { badge: a, button: b, overlap, vw: innerWidth };
+                });
+                check(`${size} live: in the in-app fullscreen (a 40px safe area at the side) the LIVE badge stays clear of the 44px button, on screen`, fs.overlap === 0 && fs.button.r - fs.button.l >= 43.5 && fs.badge.l >= 0, fs);
+                // The call view's header: the room's whole name ("2 people" sat beside it).
+                const vh = await P.evaluate(() => { const n = document.querySelector('.voice-stage-name'); return n && { text: n.textContent, whole: n.scrollWidth <= n.clientWidth + 1, w: Math.round(n.getBoundingClientRect().width) }; });
+                check(`${size} live: the call view's header shows the room's whole name`, !!vh && vh.whole && vh.w > 0, vh);
             }
             // The phone's own voice bar in that call: every control and the encryption badge on
             // screen, apart, and what a tap at its middle hits.
@@ -650,6 +913,58 @@ try {
             if (bar) {
                 check(`${size} live: nothing in the phone's voice bar overlaps anything else in it`, bar.overlaps.length === 0, { overlaps: bar.overlaps, items: bar.items.map((i) => `${i.what} ${Math.round(i.l)}-${Math.round(i.r)}`) });
                 check(`${size} live: every control in the voice bar is on screen and what a tap at its middle hits`, bar.items.every((i) => i.l >= 0 && i.r <= bar.vw && i.hit), bar.items.filter((i) => !(i.l >= 0 && i.r <= bar.vw && i.hit)));
+            }
+            // The bar shows the room's whole name: the Encrypted badge's words squeezed it to "Lo..."
+            // at 390 and to nothing at 360. The badge is its lock there, still named in full.
+            const cb = await P.evaluate(() => {
+                const p = document.querySelector('.voice-panel-compact');
+                const n = p?.querySelector('.voice-channel-name');
+                if (!n) return null;
+                const vis = (e) => !!e && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0;
+                const badge = p.querySelector('.voice-e2ee');
+                return { text: n.textContent, w: Math.round(n.getBoundingClientRect().width), whole: n.scrollWidth <= n.clientWidth + 1, lock: vis(badge?.querySelector('.voice-e2ee-lock svg')), words: vis(badge?.querySelector('.voice-e2ee-label')), named: badge?.getAttribute('aria-label') ?? null };
+            });
+            check(`${size} live: the call bar shows the room's whole name`, !!cb && cb.whole && cb.w > 0, cb);
+            check(`${size} live: ...beside the encryption badge drawn as its lock, still named in full for a screen reader`, !!cb && cb.lock && !cb.words && /encryption/i.test(cb.named ?? ''), cb);
+            // Sideways, watching the owner's stream with the owner's camera on: the camera strip and
+            // the call bar floating over the picture do not overlap (the bar covered the cameras).
+            const watch = P.locator('.voice-stage-tile .vs-watch-btn').first();
+            if (await watch.count()) {
+                await tap(P, watch);
+                await sleep(1500);
+                await P.setViewportSize({ width: h, height: w });
+                await sleep(1500);
+                const sideways = () => P.evaluate(() => {
+                    const take = document.documentElement.dataset.streamTakeover ?? null;
+                    const chrome = document.documentElement.dataset.streamChrome ?? null;
+                    const rail = document.querySelector('.stream-stage .camera-rail'), bar = document.querySelector('.voice-panel-compact');
+                    const box = (e) => { const r = e.getBoundingClientRect(); return { l: Math.round(r.left), t: Math.round(r.top), r: Math.round(r.right), b: Math.round(r.bottom) }; };
+                    if (!rail || !bar) return { take, chrome, rail: !!rail, bar: !!bar };
+                    const a = box(rail), b = box(bar);
+                    const overlap = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l)) * Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+                    const tile = rail.querySelector('.camera-rail-tile');
+                    const tr = tile && tile.getBoundingClientRect();
+                    const hit = tr && document.elementFromPoint(tr.left + tr.width / 2, tr.top + tr.height / 2);
+                    return { take, chrome, rail: a, bar: b, overlap, tileSeen: !!hit && tile.contains(hit), vh: innerHeight };
+                });
+                const sw = await until(async () => { const r = await sideways(); return r.take && r.rail && r.bar ? r : null; }, 8000) || await sideways();
+                check(`${size} sideways: the stream takes the screen, with the camera strip and the call bar on it`, sw.take === 'landscape' && typeof sw.rail === 'object' && typeof sw.bar === 'object', sw);
+                check(`${size} sideways: the camera strip and the call bar do not overlap`, sw.overlap === 0, sw);
+                check(`${size} sideways: the middle of the camera's tile is the camera, not the bar over it`, sw.tileSeen === true, sw);
+                await shot(P, `sideways-camera-${h}x${w}`);
+                // A tap on the picture hides the controls: the strip is back at the bottom edge.
+                await P.touchscreen.tap(Math.round(h / 2), Math.round(w / 3));
+                await sleep(700);
+                const hid = await sideways();
+                check(`${size} sideways: controls hidden, the strip is back down at the bottom`, hid.chrome === 'hidden' && typeof hid.rail === 'object' && hid.rail.b >= hid.vh - 2, hid);
+                await P.touchscreen.tap(Math.round(h / 2), Math.round(w / 3));
+                await sleep(500);
+                await P.setViewportSize({ width: w, height: h });
+                await sleep(1000);
+                await P.locator('.stream-stage-header .back-to-chat-btn').first().tap().catch(() => {});
+                await sleep(600);
+            } else {
+                check(`${size} sideways: the owner's tile offers Watch stream`, false);
             }
             await tap(P, P.locator('[data-testid="voice-leave"]').first()).catch(() => {});
             await sleep(800);
