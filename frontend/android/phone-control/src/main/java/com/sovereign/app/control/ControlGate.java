@@ -48,16 +48,21 @@ final class ControlGate {
 
     /**
      * The refusal for input now, or null. In order: no session the person
-     * allowed, no service to inject with (switched off, or only taken away
-     * for now), the phone put away, then the share's own state
+     * allowed, the phone put away, no service to inject with (switched off,
+     * or only taken away for now), then the share's own state
      * ({@link ScreenMap#refusal}).
+     *
+     * The phone put away comes BEFORE the service: a session paused because
+     * Android took the service away, on a phone then locked with its screen
+     * on (no screen-off broadcast), read "paused", and unlocked before the
+     * service came back it resumed with no new Allow.
      */
     static String refusal(boolean session, boolean serviceConnected, boolean serviceEnabled,
                           boolean keyguardLocked, boolean interactive, String shareRefusal) {
         if (!session) return NO_SESSION;
-        if (!serviceConnected) return serviceEnabled ? SERVICE_SUSPENDED : SERVICE_OFF;
         if (!interactive) return SCREEN_OFF;
         if (keyguardLocked) return LOCKED;
+        if (!serviceConnected) return serviceEnabled ? SERVICE_SUSPENDED : SERVICE_OFF;
         return shareRefusal;
     }
 

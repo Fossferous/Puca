@@ -295,6 +295,14 @@ public final class PhoneControl {
                 }
             } else if (indicator == null) {
                 main.removeCallbacks(resumeTimeout);
+                // Put away while it was paused: that ends it, it never
+                // resumes (the watchdog may not have run since).
+                if (!interactive() || locked()) {
+                    end(!interactive() ? ControlGate.SCREEN_OFF : ControlGate.LOCKED, true);
+                    Listener l = listener;
+                    if (l != null) l.statusChanged();
+                    return;
+                }
                 Indicator again = new Indicator(svc);
                 again.show(viewer, () -> end(STOPPED_INDICATOR, true));
                 if (!again.showing()) {

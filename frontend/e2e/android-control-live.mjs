@@ -390,6 +390,23 @@ const inSettings = (d) => d.nodes.some(n => n.pkg === 'com.android.settings');
  *  anything reads the phone back (a uiautomator dump pauses the service, and
  *  a gesture still playing then is cancelled). */
 const settleInput = () => sleep(2000);
+/**
+ * Input straight into the phone's plugin from the phone's OWN page, past the
+ * page's remote-control code: what the NATIVE gate lets through. The
+ * viewer-side negative controls only show the viewer stopped sending (with
+ * no session it has no key); this one shows the phone takes nothing either.
+ */
+async function directTap(P, nx, ny) {
+    return P.evaluate(async ({ nx, ny }) => {
+        const t = performance.now();
+        const events = [{ t: 'move', x: nx, y: ny, at: t }, { t: 'down', button: 0, at: t + 1 }, { t: 'up', button: 0, at: t + 90 }];
+        try { await window.Capacitor.nativePromise('SovereignPhoneControl', 'inject', { events }); return true; } catch (e) { return String(e); }
+    }, { nx, ny });
+}
+const directBack = (P) => P.evaluate(async () => {
+    try { await window.Capacitor.nativePromise('SovereignPhoneControl', 'inject', { events: [{ t: 'nav', a: 'back', at: performance.now() }] }); return true; } catch (e) { return String(e); }
+});
+
 /** Press one of the viewer's phone buttons (Back, Home, Recents). */
 async function phoneButton(V, a) {
     await V.evaluate((x) => document.querySelector(`[data-testid="rc-phone-${x}"]`)?.click(), a);
@@ -787,6 +804,19 @@ try {
     // a pointer move over the picture, so the shade's Stop is what ends it.
     { const c = await viewerPoint(V, 0.5, 0.5); if (c) { await V.mouse.move(c.x, c.y); await V.mouse.move(c.x + 5, c.y + 5); } }
     check('the session is still live before the shade', (await viewerControl(V)).controlling?.status === 'active');
+    // POSITIVE CONTROL for the native negative control below: while the
+    // session lasts, the same direct input DOES land.
+    sh('am force-stop com.android.settings');
+    settingsFront();
+    await sleep(2500);
+    const dPos = dump('direct-live-before');
+    const dPosRow = dPos.nodes.find(n => ROW.test(n.text));
+    const dPosSent = dPosRow ? await directTap(P, ...norm(dPosRow, dPos)) : 'no row';
+    await settleInput();
+    const dPosOpened = await dumpUntil((d) => onRowPage(d) ? d : null);
+    check('POSITIVE CONTROL: during the session, input straight into the phone\'s plugin lands (the row opens)', dPosSent === true && !!dPosOpened, { sent: dPosSent });
+    await directBack(P);
+    await settleInput();
     settingsFront();
     await sleep(1500);
     sh('cmd statusbar expand-notifications');
@@ -818,6 +848,12 @@ try {
     await sleep(2500);
     const negAfter = dump('revoked-after');
     check('NEGATIVE CONTROL: after the revoke, a click aimed at the same row changes nothing', !!negRow && onMainList(negAfter) && !onRowPage(negAfter));
+    // And the phone itself takes nothing: the same tap straight into its
+    // plugin, past the page's code, lands nowhere.
+    const dNegSent = negRow ? await directTap(P, ...norm(negRow, negAfter)) : 'no row';
+    await settleInput();
+    const dNegAfter = dump('revoked-direct-after');
+    check('NEGATIVE CONTROL (native): after the revoke, input straight into the phone\'s plugin lands nowhere', dNegSent === true && onMainList(dNegAfter) && !onRowPage(dNegAfter), { sent: dNegSent });
 
     // ---- 5. REVOKED with the frame's own Stop on the screen
     step('revoked from the Stop on the phone\'s screen');
@@ -899,6 +935,11 @@ try {
     const sAfter = dump('reshare-after');
     check('NEGATIVE CONTROL: on the new share, a click aimed at the row changes nothing without a new Allow',
         !!sRow && onMainList(sAfter) && !onRowPage(sAfter), { row: !!sRow, main: onMainList(sAfter) });
+    const sDirect = sRow ? await directTap(P, ...norm(sRow, sAfter)) : 'no row';
+    await settleInput();
+    const sDirectAfter = dump('reshare-direct-after');
+    check('NEGATIVE CONTROL (native): on the new share, input straight into the phone\'s plugin lands nowhere',
+        sDirect === true && onMainList(sDirectAfter) && !onRowPage(sDirectAfter), { sent: sDirect });
 
     // ---- 6. LOCKING the phone ends it, and nothing resumes on unlock
     step('the phone locked');

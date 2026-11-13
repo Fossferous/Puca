@@ -57,8 +57,17 @@ describe('shareAvailability', () => {
             .toEqual({ canShare: false, reason: 'ios' });
     });
 
-    it('a desktop browser without getDisplayMedia (an insecure page, an old engine) is told so', () => {
+    it('a desktop browser without getDisplayMedia (an old engine) is told so', () => {
         expect(shareAvailability(env({ displayMedia: false }))).toEqual({ canShare: false, reason: 'browser' });
+        expect(shareAvailability(env({ displayMedia: false, secure: true }))).toEqual({ canShare: false, reason: 'browser' });
+    });
+
+    it('a desktop browser on a page over plain http is told it is the address, not the browser', () => {
+        expect(shareAvailability(env({ displayMedia: false, secure: false }))).toEqual({ canShare: false, reason: 'insecure' });
+        expect(shareUnavailableWords('insecure').body).toMatch(/https/);
+        // A phone over http is still told about the phone first.
+        expect(shareAvailability(env({ userAgent: UA.androidChrome, maxTouchPoints: 5, displayMedia: false, secure: false })))
+            .toEqual({ canShare: false, reason: 'android-browser' });
     });
 
     it('an embedding host that supplies the picture shares whatever the browser has', () => {
@@ -66,7 +75,7 @@ describe('shareAvailability', () => {
     });
 
     it('every reason has words, and only the Android ones offer the app', () => {
-        for (const r of ['android-browser', 'android-app', 'ios', 'ios-untested', 'browser'] as const) {
+        for (const r of ['android-browser', 'android-app', 'ios', 'ios-untested', 'insecure', 'browser'] as const) {
             const w = shareUnavailableWords(r);
             expect(w.title.length).toBeGreaterThan(0);
             expect(w.body.length).toBeGreaterThan(20);

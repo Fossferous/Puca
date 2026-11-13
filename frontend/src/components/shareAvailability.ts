@@ -23,7 +23,7 @@
  */
 import { screenShareOffered } from './settingsModal.utils';
 
-export type ShareUnavailableReason = 'android-browser' | 'android-app' | 'ios' | 'ios-untested' | 'browser';
+export type ShareUnavailableReason = 'android-browser' | 'android-app' | 'ios' | 'ios-untested' | 'insecure' | 'browser';
 
 export interface ShareEnv {
     userAgent: string;
@@ -36,6 +36,9 @@ export interface ShareEnv {
     hostShares: boolean;
     /** navigator.mediaDevices.getDisplayMedia is there. */
     displayMedia: boolean;
+    /** A secure context (https, or localhost): a browser offers no
+     *  getDisplayMedia to a page over plain http. Absent: secure. */
+    secure?: boolean;
 }
 
 export type ShareAvailability = { canShare: true } | { canShare: false; reason: ShareUnavailableReason };
@@ -53,6 +56,9 @@ export function shareAvailability(env: ShareEnv): ShareAvailability {
     }
     if (/Android/i.test(env.userAgent)) return no('android-browser');
     if (!screenShareOffered(env.userAgent)) return no('browser');
+    // A desktop browser on a page over plain http: it is the address, not
+    // the browser, and "use a desktop browser" told someone already in one.
+    if (!env.displayMedia && env.secure === false) return no('insecure');
     if (!env.displayMedia) return no('browser');
     return { canShare: true };
 }
@@ -84,6 +90,12 @@ export function shareUnavailableWords(reason: ShareUnavailableReason): { title: 
                 body: 'Púca doesn’t offer screen sharing on iPhone and iPad yet: Safari’s new screen sharing hasn’t been tried with Púca. You can still watch other people’s screens.',
                 getApp: false,
             };
+        case 'insecure':
+            return {
+                title: 'Screen sharing needs a secure connection',
+                body: 'Browsers share a screen only with a page opened over https. Open Púca at its https address, or use the Púca desktop app.',
+                getApp: false,
+            };
         case 'browser':
         default:
             return {
@@ -104,5 +116,6 @@ export function currentShareEnv(nativeShare: boolean, hostShares: boolean, nativ
         nativeShare,
         hostShares,
         displayMedia: typeof nav?.mediaDevices?.getDisplayMedia === 'function',
+        secure: typeof window === 'undefined' || window.isSecureContext !== false,
     };
 }

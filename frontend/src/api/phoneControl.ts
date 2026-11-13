@@ -1,11 +1,11 @@
 /**
  * Control of THIS phone from a call: the page's side of the Android app's
  * SovereignPhoneControl plugin (frontend/android/phone-control/: an
- * AccessibilityService that taps, swipes and types). FULL build only:
- * remoteControl.ts is the one importer, and Lite aliases that module away
- * (vite.shared.ts), so this file never enters a Lite bundle either
- * (RC_MODULE_PATTERNS backs that up, and the Lite APK does not even carry
- * the plugin).
+ * AccessibilityService that taps, swipes and types). FULL build only: its
+ * importers are remoteControl.ts and RemoteControlOverlay.tsx, both of which
+ * Lite leaves out (vite.shared.ts aliases the first and RC_MODULE_PATTERNS
+ * lists both, with this file), so it never enters a Lite bundle either, and
+ * the Lite APK does not even carry the plugin.
  *
  * The rules, all enforced natively too (PhoneControl.java):
  *   - offered only while this phone shares its WHOLE screen from the app;

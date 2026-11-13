@@ -239,7 +239,8 @@ let controlHostKind: 'phone' | null = null;
 let requestTimer: ReturnType<typeof setTimeout> | null = null;
 // HOST, a phone: the Allow being acted on while the native session starts
 // (an await); `withdrawn` when the viewer goes meanwhile (teardownPartner).
-let answering: { userId: number; withdrawn: boolean } | null = null;
+type AnswerTicket = { userId: number; withdrawn: boolean; endedNatively?: string };
+let answering: AnswerTicket | null = null;
 // My ephemeral as viewer (kept from request until the host's response arrives).
 let viewerEph: ControlEphemeral | null = null;
 // HOST: the viewer's ephemeral public key from their request, until I grant.
@@ -1395,7 +1396,7 @@ export async function respondToControlRequest(granted: boolean) {
         // A phone: the native session first (the service on, the whole
         // screen shared, the indicator up), or no grant at all.
         if (hostKind() === 'phone') {
-            const ticket = { userId: req.userId, withdrawn: false };
+            const ticket: AnswerTicket = { userId: req.userId, withdrawn: false };
             answering = ticket;
             const why = await beginPhoneSession(req);
             if (answering === ticket) answering = null;
@@ -1413,9 +1414,10 @@ export async function respondToControlRequest(granted: boolean) {
                 notSharing();
                 return;
             }
-            if (why) {
+            if (why || ticket.endedNatively) {
+                phoneHostSession = false;
                 wsClient.send({ type: 'ControlResponse', payload: { target_user: req.userId, granted: false } });
-                setNotice(`Control not started: ${why}`);
+                setNotice(why ? `Control not started: ${why}` : endedWords(ticket.endedNatively!));
                 emit();
                 return;
             }
@@ -1560,7 +1562,7 @@ export function initRemoteControl() {
                 // native session still has to start (service, whole screen),
                 // and the viewer can go, or the share end, while it does —
                 // the same ticket the manual Allow holds.
-                const ticket = { userId: p.from_user, withdrawn: false };
+                const ticket: AnswerTicket = { userId: p.from_user, withdrawn: false };
                 answering = ticket;
                 // Android's dialog asks in Púca, and the person who offered
                 // is usually in another app by now: say so in the shade.
@@ -1578,9 +1580,10 @@ export function initRemoteControl() {
                     }
                     return;
                 }
-                if (why) {
+                if (why || ticket.endedNatively) {
+                    phoneHostSession = false;
                     wsClient.send({ type: 'ControlResponse', payload: { target_user: p.from_user, granted: false } });
-                    setNotice(`Control not started: ${why}`);
+                    setNotice(why ? `Control not started: ${why}` : endedWords(ticket.endedNatively!));
                     emit();
                     return;
                 }
@@ -1826,6 +1829,13 @@ export function initRemoteControl() {
     // screen or in the notification, the phone locked, the service switched
     // off, the share gone). Native input already stopped; tell the viewer.
     onPhoneControlEnded((reason) => {
+        // Over natively before the page recorded its grant (Allow pressed,
+        // then the screen went off at once): the grant must not go out for
+        // a session the phone no longer has.
+        if (answering && !state.controlledBy) {
+            answering.endedNatively = reason;
+            return;
+        }
         if (!state.controlledBy || !phoneHostSession) return;
         phoneHostSession = false; // already over natively
         setNotice(endedWords(reason));

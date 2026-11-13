@@ -68,6 +68,16 @@ final class Injector {
         if (!ended) pump();
     }
 
+    /**
+     * The session is over: nothing more is sent, and a finger that is down is
+     * lifted where it is. A segment already playing when the session ends
+     * plays out (at most a 2 s hold, a 700 ms long press or a 250 ms move:
+     * TouchPlanner's MAX_HOLD_MS, LONG_PRESS_MS, MAX_SEGMENT_MS), and a
+     * finger it put down is lifted when it completes (onCompleted). Android
+     * has no way to cancel a gesture but to dispatch another, which would be
+     * a touch of its own somewhere on the screen; a real touch at the phone
+     * (the frame's Stop, the shade) cancels it. Docs: REMOTE_CONTROL.md.
+     */
     void end() {
         ended = true;
         main.removeCallbacks(pump);

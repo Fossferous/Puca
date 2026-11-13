@@ -516,7 +516,7 @@ describe('the Share button and the sharing settings follow nativeScreenShareAvai
         && c.includes('const shareHere = shareAvailability(currentShareEnv(nativeShare, ')
         && c.includes('const isMobile = !shareHere.canShare;')
         && (c.match(/\{!isMobile && shareAvailable && \(/g) ?? []).length === 2;
-    const settingsOffer = (c: string) => c.includes('{(screenShareOffered() || nativeScreenShareAvailable()) && (');
+    const settingsOffer = (c: string) => c.includes('{((screenShareOffered() && !iosHere()) || nativeScreenShareAvailable()) && (');
 
     it('holds in the source', () => {
         expect(panelOffers(vp)).toBe(true);
@@ -529,6 +529,9 @@ describe('the Share button and the sharing settings follow nativeScreenShareAvai
         expect(panelOffers(mutate(vp))).toBe(false);
     });
     it('the settings pin goes red when the sharing settings are web-only again', () => {
-        expect(settingsOffer(settings.replace('(screenShareOffered() || nativeScreenShareAvailable())', 'screenShareOffered()'))).toBe(false);
+        expect(settingsOffer(settings.replace('((screenShareOffered() && !iosHere()) || nativeScreenShareAvailable())', 'screenShareOffered()'))).toBe(false);
+    });
+    it('the settings pin goes red when an iPad asking for desktop sites gets them again', () => {
+        expect(settingsOffer(settings.replace('(screenShareOffered() && !iosHere())', 'screenShareOffered()'))).toBe(false);
     });
 });

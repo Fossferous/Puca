@@ -50,10 +50,12 @@ public class ControlGateTest {
         String r = r(true, false, true, false, true, null);
         assertEquals(ControlGate.SERVICE_SUSPENDED, r);
         assertFalse(ControlGate.ends(r));
-        // While it is away the order says "away" (nothing could land anyway;
-        // the lock is caught then by the screen-off broadcast,
-        // PhoneControl.watchScreen); once it is back, a locked phone ends it.
-        assertEquals(ControlGate.SERVICE_SUSPENDED, r(true, false, true, true, true, null));
+        // A lock while it is away ENDS the session (the screen may stay on,
+        // so no screen-off broadcast says so): paused, it used to resume
+        // after an unlock with no new Allow.
+        assertEquals(ControlGate.LOCKED, r(true, false, true, true, true, null));
+        assertTrue(ControlGate.ends(r(true, false, true, true, true, null)));
+        assertEquals(ControlGate.SCREEN_OFF, r(true, false, true, false, false, null));
         assertEquals(ControlGate.LOCKED, r(true, true, true, true, true, null));
     }
 

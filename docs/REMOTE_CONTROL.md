@@ -241,10 +241,11 @@ is read out, logged or sent.
   app is not already live when they come back), lets no other app's window
   click through it, is never asked while a session lasts, and is a No after
   30 s; its Cancel is a Deny (the denial ladder). Every request is asked
-  again; an offer (the phone's person offering control) counts as the page's
-  half of the consent, and Android's dialog still asks, with a notification
-  (*X took your offer to control this phone*), as the person is usually in
-  another app by then. The page's own Allow, on a phone and a desktop alike,
+  again. Offering control is in the desktop app's UI only (the stage's and the
+  member menu's Offer control both need it): a phone's control always starts
+  from the viewer's request. Should an offer reach a phone's page anyway, it
+  counts only as the page's half of the consent: Android's dialog still asks,
+  with a notification (*X took your offer to control this phone*). The page's own Allow, on a phone and a desktop alike,
   also takes no press for 800 ms after a prompt for a NEW requester appears
   (the prompt is keyed by who asks). The prompt says what control of a phone means
   and, with the service off, how to switch it on (with Android 13+'s *Allow
@@ -306,14 +307,25 @@ is read out, logged or sent.
   inactivity timeout, the socket dropping). A native end tells the page, which
   tells the viewer. Control never resumes by itself: after an unlock the
   viewer asks again and the person answers again.
+- **A gesture already playing finishes.** A press is played in segments, and
+  one already dispatched when the session ends plays out: at most a 2 s hold,
+  a 700 ms long press or a 250 ms move (`TouchPlanner`'s `MAX_HOLD_MS`,
+  `LONG_PRESS_MS`, `MAX_SEGMENT_MS`); a finger it put down is then lifted.
+  Android has no way to cancel a gesture but to dispatch another, and that
+  would be a touch of its own somewhere on the screen. A real touch at the
+  phone (the frame's Stop, the shade) cancels it; nothing new is sent after
+  the end.
 - **The service taken away for a moment is a pause, not an end.** Anything
   using UiAutomation (test tools, uiautomator, some automation apps) makes
   Android unbind every other accessibility service while it runs. With the
   person's switch still ON, that pauses the session: the frame and pill go
   (they belong to the service), nothing lands, and when Android binds the
   service again the frame and pill are shown again before any input does; no
-  rebind within 60 s ends it. With the switch OFF, it ends at once. Found by
-  the emulator walk, whose own `uiautomator dump` ended every session.
+  rebind within 60 s ends it. With the switch OFF, it ends at once. A lock
+  while it is away ends it too (`ControlGate` asks about the lock before the
+  service, and the service coming back checks again): paused, it used to
+  resume after an unlock. Found by the emulator walk, whose own
+  `uiautomator dump` ended every session.
 - Locked, nothing works: input is refused while the keyguard is up, and the
   session ends with it. A password field is never typed into (its text cannot
   be read back, so it could only be replaced whole).
@@ -325,8 +337,9 @@ one-class `ControlRegistrar` that Lite compiles as a no-op
 and its dex carries none of it; `frontend/scripts/check-apk-control.mjs`
 proves that from built APKs (every detector must fire on the full APK and
 stay silent on Lite). The page side, `api/phoneControl.ts`, is imported only by
-`remoteControl.ts`, which Lite aliases away; `RC_MODULE_PATTERNS` and
-`check-no-rc.mjs` back that up.
+`remoteControl.ts` (which Lite aliases away) and `RemoteControlOverlay.tsx`
+(which Lite leaves out); `RC_MODULE_PATTERNS` lists all three, and
+`check-no-rc.mjs` backs that up.
 
 **Not covered.** Android 7 (API 24/25) cannot continue a stroke: the service is
 not offered in its Accessibility settings at all (`android:enabled` from API

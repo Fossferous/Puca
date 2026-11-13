@@ -56,6 +56,10 @@ const phone = {
     gate: null as Promise<void> | null,
     begun: [] as string[],
     ended: 0,
+    /** A native session is live: set when begin answers ok, cleared by end. */
+    active: false,
+    /** Runs while begin waits (after the gate opens, before it answers). */
+    duringBegin: null as (() => void) | null,
     injected: [] as Array<Record<string, unknown>>,
     endedCb: null as ((reason: string) => void) | null,
 };
@@ -69,10 +73,12 @@ vi.mock('../api/phoneControl', async () => {
             phone.begun.push(viewer);
             order.push('native:begin');
             if (phone.gate) await phone.gate;
+            phone.duringBegin?.();
             order.push('native:begun');
+            if (phone.begin.ok) phone.active = true;
             return phone.begin;
         },
-        endPhoneControl: () => { phone.ended++; },
+        endPhoneControl: () => { phone.ended++; phone.active = false; },
         injectPhoneControl: async (events: Array<Record<string, unknown>>) => { phone.injected.push(...events); },
         onPhoneControlEnded: (cb: (reason: string) => void) => { phone.endedCb = cb; return () => {}; },
     };
@@ -156,6 +162,8 @@ beforeEach(async () => {
     phone.gate = null;
     phone.begun.length = 0;
     phone.ended = 0;
+    phone.active = false;
+    phone.duringBegin = null;
     phone.injected.length = 0;
 });
 afterEach(() => { untrack(); });
@@ -274,12 +282,13 @@ describe('a phone sharing its screen, as the host', () => {
         // The viewer cancels meanwhile.
         handlers.get('ControlEnded')!({ payload: { from_user: VIEWER } });
         expect(phone.ended, 'Android\'s dialog, still asking, is taken down at once').toBe(1);
+        // Its Allow was pressed meanwhile: the native session starts anyway.
         release();
         await answered;
         await settle();
         expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant to nobody').toBe(false);
         expect(rc.getControlState().controlledBy).toBeNull();
-        expect(phone.ended, 'and the native session with it').toBeGreaterThanOrEqual(1);
+        expect(phone.active, 'and the session that started after the withdrawal is ended').toBe(false);
     });
 
     it('the share ending ends control at once, natively too, and sharing again gives nothing back', async () => {
@@ -391,7 +400,21 @@ describe('a phone sharing its screen, as the host', () => {
         await settle();
         expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant to nobody').toBe(false);
         expect(rc.getControlState().controlledBy).toBeNull();
-        expect(phone.ended, 'the native session is taken down').toBeGreaterThanOrEqual(1);
+        expect(phone.active, 'the session that started after the withdrawal is ended').toBe(false);
+    });
+
+    it('a native end before the page recorded its grant (Allow, then the screen off) grants nothing', async () => {
+        const { rc } = await request();
+        // The phone answers "started" and, before the page goes on, says the
+        // session is over (the order Capacitor delivers them in makes this
+        // narrow; it must not matter).
+        phone.duringBegin = () => phone.endedCb!('screen-off');
+        await rc.respondToControlRequest(true);
+        await settle();
+        expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant').toBe(false);
+        expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
+        expect(rc.getControlState().controlledBy, 'no session the phone does not have').toBeNull();
+        expect(rc.getControlState().notice).toBe('Remote control ended: the phone was locked.');
     });
 
     it('a second request while a phone is still starting the session it allowed is refused', async () => {
