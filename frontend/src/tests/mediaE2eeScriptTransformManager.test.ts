@@ -975,6 +975,50 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         expect(camSender.track).toBe(cam2);
     });
 
+    it('a camera switch under way keeps the hold: the 1 s sweep does not end it on the stopped camera, and the next camera goes on the SAME held sender', async () => {
+        // The media layer's switch in its real order: the old camera stopped
+        // and out of the stream FIRST (a phone opens one camera), the next one
+        // opened after. The sweep used to see the stopped camera, end the hold
+        // with nothing on the sender, and the next camera, finding no camera
+        // sender, went out on a new transceiver the other side's tile never
+        // plays (black for the rest of the call).
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        const senders = pc.senders.length;
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        let underWay = false;
+        media.cameraSwitchInProgress = () => underWay;
+        media.switchCamera = async () => {
+            underWay = true;
+            cam.stop();
+            local.splice(1, 1);
+            await gate;
+            local.push(cam2);
+            underWay = false;
+            return { ok: true, track: cam2 };
+        };
+        const switching = mgr.switchCamera({ facing: 'environment' });
+        await settle();
+        sweep(mgr); // the 1 s sweep, while the next camera opens
+        await settle();
+        release();
+        await switching;
+        await settle();
+        expect(pc.senders.length, 'a second camera sender: a new transceiver the viewer never shows').toBe(senders);
+        expect((camSender.track as FakeTrack | null)?.id, 'the camera sender lost its hold (or its camera)').toBe('cam2+stand');
+        sealedFirst(camSender);
+        await settle();
+        sweep(mgr);
+        await settle();
+        expect(camSender.track, 'once sealed, the next camera goes on').toBe(cam2);
+    });
+
     it('stopping a share finds its held sender (by the track it waits to send) and removes it', async () => {
         scriptEngine();
         const mic = track('audio', 'mic');

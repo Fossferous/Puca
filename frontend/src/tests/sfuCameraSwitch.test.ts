@@ -218,6 +218,23 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(pub.track!.isMuted, 'the publication stayed muted').toBe(false);
     });
 
+    it('a ghost publication of the stopped camera beside the live one (a reconnect race): the ghost goes, the live camera is kept and NOT stopped', async () => {
+        const { sfu, s, pubs, lp } = await rig();
+        (s.room as { state: string }).state = 'connected';
+        const rear = new FakeCamTrack('cam-back');
+        await sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        // The ghost first, as LiveKit lists it; the live camera after.
+        const ghostTrack = new FakeCamTrack('ghost');
+        ghostTrack.readyState = 'ended';
+        const ghost = new LocalVideoTrack(ghostTrack as unknown as MediaStreamTrack, undefined, true);
+        pubs.unshift({ source: Track.Source.Camera, track: ghost, trackSid: 'TR_ghost' });
+        await sfu.reassertCamera();
+        expect(rear.readyState, 'the live camera was stopped by its own swap: black for everyone').toBe('live');
+        expect(pubs.map(p => p.trackSid)).toEqual(['TR_camera_1']);
+        expect(pubs[0].track!.mediaStreamTrack).toBe(rear);
+        expect(lp.unpublishTrack).toHaveBeenCalledWith(ghostTrack, true);
+    });
+
     it('no camera published: nothing happens', async () => {
         const { sfu, s, lp } = await rig();
         s.cameraPub = null;

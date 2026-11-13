@@ -963,9 +963,13 @@ export class SfuManager {
         // Still the camera to put on (not turned off, nor switched again).
         const current = () => this.cameraWanted === newTrack && newTrack.readyState === 'live';
         const pubs = this.localPubs(Track.Source.Camera).filter(p => p.track);
-        const [keep, ...extra] = pubs;
-        for (const pub of extra) {
-            await this.room.localParticipant.unpublishTrack(pub.track!.mediaStreamTrack, true);
+        // The publication that already carries it, if one does (a reconnect
+        // can leave a ghost of the old track beside it); the rest go, and
+        // the track being put on is never the one stopped with them.
+        const keep = pubs.find(p => p.track!.mediaStreamTrack === newTrack) ?? pubs[0];
+        for (const pub of pubs.filter(p => p !== keep)) {
+            const t = pub.track!.mediaStreamTrack;
+            await this.room.localParticipant.unpublishTrack(t, t !== newTrack);
         }
         if (keep?.track) {
             try {
@@ -983,7 +987,8 @@ export class SfuManager {
                 return;
             } catch (err) {
                 console.warn('[sfu] camera replaceTrack failed; publishing the new camera afresh:', err);
-                await this.room.localParticipant.unpublishTrack(keep.track.mediaStreamTrack, true).catch(() => { /* already gone */ });
+                const t = keep.track.mediaStreamTrack;
+                await this.room.localParticipant.unpublishTrack(t, t !== newTrack).catch(() => { /* already gone */ });
             }
         }
         // Afresh only while connected, and only the camera still wanted: a
@@ -1004,8 +1009,8 @@ export class SfuManager {
     async reassertCamera(): Promise<void> {
         const want = this.cameraWanted;
         if (!this.room || !this.cameraPub || !want || want.readyState !== 'live') return;
-        const pub = this.localPubs(Track.Source.Camera).find(p => p.track);
-        if (pub?.track?.mediaStreamTrack === want) return;
+        const pubs = this.localPubs(Track.Source.Camera).filter(p => p.track);
+        if (pubs.length === 1 && pubs[0].track!.mediaStreamTrack === want) return;
         console.info('[sfu] the camera publication lost the camera switched to while reconnecting; putting it back');
         await this.replaceCameraTrack(want);
     }

@@ -728,8 +728,17 @@ export class WebRTCManager {
 
     /** End every hold that is over (see heldSenders). */
     private sweepHeldSenders(): void {
+        const screen: MediaStreamTrack[] = this.media.getScreenShareStreamSync()?.getVideoTracks() ?? [];
         for (const [sender, held] of [...this.heldSenders]) {
             if (held.swaps > 0) continue; // a stand-in is still going on
+            // A camera switch under way has stopped the old camera before
+            // opening the next (a phone opens one at a time): its sender's hold
+            // waits for the next camera. Ended on the stopped track here, the
+            // hold put nothing on the sender, the next camera found no camera
+            // sender and went out on a NEW transceiver, which the other side's
+            // tile never plays (black for the rest of the call), or, before
+            // that nothing landed, onto this sender with no hold at all.
+            if (held.real?.kind === 'video' && !screen.includes(held.real) && this.media.cameraSwitchInProgress()) continue;
             const peer = this.peers.get(held.userId);
             const c = peer?.mediaCrypto;
             const onPeer = !!peer && peer.connection.getSenders().includes(sender);

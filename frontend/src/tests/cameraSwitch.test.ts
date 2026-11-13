@@ -55,9 +55,10 @@ function named(name: string, message = name): Error {
 }
 
 /** A phone: `cameras`, at most one open at a time, and a log of what was asked. */
-function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; listFacing?: boolean } = {}) {
+function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; listFacing?: boolean; hang?: (cam: Cam) => Promise<void> | null } = {}) {
     const asked: MediaTrackConstraints[] = [];
     const open = new Set<FakeTrack>();
+    const lateTracks: FakeTrack[] = [];
     let gate: Promise<void> | null = null;
     const getUserMedia = vi.fn(async (c: MediaStreamConstraints) => {
         if (gate) await gate;
@@ -72,6 +73,16 @@ function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; list
         else if (fm?.ideal) cam = cameras.find(x => x.facing === fm.ideal) ?? cameras[0];
         else cam = cameras[0];
         if (!cam) throw named('OverconstrainedError');
+        // A camera whose open never settles (a dismissed permission prompt,
+        // a driver that hangs) until the test lets it: it then opens.
+        const hung = opts.hang?.(cam);
+        if (hung) {
+            await hung;
+            const late = new FakeTrack(cam, (x) => open.delete(x));
+            open.add(late);
+            lateTracks.push(late);
+            return new FakeStream([late]);
+        }
         const refusal = opts.refuse?.(cam);
         if (refusal) throw refusal;
         const t = new FakeTrack(cam, (x) => open.delete(x));
@@ -83,7 +94,7 @@ function phone(cameras: Cam[], opts: { refuse?: (cam: Cam) => Error | null; list
         getCapabilities: () => (opts.listFacing === false || !cam.facing ? {} : { facingMode: [cam.facing] }),
     })));
     return {
-        asked, open, getUserMedia, enumerateDevices,
+        asked, open, lateTracks, getUserMedia, enumerateDevices,
         hold() { let release!: () => void; gate = new Promise<void>(r => { release = r; }); return () => { gate = null; release(); }; },
     };
 }
@@ -278,6 +289,61 @@ describe('when a camera will not open', () => {
         expect(before.readyState).toBe('ended');
         expect(localCameraState().trackId, 'the store still names the stopped track').toBe(after.id);
         expect(told, 'nobody was told the camera changed, so the self-view kept the stopped track').toBeGreaterThan(0);
+    });
+
+    it('a camera that never opens is given up after 20 s: the one that was on is back, and if it opens late it is stopped (no light left on)', async () => {
+        let letBackOpen!: () => void;
+        const backHangs = new Promise<void>(r => { letBackOpen = r; });
+        useCameras([FRONT, BACK], { hang: (cam) => (cam === BACK ? backHangs : null) });
+        const media = inCall();
+        await media.toggleVideo(true);
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+            const flipping = media.flipCamera();
+            await vi.advanceTimersByTimeAsync(MediaManager.SWITCH_OPEN_TIMEOUT_MS + 10);
+            const r = await flipping;
+            expect(r.ok, 'the switch waited for ever (and every press after it)').toBe(false);
+            expect(!r.ok && r.reason).toBe('unavailable');
+            expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
+            expect(media.cameraSwitchInProgress()).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+        letBackOpen();
+        await flush();
+        expect(rig.lateTracks.map(t => t.readyState), 'the camera that opened late was left on').toEqual(['ended']);
+    });
+
+    it('a switch is under way from its start to its answer (the hold sweep waits for it)', async () => {
+        useCameras([FRONT, BACK]);
+        const media = inCall();
+        await media.toggleVideo(true);
+        expect(media.cameraSwitchInProgress()).toBe(false);
+        const release = rig.hold();
+        const flipping = media.flipCamera();
+        await flush();
+        expect(media.cameraSwitchInProgress()).toBe(true);
+        release();
+        await flipping;
+        expect(media.cameraSwitchInProgress()).toBe(false);
+    });
+
+    it('turned off while the switch waits to ask again: it does not ask (no camera light, nothing a phone would then refuse)', async () => {
+        const media = inCall();
+        let refusedOnce = false;
+        useCameras([FRONT, BACK], {
+            refuse: (cam) => {
+                if (cam !== BACK || refusedOnce) return null;
+                refusedOnce = true;
+                setTimeout(() => { void media.toggleVideo(false); }, 50); // during the 400 ms wait
+                return named('NotReadableError');
+            },
+        });
+        await media.toggleVideo(true);
+        const r = await media.flipCamera();
+        expect(r.ok).toBe(false);
+        expect(rig.asked.filter(a => (a.deviceId as ConstrainDOMStringParameters | undefined)?.exact === 'back').length, 'asked for the camera again after it was turned off').toBe(1);
+        expect(rig.open.size).toBe(0);
     });
 
     it('a camera still being let go of is asked for once more, a moment later', async () => {

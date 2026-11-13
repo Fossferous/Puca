@@ -85,6 +85,7 @@ export class MediaManager {
         return null;
     }
     async switchCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }
+    cameraSwitchInProgress(): boolean { return false; }
     async flipCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }
     stopLocalStream(): void { this.local?.getTracks().forEach((t) => t.stop()); this.local = null; }
     stopScreenShare(): boolean {

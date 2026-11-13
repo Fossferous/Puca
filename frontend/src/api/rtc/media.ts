@@ -722,6 +722,33 @@ export class MediaManager {
      * while one is under way waits for it. A camera that opens is remembered
      * for the next call (Settings' `camera`).
      */
+    /** Whether a camera switch is under way (its old camera already stopped). */
+    cameraSwitchInProgress(): boolean {
+        return this.switching !== null;
+    }
+
+    /** How long a switch waits for a camera to open. A getUserMedia that never
+     *  settles (a permission doorhanger dismissed rather than answered, a
+     *  driver that hangs) kept the switch, and every press after it, waiting
+     *  for the rest of the session, with the old camera already stopped. */
+    static readonly SWITCH_OPEN_TIMEOUT_MS = 20_000;
+
+    /** openCamera, given up after SWITCH_OPEN_TIMEOUT_MS; a camera that opens
+     *  after that is stopped at once (its light would stay on). */
+    private openCameraInTime(request: CameraRequest | null): Promise<MediaStreamTrack> {
+        let late = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const opening = this.openCamera(request);
+        opening.then(t => { if (late) t.stop(); }, () => { /* the switch has its answer */ });
+        const limit = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+                late = true;
+                reject(Object.assign(new Error('the camera did not open in time'), { name: 'TimeoutError' }));
+            }, MediaManager.SWITCH_OPEN_TIMEOUT_MS);
+        });
+        return Promise.race([opening, limit]).finally(() => clearTimeout(timer));
+    }
+
     async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
         if (this.switching) return this.switching;
         this.switching = this.doSwitchCamera(request).finally(() => { this.switching = null; });
@@ -742,24 +769,27 @@ export class MediaManager {
         let track: MediaStreamTrack | null = null;
         let failure: unknown = null;
         try {
-            track = await this.openCamera(request);
+            track = await this.openCameraInTime(request);
         } catch (err) {
             failure = err;
             // A camera just let go of can still be held for a moment by the
-            // phone's camera service: once more, a little later.
+            // phone's camera service: once more, a little later (unless the
+            // camera was turned off, or the call left, meanwhile).
             const name = (err as { name?: string } | null)?.name;
             if (!stale() && (name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError')) {
                 await new Promise(r => setTimeout(r, 400));
-                try {
-                    track = await this.openCamera(request);
-                    failure = null;
-                } catch { /* still refused */ }
+                if (!stale()) {
+                    try {
+                        track = await this.openCameraInTime(request);
+                        failure = null;
+                    } catch { /* still refused */ }
+                }
             }
         }
         if (!track && !stale()) {
             // Put back the camera that was on.
             try {
-                track = await this.openCamera(now.deviceId ? { deviceId: now.deviceId } : now.facing ? { facing: now.facing } : null);
+                track = await this.openCameraInTime(now.deviceId ? { deviceId: now.deviceId } : now.facing ? { facing: now.facing } : null);
             } catch (err) {
                 console.warn('[WebRTC] The camera that was on could not be opened again either:', err);
             }

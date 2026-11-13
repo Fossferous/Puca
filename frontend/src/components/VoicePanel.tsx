@@ -3255,7 +3255,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      * of the call: the SFU publication (sfuManager.replaceCameraTrack; mesh
      * peers were given it by webrtcManager already), every surface that shows
      * your own camera, and a line when it did not go as asked. One at a time:
-     * a phone cannot open two cameras, so a second press waits.
+     * a phone cannot open two cameras, so a press while a switch is under way
+     * is not taken (Flip shows itself busy meanwhile).
      */
     const applyCameraSwitch = useCallback(async (run: () => Promise<CameraSwitch>) => {
         if (cameraSwitchingRef.current) return;
