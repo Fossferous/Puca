@@ -116,7 +116,9 @@ domain shows as its real, encoded name.
 
 `permission_decision` in `discord_window.rs` decides, per site and per kind.
 Nothing is ever granted to any site but Discord's own app (discord.com, and its
-PTB and Canary versions), and nothing is granted without a question:
+PTB and Canary versions). Discord's app is given nothing without a question,
+with one exception: whether it may play sound and video by itself (autoplay) is
+left to WebView2's own rule, which asks nothing.
 
 | Asked for | From Discord's app | From any other site |
 |---|---|---|
@@ -124,6 +126,7 @@ PTB and Canary versions), and nothing is granted without a question:
 | Reading the clipboard | WebView2's own question | Refused |
 | Notifications | Púca's question, only after you pressed something in Discord that asked | Refused |
 | Sharing your screen | WebView2's own picker | Refused |
+| Playing sound and video by itself (autoplay) | WebView2's own rule, with no question | Refused |
 | Location, and everything else | Refused | Refused |
 
 WebView2 has no question of its own for notifications. Without one, it refuses
@@ -150,6 +153,14 @@ not its app:
   app's audio in Púca, the Discord window counts as part of Púca and is not
   offered, even after Púca has restarted while the window stayed open
   (`is_pucas_own` in `frontend/src-tauri/src/audio_capture.rs`).
+- A screen share from the Discord window keeps Windows' "sharing your screen"
+  bar and its **Stop sharing** button. Púca's **Hide Windows' "sharing your
+  screen" bar** setting hides only Púca's own bar: with the Discord window behind
+  a game, that bar is the one sign on the desktop that the share to Discord is
+  still running, and Púca's tray icon does not turn amber for it
+  (`own_webviews` in `frontend/src-tauri/src/capture_bar.rs`, which asks the
+  same `boost_targets` rule in `stream_boost.rs` that keeps a Púca share from
+  raising the Discord window's priority).
 
 ## Downloads
 

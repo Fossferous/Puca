@@ -128,6 +128,9 @@ pub fn descendants_named(rows: &[ProcRow], root: u32, name: &str) -> Vec<u32> {
 /// of this one too, and a Púca share has no business raising them over the
 /// owner's game. Found by name (the same image as this process), so its whole
 /// subtree is left where Windows put it.
+///
+/// capture_bar.rs asks this same function which "sharing your screen" bars are
+/// Púca's own to hide, so a change here also changes which bars it hides.
 #[cfg_attr(not(windows), allow(dead_code))] // exercised by tests + Windows imp
 pub fn boost_targets(rows: &[ProcRow], self_pid: u32, webview_exe: &str) -> Vec<u32> {
     let mut targets = descendants_named(rows, self_pid, webview_exe);

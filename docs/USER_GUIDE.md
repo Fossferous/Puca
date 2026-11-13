@@ -649,7 +649,11 @@ The first time, Android has to let Púca do it:
 2. If it says to turn on **Púca remote control** first, tap **Open
    Accessibility settings**, open **Púca remote control** and switch it on.
    Android explains what an accessibility service can do; Púca uses it only
-   while you have allowed someone, and does not read your screen with it
+   while you have allowed someone, and does not read your screen with it.
+   If it says instead that Android has stopped Púca remote control for now,
+   the switch is already on and there is nothing to turn on: an automation
+   or testing app can make Android do that, and **Allow control** can be
+   pressed once Android runs it again
 3. If Android says it is a **restricted setting** (Android 13 and later, for
    an app installed from the download page): tap **Open App info** in Púca's
    prompt, tap the menu at the top right, choose **Allow restricted
@@ -685,8 +689,10 @@ which you chose, so an app that fills the whole screen looks like the entire
 screen until you switch away from it, which ends control within a second; a
 tap sent in that moment can reach the app you switched to. Choose **Entire
 screen** to be sure. Typing goes into the
-text box you or they tapped; it does not type into password fields, and it
-does not press keyboard shortcuts.
+text box you or they tapped, and it does not press keyboard shortcuts. What
+they type is never put into a password box, but their Enter still reaches
+one, and a tap on your phone's own keyboard is a tap like any other, so they
+can still type with that.
 
 Control of a phone is in the full Púca app only, not in Púca Lite, and needs
 the new Android app (a new install from the download page). Phones running
@@ -707,8 +713,9 @@ asks them; once they allow it:
 - the stream's buttons gain **Back**, **Home** and **Recent apps** for their
   phone.
 
-While you wait for an answer, the request's button is a cancel button
-(after a cancel you can ask that person again after a short wait). If
+While you wait for an answer, the request's button on the stream is a
+cancel button (the right-click menu only shows **Control Requested…**;
+after a cancel you can ask that person again after a short wait). If
 nobody answers for nearly three minutes (their app cannot be
 controlled at all, Púca Lite for instance), the request is dropped.
 
@@ -844,7 +851,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Fullscreen** | Expand that stream to the whole screen |
 | **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |
-| **Request Control** | Ask the sharer for keyboard and mouse control of their screen (or touch control of their phone, see [Control someone's phone](#control-someones-phone)); they must accept. While waiting, the same button cancels the request |
+| **Request Control** | Ask the sharer for keyboard and mouse control of their screen (or touch control of their phone, see [Control someone's phone](#control-someones-phone)); they must accept. While waiting, the stream's own button cancels the request; in the right-click menu the row reads **Control Requested…** and cannot be pressed |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
 | **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
 

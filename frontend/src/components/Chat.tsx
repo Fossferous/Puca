@@ -1206,7 +1206,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Android's BACK closes what is open here first (hooks/useBackClose.ts).
     useBackClose(() => setShowCreateModal(false), showCreateModal);
     useBackClose(() => setNickEditServer(null), nickEditServer !== null);
-    // Pins are drawn only in a channel's header: a DM or the Friends page keeps showPins set.
+    // Pins are drawn only in a channel's header: a DM keeps showPins set. What covers the
+    // channel closes them (pinsCovers, below).
     useBackClose(() => setShowPins(false), showPins && !currentDM && currentChannel !== null);
     useBackClose(() => setFormatMenu(null), formatMenu !== null);
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
@@ -1369,6 +1370,23 @@ export function Chat({ onLogout }: ChatProps) {
     // Tasks view is built for.
     const notesInApp = isTauri() && !isMobile;
     const notesOnScreen = notesInApp && showNotesView;
+    // The pins close when something takes the channel's place: the Friends/Tasks dashboard,
+    // Devices or Notes opening over it, or, on a phone, the chat panel giving way to another.
+    // Left open under a phone's dashboard or another panel, they held Back, and Back closed
+    // something nobody could see. Where the desktop layout applies (a desktop window, an
+    // Android tablet wider than 1024 px) .pins-panel (z-index 200) was drawn over the
+    // dashboard and Devices (z-index 100). Each bit is one of those views; a bit turning on
+    // closes the pins. Only the turning on: on that tablet the chat is on screen while
+    // mobilePanel rests at 'channels', and the pins must still open there.
+    const pinsCovers = (showFriendsPanel ? 1 : 0)
+        | (RC_ENABLED && showDevicesView ? 2 : 0)
+        | (notesOnScreen ? 4 : 0)
+        | (isMobile && mobilePanel !== 'chat' ? 8 : 0);
+    const [pinsCoversBefore, setPinsCoversBefore] = useState(pinsCovers);
+    if (pinsCovers !== pinsCoversBefore) {
+        setPinsCoversBefore(pinsCovers);
+        if ((pinsCovers & ~pinsCoversBefore) !== 0 && showPins) setShowPins(false);
+    }
     // A mode's look belongs to its server's own screen. These paint over that slot with
     // currentServer still set, and the accent is on the document.
     const modeLook = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);

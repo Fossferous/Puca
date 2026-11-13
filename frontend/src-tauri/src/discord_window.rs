@@ -42,15 +42,16 @@
 //! of Connections (Spotify, Xbox, ...) therefore open in the browser.
 //!
 //! PERMISSIONS. Only Discord's own app origin may be granted anything, and
-//! nothing is granted without someone being asked: the microphone, the camera
-//! and clipboard reading get WebView2's own question (and Windows' own for the
-//! microphone and camera); notifications, which WebView2 never asks about
+//! nothing but autoplay is granted without someone being asked: the microphone,
+//! the camera and clipboard reading get WebView2's own question (and Windows' own
+//! for the microphone and camera); notifications, which WebView2 never asks about
 //! ("Notifications ... never prompt", WebView2Feedback #4488;
 //! `CoreWebView2PermissionKind.Notifications`: "no browser permission prompt will
 //! be shown"), get Púca's question, and only when the owner pressed something in
-//! Discord's page that asked; location and everything else are refused, for
-//! every origin. Screen sharing goes through WebView2's own picker, from Discord's
-//! app only.
+//! Discord's page that asked; autoplay (playing sound and video by itself) is
+//! left to WebView2's own rule, which asks nothing; location and everything else
+//! are refused, for every origin. Screen sharing goes through WebView2's own
+//! picker, from Discord's app only.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -224,9 +225,11 @@ pub enum PermissionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
-    /// Left to WebView2: it asks with its own question (and Windows with its own,
-    /// for the microphone and camera), and remembers the answer in Discord's
-    /// profile, as Edge does.
+    /// Left to WebView2, as Edge leaves it. For the microphone, the camera and
+    /// reading the clipboard it asks its own question (and Windows asks its own,
+    /// for the microphone and camera) and remembers the answer in Discord's
+    /// profile. For autoplay it asks nothing: its own rule for playing sound
+    /// without a click decides.
     WebView2Prompt,
     /// Púca asks the owner, because WebView2 never does for this kind.
     AskOwner,
@@ -236,7 +239,8 @@ pub enum PermissionAction {
 
 /// How a permission request from `origin` is answered.
 ///
-/// Never granted without a question, and only ever for Discord's own app:
+/// Only ever for Discord's own app, and never granted without a question but
+/// for autoplay:
 /// - a call needs the microphone and camera, and pasting a picture can need the
 ///   clipboard: WebView2's own question;
 /// - notifications: WebView2 has no question of its own, so Púca asks, and only
@@ -244,7 +248,8 @@ pub enum PermissionAction {
 ///   (`user_initiated`). A request the page makes by itself is refused quietly
 ///   and not remembered, so it never becomes a question nobody asked for, and
 ///   Discord's own "enable notifications" can still ask later;
-/// - autoplay is WebView2's own rule for playing sound without a click;
+/// - autoplay is WebView2's own rule for playing sound without a click, which
+///   asks nothing (docs/DISCORD.md's table says so too);
 /// - location, and every other kind: Discord's web app has no use for them.
 pub fn permission_decision(kind: PermissionKind, origin: &str, user_initiated: bool) -> PermissionAction {
     if !is_app_origin(origin) {

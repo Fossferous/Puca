@@ -386,13 +386,15 @@ fn stop_app_audio_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// Hide WebView2's "… is sharing a window and audio" bar (see capture_bar.rs).
+/// Hide this app's own WebView2 "… is sharing a window and audio" bar, never
+/// another app's or the Discord window's (see capture_bar.rs).
 /// Returns how many bar windows were hidden (0 = none found yet — caller retries).
 ///
 /// MUST stay async + spawn_blocking: the frontend polls this every 700ms for
-/// the whole share, and EnumWindows over every top-level window (plus a
-/// process-name query per candidate) on the MAIN thread ran ~1.4x/s in
-/// exactly the window where live control input was also being injected there.
+/// the whole share, and EnumWindows over every top-level window (plus one
+/// Toolhelp process snapshot, taken when some window passes the class and
+/// title checks) on the MAIN thread ran ~1.4x/s in exactly the window where
+/// live control input was also being injected there.
 #[tauri::command]
 async fn hide_screen_capture_bar() -> u32 {
     tauri::async_runtime::spawn_blocking(capture_bar::hide_capture_bar)

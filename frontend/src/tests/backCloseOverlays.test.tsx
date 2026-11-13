@@ -44,6 +44,8 @@ import { ContextMenu } from '../components/ContextMenu';
 import { NotesDialog } from '../components/NotesDialog';
 import { ImageLightbox } from '../components/ImageLightbox';
 import { WelcomePopup } from '../components/WelcomePopup';
+import { ShareUnavailableButton } from '../components/ShareUnavailableButton';
+import ScreenShareModal from '../components/ScreenShareModal';
 import { useBackClose } from '../hooks/useBackClose';
 
 let host: HTMLDivElement;
@@ -163,6 +165,76 @@ describe('Android BACK closes the overlay on top, not the app', () => {
         await settle();
         await back();
         expect(onDismiss).toHaveBeenCalledTimes(1);
+    });
+
+    it('the card that says why Share Screen is not here (the Android app that cannot share, review finding)', async () => {
+        act(() => root.render(<ShareUnavailableButton reason="android-app" />));
+        const card = () => host.querySelector('[data-testid="screenshare-unavailable-card"]');
+        act(() => (host.querySelector('[data-testid="screenshare-unavailable"]') as HTMLButtonElement).click());
+        await settle();
+        expect(card(), 'the card is open').toBeTruthy();
+        await back();
+        expect(card(), 'Back closed it').toBeNull();
+        await settle();
+        expect(h.enabled.at(-1), 'and gave Back to the system again').toBe(false);
+    });
+
+    describe('the Share dialog (review finding: Back folded the call bar out of sight behind it)', () => {
+        const capture = { pending: false };
+        const props = {
+            onCaptureScreen: () => (capture.pending ? new Promise<null>(() => {}) : Promise.resolve(null)),
+            onGoLive: async () => {},
+            onCancelAfterCapture: () => {},
+        };
+        beforeEach(() => { capture.pending = false; });
+
+        it('over the call bar opened to all its controls, Back closes the dialog and leaves the bar', async () => {
+            const foldedBar = vi.fn();
+            const onClose = vi.fn();
+            function Bar() { useBackClose(foldedBar); return null; }
+            act(() => root.render(<><Bar /></>));
+            act(() => root.render(<><Bar /><ScreenShareModal isOpen launch="settings" onClose={onClose} {...props} /></>));
+            await settle();
+            expect(host.querySelector('.stream-modal-overlay'), 'the dialog is drawn').toBeTruthy();
+            await back();
+            expect(onClose).toHaveBeenCalledTimes(1);
+            expect(foldedBar).not.toHaveBeenCalled();
+            // CONTROL: the dialog gone, the next Back folds the bar.
+            act(() => root.render(<><Bar /><ScreenShareModal isOpen={false} launch="settings" onClose={onClose} {...props} /></>));
+            await settle();
+            await back();
+            expect(foldedBar).toHaveBeenCalledTimes(1);
+        });
+
+        it('while it works (its X disabled), Back holds and closes nothing under it either', async () => {
+            const foldedBar = vi.fn();
+            const onClose = vi.fn();
+            function Bar() { useBackClose(foldedBar); return null; }
+            capture.pending = true;
+            act(() => root.render(<><Bar /></>));
+            act(() => root.render(<><Bar /><ScreenShareModal isOpen launch="settings" onClose={onClose} {...props} /></>));
+            await settle();
+            act(() => (host.querySelector('[data-testid="share-go-live"]') as HTMLButtonElement).click());
+            await settle();
+            expect((host.querySelector('.stream-modal-close') as HTMLButtonElement).disabled, 'busy').toBe(true);
+            await back();
+            expect(onClose).not.toHaveBeenCalled();
+            expect(foldedBar).not.toHaveBeenCalled();
+        });
+
+        it("a quick launch draws no dialog, so it holds no Back (the picker is Android's own)", async () => {
+            const foldedBar = vi.fn();
+            const onClose = vi.fn();
+            function Bar() { useBackClose(foldedBar); return null; }
+            capture.pending = true;
+            act(() => root.render(<><Bar /></>));
+            act(() => root.render(<><Bar /><ScreenShareModal isOpen launch="quick" onClose={onClose} {...props} /></>));
+            await settle();
+            expect(host.querySelector('.stream-modal-overlay')).toBeNull();
+            await back();
+            expect(onClose).not.toHaveBeenCalled();
+            expect(foldedBar).toHaveBeenCalledTimes(1);
+        });
     });
 
     it('control: off Android (the web, the desktop app) nothing is asked of the native side', async () => {

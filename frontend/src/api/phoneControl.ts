@@ -22,10 +22,15 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { nativeShareStats } from './nativeScreenShare';
 
-/** What the native side says may not happen now (PhoneControl.beginRefusal). */
+/** What the native side says may not happen now (PhoneControl.beginRefusal,
+ *  ControlGate.beginRefusal). The two service ones are read from the Java by
+ *  src/tests/phoneControlBeginRefusals.test.ts. */
 export type PhoneControlRefusal =
     | 'service-disabled' // not switched on in Android's Accessibility settings
-    | 'service-off'      // switched on, not bound by Android (yet)
+    | 'service-suspended' // switched on, but Android is not running it now (an
+                          // automation or testing app's UiAutomation holds it,
+                          // or not bound yet): nothing for the person to turn on
+    | 'service-off'      // what beginPhoneControl answers when the plugin call fails
     | 'not-sharing'
     | 'one-app'          // Android 14+ "Share one app": not the whole screen
     | 'locked'
@@ -37,6 +42,22 @@ export type PhoneControlRefusal =
     | 'withdrawn'        // the page took the request back while it asked
     | 'busy'             // a session, or another question, already there
     | string;
+
+/** Why the phone ended a session itself (`controlEnded`): every reason
+ *  PhoneControl.end is given with tell=true, including each refusal
+ *  ControlGate.ends lets end one. src/tests/phoneControlEndReasons.test.ts
+ *  reads the Java and fails on a reason missing here or in endedWords. */
+export type PhoneControlEndReason =
+    | 'notification'     // Stop control in the share's notification
+    | 'indicator'        // the Stop beside "X is controlling this phone"
+    | 'locked'
+    | 'screen-off'
+    | 'service-off'      // switched off in Android's Accessibility settings
+    | 'service-lost'     // taken away by Android, switch still on, not back in 60 s
+    | 'not-sharing'      // the share ended
+    | 'one-app'          // the share is no longer of the whole screen
+    | 'hidden'           // one app shared, and it is no longer on the screen
+    | 'no-indicator';    // back after being taken away, but its frame refused
 
 export interface PhoneControlStatus {
     enabled: boolean;
@@ -94,6 +115,8 @@ export function refusalWords(r: PhoneControlRefusal | null | undefined): string 
         case 'service-disabled':
         case 'service-off':
             return 'Púca remote control is off in Android\'s Accessibility settings.';
+        case 'service-suspended':
+            return 'Android has stopped Púca remote control for now, as an automation or testing app can make it do. It is still switched on in Android\'s settings, and control can start once Android runs it again.';
         case 'one-app':
             return 'You are sharing one app, not your whole screen. Control needs the whole screen: stop sharing and share again with "Entire screen".';
         case 'not-sharing':
@@ -118,21 +141,30 @@ export function refusalWords(r: PhoneControlRefusal | null | undefined): string 
     }
 }
 
-/** What the page says when the phone itself ended a session. */
+/** What the page says when the phone itself ended a session (a
+ *  PhoneControlEndReason; anything else, from an older or newer APK, gets the
+ *  plain last line). */
 export function endedWords(reason: string): string {
     switch (reason) {
         case 'notification':
         case 'indicator':
             return 'You stopped remote control.';
         case 'locked':
-        case 'screen-off':
             return 'Remote control ended: the phone was locked.';
+        case 'screen-off':
+            return 'Remote control ended: the phone\'s screen went off.';
         case 'service-off':
             return 'Remote control ended: Púca remote control was switched off in Android\'s settings.';
+        case 'service-lost':
+            return 'Remote control ended: Android stopped Púca remote control for over a minute, as an automation or testing app can make it do. It is still switched on in Android\'s settings.';
         case 'not-sharing':
             return 'Remote control ended: the screen share stopped.';
         case 'one-app':
             return 'Remote control ended: the share is no longer of the whole screen.';
+        case 'hidden':
+            return 'Remote control ended: the app you are sharing is no longer on the screen. Share the entire screen for control that can go between apps.';
+        case 'no-indicator':
+            return 'Remote control ended: Android did not let Púca show who is in control on the screen.';
         default:
             return 'Remote control ended.';
     }

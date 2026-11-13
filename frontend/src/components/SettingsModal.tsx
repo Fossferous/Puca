@@ -1852,10 +1852,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Hide Windows' "sharing your screen" bar</label>
                                             <span className="option-hint">
                                                 Windows shows a bar while you share your screen, and it can sit on top
-                                                of a fullscreen game. Hiding it also removes its "Stop sharing" button
-                                                and the clearest sign that a capture is running, so it stays off unless
-                                                you ask for it. Either way, the tray icon turns amber whenever anything
-                                                is recording or controlling this machine.
+                                                of a fullscreen game. This hides only Púca's own bar, never another
+                                                app's or the Discord window's. Hiding it also removes its "Stop
+                                                sharing" button and the clearest sign that a capture is running, so it
+                                                stays off unless you ask for it. Either way, the tray icon turns amber
+                                                whenever Púca is recording or someone is controlling this machine
+                                                through Púca.
                                             </span>
                                         </div>
                                         <input

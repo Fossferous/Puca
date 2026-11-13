@@ -179,8 +179,11 @@ export const defaultSettings = {
     // re-hide the bar every 700 ms for the whole capture, which suppressed the
     // strongest indicator the user had that their screen was being recorded —
     // along with its in-band "Stop sharing" button. Kept as an option because
-    // the bar genuinely does sit on top of a fullscreen game. The tray icon
-    // badges amber while any capture runs whether or not this is on.
+    // the bar genuinely does sit on top of a fullscreen game. Only Púca's own
+    // bar is hidden, never another app's or the Discord window's
+    // (capture_bar.rs). The tray icon badges amber while Púca itself is
+    // capturing (a screen share, an armed clip buffer, a device session)
+    // whether or not this is on; another app's capture does not turn it.
     hideOsCaptureBar: false,
 
     // --- Screen-control (remote control of your shared screen) kill switches ---

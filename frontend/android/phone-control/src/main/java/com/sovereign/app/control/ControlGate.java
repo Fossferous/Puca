@@ -17,6 +17,11 @@ package com.sovereign.app.control;
  *       Android taking the service away for a moment while its switch stays
  *       on.</li>
  * </ul>
+ *
+ * Every reason a native end gives the page (PhoneControl.end with tell)
+ * needs its own sentence in phoneControl.ts's endedWords:
+ * src/tests/phoneControlEndReasons.test.ts reads this folder and fails on a
+ * reason that has none.
  */
 final class ControlGate {
 
@@ -24,13 +29,26 @@ final class ControlGate {
 
     static final String NO_SESSION = "no-session";
     static final String SERVICE_OFF = "service-off";
+    /** At Allow ({@link #beginRefusal}), the person's switch is off in
+     *  Android's Accessibility settings: the page shows the way to it. */
+    static final String SERVICE_DISABLED = "service-disabled";
     /** Android has taken the service away for now while the person's switch
      *  is still on: anything using UiAutomation (test tools, some
      *  automation apps) makes Android unbind every other accessibility
      *  service while it runs. Nothing can land meanwhile, and nothing has
      *  changed about what the person allowed: the session waits for the
-     *  service to come back (PhoneControl, at most RESUME_MS). */
+     *  service to come back (PhoneControl, at most RESUME_MS). At Allow it is
+     *  the refusal too, and the page does not send the person to a switch
+     *  that is already on. */
     static final String SERVICE_SUSPENDED = "service-suspended";
+    /** The end of a SERVICE_SUSPENDED wait: Android did not give the service
+     *  back within PhoneControl.RESUME_MS. Not SERVICE_OFF: the person's
+     *  switch is still on, and the page must not send them looking for a
+     *  setting nobody changed. */
+    static final String SERVICE_LOST = "service-lost";
+    /** Android refused the overlay that shows who is in control: at Allow
+     *  nothing starts, and when the service comes back the session ends. */
+    static final String NO_INDICATOR = "no-indicator";
     static final String LOCKED = "locked";
     static final String SCREEN_OFF = "screen-off";
     /** Android 7 (API 24, 25): a press is played live as continued strokes
@@ -64,6 +82,20 @@ final class ControlGate {
         if (keyguardLocked) return LOCKED;
         if (!serviceConnected) return serviceEnabled ? SERVICE_SUSPENDED : SERVICE_OFF;
         return shareRefusal;
+    }
+
+    /**
+     * Why Allow cannot start a session now, or null: {@link #refusal} for a
+     * session about to start, with the service not bound told apart by the
+     * switch. Off, {@link #SERVICE_DISABLED} (the page shows the way to it);
+     * on, {@link #SERVICE_SUSPENDED}. Before, the switch on with the service
+     * not bound answered SERVICE_OFF, and the page told the person to turn on
+     * a switch that was already on.
+     */
+    static String beginRefusal(boolean serviceConnected, boolean serviceEnabled,
+                               boolean keyguardLocked, boolean interactive, String shareRefusal) {
+        String r = refusal(true, serviceConnected, serviceEnabled, keyguardLocked, interactive, shareRefusal);
+        return SERVICE_OFF.equals(r) ? SERVICE_DISABLED : r;
     }
 
     /** Whether a refusal ends the session (true) or only drops input (false). */

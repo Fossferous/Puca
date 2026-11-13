@@ -390,6 +390,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pipPosition = pipDrag.position;
     const isDragging = pipDrag.isDragging;
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // Android's BACK leaves the camera's full-screen self-view (its Exit
+    // Fullscreen) instead of sending the app away with it still up.
+    useBackClose(() => setIsFullscreen(false), isCameraOn && isFullscreen);
     const pipRef = useRef<HTMLDivElement>(null);
     // The camera this device has on, and the camera menu (api/rtc/cameraChoice.ts).
     const ownCamera = useLocalCamera();

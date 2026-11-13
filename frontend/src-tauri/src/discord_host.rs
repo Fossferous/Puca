@@ -604,8 +604,10 @@ unsafe fn on_permission_requested(args: ICoreWebView2PermissionRequestedEventArg
         return Ok(());
     };
     match permission_decision(kind_of(kind), &origin, user_initiated) {
-        // Left at its default state: WebView2 shows its own question (and
-        // Windows its own, for the microphone and camera).
+        // Left at its default state: for the microphone, the camera and the
+        // clipboard WebView2 shows its own question (and Windows its own, for
+        // the microphone and camera); for autoplay it asks nothing and its own
+        // rule decides.
         PermissionAction::WebView2Prompt => Ok(()),
         PermissionAction::Deny => {
             refuse(&args);

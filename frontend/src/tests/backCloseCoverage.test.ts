@@ -35,8 +35,6 @@ const LEAVES_BACK: Record<string, string> = {
     'FileAccessPrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
     'HostConsentPrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
     'UnattendedPassphrasePrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
-    'RemoteControlOverlay.tsx': "remote control OF a phone: the phone screen-share work's, not this one's",
-    'ScreenShareModal.tsx': "the phone's own screen share: the phone screen-share work's, not this one's",
 };
 
 /** Layers that match no LAYER pattern, so the scan cannot find them. */
@@ -49,6 +47,21 @@ const MUST_TAKE_BACK = [
     // may close while they wait.
     'RecoveryCodeModal.tsx', 'ClipApprovalPrompt.tsx',
 ];
+
+/**
+ * The scan above is per FILE: one Back hook anywhere passes a file that draws
+ * several layers. These are such layers one by one: how each is drawn (which
+ * pins the entry to the real markup) and the state it is drawn under, which a
+ * useBackClose's `active` must name. Before this, VoicePanel passed on its call
+ * bar's hook while its camera full screen took no Back (review finding).
+ */
+const EACH_LAYER: Array<{ file: string; layer: string; drawn: RegExp; state: string }> = [
+    { file: 'VoicePanel.tsx', layer: "the camera's full screen", drawn: /\{isCameraOn && isFullscreen && \(\s*<div className="camera-fullscreen"/, state: 'isFullscreen' },
+    { file: 'VoicePanel.tsx', layer: "the call's Encrypted explanation", drawn: /\{e2eeTipOpen && createPortal\(/, state: 'e2eeTipOpen' },
+    { file: 'Chat.tsx', layer: 'the pinned messages', drawn: /\{showPins && \(\(\) => \{/, state: 'showPins' },
+    { file: 'DeviceStage.tsx', layer: "the phone's stage menus", drawn: /\{isMobile && activeMobileMenu === 'more' && \(/, state: 'activeMobileMenu' },
+];
+const heldUnder = (state: string) => new RegExp(String.raw`\buseBackClose\([^;]*\b${state}\b[^;]*\);`);
 
 function walk(dir: string): string[] {
     return readdirSync(dir).flatMap((name) => {
@@ -78,6 +91,25 @@ describe('Android BACK: every layer takes it or says why not', () => {
             return !f || !TAKES_BACK.test(f.src);
         });
         expect(missing).toEqual([]);
+    });
+
+    it('a file that draws several layers takes Back for each of them', () => {
+        const missing = EACH_LAYER.filter(({ file, drawn, state }) => {
+            const f = files.find((x) => x.name === file);
+            expect(f, `${file} no longer exists`).toBeTruthy();
+            expect(drawn.test(f!.src), `${file}: ${drawn} no longer matches how the layer is drawn`).toBe(true);
+            return !heldUnder(state).test(f!.src);
+        }).map(({ file, layer }) => `${file}: ${layer}`);
+        expect(missing).toEqual([]);
+    });
+
+    it('control: the per-layer check fails a layer whose state no Back hook names', () => {
+        const src = 'useBackClose(() => setControlsExpanded(false), controlsExpanded && isPhonePanel);\n'
+            + '{isCameraOn && isFullscreen && (<div className="camera-fullscreen" />)}';
+        expect(heldUnder('isFullscreen').test(src)).toBe(false);
+        expect(heldUnder('controlsExpanded').test(src)).toBe(true);
+        // The close function naming it is not enough: setIsFullscreen is not isFullscreen.
+        expect(heldUnder('isFullscreen').test('useBackClose(() => setIsFullscreen(false), isCameraOn);')).toBe(false);
     });
 
     it('every exception is still a file that draws a layer and takes no Back (no stale entries)', () => {

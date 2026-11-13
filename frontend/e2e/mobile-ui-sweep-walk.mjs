@@ -681,9 +681,13 @@ try {
                 const c = i?.closest('.friends-content') ?? i?.parentElement?.parentElement;
                 if (!i || !c) return null;
                 const cs = getComputedStyle(c);
-                return { input: Math.round(i.getBoundingClientRect().width), room: Math.round(c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) };
+                return { input: Math.round(i.getBoundingClientRect().width), room: Math.round(c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)), font: parseFloat(getComputedStyle(i).fontSize) };
             });
             check(`${size} friends: the All tab's search box takes its row`, !!fsb && fsb.input >= fsb.room - 2, fsb);
+            // Chat.css's top-level `.search-bar input` (0.85rem) loads after FriendsPanel.css and beat its
+            // `.friends-dashboard input { font-size: 16px }` once the phone rule was scoped to the header
+            // (release review): under 16px an iPhone zooms the page on focus.
+            check(`${size} friends: the All tab's search box is 16px or more`, !!fsb && fsb.font >= 16, fsb);
             await openServer(srv.id);
             await openChannel(general.name);
         }

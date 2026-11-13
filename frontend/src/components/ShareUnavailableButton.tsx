@@ -10,6 +10,7 @@ import { ScreenShareIcon, CloseIcon } from './Icons';
 import { shareUnavailableWords, type ShareUnavailableReason } from './shareAvailability';
 import { API_BASE_URL } from '../api/config';
 import { openDownloadPage } from '../api/appVersion';
+import { useBackClose } from '../hooks/useBackClose';
 import './ShareUnavailableButton.css';
 
 /** The server's download page (its /app-version), or null when it has none. */
@@ -32,6 +33,9 @@ export function ShareUnavailableButton({ reason }: { reason: ShareUnavailableRea
     const button = useRef<HTMLButtonElement>(null);
     const titleId = useId();
     const words = shareUnavailableWords(reason);
+    // Android's BACK closes the card as Escape does (the Android app shows it
+    // where the app cannot share: reason 'android-app').
+    useBackClose(() => { setOpen(false); button.current?.focus(); }, open);
 
     useEffect(() => {
         if (!open) return;

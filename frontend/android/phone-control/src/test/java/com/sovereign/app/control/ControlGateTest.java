@@ -2,6 +2,7 @@ package com.sovereign.app.control;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -57,6 +58,31 @@ public class ControlGateTest {
         assertTrue(ControlGate.ends(r(true, false, true, true, true, null)));
         assertEquals(ControlGate.SCREEN_OFF, r(true, false, true, false, false, null));
         assertEquals(ControlGate.LOCKED, r(true, true, true, true, true, null));
+    }
+
+    /** beginRefusal(connected, enabled, locked, interactive, share). */
+    private static String atAllow(boolean connected, boolean enabled, boolean locked, boolean interactive,
+                                  String share) {
+        return ControlGate.beginRefusal(connected, enabled, locked, interactive, share);
+    }
+
+    @Test
+    public void atAllowTheSwitchOnWithTheServiceNotBoundIsNotTheSwitchOff() {
+        // UiAutomation holding the service, the person's switch still on: the
+        // page must not send them to turn on a switch that is on. It used to
+        // answer SERVICE_OFF here, which the page read as "turn it on".
+        String on = atAllow(false, true, false, true, null);
+        assertEquals(ControlGate.SERVICE_SUSPENDED, on);
+        // CONTROL: the switch really off is told as such, with the way to it.
+        String off = atAllow(false, false, false, true, null);
+        assertEquals(ControlGate.SERVICE_DISABLED, off);
+        assertNotEquals(on, off);
+        // Bound and all well: Allow may start it; the share's own refusal
+        // and the phone put away still come through.
+        assertNull(atAllow(true, true, false, true, null));
+        assertEquals(ScreenMap.ONE_APP, atAllow(true, true, false, true, ScreenMap.ONE_APP));
+        assertEquals(ControlGate.LOCKED, atAllow(false, true, true, true, null));
+        assertEquals(ControlGate.SCREEN_OFF, atAllow(false, false, false, false, null));
     }
 
     @Test

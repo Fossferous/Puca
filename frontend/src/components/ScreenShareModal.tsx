@@ -8,6 +8,7 @@ import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
 import { loadSettings, rememberedShareAudio, saveSettings, type ShareAudioMode } from './settingsStore';
 import { FPS_OPTIONS, RESOLUTION_OPTIONS, rememberedQuality } from '../api/rtc/shareHealth';
 import { AppMixerList, type MixerRowState } from './AppMixerList';
+import { useBackClose } from '../hooks/useBackClose';
 import './ScreenShareModal.css';
 
 // 'browser' is the WEB build's marker for "the picker's own Share-audio
@@ -218,6 +219,16 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
         startQuickLaunch();
     }, [isOpen, launch]);
 
+    const handleCancel = () => {
+        // Cancelling from the app step abandons an already-captured surface.
+        if (mixerApps) onCancelAfterCapture();
+        reset();
+        onClose();
+    };
+    // Android's BACK is the X, while the dialog is on screen (a quick launch
+    // draws none until the app step) and, like the X, not while it works.
+    useBackClose(() => { if (!busy) handleCancel(); }, isOpen && !(launch === 'quick' && !mixerApps));
+
     if (!isOpen) return null;
 
     /** Go live from the app step with exactly the ticked apps. */
@@ -241,13 +252,6 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
             onCancelAfterCapture();
             reset();
         }
-    };
-
-    const handleCancel = () => {
-        // Cancelling from the app step abandons an already-captured surface.
-        if (mixerApps) onCancelAfterCapture();
-        reset();
-        onClose();
     };
 
     // A quick launch shows nothing but the picker — and then, only if the

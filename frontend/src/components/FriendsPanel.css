@@ -835,6 +835,11 @@
     .friends-dashboard .search-bar input {
         width: 100%;
         max-width: none;
+        /* And 16px, for the same reason as the rule further down: Chat.css's
+           top-level .search-bar input (0.85rem) loads later and beats
+           .friends-dashboard input at equal weight, and under 16px iOS zooms
+           the page on focus. */
+        font-size: 16px;
     }
 
     /* Add Friend, the page's main action, was cut off at the edge at 390 px

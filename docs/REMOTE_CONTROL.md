@@ -248,10 +248,11 @@ is read out, logged or sent.
   with a notification (*X took your offer to control this phone*). The page's own Allow, on a phone and a desktop alike,
   also takes no press for 800 ms after a prompt for a NEW requester appears
   (the prompt is keyed by who asks). The prompt says what control of a phone means
-  and, with the service off, how to switch it on (with Android 13+'s *Allow
-  restricted settings* for an APK installed from outside a store), and Allow
-  stays disabled until the phone says it can. Opening the settings from the
-  prompt extends its deadline to 120 s from when the request arrived (however
+  and, with the service switched off, how to switch it on (with Android 13+'s *Allow
+  restricted settings* for an APK installed from outside a store); switched on
+  but not running, it says Android has stopped it for now (the pause below),
+  with no way to the setting. Allow stays disabled until the phone says it
+  can. Opening the settings from the prompt extends its deadline to 120 s from when the request arrived (however
   often it is pressed), inside the viewer's own wait of 165 s (120 s, 30 s for
   Android's dialog, 15 s to spare).
 - A request reaches a phone that is showing another app as a notification
@@ -321,14 +322,29 @@ is read out, logged or sent.
   person's switch still ON, that pauses the session: the frame and pill go
   (they belong to the service), nothing lands, and when Android binds the
   service again the frame and pill are shown again before any input does; no
-  rebind within 60 s ends it. With the switch OFF, it ends at once. A lock
+  rebind within 60 s ends it, as `service-lost` (never as the switch turned
+  off: the phone's notice says Android stopped it and the switch is still
+  on). A frame Android refuses on the way back ends it too (`no-indicator`).
+  Every reason a native end gives has its own words on the page
+  (`phoneControl.ts` `endedWords`; `phoneControlEndReasons.test.ts` reads
+  the Java for them). With the switch OFF, it ends at once. A lock
   while it is away ends it too (`ControlGate` asks about the lock before the
   service, and the service coming back checks again): paused, it used to
   resume after an unlock. Found by the emulator walk, whose own
-  `uiautomator dump` ended every session.
+  `uiautomator dump` ended every session. With no session yet, the same
+  state is its own refusal at Allow (`service-suspended`,
+  `ControlGate.beginRefusal`): the prompt says Android has stopped Púca
+  remote control for now and that it is still switched on, and offers no
+  way to the setting; only the switch off (`service-disabled`) gets *Open
+  Accessibility settings*.
 - Locked, nothing works: input is refused while the keyguard is up, and the
-  session ends with it. A password field is never typed into (its text cannot
-  be read back, so it could only be replaced whole).
+  session ends with it.
+- What the viewer types (text, Backspace, Delete) is never put into a
+  password field: its text cannot be read back, so it could only be replaced
+  whole (`PhoneControlService.edit`). That is not a fence round the field:
+  the viewer's Enter still reaches it (on Android 11 and later, as Android's
+  IME Enter action, which `edit` tries before it looks at the field), and a
+  tap lands wherever it is aimed, on the phone's own keyboard too.
 
 **Full APK only.** The module is a dependency of the full build alone
 (`app/build.gradle`: `if (!isLite)`), and the app reaches it only through a

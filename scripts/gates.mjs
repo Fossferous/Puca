@@ -292,10 +292,11 @@ const GATES = [
 // Never run by this script; printed in every summary.
 const NOT_RUN_HERE = [
     'connectedDebugAndroidTest (notes-app, headless emulator)',
-    'e2e/android-shade-keys-live.mjs, android-share-live.mjs (headless emulator)',
-    'e2e/feature-flows.mjs, games-live, games-walk, modes-walk, sidebar-toggles-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
+    'e2e/android-shade-keys-live.mjs, android-share-live.mjs, android-control-live.mjs, android-phone-sweep-live.mjs, android-camera-flip-live.mjs (headless emulator)',
+    'e2e/feature-flows.mjs, games-live, games-walk, modes-walk, sidebar-toggles-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll, server-gone-live, channel-gone-live, newcomer-voice-key-live, sidebar-hide-hover-active-walk, mobile-ui-sweep-walk, camera-switch-live (throwaway backend)',
     'e2e/poker-table-real-browser.mjs, user-context-menu-reach.mjs (vite dev server)',
     'e2e-live-verify, batch7-permbits-live, the two-peer voice suites (throwaway stack)',
+    'scripts/check-apk-control.mjs (frontend/; the two BUILT release APKs, full and Lite)',
 ];
 
 function vitestCheck(out) {

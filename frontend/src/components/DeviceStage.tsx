@@ -595,10 +595,6 @@ export function DeviceStage() {
     /** "Type text…": the dialog's starting text, or null while it is closed. */
     const [typeText, setTypeText] = useState<string | null>(null);
     const typeTextOpen = typeText !== null;
-    // Android's BACK closes the phone's open menu, the type-text box and the
-    // pinned-keys editor first (they take it themselves); the stage itself is
-    // a screen, not a layer.
-    useBackClose(() => setActiveMobileMenu(null), isMobile && activeMobileMenu !== null);
     /** Real fullscreen (stageFullscreen.ts) is on. */
     const [fullscreen, setFullscreen] = useState(false);
     /** The stage root, which is what goes fullscreen. */
@@ -662,6 +658,15 @@ export function DeviceStage() {
         s => s.role === 'controller' && s.phase !== 'ended' && !s.filesOnly,
     ) ?? null;
 
+    // Android's BACK closes the phone's open menu, the type-text box and the
+    // pinned-keys editor first (they take it themselves); the stage itself is
+    // a screen, not a layer. Held only while the menu is DRAWN: a session that
+    // ends (until the next session clears it, below), or a stage minimised to
+    // its strip, can leave activeMobileMenu set (the keyboard bar has no
+    // backdrop, so Close and Chat stay tappable while it is up), and a menu
+    // nobody could see held Back: the next press did nothing visible.
+    useBackClose(() => setActiveMobileMenu(null), isMobile && activeMobileMenu !== null && session !== null && !isMinimized);
+
     // A new attempt clears the last failure: a stale reason beside a live
     // session reads as if this one had failed too.
     if (session && failure && session.id !== failure.id) setFailure(null);
@@ -717,6 +722,10 @@ export function DeviceStage() {
         // The pinned-keys editor belongs to the session it was opened in; a
         // new one must not start with it up (and the keys held back by it).
         setPinsEditorOpen(false);
+        // So does a phone's open menu (the keyboard bar, More, the screens,
+        // the mouse): left set when its session ended, it came back up, with
+        // its Back layer, on the next session.
+        setActiveMobileMenu(null);
     }
 
     const sessionActiveId = session?.id ?? null;

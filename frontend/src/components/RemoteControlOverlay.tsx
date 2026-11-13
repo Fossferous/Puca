@@ -33,6 +33,7 @@ import {
 } from '../api/phoneControl';
 import { loadSettings } from './settingsStore';
 import { GamepadIcon, StopIcon } from './Icons';
+import { useBackClose } from '../hooks/useBackClose';
 import './RemoteControlOverlay.css';
 
 /** Kill-switch reminder line, reflecting the user's configured hotkey + whether
@@ -95,12 +96,18 @@ function usePhoneStatus(open: boolean): PhoneControlStatus | null {
 function PhoneControlPrompt({ username }: { username: string }) {
     const status = usePhoneStatus(true);
     const refusal = status?.refusal ?? null;
+    // The switch off. Not 'service-suspended' (switched on, Android not
+    // running it now): there is nothing to turn on, so it gets its words and
+    // no way to the settings.
     const serviceOff = refusal === 'service-disabled' || refusal === 'service-off';
     // Android 13+ keeps an APK from outside an app store away from this switch
     // until "Allow restricted settings" in its App info.
     const restricted = serviceOff && (status?.sdk ?? 0) >= 33;
     const ready = !!status && refusal === null;
     const armed = useArmed(ALLOW_ARM_MS);
+    // Android's BACK on this prompt is Deny, never Allow. Left alone it went
+    // past the prompt and closed whatever was under it, out of sight.
+    useBackClose(() => { void respondToControlRequest(false); });
     return (
         <div className="rc-prompt" role="dialog" aria-modal="true" aria-labelledby="rc-phone-title" data-testid="rc-phone-prompt">
             <div className="rc-prompt-icon"><GamepadIcon size={40} /></div>
@@ -168,6 +175,8 @@ function PhoneControlPrompt({ username }: { username: string }) {
 
 function DesktopControlPrompt({ username }: { username: string }) {
     const armed = useArmed(ALLOW_ARM_MS);
+    // An Android app that cannot be controlled draws this one: BACK is Deny.
+    useBackClose(() => { void respondToControlRequest(false); });
     return (
         <div className="rc-prompt" role="dialog" aria-modal="true">
             <div className="rc-prompt-icon"><GamepadIcon size={40} /></div>
@@ -213,6 +222,9 @@ export function RemoteControlOverlay() {
             return () => clearTimeout(t);
         }
     }, [ctrl?.notice]);
+
+    // A host offering me control: BACK is No thanks, never Take control.
+    useBackClose(declineControlOffer, !!ctrl?.offer);
 
     if (!ctrl) return null;
 

@@ -949,15 +949,31 @@ the sender. It opens no port and talks to no third party.
 ### Screen-share control needs your click, every time
 
 Separate, older feature: someone watching your screen share in a voice channel can request
-mouse/keyboard control.
+mouse/keyboard control, or touch control of a phone (`docs/REMOTE_CONTROL.md`, *Controlling
+a phone*).
 
 - **Default deny.** `state.controlledBy` is only ever set inside the "Allow control" handler.
   There is no auto-accept setting anywhere (`rg 'autoAccept|allowRemoteControl'` → nothing).
-- Auto-denies after 45s unanswered; repeated denials enter a growing cooldown.
-- Requires you to be actively sharing, on the desktop app, with E2EE handshake material.
-- **Revocable six ways** — Stop button, Esc, a configurable kill key, a native low-level
-  hook that works even when a game has focus, partner disconnect, and a 90s inactivity
-  timeout. Teardown releases every held key so nothing sticks down.
+- Auto-denies after 45s unanswered; repeated denials enter a growing cooldown. On a phone,
+  opening Android's settings from the prompt (to switch the control service on) gives it
+  up to 120 s from when the request arrived, and Android's own dialog then has 30 s.
+- Requires you to be actively sharing, with E2EE handshake material, from one of the two
+  apps that can be controlled: the Windows desktop app, or the full Android app sharing its
+  WHOLE screen. Browsers, the iPhone and Púca Lite cannot be controlled at all.
+- **On a phone, your Allow is asked twice.** After the page's Allow, Android's own dialog
+  (*Let X control this phone?*, `Consent.java`) must be answered too, and only its Allow
+  starts a session. Script in the page cannot press a native dialog, so a page that runs
+  hostile code (a rendering bug, an update signed with a stolen key) still cannot start
+  one by itself. The control service must also be switched on in Android's Accessibility
+  settings, which the page can open for you but not switch.
+- **Revocable six ways** on a desktop — Stop button, Esc, a configurable kill key, a native
+  low-level hook that works even when a game has focus, partner disconnect, and a 90s
+  inactivity timeout. Teardown releases every held key so nothing sticks down. On a phone:
+  the **Stop** drawn over every app, **Stop control** in the share's notification and in
+  Púca, locking the phone or its screen going off, switching the service off, the share
+  ending or no longer being of the whole screen, partner disconnect and the same 90 s
+  timeout. Control of a phone never resumes by itself: the viewer asks again and you answer
+  again.
 - **The server cannot read the input.** It relays an opaque AES-256-GCM blob it has no key
   for — the `ClientMessage::ControlInput` arm in [`src/ws.rs`](../src/ws.rs) moves `event` through
   untouched, and the section header above it calls itself a dumb pipe. Forged frames fail GCM and are dropped.
@@ -968,13 +984,26 @@ mouse/keyboard control.
    server from the authenticated connection (the `ClientMessage::ControlRequest` arm in [`src/ws.rs`](../src/ws.rs)) — so
    another *user* cannot spoof it, but the *operator* can mint a token bearing any username
    (§2). The cryptographic gates hold; the human one becomes a judgement call about a name
-   the server chose.
+   the server chose. On a phone, the name in Android's own dialog is that same name.
 2. **Granted control is whole-desktop, not window-scoped.** Once you click Allow, the
    controller can alt-tab out of the shared game and act anywhere — absolute mouse moves
    span the virtual desktop and keystrokes go to whatever has focus. Limited only by
    Windows UIPI (no elevated windows, no UAC prompt, no lock screen) and by your revoking
    it. Revoke-on-any-physical-input exists but is **off by default**.
-3. **Unattended access, if you ever turn it on, has no password-distinctness check.** The
+3. **Granted control of a phone reaches every app on it.** Android's accessibility service,
+   which is how the taps land, is not limited to the shared picture: the controller can
+   press Home or Recents, open any app and type into the field that has the focus (nothing
+   while the phone is locked). What the controller types (text, Backspace, Delete) is never
+   put into a password field (`PhoneControlService.edit`), but that does not keep them out
+   of one: their Enter is still sent to it (on Android 11 and later, as Android's IME Enter
+   action, which `edit` tries before it checks for a password field), and a tap lands
+   wherever they aim it, on the phone's own keyboard too. An orange frame and "X is
+   controlling this phone" stay over every app while it lasts. A share of ONE app that
+   fills the screen passes Allow, because Android does not say which was chosen; control
+   ends when Android reports that app hidden behind another, but that report comes a moment
+   after the switch, so a tap sent in that moment can land on the app now in front. Share
+   the entire screen to know what the controller can reach.
+4. **Unattended access, if you ever turn it on, has no password-distinctness check.** The
    only rule is 8 characters (`armUnattended` in [`unattendedHost.ts`](../frontend/src/api/devices/unattendedHost.ts)).
    If you reuse your account password there, someone who phishes that password gets silent
    unattended control — and an armed host deliberately does not prompt, with only a tray
@@ -986,7 +1015,7 @@ mouse/keyboard control.
    further miss up to 15 minutes. A right passphrase clears the count
    ([`crates/puca-ua/src/lib.rs`](../crates/puca-ua/src/lib.rs), `FREE_FAILURES`). The
    count lives in the running agent and app, so restarting them resets it.
-4. **Use the desktop app, not the web app.** The desktop build loads bundled local assets
+5. **Use the desktop app, not the web app.** The desktop build loads bundled local assets
    and verifies updates against a pinned minisign key, so a malicious server cannot backdoor
    it. In a browser, the server serves the code that does your encryption — a hostile
    operator there is total compromise, and no amount of cryptography in this repo changes
@@ -1879,9 +1908,14 @@ The desktop app can open Discord's own website in a window of its own
 window is a separate process with no Tauri and nothing of Púca in it: no script
 of Púca's in the page, no message channel, no host objects, no interception of
 its requests, its own WebView2 profile held exclusively, top-level pages pinned
-to Discord's own domains, and no permission granted to any other site or without
-a question. Púca's own window can only open it, bring it forward, and close it
-to delete its profile ("Sign out of Discord and clear its data on this PC").
+to Discord's own domains, and no permission granted to any other site. For
+Discord's own app, the microphone, the camera and reading the clipboard are
+WebView2's own question, notifications are Púca's question (asked only after a
+press in Discord's page), and location and every other kind are refused; autoplay
+(playing sound and video by itself) is left to WebView2's own rule, which asks
+nothing (`permission_decision` in `discord_window.rs`). A screen share goes through
+WebView2's own picker, from Discord's app only. Púca's own window can only open
+it, bring it forward, and close it to delete its profile ("Sign out of Discord and clear its data on this PC").
 Your Púca server never sees any of it. [DISCORD.md](DISCORD.md) names the code
 that enforces each part (`frontend/src-tauri/src/discord_host.rs`,
 `frontend/src-tauri/src/discord_window.rs`), the tests that hold it, and what

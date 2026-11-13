@@ -42,8 +42,9 @@ import org.json.JSONObject;
  *   <li>{@code end()} — the page ended the session (or took back a request
  *       whose dialog is still open).</li>
  *   <li>events {@code controlEnded {reason}} (a native end: notification,
- *       indicator, locked, screen-off, service-off, not-sharing, one-app) and
- *       {@code statusChanged} (the service came or went).</li>
+ *       indicator, locked, screen-off, service-off, service-lost, not-sharing,
+ *       one-app, hidden, no-indicator; each has its words in phoneControl.ts's
+ *       endedWords) and {@code statusChanged} (the service came or went).</li>
  * </ul>
  */
 @CapacitorPlugin(name = "SovereignPhoneControl")

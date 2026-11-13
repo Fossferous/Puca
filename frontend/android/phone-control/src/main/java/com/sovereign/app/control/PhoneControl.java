@@ -163,21 +163,17 @@ public final class PhoneControl {
         if (!ControlGate.supported(Build.VERSION.SDK_INT)) return ControlGate.UNSUPPORTED;
         if (!installed()) return ScreenMap.NOT_SHARING;
         int[] s = screenSize();
-        boolean connected = serviceConnected();
-        boolean enabled = serviceEnabled();
-        String r = ControlGate.refusal(true, connected, enabled, locked(), interactive(),
-                ScreenMap.beginRefusal(share(), s[0], s[1], SystemClock.elapsedRealtime()));
         // Not bound: starting waits for Android either way, but the person
-        // is told whether the switch itself is off.
-        if (ControlGate.SERVICE_OFF.equals(r) || ControlGate.SERVICE_SUSPENDED.equals(r)) {
-            return enabled ? ControlGate.SERVICE_OFF : "service-disabled";
-        }
-        return r;
+        // is told whether the switch itself is off (ControlGateTest).
+        return ControlGate.beginRefusal(serviceConnected(), serviceEnabled(), locked(), interactive(),
+                ScreenMap.beginRefusal(share(), s[0], s[1], SystemClock.elapsedRealtime()));
     }
 
     /** How long a session waits for Android to give the service back. */
     static final long RESUME_MS = 60_000;
-    private static final Runnable resumeTimeout = () -> end(ControlGate.SERVICE_OFF, true);
+    /** Its own reason, not SERVICE_OFF: the switch is still on (that is why
+     *  the session waited), so "switched off" would be untrue. */
+    private static final Runnable resumeTimeout = () -> end(ControlGate.SERVICE_LOST, true);
 
     /** How often a live session checks, input or not, that it may go on. The
      *  screen going off, Stop, the service and the share's end act at once;
@@ -213,7 +209,7 @@ public final class PhoneControl {
         String r = beginRefusal();
         if (r != null) return r;
         PhoneControlService svc = PhoneControlService.current;
-        if (svc == null) return ControlGate.SERVICE_OFF;
+        if (svc == null) return serviceEnabled() ? ControlGate.SERVICE_SUSPENDED : ControlGate.SERVICE_DISABLED;
         if (active) end(null, false); // one at a time: a new grant replaces the old
         viewer = label(viewerName);
         indicator = new Indicator(svc);
@@ -221,7 +217,7 @@ public final class PhoneControl {
         if (!indicator.showing()) {
             // No visible sign of control, no control.
             indicator = null;
-            return "no-indicator";
+            return ControlGate.NO_INDICATOR;
         }
         active = true;
         injector = new Injector(main, env());
@@ -306,7 +302,7 @@ public final class PhoneControl {
                 Indicator again = new Indicator(svc);
                 again.show(viewer, () -> end(STOPPED_INDICATOR, true));
                 if (!again.showing()) {
-                    end("no-indicator", true);
+                    end(ControlGate.NO_INDICATOR, true);
                 } else {
                     indicator = again;
                     Log.i(TAG, "control service back: session resumed");

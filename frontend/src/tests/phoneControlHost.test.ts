@@ -414,7 +414,7 @@ describe('a phone sharing its screen, as the host', () => {
         expect(sent.some(m => m.type === 'ControlResponse' && m.payload?.granted === true), 'no grant').toBe(false);
         expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
         expect(rc.getControlState().controlledBy, 'no session the phone does not have').toBeNull();
-        expect(rc.getControlState().notice).toBe('Remote control ended: the phone was locked.');
+        expect(rc.getControlState().notice).toBe('Remote control ended: the phone\'s screen went off.');
     });
 
     it('a second request while a phone is still starting the session it allowed is refused', async () => {
