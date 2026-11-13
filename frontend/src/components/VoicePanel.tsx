@@ -2689,8 +2689,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         setDfOffer(null);
 
         // Local camera teardown (the WS notify already went out above, before
-        // we left the room).
+        // we left the room). Full screen and the camera menu go with it: the
+        // next call's camera would otherwise open straight into full screen,
+        // or with a menu under a control that is gone.
         setIsCameraOn(false);
+        setIsFullscreen(false);
+        setCameraMenu(null);
         globalCameraUsers.delete(currentUserId);
         globalCameraStreams.clear(); // drop everyone's camera feeds (ours included)
 
@@ -3176,6 +3180,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      * icon (and the video) until the user left — a ghost camera.
      */
     const setCameraEnabled = useCallback(async (on: boolean) => {
+        if (!on) {
+            // Off by any path (the menu, the panel's button, a switch that
+            // could open no camera at all): full screen and the menu with it,
+            // or the camera turned on again opens straight into full screen.
+            setIsFullscreen(false);
+            setCameraMenu(null);
+        }
         // ON acquires only: the track reaches peers after the server accepts
         // the announcement (B7 — announce first, publish on the echo — so a
         // camera the server refuses never puts a frame on the wire, and peers

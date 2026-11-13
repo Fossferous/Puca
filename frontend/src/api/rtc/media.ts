@@ -118,6 +118,8 @@ export class MediaManager {
     /** The switch in progress (a second press waits for it, it does not start
      *  a second one: two cameras opening at once is what a phone refuses). */
     private switching: Promise<CameraSwitch> | null = null;
+    /** Answers the switch in progress at once, as "no camera" (dropSwitch). */
+    private abandonSwitch: (() => void) | null = null;
 
     /**
      * Get the current local stream
@@ -449,7 +451,7 @@ export class MediaManager {
         this.cameraEpoch++;
         // A switch still opening belongs to the call that ended (it puts
         // nothing on: cameraEpoch); the next call's first press is its own.
-        this.switching = null;
+        this.dropSwitch();
         setLocalCameraState({ deviceId: null, trackId: null, facing: null });
         // Deliberate teardown: any late ended/mute from the old capture is
         // stale, not a device loss.
@@ -664,7 +666,7 @@ export class MediaManager {
             // A switch still opening puts nothing on now (cameraEpoch); the
             // camera turned on again is not to wait on it, nor to be held as
             // "a switch under way" by the encryption hold's sweep.
-            this.switching = null;
+            this.dropSwitch();
             setLocalCameraState({ deviceId: null, trackId: null, facing: null });
             return null;
         }
@@ -724,18 +726,26 @@ export class MediaManager {
         return this.switchCamera(target);
     }
 
-    /**
-     * Put another camera on: exactly the one asked for. The camera in use is
-     * stopped FIRST, because a phone cannot have two open (Android refuses the
-     * second with NotReadableError; iOS ends the first) — so when the new one
-     * will not open, the one that was on is opened again and the switch says
-     * it failed, rather than leaving the call with no camera. A second press
-     * while one is under way waits for it. A camera that opens is remembered
-     * for the next call (Settings' `camera`).
-     */
     /** Whether a camera switch is under way (its old camera already stopped). */
     cameraSwitchInProgress(): boolean {
         return this.switching !== null;
+    }
+
+    /**
+     * The camera turned off, or the call ended: the switch in progress is
+     * answered now, as "no camera", not when its camera opens (up to
+     * SWITCH_OPEN_TIMEOUT_MS later). Everything waiting on that answer
+     * waits no longer: the call manager's count of switches under way, and
+     * with it the encryption hold's sweep (whose stand-in of the old camera
+     * keeps that camera open), and the panel, which takes no press while a
+     * switch is under way. The open itself goes on; whatever it opens is
+     * stopped when it lands (doSwitchCamera's stale check).
+     */
+    private dropSwitch(): void {
+        const abandon = this.abandonSwitch;
+        this.switching = null;
+        this.abandonSwitch = null;
+        abandon?.();
     }
 
     /** How long a switch waits for a camera to open. A getUserMedia that never
@@ -760,13 +770,31 @@ export class MediaManager {
         return Promise.race([opening, limit]).finally(() => clearTimeout(timer));
     }
 
+    /**
+     * Put another camera on: exactly the one asked for. The camera in use is
+     * stopped FIRST, because a phone cannot have two open (Android refuses the
+     * second with NotReadableError; iOS ends the first) — so when the new one
+     * will not open, the one that was on is opened again and the switch says
+     * it failed, rather than leaving the call with no camera. A second press
+     * while one is under way waits for it. A camera that opens is remembered
+     * for the next call (Settings' `camera`). Turned off meanwhile, it is
+     * answered at once (dropSwitch).
+     */
     async switchCamera(request: CameraRequest): Promise<CameraSwitch> {
         if (this.switching) return this.switching;
-        const switching: Promise<CameraSwitch> = this.doSwitchCamera(request).finally(() => {
+        let abandon!: () => void;
+        const abandoned = new Promise<CameraSwitch>(resolve => {
+            abandon = () => resolve({ ok: false, reason: 'no-camera', track: null });
+        });
+        const switching: Promise<CameraSwitch> = Promise.race([this.doSwitchCamera(request), abandoned]).finally(() => {
             // Not a switch started after this one (the call ended meanwhile).
-            if (this.switching === switching) this.switching = null;
+            if (this.switching === switching) {
+                this.switching = null;
+                this.abandonSwitch = null;
+            }
         });
         this.switching = switching;
+        this.abandonSwitch = abandon;
         return switching;
     }
 

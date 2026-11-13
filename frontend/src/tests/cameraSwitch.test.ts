@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { MediaManager } from '../api/rtc/media';
+// The call manager, for its count of switches under way (no peers, so no
+// signalling and no ICE).
+vi.mock('../api/websocket', () => ({ wsClient: { on: () => {}, off: () => {} } }));
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c, fetchIceConfig: async () => ({ iceServers: [] }) }));
+
+import { MediaManager, type CameraSwitch } from '../api/rtc/media';
+import { WebRTCManager } from '../api/rtc/manager';
 import { localCameraState, onLocalCameraState, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
 import { loadSettings, rememberedCamera, saveSettings } from '../components/settingsStore';
 
@@ -131,6 +137,10 @@ function inCall(): MediaManager {
 }
 const videoOf = (media: MediaManager) => media.getLocalStreamSync()!.getVideoTracks() as unknown as FakeTrack[];
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+/** Everything already able to run has run: a switch answered "no camera"
+ *  when the camera went off goes on opening in the background, and stops
+ *  what it opens when that lands. */
+const settle = () => new Promise<void>(r => setTimeout(r, 0));
 
 beforeEach(() => {
     localStorage.clear();
@@ -256,6 +266,7 @@ describe('Flip on a phone', () => {
         expect(next.ok, 'the next call\'s press was answered with the old call\'s switch').toBe(true);
         letBackOpen();
         const r = await old;
+        await settle();
         expect(r.ok).toBe(false);
         expect(rig.lateTracks.map(t => t.readyState), 'the old switch\'s camera was left on').toEqual(['ended']);
         expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
@@ -268,16 +279,49 @@ describe('Flip on a phone', () => {
         const media = inCall();
         await media.toggleVideo(true);
         const hung = media.flipCamera();
+        let answer: CameraSwitch | 'none yet' = 'none yet';
+        void hung.then(r => { answer = r; });
         await flush();
         await media.toggleVideo(false);
         expect(media.cameraSwitchInProgress(), 'the hold sweep would keep waiting on the hung switch').toBe(false);
+        await flush();
+        expect(answer, 'the press waits on a camera that is off (the panel takes no other press until it is answered)')
+            .toEqual({ ok: false, reason: 'no-camera', track: null });
         await media.toggleVideo(true);
         const next = await media.switchCamera({ deviceId: 'front' });
         expect(next.ok, 'a press answered with the hung switch').toBe(true);
         letBackOpen();
         await hung;
+        await settle();
         expect(rig.lateTracks.map(t => t.readyState)).toEqual(['ended']);
         expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
+    });
+
+    it('in the call manager: turned off while a switch hangs, it is no longer a switch under way there at once (the hold sweep keeps a stand-in of the old camera, and its light, while one is)', async () => {
+        let letBackOpen!: () => void;
+        const backHangs = new Promise<void>(r => { letBackOpen = r; });
+        useCameras([FRONT, BACK], { hang: (cam) => (cam === BACK ? backHangs : null) });
+        const mgr = new WebRTCManager();
+        const media = (mgr as unknown as { media: MediaManager }).media;
+        (media as unknown as { localStream: FakeStream }).localStream = new FakeStream();
+        const underWay = () => (mgr as unknown as { cameraSwitchesUnderWay: number }).cameraSwitchesUnderWay;
+        try {
+            await media.toggleVideo(true);
+            let answer: CameraSwitch | 'none yet' = 'none yet';
+            void mgr.flipCamera().then(r => { answer = r; });
+            await flush();
+            expect(underWay(), 'precondition: the switch is under way').toBe(1);
+            await mgr.toggleVideo(false);
+            await settle();
+            expect(underWay(), 'still under way after Turn off: the sweep waits up to 20 s').toBe(0);
+            expect(answer).toEqual({ ok: false, reason: 'no-camera', track: null });
+            letBackOpen();
+            await settle();
+            expect(rig.lateTracks.map(t => t.readyState), 'the camera that opened late was left on').toEqual(['ended']);
+            expect(videoOf(media)).toEqual([]);
+        } finally {
+            mgr.closeAll();
+        }
     });
 
     it('a remembered camera that is gone opens the default one instead of no camera', async () => {
@@ -481,6 +525,7 @@ describe('presses and the call ending', () => {
         await media.toggleVideo(false);
         release();
         const r = await flipping;
+        await settle();
         expect(r.ok).toBe(false);
         expect(videoOf(media)).toEqual([]);
         expect(rig.open.size, 'the camera opened meanwhile is still on (LED lit, nothing holds it)').toBe(0);
@@ -496,6 +541,7 @@ describe('presses and the call ending', () => {
         media.stopLocalStream();
         release();
         await flipping;
+        await settle();
         expect(rig.open.size).toBe(0);
         expect(localCameraState().deviceId).toBeNull();
     });

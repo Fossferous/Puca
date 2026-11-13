@@ -130,6 +130,9 @@ const CAMERAS = (cfg) => {
         if (!c || !c.video) return realGUM(c);
         const v = typeof c.video === 'object' ? c.video : {};
         state.asked.push(JSON.stringify({ deviceId: v.deviceId, facingMode: v.facingMode }));
+        // Every camera busy (another app has them all): a switch opens neither
+        // the next camera nor, put back, the one that was on.
+        if (state.allBusy) throw new DOMException('Could not start video source', 'NotReadableError');
         if (cfg.onlyOne && [...state.live].some(t => t.readyState === 'live')) {
             state.refused++;
             throw new DOMException('Could not start video source', 'NotReadableError');
@@ -549,6 +552,21 @@ try {
     const back = await until(() => D.evaluate(() => document.activeElement?.getAttribute('data-testid')), 2000);
     check('desktop: and the focus goes back to the arrow', back === 'camera-options', { back });
     await tileShows(P, uid.D, 'orange', 'desktop by keys', { probe: true });
+
+    step('desktop: a switch in full screen that can open no camera at all');
+    await press(D, '[data-testid="camera-options"]');
+    await until(() => geometry(D, '.camera-menu .context-menu-item', '^Full screen$'), 4000);
+    await press(D, '.camera-menu .context-menu-item', '^Full screen$');
+    const dFs = await until(() => D.evaluate(() => !!document.querySelector('.camera-fullscreen')), 5000);
+    await D.evaluate(() => { window.__cams.allBusy = true; });
+    await press(D, '.camera-fullscreen-controls [data-testid="camera-flip"]');
+    const dOff = await until(() => D.evaluate(() => (document.body.innerText.includes('could not be opened again') && !document.querySelector('.camera-fullscreen, .camera-preview-mini')) || null), 12000);
+    check('desktop: no camera to be had, it is off, out of full screen, and it says so', !!dFs && !!dOff, { dFs, dOff });
+    await D.evaluate(() => { window.__cams.allBusy = false; });
+    await D.locator('.vp-camera').click();
+    const dBack = await until(() => D.evaluate(() => (document.querySelector('.camera-preview-mini') && !document.querySelector('.camera-fullscreen')) ? true : document.querySelector('.camera-fullscreen') ? 'full screen' : null), 8000);
+    check('desktop: turned on again, the camera opens in its small window, not straight into full screen', dBack === true, { dBack });
+    await D.evaluate(() => [...document.querySelectorAll('.camera-fullscreen-controls .exit-btn')].forEach(b => b.click()));
 
     // ---- themes: the menu's words, the controls' icons ----
     step('all eight themes, with and without high contrast');
