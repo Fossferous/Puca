@@ -341,6 +341,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// held exclusively, so no other process (Púca's own included) can open a
 /// webview on Discord's profile while this one runs.
 fn create_environment(user_data: &Path) -> Result<ICoreWebView2Environment, String> {
+    environment_from(user_data, environment_options())
+}
+
+/// The window's environment options (above). Apart so that a test can start an
+/// environment from exactly these: `the_page_sees_no_bridge` adds one browser
+/// argument in the TEST module, never here (`nothing_above_the_tests_can_put_
+/// anything_into_the_page` refuses one anywhere above the tests).
+fn environment_options() -> CoreWebView2EnvironmentOptions {
     let options = CoreWebView2EnvironmentOptions::default();
     // SAFETY: setters on an options object this function owns.
     unsafe {
@@ -348,6 +356,10 @@ fn create_environment(user_data: &Path) -> Result<ICoreWebView2Environment, Stri
         options.set_allow_single_sign_on_using_os_primary_account(false);
         options.set_exclusive_user_data_folder_access(true);
     }
+    options
+}
+
+fn environment_from(user_data: &Path, options: CoreWebView2EnvironmentOptions) -> Result<ICoreWebView2Environment, String> {
     let (tx, rx) = mpsc::channel();
     let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |error, env| {
         let _ = tx.send(error.and_then(|_| env.ok_or_else(|| wv2_windows::core::Error::from_hresult(wv2_windows::Win32::Foundation::E_POINTER))));
@@ -996,6 +1008,11 @@ mod tests {
         assert!(seen > 30, "src/ was read ({seen} files)");
     }
 
+    /// The test environment's only extra argument (the window's own environment
+    /// has none): Tauri's IPC and asset names resolve to nothing, so only an
+    /// intercepted request can be answered on them.
+    const PROBE_RESOLVER_RULES: &str = r#"--host-resolver-rules="MAP ipc.localhost ~NOTFOUND, MAP tauri.localhost ~NOTFOUND""#;
+
     /// What the test asks of the page: what can it see of a host? Run in the
     /// page's own world by the TEST (the window above never runs a script).
     const PROBE: &str = r#"(async () => {
@@ -1156,7 +1173,16 @@ mod tests {
     fn the_page_sees_no_bridge() {
         init_ui_thread().expect("UI thread");
         let profile = std::env::temp_dir().join(format!("puca-discord-probe-{}", std::process::id()));
-        let env = create_environment(&profile).expect("WebView2 runtime (Windows has it)");
+        // Tauri's two names are loopback names, so without this whatever this PC
+        // serves on port 80 answers the probe below (GitHub's windows-2025 runner
+        // does, and the test once failed there with nothing of Púca's answering).
+        // Pointed at nothing, a name is reachable ONLY by intercepting it, which is
+        // how Tauri serves its IPC and its files, and what the negative control
+        // at the end does with these same names in this same environment.
+        let options = environment_options();
+        // SAFETY: a setter on an options object this test owns.
+        unsafe { options.set_additional_browser_arguments(PROBE_RESOLVER_RULES.to_owned()) };
+        let env = environment_from(&profile, options).expect("WebView2 runtime (Windows has it)");
 
         let plain = load_probe(&env, |_, _| {});
         let seen = &plain.seen;
@@ -1167,8 +1193,9 @@ mod tests {
         // web messaging off, nothing the page posts reaches the host.
         assert_eq!(*plain.messages.borrow(), 0, "a web message reached the host: {seen}");
         // Nothing answers on Tauri's IPC or asset names: no bridge, no Púca files.
-        // (A web server of your own on this PC's port 80 would answer here and
-        // fail this; nothing of Púca's ever listens there.)
+        // Any answer at all fails this, a 404 included (an intercepted name that
+        // answered "not found" would still be a way in); a web server on this
+        // PC's port 80 cannot answer, because the names resolve to nothing.
         for key in ["ipcFetch", "assetFetch"] {
             assert_eq!(seen[key], "error", "{key} was answered: {seen}");
         }
