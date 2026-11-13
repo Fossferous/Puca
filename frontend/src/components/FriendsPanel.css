@@ -828,6 +828,15 @@
         white-space: nowrap;
     }
 
+    /* Friends' own search boxes (All, Pending) are .search-bar like the chat
+       header's, whose width rules in Chat.css load later and won: 88-120 px,
+       turning into an overlay on focus. On a phone they take the row, as this
+       file means them to. */
+    .friends-dashboard .search-bar input {
+        width: 100%;
+        max-width: none;
+    }
+
     /* Add Friend, the page's main action, was cut off at the edge at 390 px
        and mostly hidden at 360: the row's decorative icon and its 12 px gaps
        took the room. Without them all four tabs fit beside the close and

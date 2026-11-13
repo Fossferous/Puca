@@ -68,6 +68,11 @@
     --text-muted: #949ba4;
     /* Secondary text, timestamps */
     --text-faint: #8b8e97;
+    /* What --text-faint was, for what is not words: the offline presence dot
+       (1.6:1 from the online green in lightness, which a red-green colour-
+       blind eye goes by; the lighter grey was 1.03:1) and a switch's off
+       track under its white knob. */
+    --faint-fill: #6d6f78;
     /* Hints, timestamps, placeholders, offline members. 4.5:1 or more on
        every dark surface it sits on (--bg-primary 5.4, --bg-secondary 5.9,
        --bg-hover 5.0, --bg-quaternary 4.7; AMOLED's too). It was #6d6f78:
@@ -286,6 +291,7 @@
     --brand-text: color-mix(in srgb, var(--brand-hover) 90%, #000);
     /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
     --text-faint: #62656e;
+    --faint-fill: #62656e;
     /* The dark palette's are 1.7 to 3.4:1 on Light's surfaces. These hold 4.5:1 on all of them,
        --bg-tertiary included. */
     --text-link: #0060ac;
@@ -428,6 +434,7 @@
     --text-normal: #ffffff;
     --text-muted: #d7dbe2;
     --text-faint: #b9bdc9;
+    --faint-fill: #b9bdc9;
     --header-secondary: #e2e5ea;
     --border-separator: #6c6f78;
     --border-subtle: rgba(255, 255, 255, 0.45);
@@ -439,6 +446,7 @@
     --text-normal: #000000;
     --text-muted: #26282d;
     --text-faint: #43464e;
+    --faint-fill: #43464e;
     --header-secondary: #1a1c20;
     --border-separator: #8a8d95;
     --border-subtle: rgba(0, 0, 0, 0.45);

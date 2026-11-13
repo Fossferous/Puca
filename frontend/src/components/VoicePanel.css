@@ -1347,8 +1347,14 @@
         display: none;
     }
 
-    .voice-panel-compact.vp-collapsed .voice-connection-text {
-        min-width: 4em;
+    /* Under 380 px the green signal icon goes too (the badge's lock, in the
+       same green, says the call is up): its 27 px are the name's, which was
+       three letters at 360. No floor on the name: one that cannot fit pushes
+       the badge under Mute (it did, by 13 px at 360). */
+    @media (max-width: 379px) {
+        .voice-panel-compact.vp-collapsed .voice-connected-icon {
+            display: none;
+        }
     }
 
     .voice-panel-compact.vp-collapsed .voice-controls-compact {

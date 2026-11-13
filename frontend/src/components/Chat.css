@@ -943,6 +943,12 @@
         -webkit-user-select: none;
         user-select: none;
     }
+
+    /* A field inside one, editing a message: Chromium inherits user-select. */
+    [data-long-press-menu] .message :is(input, textarea, [contenteditable="true"]) {
+        -webkit-user-select: text;
+        user-select: text;
+    }
 }
 
 /* Hover stretches the row's background to the list's edges: HORIZONTAL only.
@@ -3302,7 +3308,8 @@ body.voice-drag-active {
        to six letters ("announ…") behind a 120 px search box whose own words
        were cut ("Search this c"); the box says "Search" on a phone now and
        is that wide, and widens over the header when it takes the focus. The
-       name ellipsises, and never below four letters' room. */
+       name ellipsises, and never below four letters' room. Scoped to the
+       header: Friends' search boxes are .search-bar too, and took 88 px. */
     .chat-header {
         padding-left: 12px;
         padding-right: 12px;
@@ -3312,14 +3319,14 @@ body.voice-drag-active {
         min-width: 4em;
     }
 
-    .search-bar input {
+    .chat-header .search-bar input {
         width: 88px;
         max-width: 30vw;
         font-size: 16px;
         text-overflow: ellipsis;
     }
 
-    .search-bar input:focus {
+    .chat-header .search-bar input:focus {
         position: absolute;
         right: 0;
         width: calc(100vw - 24px);
