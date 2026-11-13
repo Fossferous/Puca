@@ -31,7 +31,8 @@ vi.mock('../api/websocket', () => ({
     wsClient: { on: (type: string, h: Handler) => { handlers.set(type, [...(handlers.get(type) ?? []), h]); }, off: () => {} },
 }));
 vi.mock('../api/platform', async (importOriginal) => ({ ...(await importOriginal<typeof import('../api/platform')>()), isTauri: () => false, isAndroidApp: () => false, appIsForeground: () => true }));
-vi.mock('../api/mobileApp', () => ({ postMobileNotification: vi.fn(async () => {}) }));
+// interceptBack: the prompt holds Android's Back while it is up (hooks/useBackClose.ts); nothing here is Android.
+vi.mock('../api/mobileApp', () => ({ postMobileNotification: vi.fn(async () => {}), interceptBack: () => () => {} }));
 
 const mod = await import('../api/clips/clipProposals');
 const { ClipApprovalPrompt } = await import('../components/ClipApprovalPrompt');
