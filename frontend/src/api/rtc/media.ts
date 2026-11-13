@@ -661,6 +661,10 @@ export class MediaManager {
                 this.localStream?.removeTrack(track);
             });
             this.cameraEpoch++;
+            // A switch still opening puts nothing on now (cameraEpoch); the
+            // camera turned on again is not to wait on it, nor to be held as
+            // "a switch under way" by the encryption hold's sweep.
+            this.switching = null;
             setLocalCameraState({ deviceId: null, trackId: null, facing: null });
             return null;
         }

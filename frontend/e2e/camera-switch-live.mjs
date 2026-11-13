@@ -335,6 +335,27 @@ async function lkTracks(room) {
     return Object.fromEntries(((await r.json()).participants || []).map(x => [x.identity, (x.tracks || []).filter(t => t.source === 'CAMERA' || t.source === 1).map(t => t.sid)]));
 }
 
+/**
+ * The background `selector` is drawn with while HOVERED, as a phone leaves a
+ * button after a tap: under touch emulation (hover: none) a tap keeps no
+ * hover, but a mouse resting on it does, and mobile.css's touch rule
+ * (button:hover { background-color: inherit }) then applies as on a phone.
+ * Answers its colour and alpha.
+ */
+async function hoveredBackground(page, selector) {
+    const g = await geometry(page, selector);
+    if (!g) return null;
+    await page.mouse.move(g.cx, g.cy);
+    await sleep(200);
+    const r = await page.evaluate((sel) => ({
+        bg: getComputedStyle(document.querySelector(sel)).backgroundColor,
+        hoverNone: matchMedia('(hover: none)').matches,
+    }), selector);
+    await page.mouse.move(2, 2);
+    const m = r.bg.match(/[\d.]+/g) || [];
+    return { ...r, alpha: r.bg === 'transparent' ? 0 : m.length >= 4 ? Number(m[3]) : 1 };
+}
+
 /** Press Flip. Before this change it sat behind a tap on the self-view. */
 async function flip(page) {
     if (await geometry(page, '[data-testid="camera-flip"]')) return press(page, '[data-testid="camera-flip"]');
@@ -441,6 +462,8 @@ try {
         return els.length ? els.map(e => ({ label: (e.textContent || '').trim(), id: e.getAttribute('data-value'), checked: e.getAttribute('aria-checked'), role: e.getAttribute('role') })) : null;
     }), 5000) ?? [];
     check('phone: a tap on the self-view opens the menu, every camera by name', items.map(i => i.label).join('|') === 'Front Camera|Back Camera|Back Ultra Wide Camera', items);
+    const pipHover = await hoveredBackground(P, '[data-testid="camera-self-view-menu"]');
+    check('phone: the self-view stays a picture while its button is hovered after the tap (no box over the camera)', !!pipHover && pipHover.hoverNone && pipHover.alpha === 0, pipHover);
     check('phone: the camera on is the one ticked (menuitemradio, aria-checked)', items.filter(i => i.checked === 'true').map(i => i.id).join() === 'cam-back' && items.every(i => i.role === 'menuitemradio'), items);
     await sleep(400); // past the menu's scale-in
     const rows = [];
@@ -484,6 +507,9 @@ try {
     const fsButtons = [];
     for (const sel of ['.camera-fullscreen-controls [data-testid="camera-flip"]', '.camera-fullscreen-controls [data-testid="camera-choose"]', '.camera-fullscreen-controls .exit-btn', '.camera-fullscreen-controls .cam-off-btn']) fsButtons.push(await geometry(P, sel));
     check('phone: full screen\'s Flip, Cameras, Exit and Turn Off Camera are whole buttons, >= 44 px, on screen, what a tap hits', fsButtons.every(g => target44(g) && g.w > g.h), fsButtons);
+    const fsHover = [];
+    for (const sel of ['.camera-fullscreen-controls [data-testid="camera-flip"]', '.camera-fullscreen-controls [data-testid="camera-choose"]', '.camera-fullscreen-controls .exit-btn', '.camera-fullscreen-controls .cam-off-btn']) fsHover.push(await hoveredBackground(P, sel));
+    check("phone: full screen's buttons keep their dark backing when hovered after a tap", fsHover.every(h => !!h && h.hoverNone && h.alpha >= 0.6), fsHover);
     const fsFlipNamed = await P.locator('.camera-fullscreen-controls').getByRole('button', { name: /^Flip Camera$/ }).count();
     check("phone: full screen's Flip is named by the words on it, Flip Camera (what voice control says to press)", fsFlipNamed === 1, { fsFlipNamed });
     if (OUT) save('phone-fullscreen.png', await P.screenshot());

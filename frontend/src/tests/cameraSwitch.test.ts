@@ -261,6 +261,25 @@ describe('Flip on a phone', () => {
         expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
     });
 
+    it('the camera turned off while a switch hangs: turned on again, it is not held up by that switch', async () => {
+        let letBackOpen!: () => void;
+        const backHangs = new Promise<void>(r => { letBackOpen = r; });
+        useCameras([FRONT, BACK], { hang: (cam) => (cam === BACK ? backHangs : null) });
+        const media = inCall();
+        await media.toggleVideo(true);
+        const hung = media.flipCamera();
+        await flush();
+        await media.toggleVideo(false);
+        expect(media.cameraSwitchInProgress(), 'the hold sweep would keep waiting on the hung switch').toBe(false);
+        await media.toggleVideo(true);
+        const next = await media.switchCamera({ deviceId: 'front' });
+        expect(next.ok, 'a press answered with the hung switch').toBe(true);
+        letBackOpen();
+        await hung;
+        expect(rig.lateTracks.map(t => t.readyState)).toEqual(['ended']);
+        expect(videoOf(media).map(t => t.cam)).toEqual([FRONT]);
+    });
+
     it('a remembered camera that is gone opens the default one instead of no camera', async () => {
         // Listed when chosen, gone now; and an id the phone refuses outright.
         useCameras([FRONT, BACK]);

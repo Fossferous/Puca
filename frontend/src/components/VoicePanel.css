@@ -978,6 +978,14 @@
     cursor: inherit;
 }
 
+/* Its own hover, so mobile.css's touch rule (button:hover { background-color:
+   inherit }, which outranks a bare class) cannot reach it: a tap on a phone
+   leaves the button hovered, and inherited it was the self-view's opaque
+   background, laid over the camera picture while the menu was open. */
+.pip-open-menu:hover {
+    background: transparent;
+}
+
 .pip-open-menu:focus-visible {
     outline: 3px solid #fff;
     outline-offset: -3px;
@@ -1072,6 +1080,21 @@
 .fullscreen-btn:active {
     transform: scale(0.95);
     background: rgba(0, 0, 0, 0.75);
+}
+
+/* Their own hover, for the same touch rule: hovered after a tap, they
+   inherited the controls' see-through gradient and lost the dark backing
+   their words need over a bright picture. */
+.fullscreen-btn:hover {
+    background: rgba(0, 0, 0, 0.75);
+}
+
+.fullscreen-btn.exit-btn:hover {
+    background: #3b45a8;
+}
+
+.fullscreen-btn.cam-off-btn:hover {
+    background: #8a2628;
 }
 
 .fullscreen-btn:focus-visible {
