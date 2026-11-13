@@ -1633,8 +1633,12 @@ button.message-attachment.error { color: #ffb4b4; }
     background: none; border: none; cursor: pointer;
     font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
 }
-.pins-toggle-btn:hover,
-.checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+/* Only where something can hover: a tap on a touch screen left the grey box
+   on the button until the next tap elsewhere (a sticky :hover). */
+@media (hover: hover) {
+    .pins-toggle-btn:hover,
+    .checklist-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+}
 .pins-panel {
     /* Anchored LEFT so the panel grows INTO the chat column. The pins button
        sits near the left of the header, and .chat-main clips at overflow:

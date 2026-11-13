@@ -330,6 +330,14 @@
     }
 }
 
+/* The in-app fullscreen (mediaFullscreen.ts route 3) moves the button inside
+   the safe areas and makes it 44px (phoneLandscape.css): the badge follows,
+   6px to its left and level with its middle. */
+html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn ~ .vs-live-badge {
+    top: calc(max(8px, var(--safe-area-top, 0px)) + 13px);
+    right: calc(max(8px, var(--safe-area-right, 0px)) + 50px);
+}
+
 /* The call view's header on a phone: "2 people" sat beside the name and the
    Invite and Back to Chat buttons took the rest, so the name was cut to
    "Lou…" at 390 px and less at 360. The count goes under the name, and the

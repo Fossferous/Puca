@@ -99,7 +99,7 @@ const ROW_CONTROLS = 'input, select, textarea, button, a[href], [role="button"],
  * twice otherwise), and so is a press that ended selecting the row's words.
  * Returns whether it toggled.
  */
-export function toggleSettingFromRow(target: EventTarget | null): boolean {
+export function toggleSettingFromRow(target: EventTarget | null, opts: { pressInSelection?: boolean } = {}): boolean {
     if (!(target instanceof Element)) return false;
     if (target.closest(ROW_CONTROLS)) return false;
     const label = target.closest('label');
@@ -110,12 +110,26 @@ export function toggleSettingFromRow(target: EventTarget | null): boolean {
     // copy, not choosing: a native <label> ignores that click too (Chromium's
     // and Gecko's label activation both skip a click that made a selection).
     // Without this, copying a phrase of a hint flipped and saved its setting.
+    // But not a single press that went down INSIDE words already selected
+    // (`pressInSelection`, from pointInSelection at mousedown): Chromium's
+    // label takes that one, and the selection goes with it. Skipping it too
+    // made a second press necessary.
     const selection = target.ownerDocument.getSelection?.();
-    if (selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(row)) return false;
+    if (!opts.pressInSelection && selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(row)) return false;
     const controls = row.querySelectorAll(ROW_CONTROLS);
     if (controls.length !== 1) return false;
     const box = controls[0];
     if (!(box instanceof HTMLInputElement) || box.type !== 'checkbox' || box.disabled) return false;
     box.click();
     return true;
+}
+
+/** Whether (x, y) is on words that are selected now: read at mousedown, before
+ *  the press changes the selection, for toggleSettingFromRow. */
+export function pointInSelection(doc: Document, x: number, y: number): boolean {
+    const selection = doc.getSelection?.();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+    const range = selection.getRangeAt(0);
+    if (typeof range.getClientRects !== 'function') return false;
+    return [...range.getClientRects()].some(b => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom);
 }

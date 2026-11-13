@@ -12,7 +12,7 @@
  * bundle.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { toggleSettingFromRow } from '../components/settingsModal.utils';
+import { pointInSelection, toggleSettingFromRow } from '../components/settingsModal.utils';
 
 function row(html: string): HTMLElement {
     const host = document.createElement('div');
@@ -93,6 +93,36 @@ describe('toggleSettingFromRow', () => {
         sel.removeAllRanges();
         expect(toggleSettingFromRow(hint)).toBe(true);
         expect(box.checked).toBe(true);
+    });
+
+    it('a single press that went down INSIDE the selected words toggles, as a native label does', () => {
+        // Chromium's label skips only a click whose mousedown was not a single
+        // click in the selection; skipping this one too needed a second press.
+        const host = row(ONE);
+        const hint = host.querySelector('.option-hint') as HTMLElement;
+        const box = host.querySelector('input') as HTMLInputElement;
+        const range = document.createRange();
+        range.selectNodeContents(hint);
+        const sel = document.getSelection() as Selection;
+        sel.removeAllRanges();
+        sel.addRange(range);
+        expect(toggleSettingFromRow(hint, { pressInSelection: true })).toBe(true);
+        expect(box.checked).toBe(true);
+        // CONTROL: the same selection, the press not in it (a drag that ended here).
+        expect(toggleSettingFromRow(hint, { pressInSelection: false })).toBe(false);
+        expect(box.checked).toBe(true);
+        sel.removeAllRanges();
+    });
+
+    it('pointInSelection: nothing selected, or no geometry to read (jsdom), is never "in the selection"', () => {
+        document.getSelection()?.removeAllRanges();
+        expect(pointInSelection(document, 10, 10)).toBe(false);
+        const host = row(ONE);
+        const range = document.createRange();
+        range.selectNodeContents(host.querySelector('.option-hint') as HTMLElement);
+        document.getSelection()!.addRange(range);
+        expect(pointInSelection(document, 10, 10)).toBe(false);
+        document.getSelection()!.removeAllRanges();
     });
 
     it('a selection somewhere else on the page does not stop a press on this row', () => {
