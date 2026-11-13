@@ -26,7 +26,7 @@
 //   - every camera control is on screen, >= 44 px and what a tap there hits.
 // NEGATIVE CONTROL: the same run against a debug APK built before the fix
 // (its Flip asked for the front camera again) fails the flip checks; that is
-// how the bug was reproduced (docs/USER_GUIDE.md, Cameras on a phone).
+// how the bug was reproduced (docs/USER_GUIDE.md, Cameras: front, rear and the camera menu).
 //
 // Needs: a THROWAWAY backend + Postgres reachable on the host as API, a vite
 // dev server of this tree at APP built against that API, the debug APK of this

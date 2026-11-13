@@ -456,6 +456,9 @@ try {
     check('phone: the rear camera\'s self-view is NOT mirrored (the block left of centre)', unmirrored(rear), { block: rear.block, mirrored: rear.mirrored });
     await tileShows(D, uid.P, 'green', 'rear');
     await encrypted(D, P, uid.P, 'rear');
+    // An empty listing is no pass: without the first one the check below never ran, and the
+    // walk said nothing (release review). SFU=1 means LiveKit must list the phone's camera.
+    if (SFU) check('SFU: LiveKit lists the camera publication of the phone before the switch', !!lk0, lk0);
     if (SFU && lk0) {
         const lk1 = await lkTracks(`sfu_${voice.id}`);
         check('SFU: LiveKit has ONE camera publication from the phone, the same one (swapped, not republished)',

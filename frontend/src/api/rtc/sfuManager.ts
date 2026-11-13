@@ -1011,10 +1011,20 @@ export class SfuManager {
         // stopped track published is a ghost camera tile for everyone.
         // Reconnecting, reassertCamera does it once the room is back.
         if (!current() || !this.connected || !this.room) return;
-        this.cameraPub = await this.room.localParticipant.publishTrack(newTrack, {
+        const room = this.room;
+        const published = await room.localParticipant.publishTrack(newTrack, {
             source: Track.Source.Camera,
             simulcast: true,
         });
+        // Turned off, or switched again, while that was publishing: Turn off
+        // found nothing of it to take off yet, and the next switch put its own
+        // camera on. Take this one straight back off rather than leave a
+        // stopped camera published (a ghost tile) or hold the wrong handle.
+        if (!current()) {
+            await room.localParticipant.unpublishTrack(newTrack, false).catch(() => { /* already gone */ });
+            return;
+        }
+        this.cameraPub = published;
     }
 
     /**

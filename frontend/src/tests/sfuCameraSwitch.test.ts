@@ -198,6 +198,50 @@ describe('SFU: a camera switch keeps its publication and its sender', () => {
         expect(lp.publishTrack).not.toHaveBeenCalled();
     });
 
+    /** The swap fails, so the new camera is published afresh; the FIRST publish is held at `gate`. */
+    async function heldFreshPublish() {
+        const r = await rig();
+        (r.s.room as { state: string }).state = 'connected';
+        r.pub.track!.replaceTrack = vi.fn(async () => { throw new Error('unable to replace an unpublished track'); }) as never;
+        let release!: () => void;
+        const gate = new Promise<void>(res => { release = res; });
+        const publish = r.lp.publishTrack.getMockImplementation()!;
+        let first = true;
+        r.lp.publishTrack.mockImplementation(async (t: MediaStreamTrack) => {
+            if (first) { first = false; await gate; }
+            return publish(t);
+        });
+        return { ...r, release };
+    }
+
+    it('the camera turned off while the new camera is being published afresh: it is taken back off, no camera left published', async () => {
+        const { sfu, s, pubs, lp, release } = await heldFreshPublish();
+        const rear = new FakeCamTrack('cam-back');
+        const swapping = sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        await vi.waitFor(() => expect(lp.publishTrack).toHaveBeenCalledTimes(1));
+        await sfu.unpublishCamera();
+        rear.readyState = 'ended'; // the media layer stopped it with the camera
+        release();
+        await swapping;
+        expect(pubs.filter(p => p.source === Track.Source.Camera), 'a stopped camera is still published (a ghost tile)').toEqual([]);
+        expect(s.cameraPub, 'Turn off\'s null was overwritten').toBeNull();
+    });
+
+    it('switched again while the first new camera was being published afresh: only the last camera is published, and it is the one held', async () => {
+        const { sfu, s, pubs, lp, release } = await heldFreshPublish();
+        const rear = new FakeCamTrack('cam-back');
+        const ultra = new FakeCamTrack('cam-ultra');
+        const first = sfu.replaceCameraTrack(rear as unknown as MediaStreamTrack);
+        await vi.waitFor(() => expect(lp.publishTrack).toHaveBeenCalledTimes(1));
+        rear.readyState = 'ended'; // the media layer stops one camera before opening the next
+        await sfu.replaceCameraTrack(ultra as unknown as MediaStreamTrack);
+        release();
+        await first;
+        const cams = pubs.filter(p => p.source === Track.Source.Camera).map(p => p.track?.mediaStreamTrack);
+        expect(cams, 'the camera switched away from is still published').toEqual([ultra]);
+        expect((s.cameraPub as Pub).track?.mediaStreamTrack, 'the handle is not the last camera\'s').toBe(ultra);
+    });
+
     it('VoicePanel hands every switch to the SFU manager, connected or reconnecting', () => {
         const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/VoicePanel.tsx'), 'utf8');
         const call = src.indexOf('await sfuManager.replaceCameraTrack(live)');
