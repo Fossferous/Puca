@@ -9,6 +9,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const h = vi.hoisted(() => ({
     platform: 'android',
     missing: false,
+    /** The plugin's methods are not there at all (a mocked or broken bridge): they throw when called. */
+    absent: false,
     calls: [] as Array<{ enabled: boolean }>,
     listeners: new Map<string, Array<() => void>>(),
     removed: 0,
@@ -20,17 +22,23 @@ vi.mock('@capacitor/core', () => ({
         isNativePlatform: () => h.platform !== 'web',
     },
     registerPlugin: () => ({
-        setBackIntercept: async (opts: { enabled: boolean }) => {
+        setBackIntercept: (opts: { enabled: boolean }) => {
+            if (h.absent) throw new TypeError('App.setBackIntercept is not a function');
+            return (async () => {
             h.calls.push(opts);
             if (h.missing) throw new Error('"SovereignApp.setBackIntercept()" is not implemented on android');
+            })();
         },
         // The base Plugin's addListener resolves on every APK, with or
         // without the method (mobileApp.ts says so for 'keyboard').
-        addListener: async (evt: string, cb: () => void) => {
+        addListener: (evt: string, cb: () => void) => {
+            if (h.absent) throw new TypeError('App.addListener is not a function');
+            return (async () => {
             const list = h.listeners.get(evt) ?? [];
             list.push(cb);
             h.listeners.set(evt, list);
             return { remove: async () => { h.removed++; h.listeners.set(evt, (h.listeners.get(evt) ?? []).filter((f) => f !== cb)); } };
+            })();
         },
     }),
 }));
@@ -43,6 +51,7 @@ const back = () => { for (const cb of h.listeners.get('backButton') ?? []) cb();
 beforeEach(() => {
     h.platform = 'android';
     h.missing = false;
+    h.absent = false;
     h.calls = [];
     h.listeners = new Map();
     h.removed = 0;
@@ -142,6 +151,17 @@ describe('interceptBack', () => {
         release();
         await settle();
         expect(h.calls).toEqual([{ enabled: true }, { enabled: false }]);
+    });
+
+    it('no plugin at all (its methods throw where they are called): nothing escapes into the overlay taking Back', async () => {
+        // clipDownloadNative.test.tsx's Android has no SovereignApp: the picture viewer died there.
+        h.absent = true;
+        let release: () => void = () => {};
+        expect(() => { release = interceptBack(() => {}); }).not.toThrow();
+        await settle();
+        expect(() => release()).not.toThrow();
+        await settle();
+        h.absent = false;
     });
 
     it('positive control: not on Android (the web, the desktop app), it asks nothing at all', async () => {

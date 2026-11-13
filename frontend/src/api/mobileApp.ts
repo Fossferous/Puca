@@ -770,6 +770,18 @@ let backGen = 0;
  * reloads while it is on cannot strand back either: SovereignAppPlugin
  * hands back to the system when no page listens.
  */
+/** A plugin call that never throws where it is made: a bridge without the
+ *  plugin or the method rejects instead. interceptBack runs inside every
+ *  overlay's effect (hooks/useBackClose.ts), and a throw there would take the
+ *  overlay down with it. */
+function settled<T>(call: () => Promise<T>): Promise<T> {
+    try {
+        return Promise.resolve(call());
+    } catch (e) {
+        return Promise.reject(e);
+    }
+}
+
 export function interceptBack(onBack: () => void): () => void {
     if (!android()) return () => {};
     const me = { close: onBack };
@@ -778,16 +790,16 @@ export function interceptBack(onBack: () => void): () => void {
         const gen = ++backGen;
         backListener = {
             gen,
-            handle: App.addListener('backButton', () => {
+            handle: settled(() => App.addListener('backButton', () => {
                 if (gen !== backGen) return;
                 backLayers[backLayers.length - 1]?.close();
-            }).then((h) => h, () => null /* no plugin: back stays the system's */),
+            })).then((h) => h, () => null /* no plugin: back stays the system's */),
         };
     }
     // Every push, not only the first: the native side switches itself off
     // when a press finds no listener (a page reload), and a held layer must
     // not be left without back after that.
-    App.setBackIntercept({ enabled: true }).catch(() => { /* an APK without it */ });
+    settled(() => App.setBackIntercept({ enabled: true })).catch(() => { /* an APK without it */ });
     let released = false;
     return () => {
         if (released) return;
@@ -798,8 +810,8 @@ export function interceptBack(onBack: () => void): () => void {
         const gone = backListener;
         backListener = null;
         backGen++;
-        void gone?.handle.then((h) => h?.remove());
-        App.setBackIntercept({ enabled: false }).catch(() => { /* an APK without it */ });
+        void gone?.handle.then((h) => h?.remove()).catch(() => { /* gone with the bridge */ });
+        settled(() => App.setBackIntercept({ enabled: false })).catch(() => { /* an APK without it */ });
     };
 }
 
