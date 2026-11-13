@@ -7,13 +7,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const h = vi.hoisted(() => ({
-    native: null as ((d: { visible: boolean }) => void) | null,
+    native: null as ((d: { visible: boolean; topPx?: number }) => void) | null,
     state: null as { visible: boolean; topPx: number; viewHeightPx: number } | null,
 }));
 
 vi.mock('../api/mobileApp', () => ({
     mobileKeyboardState: async () => h.state,
-    onMobileKeyboard: async (cb: (d: { visible: boolean }) => void) => {
+    onMobileKeyboard: async (cb: (d: { visible: boolean; topPx?: number }) => void) => {
         h.native = cb;
         return { remove: async () => { h.native = null; } };
     },
@@ -91,6 +91,26 @@ describe('installKeyboardUp marks <html>', () => {
         await settle();
         h.native!({ visible: true });
         expect(up()).toBe(false);
+    });
+
+    it('the app\'s "nothing measured yet" (topPx -1, Android 7 to 10 for good) is no answer: the visual viewport decides', async () => {
+        // Review finding: read as "keyboard down", it locked the viewport out for the session.
+        stop();
+        await settle(); // the first install's listener is let go before the second one's arrives
+        const vv = Object.assign(new EventTarget(), { height: window.innerHeight, scale: 1 });
+        Object.defineProperty(window, 'visualViewport', { value: vv, configurable: true });
+        h.state = { visible: false, topPx: -1, viewHeightPx: 0 };
+        stop = installKeyboardUp();
+        await settle();
+        h.native!({ visible: false, topPx: -1 });
+        box.focus();
+        vv.height = Math.round(window.innerHeight * 0.55);
+        vv.dispatchEvent(new Event('resize'));
+        expect(up()).toBe(true);
+        // CONTROL: a measured "down" from the app is believed over the viewport.
+        h.native!({ visible: false, topPx: 900 });
+        expect(up()).toBe(false);
+        Object.defineProperty(window, 'visualViewport', { value: undefined, configurable: true });
     });
 
     it('stopping takes the mark away', async () => {

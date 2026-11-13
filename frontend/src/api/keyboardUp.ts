@@ -4,7 +4,8 @@
  * apps. Before 2026-11-12 it stayed on top of the keyboard, 60 px of the
  * ~470 px a phone has left while typing (seen on the real APK).
  *
- * Two signals, either enough, both only while a text field has the focus:
+ * Two signals, both only while a text field has the focus (the app's own,
+ * when it has measured the keyboard, decides; else the visual viewport):
  *  - the Android app's own keyboard event (APKs from 0.8.88). The WebView is
  *    resized there, so nothing in the page can see the keyboard; and a Back
  *    that closes the keyboard leaves the field focused, which this sees as
@@ -71,8 +72,12 @@ export function installKeyboardUp(): () => void {
     const vv = window.visualViewport;
     vv?.addEventListener('resize', update);
     let live = true;
-    const fromNative = (d: { visible: boolean }) => {
+    const fromNative = (d: { visible: boolean; topPx?: number }) => {
         if (!live) return;
+        // topPx -1 is the plugin's "nothing measured yet" (permanently, on Android
+        // 7 to 10, where its inset listener is never installed): not an answer,
+        // so the visual viewport still gets its say.
+        if (typeof d.topPx === 'number' && d.topPx < 0) return;
         nativeVisible = d.visible;
         update();
     };
