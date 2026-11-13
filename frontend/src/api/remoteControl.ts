@@ -100,6 +100,15 @@ let phoneRequestNoticeUp = false;
 /** HOST: when the pending request arrived (Date.now), for its deadline. */
 let incomingRequestAt = 0;
 
+/** Take the request's line out of the shade. Whether or not this page can
+ *  still host a phone: the share may have ended under the prompt, and the
+ *  line would stay there. */
+function clearPhoneRequestNotice() {
+    if (!phoneRequestNoticeUp) return;
+    phoneRequestNoticeUp = false;
+    void clearMobileNotifications(PHONE_REQUEST_NOTICE);
+}
+
 /** Clear the consent deadline and drop the surfaced window's TOPMOST bit.
  *  Runs on EVERY exit from the prompt: allow, deny, auto-deny, viewer gone. */
 function clearConsentAttention() {
@@ -107,12 +116,7 @@ function clearConsentAttention() {
         clearTimeout(consentDeadlineTimer);
         consentDeadlineTimer = null;
     }
-    // Whether or not this page can still host a phone: the share may have
-    // ended under the prompt, and the line would stay in the shade.
-    if (phoneRequestNoticeUp) {
-        phoneRequestNoticeUp = false;
-        void clearMobileNotifications(PHONE_REQUEST_NOTICE);
-    }
+    clearPhoneRequestNotice();
     if (isTauri()) {
         void tauriCore()
             .then(({ invoke }) => invoke('release_attention_topmost'))
@@ -124,6 +128,9 @@ export const DENIAL_DECAY_MS = 10 * 60_000;
 
 export type DenialRecord = { count: number; until: number; last: number };
 const viewerDenials = new Map<number, DenialRecord>(); // me as viewer: hostId -> record
+// Me as viewer: hosts whose last step on that ladder was my own withdrawn
+// request, not their No (so the wait is not called a decline).
+const viewerWithdrew = new Set<number>();
 const hostDenials = new Map<number, DenialRecord>();   // me as host: viewerId -> record
 
 /** Record one more denial for this peer; returns the new cooldown in ms.
@@ -868,7 +875,9 @@ export function requestControl(hostUserId: number, hostUsername: string) {
     if (state.controlling) return; // already controlling / requesting someone
     const wait = cooldownRemainingMs(viewerDenials, hostUserId);
     if (wait > 0) {
-        setNotice(`${hostUsername} declined recently — you can ask again in ${fmtCooldown(wait)}.`);
+        setNotice(viewerWithdrew.has(hostUserId)
+            ? `You can ask ${hostUsername} again in ${fmtCooldown(wait)}.`
+            : `${hostUsername} declined recently — you can ask again in ${fmtCooldown(wait)}.`);
         return;
     }
     viewerEph = generateControlEphemeral(); // fresh per session
@@ -882,6 +891,13 @@ export function requestControl(hostUserId: number, hostUsername: string) {
 export function stopControlling() {
     const target = state.controlling;
     if (!target) return;
+    // A request taken back is a step on the ladder, as the host counts it
+    // (teardownPartner): this side then waits too, rather than send a
+    // request the host refuses unseen.
+    if (target.status === 'requesting') {
+        bumpDenial(viewerDenials, target.userId);
+        viewerWithdrew.add(target.userId);
+    }
     wsClient.send({ type: 'ControlEnd', payload: { target_user: target.userId } });
     state.controlling = null;
     controlHostKind = null;
@@ -1546,8 +1562,14 @@ export function initRemoteControl() {
                 // the same ticket the manual Allow holds.
                 const ticket = { userId: p.from_user, withdrawn: false };
                 answering = ticket;
+                // Android's dialog asks in Púca, and the person who offered
+                // is usually in another app by now: say so in the shade.
+                phoneRequestNoticeUp = true;
+                void postMobileNotification(PHONE_REQUEST_NOTICE,
+                    `${p.from_username} took your offer to control this phone`, 'Open Púca to allow or deny.');
                 const why = await beginPhoneSession({ userId: p.from_user, username: p.from_username });
                 if (answering === ticket) answering = null;
+                clearPhoneRequestNotice();
                 if (ticket.withdrawn || getCurrentStreamingUserId() == null) {
                     phoneHostSession = false;
                     endPhoneControl();
@@ -1651,6 +1673,7 @@ export function initRemoteControl() {
             if (state.controlling || state.offer) return; // busy — ignore extra offers
             // An explicit offer overrides any earlier denial history with them.
             viewerDenials.delete(p.from_user);
+            viewerWithdrew.delete(p.from_user);
             const username = getStreamData(p.from_user)?.username ?? `User ${p.from_user}`;
             state.offer = { userId: p.from_user, username };
             emit();
@@ -1685,6 +1708,7 @@ export function initRemoteControl() {
             const hostEph = p.eph;
             const hostId = p.from_user;
             viewerDenials.delete(hostId); // granted — forget the denial ladder
+            viewerWithdrew.delete(hostId);
             // Stable host capture size for FPS delta calibration (see
             // computeRmoveScale). Absent from older hosts → fall back to videoWidth.
             controlHostCapture = (typeof p.cap_w === 'number' && typeof p.cap_h === 'number'
@@ -1712,6 +1736,7 @@ export function initRemoteControl() {
             // Start/grow the re-request cooldown for this host. (Auto-denies —
             // not sharing, busy, non-desktop — land here too; the ladder still
             // applies, and decays after DENIAL_DECAY_MS of quiet.)
+            viewerWithdrew.delete(p.from_user);
             const wait = bumpDenial(viewerDenials, p.from_user);
             setNotice(`${state.controlling.username} declined control (or it isn't available). You can ask again in ${fmtCooldown(wait)}.`);
             // This branch is reachable while ACTIVE (the guard above is
@@ -1938,6 +1963,11 @@ function teardownPartner(userId: number, controllingNotice: string) {
     if (state.incomingRequest?.userId === userId) {
         state.incomingRequest = null;
         if (pendingViewerEph?.userId === userId) pendingViewerEph = null;
+        // A request taken back before it was answered is a step on the
+        // denial ladder: it already put up a prompt and a notification, and
+        // a Request / Cancel loop (the request's own cancel button) put up a
+        // fresh pair every time, past the ladder that throttles requests.
+        bumpDenial(hostDenials, userId);
         clearConsentAttention();
         changed = true;
     }

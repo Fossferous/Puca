@@ -158,6 +158,11 @@ final class TouchPlanner {
     private double px = 0.5;
     private double py = 0.5;
     private boolean shift;
+    /** Ctrl, Alt or the Meta key held (by their key events): a character key
+     *  then is a shortcut, which a phone does not have, and is not typed (it
+     *  typed the key's letter: Ctrl+A an "a"). The page sends a character an
+     *  AltGr or Option makes as text, which this does not touch. */
+    private final java.util.Set<String> mods = new java.util.HashSet<>();
     private boolean rightDown;
     private double wheelAcc;
     private long wheelFirstAt;
@@ -249,6 +254,11 @@ final class TouchPlanner {
             shift = down;
             return;
         }
+        if (code.startsWith("Control") || code.startsWith("Alt") || code.startsWith("Meta")) {
+            if (down) mods.add(code);
+            else mods.remove(code);
+            return;
+        }
         if (!down) return;
         flushWheel();
         String action = KeyText.actionFor(code);
@@ -256,6 +266,7 @@ final class TouchPlanner {
             enqueue(Work.action(action, null));
             return;
         }
+        if (!mods.isEmpty()) return;
         String ch = KeyText.charFor(code, shift);
         if (ch != null) text(ch, at);
     }

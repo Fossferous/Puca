@@ -179,6 +179,26 @@ public final class PhoneControl {
     static final long RESUME_MS = 60_000;
     private static final Runnable resumeTimeout = () -> end(ControlGate.SERVICE_OFF, true);
 
+    /** How often a live session checks, input or not, that it may go on. The
+     *  screen going off, Stop, the service and the share's end act at once;
+     *  this catches the rest within a second: the keyguard up with the screen
+     *  still on, a one-app share now behind another app or no longer the
+     *  screen's size. Before, those were seen only when input arrived, and
+     *  the frame and "is controlling" stayed up meanwhile. */
+    static final long WATCH_MS = 1000;
+    private static final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!active) return;
+            String r = refusal();
+            if (ControlGate.ends(r)) {
+                end(r, true);
+                return;
+            }
+            main.postDelayed(this, WATCH_MS);
+        }
+    };
+
     // ---- a session -------------------------------------------------------
 
     /** The name shown for a viewer: trimmed, at most 64 characters. */
@@ -206,6 +226,8 @@ public final class PhoneControl {
         active = true;
         injector = new Injector(main, env());
         watchScreen(true);
+        main.removeCallbacks(watchdog);
+        main.postDelayed(watchdog, WATCH_MS);
         ShareHost h = host;
         if (h != null) h.setShareNotice(viewer + " is controlling this phone", "Stop control", stopIntent());
         Log.i(TAG, "control session started");
@@ -221,6 +243,7 @@ public final class PhoneControl {
         if (!active) return;
         active = false;
         main.removeCallbacks(resumeTimeout);
+        main.removeCallbacks(watchdog);
         Injector inj = injector;
         injector = null;
         if (inj != null) {

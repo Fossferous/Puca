@@ -70,7 +70,7 @@ import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
 import { interceptBack } from '../api/mobileApp';
-import { phoneKeyText, macKeyboard } from './phoneKeyText';
+import { phoneKeyText, phoneDropsKey, macKeyboard } from './phoneKeyText';
 
 const MOBILE = isMobile();
 
@@ -1509,6 +1509,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                             sendControlEvent({ t: 'text', s: typed });
                                             return;
                                         }
+                                        if (phoneHost && phoneDropsKey(e, macKeyboard())) return;
                                         if (e.repeat) return;
                                         heldKeys.current.add(e.code);
                                         sendControlEvent({ t: 'key', code: e.code, down: true });

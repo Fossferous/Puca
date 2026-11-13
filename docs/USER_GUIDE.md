@@ -643,9 +643,9 @@ It works only while you share the **entire screen**. Shared one app
 (Android 14 and later), Púca refuses control, because the person watching
 could not see where a tap outside that app would land. Android does not say
 which you chose, so an app that fills the whole screen looks like the entire
-screen until you switch away from it, which ends control; a tap sent in that
-moment can reach the app you switched to. Choose **Entire screen** to be
-sure. Typing goes into the
+screen until you switch away from it, which ends control within a second; a
+tap sent in that moment can reach the app you switched to. Choose **Entire
+screen** to be sure. Typing goes into the
 text box you or they tapped; it does not type into password fields, and it
 does not press keyboard shortcuts.
 
@@ -661,11 +661,15 @@ asks them; once they allow it:
 
 - **click** (or tap, on a phone) is a tap on their screen, **drag** is a
   swipe, a **right-click** is a long press, and the **mouse wheel** scrolls;
-- typing on your keyboard types into the text box they have open; Esc is Back;
+- typing on your keyboard types into the text box they have open; Esc is Back.
+  Keyboard shortcuts do nothing on a phone, and neither do accents typed
+  with a dead key or text from an input method for Chinese, Japanese or
+  Korean;
 - the stream's buttons gain **Back**, **Home** and **Recent apps** for their
   phone.
 
-While you wait for an answer, the request's button is a cancel button. If
+While you wait for an answer, the request's button is a cancel button
+(after a cancel you can ask that person again after a short wait). If
 nobody answers for nearly three minutes (their app cannot be
 controlled at all, Púca Lite for instance), the request is dropped.
 

@@ -433,6 +433,50 @@ describe('a phone sharing its screen, as the host', () => {
         expect(sent.find(m => m.type === 'ControlResponse')?.payload?.granted).toBe(false);
     });
 
+    it('a request taken back before it is answered steps the denial ladder: a Request / Cancel loop gets one prompt', async () => {
+        const rc = await import('../api/remoteControl');
+        rc.initRemoteControl();
+        sent.length = 0;
+        notified.length = 0;
+        const ask = () => handlers.get('ControlRequested')!({ payload: { from_user: 66, from_username: 'Loop', eph: 'x' } });
+        ask();
+        await settle();
+        expect(rc.getControlState().incomingRequest?.userId, 'POSITIVE CONTROL: the first is asked').toBe(66);
+        expect(notified.filter(n => /Loop/.test(n.title))).toHaveLength(1);
+        // Its own cancel button, at once.
+        handlers.get('ControlEnded')!({ payload: { from_user: 66 } });
+        await settle();
+        expect(rc.getControlState().incomingRequest).toBeNull();
+        sent.length = 0;
+        ask();
+        await settle();
+        expect(rc.getControlState().incomingRequest, 'no second prompt').toBeNull();
+        expect(notified.filter(n => /Loop/.test(n.title)), 'and no second notification').toHaveLength(1);
+        expect(sent.find(m => m.payload?.target_user === 66)?.payload?.granted, 'refused unseen').toBe(false);
+    });
+
+    it('an OFFER taken up says so in the shade while Android\'s own dialog asks', async () => {
+        let release: () => void = () => {};
+        phone.gate = new Promise<void>(r => { release = r; });
+        const rc = await import('../api/remoteControl');
+        const me = makeIdentity(new Uint8Array(32).fill(3));
+        const viewer = makeIdentity(new Uint8Array(32).fill(4));
+        setActiveIdentity(me);
+        peerIdentityPub = viewer.publicKeyEncoded;
+        rc.initRemoteControl();
+        rc.offerControl(VIEWER, 'Aoife');
+        notified.length = 0;
+        handlers.get('ControlRequested')!({
+            payload: { from_user: VIEWER, from_username: 'Aoife', eph: generateControlEphemeral().pubEncoded },
+        });
+        await settle();
+        expect(phone.begun, 'Android\'s dialog is asking').toEqual(['Aoife']);
+        expect(notified.map(n => n.title), 'the person, usually in another app, is told').toContain('Aoife took your offer to control this phone');
+        release();
+        await settle();
+        expect(rc.getControlState().controlledBy?.userId).toBe(VIEWER);
+    });
+
     it('input after the share stopped is not injected', async () => {
         const key = await allowed();
         sharing = false;
@@ -508,6 +552,18 @@ describe('the viewer of a phone', () => {
         expect(frame, 'sent on the relay').toBeDefined();
         const plain = await openControl(key, frame!.payload!.event as string);
         expect(JSON.parse(plain!)).toMatchObject({ s: 1, l: 'r', e: { t: 'down', button: 0 } });
+    });
+
+    it('a request it takes back makes it wait before asking again, and says so without calling it a decline', async () => {
+        const rc = await import('../api/remoteControl');
+        rc.initRemoteControl();
+        rc.requestControl(55, 'Someone');
+        expect(rc.getControlState().controlling?.status).toBe('requesting');
+        rc.stopControlling();
+        sent.length = 0;
+        rc.requestControl(55, 'Someone');
+        expect(sent.some(m => m.type === 'ControlRequest'), 'nothing sent the host would refuse unseen').toBe(false);
+        expect(rc.getControlState().notice).toMatch(/^You can ask Someone again in /);
     });
 
     it('forgets it when the session ends', async () => {

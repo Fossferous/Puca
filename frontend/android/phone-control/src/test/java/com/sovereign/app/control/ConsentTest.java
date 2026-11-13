@@ -19,12 +19,31 @@ public class ConsentTest {
     public void allowCountsOnlyOnceArmed() {
         Consent c = new Consent();
         assertTrue(c.ask(false, 1000, record));
+        c.shown(1000);
         assertFalse("a press under a finger already moving", c.allow(1000 + Consent.ARM_MS - 1));
         assertTrue(c.open());
         assertTrue(answers.isEmpty());
         assertTrue(c.allow(1000 + Consent.ARM_MS));
         assertEquals(List.of("allowed"), answers);
         assertFalse(c.open());
+    }
+
+    @Test
+    public void armedOnlyByBeingSeenNotByWaitingUnseen() {
+        Consent c = new Consent();
+        // Asked while the person is in another app: time passes unseen.
+        c.ask(false, 0, record);
+        assertFalse("never in front: not armed however long it waits", c.allow(20_000));
+        // They come back to Púca: it arms from THEN.
+        c.shown(20_000);
+        assertFalse(c.allow(20_000 + Consent.ARM_MS - 1));
+        // They pull the shade down: disarmed, and armed afresh on return.
+        c.hidden();
+        assertFalse(c.allow(25_000));
+        c.shown(25_000);
+        assertFalse(c.allow(25_000 + Consent.ARM_MS - 1));
+        assertTrue(c.allow(25_000 + Consent.ARM_MS));
+        assertEquals(List.of("allowed"), answers);
     }
 
     @Test
@@ -53,6 +72,7 @@ public class ConsentTest {
     public void answeredOnceWhateverComesAfter() {
         Consent c = new Consent();
         c.ask(false, 0, record);
+        c.shown(0);
         c.withdraw();
         c.decline();
         c.withdraw();

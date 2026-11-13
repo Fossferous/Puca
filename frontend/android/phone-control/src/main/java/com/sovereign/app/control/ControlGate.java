@@ -9,11 +9,13 @@ package com.sovereign.app.control;
  *   <li>ENDING ones end the session on the phone's side, and the page tells
  *       the viewer: the phone locked or its screen went off (whoever is at it
  *       put it away), the person switched Púca's service off in Android's
- *       settings, the share is over. Control never resumes by itself after
- *       one of these; the viewer asks again and the person answers again.</li>
+ *       settings, the share is over, or is of one app (Android 14+), which
+ *       includes one app shared that is now behind another. Control never
+ *       resumes by itself after one of these; the viewer asks again and the
+ *       person answers again.</li>
  *   <li>Passing ones only drop input while they last: the screen turning,
- *       one app shared and something else in front, Android taking the
- *       service away for a moment while its switch stays on.</li>
+ *       Android taking the service away for a moment while its switch stays
+ *       on.</li>
  * </ul>
  */
 final class ControlGate {
@@ -68,6 +70,10 @@ final class ControlGate {
             case SCREEN_OFF:
             case ScreenMap.NOT_SHARING:
             case ScreenMap.ONE_APP:
+            // One app shared, and the person switched to another: it used to
+            // only drop input, and control came back by itself, with no new
+            // Allow, the moment they went back to that app.
+            case ScreenMap.HIDDEN:
                 return true;
             default:
                 return false;

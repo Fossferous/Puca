@@ -26,6 +26,27 @@ export function phoneKeyText(
     return null;
 }
 
+/**
+ * Whether a key press must not reach a phone at all. A phone types
+ * characters and knows a few named keys (Enter, Backspace, Escape as Back);
+ * everything else it would get wrong:
+ * - a character key held with Ctrl, Alt or the Meta key that is not how
+ *   that character is typed (phoneKeyText said no): a phone has no
+ *   shortcuts, and it typed the key under it (Ctrl+A typed an "a");
+ * - a dead key or a desktop IME's keys ('Dead', 'Process', 'Unidentified'):
+ *   the accent, or the composed text, never reaches the phone, and the key's
+ *   own letter would (US-International ' then e typed "'é").
+ */
+export function phoneDropsKey(
+    e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'altKey'> & {
+        getModifierState?(key: 'AltGraph'): boolean;
+    },
+    mac: boolean,
+): boolean {
+    if (e.key === 'Dead' || e.key === 'Process' || e.key === 'Unidentified') return true;
+    return [...e.key].length === 1 && phoneKeyText(e, mac) === null;
+}
+
 /** A Mac's keyboard (Option types characters), from what the browser says. */
 export function macKeyboard(): boolean {
     if (typeof navigator === 'undefined') return false;

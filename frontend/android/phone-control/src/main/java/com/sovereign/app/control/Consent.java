@@ -16,9 +16,12 @@ package com.sovereign.app.control;
  * <ul>
  *   <li>One question at a time, and none while a session lasts (a viewer in
  *       control could otherwise press Allow for someone else).</li>
- *   <li>Allow ignores presses for {@link #ARM_MS} after the question appears,
- *       so a dialog that pops up under a moving finger is not answered by
- *       it.</li>
+ *   <li>Allow ignores presses until the dialog has been in front, with the
+ *       window focus, for {@link #ARM_MS}, so a dialog that pops up under a
+ *       moving finger is not answered by it. Counted from when it is SEEN:
+ *       asked while the person is in another app (an offer they made a while
+ *       ago), it used to arm unseen, and Allow was live the moment they came
+ *       back to Púca. Losing the focus disarms it again.</li>
  *   <li>Unanswered for {@link #TIMEOUT_MS}, it is a No.</li>
  *   <li>Answered once: every later press, timeout or withdrawal is
  *       ignored.</li>
@@ -42,6 +45,8 @@ final class Consent {
 
     private Answer pending;
     private long askedAt;
+    /** When the question last came into view with the focus, or -1. */
+    private long shownAt = -1;
 
     /** A question is open now. */
     boolean open() {
@@ -54,12 +59,23 @@ final class Consent {
         if (pending != null || sessionActive || answer == null) return false;
         pending = answer;
         askedAt = now;
+        shownAt = -1;
         return true;
+    }
+
+    /** The dialog has the window focus now (it is in front, to be seen). */
+    void shown(long now) {
+        if (pending != null && shownAt < 0) shownAt = now;
+    }
+
+    /** The dialog lost the focus (another app in front, the shade pulled down). */
+    void hidden() {
+        shownAt = -1;
     }
 
     /** Whether Allow takes a press at {@code now}. */
     boolean armed(long now) {
-        return pending != null && now - askedAt >= ARM_MS;
+        return pending != null && shownAt >= 0 && now - shownAt >= ARM_MS;
     }
 
     /** Allow pressed: true when it counted (and the question is closed). */

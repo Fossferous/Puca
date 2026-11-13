@@ -65,11 +65,18 @@ public class ControlGateTest {
     }
 
     @Test
+    public void oneAppSharedAndSwitchedAwayFromEndsIt() {
+        // A one-app share whose window fills the screen passes Allow (Android
+        // does not say which was chosen); switching away from it must END
+        // control, never pause it until the person goes back.
+        assertTrue(ControlGate.ends(ScreenMap.HIDDEN));
+    }
+
+    @Test
     public void passingRefusalsOnlyDropInput() {
-        // The phone turning, or one app shared with another in front: the
-        // session goes on, input is dropped while it lasts.
+        // The phone turning: the session goes on, input is dropped while it
+        // lasts.
         assertFalse(ControlGate.ends(ScreenMap.SETTLING));
-        assertFalse(ControlGate.ends(ScreenMap.HIDDEN));
         assertFalse(ControlGate.ends(ControlGate.SERVICE_SUSPENDED));
         assertFalse(ControlGate.ends(null));
         assertFalse(ControlGate.ends(ControlGate.NO_SESSION));

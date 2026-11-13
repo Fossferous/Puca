@@ -231,6 +231,36 @@ public class TouchPlannerTest {
     }
 
     @Test
+    public void aShortcutTypesNothingButTheTextAnAltGrMadeStillGoes() {
+        TouchPlanner p = new TouchPlanner();
+        // Ctrl+A, Meta+V and Alt+F: a phone has no shortcuts, and these
+        // typed the key's letter.
+        p.key("ControlLeft", true, 0);
+        p.key("KeyA", true, 1);
+        p.key("KeyA", false, 2);
+        p.key("ControlLeft", false, 3);
+        p.key("MetaLeft", true, 4);
+        p.key("KeyV", true, 5);
+        p.key("MetaLeft", false, 6);
+        p.key("AltLeft", true, 7);
+        p.key("KeyF", true, 8);
+        p.key("AltLeft", false, 9);
+        // AltGr+Q on a German keyboard: Windows sends ControlLeft and
+        // AltRight as keys, and the page sends the '@' it makes as text.
+        p.key("ControlLeft", true, 10);
+        p.key("AltRight", true, 11);
+        p.text("@", 12);
+        p.key("AltRight", false, 13);
+        p.key("ControlLeft", false, 14);
+        // Released: a plain key types again (POSITIVE CONTROL).
+        p.key("KeyB", true, 15);
+        TouchPlanner.Work w = p.poll(1000);
+        assertEquals(TouchPlanner.TEXT, w.action);
+        assertEquals("@b", w.text);
+        assertNull(p.poll(1000));
+    }
+
+    @Test
     public void escapeIsBackAndTheNavButtonsAreGlobalActions() {
         TouchPlanner p = new TouchPlanner();
         p.key("Escape", true, 0);

@@ -613,8 +613,18 @@ try {
         !!await until(() => P.evaluate((s) => !document.querySelector(s), SEL.prompt), 8000));
     const v1 = await viewerControl(V);
     check('NEGATIVE CONTROL: nothing was granted', !v1.controlling, v1);
+    // A request taken back is a step on the denial ladder, both sides: asking
+    // again at once puts up no prompt (a Request / Cancel loop used to put up
+    // a prompt and a notification every time).
+    await V.evaluate(() => document.querySelector('button[title="Request control of this screen"]')?.click());
+    const held = await until(async () => { const s = await viewerControl(V); return /You can ask .* again in/.test(s.notice || '') ? s : null; }, 4000, 200);
+    await sleep(1500);
+    const noPrompt = await P.evaluate((s) => !document.querySelector(s), SEL.prompt);
+    check('asking again at once after taking a request back: told to wait, and no prompt on the phone', !!held && noPrompt, held ?? await viewerControl(V));
 
     // ---- 2. switched on; DENIED: nothing lands
+    step('waiting out the cooldown the withdrawn request started');
+    await sleep(11000);
     step('service on');
     serviceOn();
     const on = await until(() => bound() ? true : null, 10000);
@@ -637,8 +647,10 @@ try {
         !!rowN && onMainList(after) && !onRowPage(after), { row: !!rowN, main: onMainList(after) });
 
     // ---- 2b. Allow in the page, CANCEL in Android's own dialog: nothing lands
+    // The ladder: the withdrawn request 10 s, this denial 30 s, the Cancel
+    // below 60 s (remoteControl.ts DENIAL_STEPS_MS).
     step('waiting out the denial cooldown');
-    await sleep(11000);
+    await sleep(31000);
     step('the page\'s Allow, then Cancel in Android\'s dialog');
     const r2b = await requestControl(V, P, 'native-cancel');
     check('the page\'s Allow alone starts nothing: the viewer is still asking', r2b.prompt && r2b.ready && !!r2b.pageOnly, r2b);
@@ -656,8 +668,8 @@ try {
         !!cRow && onMainList(cAfter) && !onRowPage(cAfter), { row: !!cRow, main: onMainList(cAfter) });
 
     // ---- 3. ALLOWED
-    step('waiting out the second denial\'s cooldown');
-    await sleep(31000);
+    step('waiting out the third step\'s cooldown');
+    await sleep(61000);
     const r3 = await requestControl(V, P, 'allow');
     check('a third request, allowed on the phone (the page, then Android\'s dialog)', r3.prompt && r3.ready && r3.tapped && !!r3.native?.named, r3);
     const active = await until(async () => { const s = await viewerControl(V); return s.controlling?.status === 'active' && s.kind === 'phone' ? s : null; }, 15000);

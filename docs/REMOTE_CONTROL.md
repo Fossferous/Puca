@@ -234,13 +234,17 @@ is read out, logged or sent.
   JavaScript, and anything that ever ran in it (a rendering bug that let a
   message run script, an update signed with a stolen key) could otherwise
   call `begin` and `inject` and drive every app on the phone; script in a
-  WebView cannot press a native dialog. That dialog takes no press for its
-  first 800 ms (a dialog that pops up under a moving finger is not answered
-  by it), lets no other app's window click through it, is never asked while a
-  session lasts, and is a No after 30 s; its Cancel is a Deny (the denial
-  ladder). Every request is asked again; an offer (the phone's person
-  offering control) counts as the page's half of the consent, and Android's
-  dialog still asks. The page's own Allow, on a phone and a desktop alike,
+  WebView cannot press a native dialog. That dialog takes no press until it
+  has been in front, with the window focus, for 800 ms (a dialog that pops up
+  under a moving finger is not answered by it; counted from when it is SEEN,
+  and taken away with the focus, so one asked while the person was in another
+  app is not already live when they come back), lets no other app's window
+  click through it, is never asked while a session lasts, and is a No after
+  30 s; its Cancel is a Deny (the denial ladder). Every request is asked
+  again; an offer (the phone's person offering control) counts as the page's
+  half of the consent, and Android's dialog still asks, with a notification
+  (*X took your offer to control this phone*), as the person is usually in
+  another app by then. The page's own Allow, on a phone and a desktop alike,
   also takes no press for 800 ms after a prompt for a NEW requester appears
   (the prompt is keyed by who asks). The prompt says what control of a phone means
   and, with the service off, how to switch it on (with Android 13+'s *Allow
@@ -252,7 +256,10 @@ is read out, logged or sent.
 - A request reaches a phone that is showing another app as a notification
   (*X wants to control this phone*), one at a time under one key (a new one
   replaces the last); the denial ladder throttles repeat requests before they
-  get that far, as it does on a desktop.
+  get that far, as it does on a desktop. A request the viewer takes back (its
+  cancel button, or the viewer's own give-up) before it is answered is a step
+  on that ladder, on both sides: a Request / Cancel loop put up a fresh prompt
+  and notification every time.
 - A viewer who withdraws while the phone is still asking or starting its
   native session (after the page's Allow, on an offer too) gets no grant:
   Android's dialog is taken down, and a session that started is ended rather
@@ -288,10 +295,14 @@ is read out, logged or sent.
   every touch on it, and blocked whatever sat under it at the top of the
   screen, Settings' search bar on the emulator). No overlay, no session: if
   Android refuses it, Allow starts nothing.
-- It ends at once, natively, on: either Stop, the phone locking or its screen
-  going off, the service switched off in Android's settings, the share ending
-  or no longer being of the whole screen; and from the page on everything that
-  ends a desktop session (the viewer stopping, leaving the call, the 90 s
+- It ends natively on: either Stop, the phone locking or its screen going off,
+  the service switched off in Android's settings, the share ending, or the
+  share being of one app (including one app shared that is now behind
+  another: that used to pause control, which came back by itself when the
+  person went back to it). Stop, the screen going off, the service and the
+  share's end act at once; the rest within a second, as a live session checks
+  every second whether it may go on (`PhoneControl.WATCH_MS`), input or not.
+  From the page it ends on everything that ends a desktop session (the viewer stopping, leaving the call, the 90 s
   inactivity timeout, the socket dropping). A native end tells the page, which
   tells the viewer. Control never resumes by itself: after an unlock the
   viewer asks again and the person answers again.
@@ -320,8 +331,15 @@ stay silent on Lite). The page side, `api/phoneControl.ts`, is imported only by
 **Not covered.** Android 7 (API 24/25) cannot continue a stroke: the service is
 not offered in its Accessibility settings at all (`android:enabled` from API
 26), and the prompt says control needs Android 8 or newer
-(`ControlGate.UNSUPPORTED`) rather than crash on the first tap, as it did. Typing is text, not keys: shortcuts, Tab and the arrows do nothing,
-and an app that reads only key events (some games, terminals) gets nothing.
+(`ControlGate.UNSUPPORTED`) rather than crash on the first tap, as it did.
+Typing is text, not keys: shortcuts, Tab and the arrows do nothing, and an app
+that reads only key events (some games, terminals) gets nothing. A shortcut
+(a character key with Ctrl, Alt or the Meta key that is not how the character
+is typed), a dead key and a desktop input method's keys are not sent to a
+phone at all (`phoneKeyText.ts`'s `phoneDropsKey`; the phone also types no
+character while Ctrl, Alt or Meta is held): they typed the key's letter. So an
+accent typed with a dead key, and text from a desktop input method (Chinese,
+Japanese, Korean), do not reach a phone; AltGr and Option characters do.
 Media keys, volume and the power button are not offered. My Devices does not
 control a phone yet (`api/devices/hostCapacitor.ts`); this is control from a
 call only.

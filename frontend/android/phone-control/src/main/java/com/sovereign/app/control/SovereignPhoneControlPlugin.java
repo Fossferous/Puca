@@ -179,8 +179,9 @@ public class SovereignPhoneControlPlugin extends Plugin {
      * Android's dialog over Púca, naming who asked. The page cannot press it
      * (WebView script reaches no native view), no viewer can (no session yet,
      * and none is asked while one lasts), another app's window drawn over it
-     * cannot click through it, and Allow takes no press for
-     * {@link Consent#ARM_MS}.
+     * cannot click through it, and Allow takes no press until it has been in
+     * front, with the focus, for {@link Consent#ARM_MS} (and none while it
+     * is not).
      */
     private void showConsent(Activity act, String name) {
         AlertDialog d = new AlertDialog.Builder(act)
@@ -190,6 +191,7 @@ public class SovereignPhoneControlPlugin extends Plugin {
                 .setPositiveButton(R.string.phone_control_confirm_allow, null)
                 .setOnCancelListener(x -> consent.decline())
                 .create();
+        final Runnable[] arm = new Runnable[1];
         d.setOnShowListener(x -> {
             Button allow = d.getButton(DialogInterface.BUTTON_POSITIVE);
             Button cancel = d.getButton(DialogInterface.BUTTON_NEGATIVE);
@@ -197,7 +199,23 @@ public class SovereignPhoneControlPlugin extends Plugin {
             if (allow == null) return;
             allow.setFilterTouchesWhenObscured(true);
             allow.setEnabled(false);
-            PhoneControl.main().postDelayed(() -> allow.setEnabled(true), Consent.ARM_MS);
+            arm[0] = () -> allow.setEnabled(consent.armed(SystemClock.elapsedRealtime()));
+            // Armed only while it is seen: counted from the window focus, and
+            // taken away with it.
+            allow.getViewTreeObserver().addOnWindowFocusChangeListener(focused -> {
+                PhoneControl.main().removeCallbacks(arm[0]);
+                if (focused) {
+                    consent.shown(SystemClock.elapsedRealtime());
+                    PhoneControl.main().postDelayed(arm[0], Consent.ARM_MS);
+                } else {
+                    consent.hidden();
+                    allow.setEnabled(false);
+                }
+            });
+            if (allow.hasWindowFocus()) {
+                consent.shown(SystemClock.elapsedRealtime());
+                PhoneControl.main().postDelayed(arm[0], Consent.ARM_MS);
+            }
             // Set here, not on the builder: the builder's listener closes the
             // dialog on every press, including one that did not count.
             allow.setOnClickListener(v -> consent.allow(SystemClock.elapsedRealtime()));

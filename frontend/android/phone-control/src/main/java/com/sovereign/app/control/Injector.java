@@ -165,6 +165,14 @@ final class Injector {
                 inFlight = false;
                 open = w.willContinue ? stroke : null;
                 openAt = w.willContinue ? end : null;
+                if (ended) {
+                    // The session ended while this went out: end() found no
+                    // finger down to lift, and this one just went down.
+                    // Lift it now, or it stays down (a long press firing
+                    // after the revoke) until a real touch.
+                    lift();
+                    return;
+                }
                 planner.done(true, SystemClock.elapsedRealtime());
                 pump();
             }
