@@ -5,7 +5,9 @@
     top: 0;
     left: 0;
     right: 0;
-    background: linear-gradient(135deg, #4752c4 0%, #5865f2 100%); /* white on #7289da was 3.33:1 */
+    /* White on #7289da was 3.33:1, and the version line's words are at 0.9 (0.81 for the notes):
+       these hold them at 4.83:1 or more. */
+    background: linear-gradient(135deg, #3c45a5 0%, #4752c4 100%);
     color: white;
     padding: 12px 24px;
     display: flex;

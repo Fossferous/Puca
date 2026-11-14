@@ -295,7 +295,8 @@
     /* The dark palette's are 1.7 to 3.4:1 on Light's surfaces. These hold 4.5:1 on all of them,
        --bg-tertiary included. */
     --text-link: #0060ac;
-    --text-warning: #8a5a00;
+    /* 4.68:1 on an @everyone chip in a row that mentions you, 5.16 on a brand-tinted row. */
+    --text-warning: #7a4f00;
     --text-danger: #b42318;
     --text-positive: #1a6f2f;
     /* The same as fills, behind white words, and as words where a rule names the fill: the dark
