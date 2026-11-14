@@ -5835,19 +5835,19 @@ mod web_push_away_tests {
             state.set_conn_push_away(7, old, true);
             state.web_push_record(7, dm(&format!("{sid}-missed"))); // coalesced: not told yet
             state.unregister_session(7, old); // the network changed
-            std::thread::sleep(std::time::Duration::from_millis(20)); // so a fresh away moment would show
+            std::thread::sleep(std::time::Duration::from_millis(250)); // so a fresh away moment would show
             let (new, _rx2) = connect(&state, sid, false);
             if carried {
                 assert!(state.carry_conn_push_away(7, new));
                 assert!(!state.sid_is_present(7, sid), "away again, on the new socket");
                 assert!(
-                    state.web_push_away_age(sid).unwrap() >= std::time::Duration::from_millis(20),
+                    state.web_push_away_age(sid).unwrap() >= std::time::Duration::from_millis(250),
                     "no new away moment recorded: it is still the one from before the reconnect"
                 );
                 assert_eq!(convs(&state.web_push_unseen(7, 1, sid)), vec![format!("{sid}-missed")]);
             } else {
                 state.set_conn_push_away(7, new, true);
-                assert!(state.web_push_away_age(sid).unwrap() < std::time::Duration::from_millis(20));
+                assert!(state.web_push_away_age(sid).unwrap() < std::time::Duration::from_millis(250));
                 assert!(state.web_push_unseen(7, 2, sid).is_empty(), "CONTROL: a plain away buries it");
             }
         }
@@ -5867,10 +5867,10 @@ mod web_push_away_tests {
         state.set_conn_push_away(7, conn, true);
         state.set_conn_push_away(7, conn, false); // on screen
         state.web_push_record(7, dm("seen-on-screen"));
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(250));
         assert!(state.carry_conn_push_away(7, conn));
         assert!(!state.sid_is_present(7, "phone"));
-        assert!(state.web_push_away_age("phone").unwrap() < std::time::Duration::from_millis(20), "a new away moment");
+        assert!(state.web_push_away_age("phone").unwrap() < std::time::Duration::from_millis(250), "a new away moment");
         state.web_push_record(7, dm("after"));
         assert_eq!(convs(&state.web_push_unseen(7, 1, "phone")), vec!["after"], "what it had on screen is not named");
     }
