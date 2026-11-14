@@ -333,7 +333,9 @@ describe('docs/USER_GUIDE.md quotes the voice panel\'s real SPEAK copy', () => {
     };
 
     it('the panel label', () => {
-        const m = /speakDenied \? "([^"]+)"/.exec(VP);
+        // The connection line is its own component (VoiceConnectionLine), drawn by the panel.
+        expect(VP).toMatch(/<VoiceConnectionLine[\s\S]*?speakDenied=\{speakDenied\}/);
+        const m = /speakDenied \? "([^"]+)"/.exec(stripComments(read('components/VoiceConnectionLine.tsx')));
         expect(m).not.toBeNull();
         expect(m![1]).toBe("Voice Connected · can't speak");
         expect(GUIDE).toContain(m![1]);

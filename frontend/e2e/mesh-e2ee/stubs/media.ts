@@ -22,20 +22,29 @@ async function toneTrack(frequency: number): Promise<MediaStreamTrack> {
     return dest.stream.getAudioTracks()[0];
 }
 
-/** A moving picture at `fps` frames a second. */
-function canvasTrack(fps: number): MediaStreamTrack {
+/** A moving picture at `fps` frames a second: its hue turning, or one
+ *  `colour` throughout (a camera told apart from another by what it shows).
+ *  A slow one (5 fps or fewer) hands over exactly one frame per drawing
+ *  (requestFrame): captureStream(1)'s own clock drifts against the drawing
+ *  timer, and Firefox then took a frame every two or three seconds, seldom
+ *  enough to fail a count of frames a second (measured: 7-14 frames in a
+ *  share of about 25 s). */
+function canvasTrack(fps: number, colour?: string): MediaStreamTrack {
     const canvas = document.createElement('canvas');
     canvas.width = 320; canvas.height = 240;
     const g = canvas.getContext('2d')!;
+    const slow = fps <= 5;
+    const track = (canvas as HTMLCanvasElement & { captureStream(fps?: number): MediaStream }).captureStream(slow ? 0 : fps).getVideoTracks()[0];
     let n = 0;
     setInterval(() => {
         n++;
-        g.fillStyle = `hsl(${(n * 7) % 360} 80% 50%)`;
+        g.fillStyle = colour ?? `hsl(${(n * 7) % 360} 80% 50%)`;
         g.fillRect(0, 0, 320, 240);
         g.fillStyle = '#fff';
         g.fillRect((n * 5) % 300, 100, 20, 40);
+        if (slow) (track as MediaStreamTrack & { requestFrame?: () => void }).requestFrame?.();
     }, Math.max(33, Math.round(1000 / fps)));
-    return (canvas as HTMLCanvasElement & { captureStream(fps?: number): MediaStream }).captureStream(fps).getVideoTracks()[0];
+    return track;
 }
 
 export class MediaManager {
@@ -51,9 +60,10 @@ export class MediaManager {
         return this.local;
     }
 
-    /** A drawn "camera", added to the local stream; the track is returned. */
-    addCamera(): MediaStreamTrack {
-        const video = canvasTrack(30);
+    /** A drawn "camera" (of one `colour`, if given), added to the local
+     *  stream; the track is returned. */
+    addCamera(colour?: string): MediaStreamTrack {
+        const video = canvasTrack(30, colour);
         this.local!.addTrack(video);
         return video;
     }
@@ -84,6 +94,7 @@ export class MediaManager {
         if (!enable) cams.forEach((t) => { t.stop(); this.local!.removeTrack(t); });
         return null;
     }
+    onCameraReleasing(): () => void { return () => { /* this stand-in never switches cameras */ }; }
     async switchCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }
     cameraSwitchInProgress(): boolean { return false; }
     async flipCamera(): Promise<CameraSwitch> { return { ok: false, reason: 'no-camera', track: null }; }

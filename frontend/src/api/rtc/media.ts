@@ -601,6 +601,22 @@ export class MediaManager {
         return () => { this.vadRebuilds.delete(fn); };
     }
 
+    /** Told just before a switch stops the open camera to open the next. */
+    private cameraReleasing = new Set<(track: MediaStreamTrack) => void>();
+
+    /**
+     * Register a callback fired just before a camera switch stops the camera
+     * that is on, so whatever holds a COPY of its track lets go of it too: a
+     * clone keeps the camera itself open (its source stops only with its
+     * last track), and a phone opens one camera at a time, so the next one
+     * would be refused while it lived. The encryption hold's stand-in is such
+     * a clone (WebRTCManager.heldSenders). Returns an unregister.
+     */
+    onCameraReleasing(fn: (track: MediaStreamTrack) => void): () => void {
+        this.cameraReleasing.add(fn);
+        return () => { this.cameraReleasing.delete(fn); };
+    }
+
     /** Close the shared voice-activity-detector AudioContext (on leaving voice). */
     closeVadContext() {
         if (this.vadContext && this.vadContext.state !== 'closed') {
@@ -813,7 +829,11 @@ export class MediaManager {
             return { ok: true, track: now.track }; // already on
         }
         const epoch = this.cameraEpoch;
-        stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
+        stream.getVideoTracks().forEach(t => {
+            this.cameraReleasing.forEach(fn => { try { fn(t); } catch (e) { console.warn('[WebRTC] camera-release listener failed:', e); } });
+            t.stop();
+            stream.removeTrack(t);
+        });
         const stale = () => this.localStream !== stream || this.cameraEpoch !== epoch;
 
         let track: MediaStreamTrack | null = null;

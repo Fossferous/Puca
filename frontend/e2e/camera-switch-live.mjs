@@ -30,7 +30,10 @@
 //   - a real tap on the self-view opens the camera menu: all three cameras by
 //     name, the one on ticked; the ultra wide from it turns the tile blue;
 //     Flip from there goes to the front (red, mirrored again);
-//   - the choice is remembered: camera off and on opens the camera last used;
+//   - the choice is remembered: camera off and on opens the camera last used,
+//     and the desktop's tile of it is that camera, live (on a mesh call it
+//     stayed frozen or black there, and the phone added no second video
+//     transceiver for it);
 //   - full screen: its Flip and its Turn Off Camera whole, the picture
 //     mirrored only for the front camera;
 //   - the desktop: Flip goes to the other webcam (mirrored both: a webcam
@@ -432,8 +435,27 @@ try {
     for (const [tag, p] of [['desktop', D], ['phone', P]]) {
         await p.evaluate((id) => document.querySelector(`[data-testid="server-icon"][data-server-id="${id}"]`)?.click(), srv.id);
         await sleep(1000);
+        // SFU: what the panel's line said while LiveKit was still connecting,
+        // and whether LiveKit WAS connected the moment voice-connected first
+        // appeared (docs/AUTOMATION.md: present while this device is in the
+        // call). It said Voice Connected, with voice-connected, all along.
+        if (SFU) {
+            await p.evaluate(async () => {
+                const { sfuManager } = await import('/src/api/rtc/sfuManager.ts');
+                const seen = window.__joinLine = { connecting: false, connectedEarly: null };
+                const look = () => {
+                    if (document.querySelector('[data-testid="voice-connecting"]')) seen.connecting = true;
+                    if (seen.connectedEarly === null && document.querySelector('[data-testid="voice-connected"]')) seen.connectedEarly = !sfuManager.connected;
+                };
+                new MutationObserver(look).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-testid'] });
+            });
+        }
         await p.evaluate((id) => document.querySelector(`[data-testid="voice-channel"][data-channel-id="${id}"]`)?.click(), voice.id);
         check(`${tag} is in the call`, !!await until(async () => (await p.locator('[data-testid="voice-connected"]').count()) > 0, 30000));
+        if (SFU) {
+            const seen = await p.evaluate(() => window.__joinLine);
+            check(`SFU, ${tag}: voice-connected appears only once LiveKit is connected (Connecting… before)`, seen?.connectedEarly === false, seen);
+        }
     }
     await sleep(2500);
     // The desktop looks at the call (its stage, with the phone's tile).
@@ -516,6 +538,20 @@ try {
     await press(P, '.vp-camera');
     const again = await waitOwn(P, c => c.live && c.block !== 'none');
     check('phone: the camera turned on again is the one last used (Back Camera), not mirrored', again.label === 'Back Camera' && unmirrored(again), { label: again.label, block: again.block });
+    // The VIEWER's tile: on a mesh call it stayed on the last picture, or
+    // black, once the camera had been turned off and on (the camera went out
+    // on a second sender in the same stream, the dead track first). The
+    // desktop must show the camera that is on now, frames rising.
+    await tileShows(D, uid.P, 'green', 'turned off and on again');
+    await encrypted(D, P, uid.P, 'turned off and on again');
+    if (!SFU) {
+        const lines = await P.evaluate(async (id) => {
+            const { webrtcManager } = await import('/src/api/webrtc.ts');
+            const pc = webrtcManager.peers.get(id)?.connection;
+            return pc ? pc.getTransceivers().filter(t => t.receiver.track.kind === 'video').length : null;
+        }, uid.D);
+        check('mesh: the phone\'s camera went back on its own sender (one video transceiver toward the desktop, none added)', lines === 1, { videoTransceivers: lines });
+    }
     const stored = await P.evaluate(() => JSON.parse(localStorage.getItem('sovereign_settings') || '{}').camera ?? null);
     check('phone: kept in Settings as the camera to open', stored?.deviceId === 'cam-back' && stored?.facing === 'environment', stored);
 

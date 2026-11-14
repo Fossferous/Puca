@@ -205,6 +205,22 @@ export function clearSpeaking(): void {
     emitSpeaking();
 }
 
+/**
+ * The call's voice-activity detectors (and the silent-capture sentinel) are
+ * stopped, all of them, and with them every ring they lit: whoever was
+ * speaking when they stopped would otherwise stay "speaking" with nothing left
+ * to say otherwise. Both ways out of a call (leaveVoice, and the panel's
+ * teardown on a channel switch, which remounts it without leaveVoice) end
+ * here. The switch used to stop the detectors only: your own ring stayed lit
+ * in the next channel until you spoke again (forever, muted or in an AFK
+ * channel), and every watched stream stayed ducked under it (StreamStage).
+ */
+export function stopSpeakingDetectors(cleanups: Map<number, () => void>): void {
+    cleanups.forEach(cleanup => cleanup());
+    cleanups.clear();
+    clearSpeaking();
+}
+
 export function subscribeToSpeaking(callback: SpeakingListener): () => void {
     speakingListeners.add(callback);
     return () => speakingListeners.delete(callback);
