@@ -21,11 +21,13 @@
 //   4. every component in the app on Light, inside the elements of each place it is used (skeleton's
 //      placesOf: up to PLACES_PER_COMPONENT call sites, what a parent puts around its children, JSX
 //      held in a local or made by a helper where it is named, a portal on the page), in each arm of
-//      every branch with the elements around it in the same arm, with and without High Contrast, at
-//      both sizes: the same 4.5:1 and 3:1, with opacity counted (dimmed words are read dimmed), past
-//      the two entries in NOT_AS_DRAWN, each with its reason. Until 2026-11-14 this held only 3:1
-//      and only where the dark theme held, ignored opacity, and read each component on the chat's
-//      paper: the role editor's panels inside Light's Server Settings went unseen that way;
+//      every branch and each value a class from data can take (skeleton's dataVariants), with the
+//      elements around it in the same arm, with and without High Contrast, at both sizes, and again
+//      at 1280x800 with every :hover and :focus on: the same 4.5:1 and 3:1, with opacity counted
+//      (dimmed words are read dimmed), past the two entries in NOT_AS_DRAWN, each with its reason.
+//      Until 2026-11-14 this held only 3:1 and only where the dark theme held, at rest, ignored
+//      opacity and data classes, and read each component on the chat's paper: the role editor's
+//      panels inside Light's Server Settings and the call's encryption badge (1.03:1) went unseen;
 //   5. NEGATIVE CONTROLS. OLD_LIGHT is Light's colours as they were: every surface must fail on it,
 //      or the checks above prove nothing, and the whole-app sweep must report it. OLD_SHARED does the
 //      same for the words that were below the bar on every theme. LIGHT_AT_RAISE is Light as it was
@@ -41,7 +43,7 @@ import { chromium } from 'playwright';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { armsIn, inPlace, placesOf, readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
+import { armsIn, dataVariants, inPlace, placesOf, readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, '..', 'src');
@@ -125,6 +127,17 @@ const LIGHT_AT_RAISE = `
 .pcard-muted { opacity: 0.45 !important; filter: none !important; }
 .clip-duration-chip-size { opacity: 0.8 !important; }
 .user-profile-popup .friend-btn.pending { color: #8e9297 !important; }
+.voice-e2ee.on { color: #b8f5c8 !important; background: rgba(36, 128, 70, 0.18) !important; }
+.voice-e2ee.partial { color: #ffe0a3 !important; background: rgba(191, 149, 60, 0.18) !important; }
+.voice-e2ee.off { color: #ffc4c4 !important; background: rgba(191, 60, 60, 0.15) !important; }
+.user-profile-popup .verify-btn.changed { color: #ffc4c4 !important; }
+button.ta-file.saved { color: #7fd18b !important; } button.ta-file.error { color: #ffb4b4 !important; }
+.report-badge.spam, .audit-badge.kick, .report-status.pending { color: #f0b232 !important; }
+.report-badge.harassment, .audit-badge.ban { color: #f04747 !important; }
+.report-badge.inappropriate { color: #eb459e !important; } .report-status.resolved { color: #23a55a !important; }
+.user-profile-bar .user-status.idle, .user-profile-bar .user-status.away, .active-status.idle, .active-status.away { color: var(--status-idle) !important; }
+.cal-chip-time, .cal-chip-span { color: var(--text-muted) !important; }
+.attachment-saved { opacity: 0.75 !important; }
 [data-theme="light"] .role-editor-embedded {
     --text-normal: #313338 !important; --text-muted: #5a5c64 !important; --text-faint: #62656e !important;
     --header-primary: #060607 !important; --header-secondary: #4e5058 !important; color: #313338 !important;
@@ -206,6 +219,9 @@ const RAISED = [
     'message-link', 'mention everyone', 'clip-attachment-broken', 'task-completed', 'cal-chip done', 'cal-row-title',
     'blocked-message-stub', 'option-hint-dim', 'device-wake-countdown', 'gseat-name', 'PlayingCard.tsx',
     'clip-duration-chip-size', 'friend-btn pending', 'sub-icon', 'message-attachment loading', 'update-notes',
+    // Found once a class from data was read in each value the stylesheet gives it.
+    'voice-e2ee-label', 'verify-btn changed', 'ta-file saved', 'ta-file error', 'report-badge spam', 'audit-badge ban',
+    'report-status pending', 'user-status idle', 'active-status away', 'cal-chip-time', 'attachment-saved',
 ];
 // High Contrast's muted and faint words already held 4.5:1 at these, so they were below the bar
 // without it only.
@@ -260,6 +276,8 @@ const mountsCss = mounts.outputFiles.find(file => file.path.endsWith('.css')).te
 
 // ---- what is on the page ------------------------------------------------------------------------
 const jsx = readJsx(srcDir);
+// What a class that comes from data can be, as the stylesheet the sweep reads under names it.
+dataVariants(jsx, `${appCss}\n${inlineNotes}`);
 const { components, all } = jsx;
 const instancesOf = (surface) => {
     if (surface.startsWith('<')) return all.filter(node => node.tag === surface.slice(1));
@@ -316,6 +334,9 @@ const pageWith = (name, body, sheet, script = '') => {
 const inApp = inner => `<div id="root" class="chat-container" style="display:block;height:auto;min-height:0;color:var(--text-normal);background:var(--bg-primary)">${inner}</div>`;
 const surfacesUrls = STYLESHEETS.map(([name, sheet], i) => [name, pageWith(`surfaces-${i}.html`, inApp(sectionsFor(name, sheet).join('\n')), sheet)]);
 const sweepUrl = pageWith('sweep.html', `${onTheBody.join('\n')}${inApp(sweep.join('\n'))}`, STYLESHEETS[2][1]);
+// The same with every :hover and :focus on: `:not(.__never)` matches as they would, with their weight.
+const hovered = sheet => sheet.replace(/:(hover|focus-visible|focus-within|focus)(?![\w-])/g, ':not(.__never)');
+const sweepHoveredUrl = pageWith('sweep-hovered.html', `${onTheBody.join('\n')}${inApp(sweep.join('\n'))}`, hovered(STYLESHEETS[2][1]));
 const mountsUrl = pageWith('mounts.html', '<div id="root"></div>', mountsCss, mountsJs);
 // The call's header as VoiceStage draws it, alone on a page, for a real pointer to rest on.
 const callHeaders = instancesOf('.voice-stage-header');
@@ -755,6 +776,24 @@ for (const [name, options, sheetName, url] of [
             }
             await page.evaluate(() => window.__old(''));
         }
+        await close();
+    }
+    // Under a mouse and with the keyboard's focus: the same sweep with every :hover and :focus rule
+    // on, each selector keeping its weight. A pointer resting on something hovers all around it too,
+    // so those come on together, as they do. 1280x800, where there is a mouse.
+    {
+        const { page, close } = await open(sweepHoveredUrl);
+        check(await page.evaluate(() => [...document.styleSheets].every(sheet => [...sheet.cssRules].every(rule => !/:hover|:focus/.test(rule.cssText)))), 'CONTROL: no :hover or :focus is left to wait for a pointer in the hovered sweep');
+        for (const contrast of CONTRASTS) {
+            const rows = await read(page, ['light', contrast]);
+            readings += rows.length;
+            byLook.push([`light/${contrast} 1280x800 hovered and focused`, unexcused(rows, true)]);
+        }
+        // CONTROL: Settings' Log Out under the pointer as it was (white words on a faint pink).
+        await page.evaluate(sheet => window.__old(sheet), '.settings-modal .danger-btn:not(.__never) { color: #fff !important; background: rgba(243, 139, 168, 0.1) !important; }');
+        const then = failing(await read(page, ['light', 'normal']));
+        check(then.some(row => row.cls.split(' ').includes('danger-btn')), 'CONTROL: the hovered sweep finds a button whose words go white under the pointer on Light', `${then.length} places`);
+        await page.evaluate(() => window.__old(''));
         await close();
     }
     const stale = NOT_AS_DRAWN.filter(([name]) => !used.has(name)).map(([name]) => name);

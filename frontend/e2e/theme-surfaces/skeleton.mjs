@@ -79,7 +79,26 @@ const armCount = (node) => {
     return most;
 };
 
-const words = list => list.join(' ').split(/\s+/).filter(word => /^[a-zA-Z_][\w-]*$/.test(word));
+const words = list => list.join(' ').split(/\s+/).filter(word => /^[a-zA-Z_][\w-]*[\w]$|^[a-zA-Z_]$/.test(word));
+
+// A class that comes from data (`voice-e2ee ${badge.cls}`, `kind-${e.kind}`): what is before it in
+// the same word, if anything. The stylesheet says what it can be (dataVariants).
+const dataParts = (node, into = []) => {
+    if (!node) return into;
+    if (ts.isTemplateExpression(node)) {
+        let before = node.head.text;
+        for (const span of node.templateSpans) {
+            const inner = span.expression;
+            if (ts.isIdentifier(inner) || ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner) || ts.isCallExpression(inner)) {
+                into.push({ prefix: /\s$/.test(before) || !before ? '' : before.split(/\s+/).pop() });
+            } else dataParts(inner, into);
+            before = span.literal.text;
+        }
+        return into;
+    }
+    ts.forEachChild(node, child => dataParts(child, into));
+    return into;
+};
 
 const parseFile = (file, srcDir, components, all) => {
     const at = relative(srcDir, file).split(sep).join('/');
@@ -108,6 +127,7 @@ const parseFile = (file, srcDir, components, all) => {
             found.classes = words(classNames(value));
             found.steady = words(steadyClassNames(value));
             found.arms = Array.from({ length: armCount(value) }, (_, k) => words(classNames(value, [], k)));
+            found.data = dataParts(value);
         }
         const visit = (child) => {
             if (ts.isJsxText(child)) { if (child.text.trim()) found.text = true; return; }
@@ -227,7 +247,7 @@ export const readJsx = (srcDir) => {
 export const placesOf = ({ components, all }, { most = 3 } = {}) => {
     const sites = new Map();
     for (const node of all) if (!node.intrinsic) (sites.get(node.tag) ?? sites.set(node.tag, []).get(node.tag)).push(node);
-    const wrapper = node => ({ tag: node.tag.toLowerCase(), classes: node.steady, steady: node.steady, arms: node.arms });
+    const wrapper = node => ({ tag: node.tag.toLowerCase(), classes: node.steady, steady: node.steady, arms: node.arms, variants: node.variants });
     const toSlot = (node, trail = new Set()) => {
         if (node.slot) return [];
         if (trail.has(node)) return null;
@@ -310,9 +330,37 @@ export const placesOf = ({ components, all }, { most = 3 } = {}) => {
 // (toHtml's `steady` or `arm`): a row a mention marks (`.message.mentioned`) is read with the words
 // in it. What the HTML parser would move or drop around other markup (a table's parts, SVG, a <p>)
 // is a div with the same classes.
-export const classesFor = (node, { steady = false, arm = null } = {}) => (
-    steady ? node.steady : arm === null ? node.classes : node.arms[Math.min(arm, node.arms.length - 1)]
-);
+export const classesFor = (node, { steady = false, arm = null } = {}) => {
+    if (steady) return node.steady;
+    if (arm === null) return node.classes;
+    const classes = node.arms[Math.min(arm, node.arms.length - 1)];
+    return node.variants?.length ? [...classes, node.variants[arm % node.variants.length]] : classes;
+};
+
+// What each class that comes from data can be, from the stylesheet: every class written together
+// with one of the element's own (`.voice-e2ee.on`, `.report-badge.spam`), or starting with what is
+// before it in its word (`.cal-chip.kind-task`). Each becomes one of the element's arms (toHtml's
+// `arm` k takes the k-th, round). A data class the stylesheet names nowhere changes no colour.
+export const dataVariants = ({ all }, css, { most = 10 } = {}) => {
+    const together = new Map();
+    for (const [compound] of css.matchAll(/(?:\.[a-zA-Z_][\w-]*){2,}/g)) {
+        const names = compound.split('.').filter(Boolean);
+        for (const a of names) for (const b of names) if (a !== b) (together.get(a) ?? together.set(a, new Set()).get(a)).add(b);
+    }
+    for (const node of all) {
+        if (!node.data?.length) continue;
+        const own = new Set(node.classes);
+        const found = new Set();
+        for (const { prefix } of node.data) {
+            for (const base of node.steady) {
+                for (const name of together.get(base) ?? []) {
+                    if (!own.has(name) && (!prefix || (name.startsWith(prefix) && name !== prefix))) found.add(name);
+                }
+            }
+        }
+        node.variants = [...found].sort().slice(0, most);
+    }
+};
 export const inPlace = (place, html, pick = { steady: true }) => {
     const tags = place.map(({ tag }) => (SKIP.has(tag) || /^(table|thead|tbody|tfoot|tr|td|th|caption|colgroup|col|p|select|option)$/.test(tag) ? 'div' : tag));
     const open = place.map((element, i) => `<${tags[i]} class="${escape((element.arms ? classesFor(element, pick) : element.classes).join(' '))}" data-place="1">`).join('');
@@ -358,5 +406,5 @@ export const toHtml = (node, components, { steady = false, arm = null, around = 
 export const armsIn = (node, trail = new Set()) => {
     if (node.slot || trail.has(node)) return 1;
     const next = new Set(trail).add(node);
-    return Math.max(node.arms?.length ?? 1, ...(node.kids ?? []).map(kid => armsIn(kid, next)));
+    return Math.max(node.arms?.length ?? 1, node.variants?.length ?? 1, ...(node.kids ?? []).map(kid => armsIn(kid, next)));
 };
