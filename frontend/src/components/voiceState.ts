@@ -5,6 +5,7 @@
 import { useSyncExternalStore } from 'react';
 import { useStreamStore } from '../stores/streamStore';
 import { logRtcEvent } from '../api/rtc/rtcEventLog';
+import { registerLogoutCleanup } from '../api/logoutHooks';
 
 export interface VoiceUser {
     id: number;
@@ -481,3 +482,12 @@ export function clearAllStreams() {
         window.dispatchEvent(new CustomEvent('voiceControlReset'));
     }
 }
+
+// Who is in which voice room, in every server this account is in ("Active in your servers" reads it
+// for servers that are not open, and nothing empties a room this client was never in). A sign-out
+// reloads nothing, so the next account signed in on this running app was shown the last one's calls.
+export function clearVoiceRoster(): void {
+    globalVoiceUsers.clear();
+    notifyVoiceUsersChange();
+}
+registerLogoutCleanup(clearVoiceRoster);

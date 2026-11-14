@@ -309,6 +309,16 @@
     color: var(--text-faint);
 }
 
+/* Friends' search boxes (All, Pending) take their row on the desktop too. They
+   are .search-bar like the chat header's, whose width rules in Chat.css load
+   later and won at equal weight: 200 px in a row of 900 (280 on focus, 140
+   in a window under 950 px). */
+.friends-dashboard .search-bar input,
+.friends-dashboard .search-bar input:focus {
+    width: 100%;
+    max-width: none;
+}
+
 .section-header {
     color: var(--text-muted);
     font-size: 0.75rem;

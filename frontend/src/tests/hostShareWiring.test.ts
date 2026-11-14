@@ -252,6 +252,34 @@ const PINS: Pin[] = [
         ],
     },
     {
+        // A throw here used to leave the announcement standing, and the dialog's
+        // Cancel after it found no start to go by (screenShareGoLiveFailed.test.tsx;
+        // host-share-start-live.mjs case 12 sees it in a real call).
+        name: "a mesh publish that throws is taken back like the SFU's refusal, never thrown to the dialog",
+        src: 'vp',
+        holds: (c) => {
+            const live = body(c, 'const goLive = async (audioChoice: GoLiveAudio, apps?: GoLiveApps, start?: ShareStart | null): Promise<EmbedResult> => {');
+            if (live === null) return false;
+            const at = live.indexOf('await webrtcManager.addScreenShareToPeers();');
+            const mesh = at < 0 ? null : live.slice(at, live.indexOf("goLiveMark('published');", at));
+            return inOrder(live, '} else {\n            try {\n                await webrtcManager.addScreenShareToPeers();\n            } catch (shareErr) {')
+                && inOrder(mesh, '} catch (shareErr) {', 'if (!isInVoiceRef.current) return leftCall();',
+                    "console.warn('[VoicePanel] screen share could not be sent to the call:', shareErr);",
+                    'if (release({ retract: true })) {', "goLiveEnd('failed');",
+                    "return { ok: false, error: (shareErr as Error).message || 'Screen share failed' };");
+        },
+        mutants: [
+            ['the throw reaches the dialog', replace(
+                '            try {\n                await webrtcManager.addScreenShareToPeers();\n            } catch (shareErr) {',
+                '            await webrtcManager.addScreenShareToPeers();\n            if (Math.random() > 2) { const shareErr = null;')],
+            ['the announcement left standing', (code) => {
+                const at = code.indexOf("console.warn('[VoicePanel] screen share could not be sent to the call:', shareErr);");
+                const i = at < 0 ? -1 : code.indexOf('if (release({ retract: true })) {', at);
+                return i < 0 ? code : code.slice(0, i) + 'if (release()) {' + code.slice(i + 'if (release({ retract: true })) {'.length);
+            }],
+        ],
+    },
+    {
         name: 'the sharing ref changes with the state, only there, and a Stop lets the OS bar go',
         src: 'vp',
         holds: (c) => /const setSharing = useCallback\(\(on: boolean\) => \{\s*isScreenSharingRef\.current = on;\s*setIsScreenSharing\(on\);\s*if \(!on\) stopHidingCaptureBar\(\);\s*\}, \[\]\);/.test(c)

@@ -97,6 +97,14 @@ function cardParts(name) {
     };
 }
 
+/** In the page: the fill of `name`'s Power off, whether it is :hover, and its card's colour. */
+function cardFill(name) {
+    const card = [...document.querySelectorAll('.device-card')]
+        .find(c => (c.querySelector('.device-name')?.firstChild?.textContent ?? '').trim() === name);
+    const btn = card && [...card.querySelectorAll('button')].find(b => b.textContent.trim() === 'Power off');
+    return btn ? { bg: getComputedStyle(btn).backgroundColor, hovered: btn.matches(':hover'), cardBg: getComputedStyle(card).backgroundColor } : null;
+}
+
 /** The Power off button of `name`, scrolled into view: its box and whether
  *  elementFromPoint at its middle is it. */
 async function powerOffTarget(page, name) {
@@ -278,7 +286,16 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
         .filter(r => r.height < 44 || r.width < 44).length);
     ck('phone: every Power off is at least 44x44', small === 0, `${small} under`);
 
+    // A tapped button keeps a sticky :hover on touch, and mobile.css gives every hovered button
+    // `background-color: inherit` there: the device buttons kept their fill only by their own rule.
+    const fillOf = (sel) => page.evaluate((s) => {
+        const b = [...document.querySelectorAll(s)].find(e => e.getBoundingClientRect().height > 0);
+        return b ? { bg: getComputedStyle(b).backgroundColor, hovered: b.matches(':hover'), text: b.textContent.trim() } : null;
+    }, sel);
+    const fills = {};
+    for (const sel of ['.device-btn-danger', '.device-btn-primary']) fills[sel] = await fillOf(sel);
     let t = await powerOffTarget(page, 'Slim-Jim');
+    const powerOffFill = await page.evaluate(cardFill, 'Slim-Jim');
     ck('phone: what a tap at the middle of Power off hits is Power off', t.hit === 'Power off', String(t.hit));
     answer = false;
     await page.touchscreen.tap(t.box.x + t.box.width / 2, t.box.y + t.box.height / 2);
@@ -287,6 +304,49 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
         confirms.length === 1 && confirms[0].type === 'confirm' && /^Power off Slim-Jim now\?/.test(confirms[0].message) && /will be lost/.test(confirms[0].message),
         JSON.stringify(confirms[0]?.message?.slice(0, 80)));
     ck('phone: dismissing it sends nothing', (await calls(page)).length === 0 && (await page.evaluate(cardParts, 'Slim-Jim')).line === null);
+    const afterTap = await page.evaluate(cardFill, 'Slim-Jim');
+    ck('phone: fixture: the tapped Power off keeps a sticky :hover (what the rule is about)', afterTap?.hovered === true, JSON.stringify(afterTap));
+    ck('phone: the tapped Power off keeps its own fill, not the card\'s', !!powerOffFill && afterTap?.bg === powerOffFill.bg && afterTap.bg !== afterTap.cardBg,
+        JSON.stringify({ before: powerOffFill, after: afterTap }));
+    const hoverKeeps = async (label) => {
+        const out = [];
+        for (const sel of ['.device-btn-danger', '.device-btn-primary']) {
+            const before = fills[sel];
+            if (!before) { out.push(`${sel}: none on the page`); continue; }
+            await page.locator(sel).filter({ visible: true }).first().hover();
+            await sleep(700); // past the buttons' background transition: read the colour it settles on
+            const now = await fillOf(sel);
+            if (!now?.hovered || now.bg !== before.bg) out.push(`${sel} "${before.text}": ${before.bg} -> ${now?.bg} (hovered ${now?.hovered})`);
+        }
+        await page.mouse.move(1, 1);
+        return { label, out };
+    };
+    const kept = await hoverKeeps('real');
+    ck('phone: a hovered danger and primary device button keep their own fill', kept.out.length === 0, kept.out.join('; '));
+    // NEGATIVE CONTROL: the same with the device buttons' touch rule taken out of the stylesheet.
+    const stripped = await page.evaluate(() => {
+        let n = 0;
+        for (const sheet of document.styleSheets) {
+            let rules; try { rules = sheet.cssRules; } catch { continue; }
+            for (let i = rules.length - 1; i >= 0; i--) {
+                const r = rules[i];
+                if (r instanceof CSSMediaRule && r.conditionText === '(hover: none)' && /\.device-btn[\w-]*:hover/.test(r.cssText)) { sheet.deleteRule(i); n++; }
+            }
+        }
+        return n;
+    });
+    const tappedAgain = await powerOffTarget(page, 'Slim-Jim');
+    answer = false;
+    await page.touchscreen.tap(tappedAgain.box.x + tappedAgain.box.width / 2, tappedAgain.box.y + tappedAgain.box.height / 2);
+    await sleep(700);
+    const noRule = await page.evaluate(cardFill, 'Slim-Jim');
+    const keptNoRule = await hoverKeeps('stripped');
+    ck('NEGATIVE CONTROL (phone): without the touch rule, the tapped Power off and the hovered danger and primary buttons lose their fill',
+        stripped > 0 && noRule?.hovered === true && noRule.bg !== powerOffFill?.bg && keptNoRule.out.length === 2,
+        JSON.stringify({ stripped, noRule, keptNoRule: keptNoRule.out }));
+    await page.reload();
+    await page.waitForFunction(n => document.querySelectorAll('.device-card').length >= n, OFFERED.length + NOT_OFFERED.length, { timeout: 10000 });
+    confirms.length = 0;
 
     answer = true;
     t = await powerOffTarget(page, 'Slim-Jim');
