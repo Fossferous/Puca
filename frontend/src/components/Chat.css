@@ -1152,7 +1152,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 [data-theme="light"] a.message-attachment:hover,
 [data-theme="light"] button.message-attachment:hover { background: var(--mode-chip-bg, rgba(0, 0, 0, 0.1)); }
-[data-theme="light"] button.message-attachment.saved { color: #1e7a34; }
+[data-theme="light"] button.message-attachment.saved { color: var(--text-positive); } /* #1e7a34 was 4.31:1 under the pointer */
 [data-theme="light"] button.message-attachment.error,
 [data-theme="light"] .message-attachment.failed { color: #b42318; }
 [data-theme="light"] .attachment-retry {

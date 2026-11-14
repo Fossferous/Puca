@@ -83,13 +83,13 @@
 }
 
 .update-later-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.15); /* a white wash took white words to 4.33:1 */
     border-color: rgba(255, 255, 255, 0.8);
 }
 
 .update-now-btn {
     background: white;
-    color: #5865f2;
+    color: #4752c4; /* #5865f2 was 4.04:1 on the button's hover grey */
     border: none;
     padding: 8px 20px;
     border-radius: 4px;

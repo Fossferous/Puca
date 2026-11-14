@@ -148,6 +148,11 @@
   margin-top: 0.5rem;
 }
 
+/* index.css's a:hover would turn an <a class="login-button"> (Invite's Open in the app) blue on blue. */
+a.login-button:hover { color: #fff; }
+/* And a link on the card: --brand-primary was 2.6 to 3.5:1 on it. */
+.login-container a:not(.login-button):hover { color: #fff; }
+
 .login-button:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 6px 24px rgba(124, 58, 237, 0.4);

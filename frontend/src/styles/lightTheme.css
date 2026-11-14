@@ -110,7 +110,7 @@
 
 /* A calendar chip's time and length on the chip's grey: --text-muted was 4.42:1 there. */
 [data-theme="light"] .cal-chip-time,
-[data-theme="light"] .cal-chip-span { color: var(--header-secondary); }
+[data-theme="light"] .cal-chip-span { color: var(--text-normal); }
 
 /* Faint words on --bg-quaternary, which they hold 4.5:1 only on lighter surfaces than. */
 [data-theme="light"] .settings-close-hint { color: var(--text-muted); }
@@ -122,27 +122,82 @@
 [data-theme="light"] .settings-coming-soon { color: var(--text-muted); }
 [data-theme="light"] .settings-coming-soon h4 { color: var(--text-normal); }
 
+/* Classes that come from data, each a pale colour for a dark surface: the call's encryption
+   badge (1.03 to 1.26:1), a task file's saved and failed states, the moderation tab's report and
+   audit badges and statuses (1.37 to 2.52:1), your own Idle and Away (3.74:1). */
+[data-theme="light"] .voice-e2ee.on { background: rgba(36, 128, 70, 0.08); color: var(--text-positive); }
+[data-theme="light"] .voice-e2ee.partial { background: rgba(191, 149, 60, 0.12); color: var(--text-warning); }
+[data-theme="light"] .voice-e2ee.off { background: rgba(191, 60, 60, 0.08); color: var(--text-danger); }
+[data-theme="light"] button.ta-file.saved,
+[data-theme="light"] .report-status.resolved { color: var(--text-positive); }
+[data-theme="light"] button.ta-file.error { color: var(--text-danger); }
+/* On their own red wash, deeper than --text-danger (3.99:1 there). */
+[data-theme="light"] .report-badge.harassment,
+[data-theme="light"] .audit-badge.ban { color: #9a1b12; }
+[data-theme="light"] .report-badge.spam,
+[data-theme="light"] .audit-badge.kick,
+[data-theme="light"] .report-status.pending { color: var(--text-warning); }
+[data-theme="light"] .report-badge.inappropriate { color: #8f1d5c; }
+[data-theme="light"] .user-profile-bar .user-status.idle,
+[data-theme="light"] .user-profile-bar .user-status.away,
+[data-theme="light"] .active-status.idle,
+[data-theme="light"] .active-status.away { color: #8f4500; }
+/* A saved file's note was at 0.75. */
+[data-theme="light"] .attachment-saved { opacity: 1; }
+
 /* White words on a red that is 90% opaque: over Light's pale surface that is 3.55:1. Under the
    pointer it goes darker, not back to the dark palette's red (3.84:1). */
 [data-theme="light"] .own-voice-banner-btn.leave { background: var(--color-danger); }
 [data-theme="light"] .own-voice-banner-btn.leave:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 85%, #000); }
-[data-theme="light"] .header-tab.add-friend-btn:hover { background: color-mix(in srgb, var(--color-success) 85%, #000); }
+[data-theme="light"] .header-tab.add-friend-btn:not(.active):hover { background: color-mix(in srgb, var(--color-success) 85%, #000); }
+/* Under the pointer, words a hover made for a dark surface (read by the sweep with every :hover
+   on). A .close-btn's hover is a red fill (ServerSettingsModal.css) under the theme's dark words
+   or FriendsPanel's pink (1.92 and 2.84:1 on Light's deeper red); Settings' danger buttons go
+   white on a faint pink (1.21:1); a modal's X, Settings' secondary buttons and the microphone
+   help's Dismiss go white on Light's pale greys (1.09 to 1.44:1); a link goes --brand-primary
+   (index.css, 3.5 to 4.07:1). */
+[data-theme="light"] .close-btn:hover { color: #fff; }
+[data-theme="light"] .danger-btn:hover { color: var(--color-danger); }
+[data-theme="light"] .forward-modal-close:hover,
+[data-theme="light"] .save-note-close:hover:not(:disabled),
+[data-theme="light"] .invite-modal-close:hover,
+[data-theme="light"] .secondary-btn:not(.active):hover,
+[data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { color: var(--text-normal); }
+[data-theme="light"] .permission-dismiss-btn:hover,
+[data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+[data-theme="light"] a:hover { color: var(--brand-text); }
+[data-theme="light"] .search-result-item strong { color: var(--brand-text); }
+/* Dark words on the pale pink a hover gives these: white on it was 2.32:1. */
+[data-theme="light"] .emoji-delete-btn:hover,
+[data-theme="light"] .action-more:hover,
+[data-theme="light"] .action-reject:hover { color: #11111b; }
+[data-theme="light"] .emoji-file-btn:hover { background: var(--bg-modifier-selected); }
+[data-theme="light"] .keybind-clear:hover:not(:disabled) { color: var(--text-danger); }
+[data-theme="light"] .create-btn:hover:not(:disabled) { opacity: 1; }
+[data-theme="light"] .notes-textbtn.danger:hover { color: #9a1b12; }
+/* Faint words on a row a hover greys: --text-faint holds 4.5:1 only on lighter ones. */
+[data-theme="light"] .member-item.offline:hover .member-name,
+[data-theme="light"] .notes-labelmgr-count,
+[data-theme="light"] .notes-send-hash { color: var(--text-muted); }
 
 /* Words dimmed with opacity, made for words that are near white: dimming dark words towards a
    white page takes them under 4.5:1 (a done task's 3.71:1, an earlier month's days, a calendar
    chip that is done 2.6:1). Here they keep their full colour, and what marks them is still
    there: a line through, the grey a muted colour is, the cell's own tint, the seat's status. */
 [data-theme="light"] .message-content.task-completed { opacity: 1; color: var(--text-muted); }
-[data-theme="light"] .cal-chip.done,
-[data-theme="light"] .cal-cell.other,
+[data-theme="light"] .cal-chip.done:not(.dragging),
 [data-theme="light"] .tt-sched.ended,
 [data-theme="light"] .option-hint.option-hint-dim,
 [data-theme="light"] .device-wake-countdown,
 [data-theme="light"] .blocked-message-stub,
-[data-theme="light"] .member-item.offline .member-avatar,
 [data-theme="light"] .sub-icon,
 [data-theme="light"] .message-attachment.loading,
 [data-theme="light"] .gseat.gseat-folded { opacity: 1; }
 [data-theme="light"] .cal-row.done .cal-row-title { opacity: 1; color: var(--text-muted); }
+/* An earlier or later month's days: muted, and the cell's wash, in place of the fading. */
+[data-theme="light"] .cal-cell.other { opacity: 1; }
+[data-theme="light"] .cal-cell.other:not(.today) .cal-daynum { color: var(--text-muted); }
+/* Offline members' avatars: grey in place of faint, which keeps an initial's contrast. */
+[data-theme="light"] .member-item.offline .member-avatar { opacity: 1; filter: grayscale(1); }
 /* Cards out of the hand: grey, which keeps each colour's lightness and so its contrast. */
 [data-theme="light"] .pcard.pcard-muted { opacity: 1; filter: grayscale(1); }

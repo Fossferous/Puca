@@ -305,7 +305,7 @@
     background: rgba(255, 255, 255, 0.18);
 }
 .os-pop-btn.is-on {
-    color: var(--color-primary, #5865f2);
+    color: #9aa5ff; /* the bar is dark on every theme: #5865f2 was 2.95:1 on its hover */
 }
 @media (prefers-reduced-motion: reduce) {
     .os-pop-bar { transition: none; }
