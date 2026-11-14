@@ -490,6 +490,29 @@ describe('the receiving side, when no new track comes for a camera', () => {
         }
     });
 
+    it('REVIEW: ...nor is one that has not had a packet yet passed over at its first look (the stopped one still counts its last frames)', async () => {
+        vi.useFakeTimers();
+        try {
+            const v = await viewing(2);
+            const [dead, live] = v.cams;
+            for (let i = 0; i < 2; i++) {
+                dead.receiver.frames += 1;
+                live.receiver.frames += 45;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            const t3 = v.pc.addTransceiver('video', { direction: 'recvonly' });
+            t3.currentDirection = 'recvonly';
+            t3.receiver.getStats = async () => new Map(); // no packet yet
+            v.voice.addTrack(t3.receiver.track);
+            v.pc.ontrack!({ track: t3.receiver.track, receiver: t3.receiver, streams: [v.voice] });
+            live.receiver.frames += 45; // decoded before it stopped
+            await vi.advanceTimersByTimeAsync(1500);
+            expect(v.last(), 'the stopped camera was handed over for the one still opening').toBe(t3.receiver.track);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('REVIEW: a shown receiver that reports no frames at all (no packet yet) does not hold the follow back for good', async () => {
         vi.useFakeTimers();
         try {

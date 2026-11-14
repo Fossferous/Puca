@@ -1221,11 +1221,13 @@ export class WebRTCManager {
         for (const r of receivers) {
             const n = await WebRTCManager.framesDecoded(r);
             const before = this.cameraFrames.get(r);
-            if (n !== null) this.cameraFrames.set(r, n);
-            // null: nothing to compare with yet (its first look). A receiver
-            // that reports no frames at all (no packet yet) is 0, or the one
-            // shown would hold every look back for good.
-            out.set(r, n === null ? 0 : before === undefined ? null : Math.max(0, n - before));
+            // null: its first look, nothing to compare with yet (also when it
+            // reports no frames at all: a receiver with no packet yet). After
+            // that, no frames reported is none decoded, so the one shown
+            // never holds every look back for good.
+            const now = n ?? before ?? 0;
+            this.cameraFrames.set(r, now);
+            out.set(r, before === undefined ? null : Math.max(0, now - before));
         }
         return out;
     }

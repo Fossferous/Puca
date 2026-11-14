@@ -1269,6 +1269,34 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         expect(used.track, 'a camera on a sender nothing encrypts, under "Require encryption"').toBeNull();
     });
 
+    it('SECURITY: the microphone put back when NO RECEIVE is lifted, handed by addTrack a sender wired before, is held like a new one', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const { mgr, media, pc } = await callWith(true, [mic]);
+        const micSender = pc.senders.find(x => (x.track as FakeTrack | null)?.id === 'mic+stand')!;
+        sealedFirst(micSender);
+        await settle();
+        // A share's audio, started and stopped before it was negotiated: a
+        // wired sender with no track that never sent.
+        const audio = track('audio', 'game');
+        media.getScreenShareStreamSync = () => streamOf('screen', [audio]);
+        media.stopScreenShare = () => true;
+        await mgr.addScreenShareToPeers();
+        await settle();
+        const used = pc.senders.find(x => (x.track as FakeTrack | null)?.id === 'game+stand')!;
+        expect(used, 'precondition: the share audio went out held').toBeTruthy();
+        mgr.stopScreenShare();
+        await settle();
+        used.track = null;
+        media.getScreenShareStreamSync = () => null;
+        mgr.setPeerReceives(2, false);
+        await settle();
+        pc.addTrack = (t: unknown) => { used.track = t; return used; };
+        mgr.setPeerReceives(2, true);
+        await settle();
+        expect((used.track as FakeTrack | null)?.id, 'the microphone went out on a sender that has sealed nothing, unheld').toBe('mic+stand');
+    });
+
     it('a stand-in that cannot be made leaves no hold sweep running', async () => {
         scriptEngine();
         const mic = track('audio', 'mic');
