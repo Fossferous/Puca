@@ -14,7 +14,9 @@
   a message's spoilers pair up other than the bars count
   (`_||[_](sovereign-enc:…)||[file](sovereign-enc:…)||`), the reply bar, the
   pinned list, search and Quote printed the name of a file the message keeps
-  hidden. They now take which files are hidden from the message as it is drawn.
+  hidden. They now take which files are hidden from the message as it is drawn,
+  and Quote no longer leaves a spoiler's words open in the composer when a file
+  sits right against its bars (`||![a](sovereign-enc:…) the butler did it||`).
 - **Words and emoji at a spoiler's edge beside a quote or code stay hidden.**
   A message whose spoiler ends right before a quote or a code block
   (`||⏎> l||:w8```||⏎````) printed words that 0.9.855 hid, as every version
