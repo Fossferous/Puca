@@ -201,6 +201,34 @@ describe('a preview never prints a spoiler\'s words', () => {
         }
     });
 
+    it('a file the list hides is a spoiler chip, whichever bars the list says hide it', () => {
+        // Drawn: `_` and `||[` in italics, `](…)` as words, and a spoiler holding the second file. The
+        // preview put the first file back inside bars of its own, then counted the bars before the second
+        // and found two: `Image: medical-results.pdf` in every preview, in search, and in a Quote.
+        const file = (name: string) => `[${name}](sovereign-enc:abc?k=${KEY}&m=application%2Fpdf)`;
+        const message = `_||${file('_')}||${file('medical-results.pdf')}||`;
+        const hidden: string[] = [];
+        const walk = (nodes: Node[], under: boolean) => {
+            for (const n of nodes) {
+                if (n.type === 'link' && under) hidden.push(n.label);
+                if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+            }
+        };
+        walk(parseMessage(message), false);
+        expect(hidden).toEqual(['medical-results.pdf']); // positive control: the list hides it
+        for (const shown of [text(message), messageSearchText(message), messagePreviewText(message, undefined, { spoilers: 'keep' })]) {
+            expect(shown).not.toContain('medical-results');
+            expect(shown).not.toMatch(/sovereign-enc|k=/);
+        }
+        for (const spoilers of ['hide', 'keep'] as const) {
+            expect(messagePreviewSegments(message, undefined, { spoilers }).filter(s => s.type === 'attachment' && s.name === 'medical-results.pdf'))
+                .toEqual([{ type: 'attachment', kind: 'file', name: 'medical-results.pdf', spoiler: true }]);
+        }
+        // CONTROL: a file the list draws after bars it pairs on its own is named, as it always was.
+        expect(text(`||a|| ${file('open.pdf')}`)).toBe('Spoiler File: open.pdf');
+        expect(messagePreviewText(`||a||${file('open.pdf')}||`, undefined, { spoilers: 'keep' })).toContain('open.pdf');
+    });
+
     it('a cut never lands inside a spoiler: the words are covered before the count', () => {
         const printed = text(`aaaaaaaaaa ||${SECRET}||`, 12);
         expect(printed).not.toContain('thedemon');
@@ -272,9 +300,9 @@ function wordsOf(n: Node): string {
     }
 }
 
-/** A file's ref has its own rule in the preview (a name is hidden wherever an odd number of
- *  bars come before it, code or not: api/messagePreview.ts insideSpoiler), which only ever
- *  hides more. So what is SHOWN is asked of everything but a file's name. */
+/** A file's ref has a rule of its own in the preview besides the list's (a name is also hidden
+ *  after a `||` the list draws as words and nothing closes, code or not: api/messagePreview.ts
+ *  hiddenAt), which only ever hides more. So what is SHOWN is asked of everything but a file's name. */
 const FILE_REF = /!?\[[^\]]*\]\(\s*sovereign-enc:[^)]*\)/g;
 
 function tokensByVisibility(nodes: Node[], under = false, out = { hidden: new Set<string>(), shown: new Set<string>() }) {
@@ -437,5 +465,65 @@ describe('property: a spoiler added to a message changes nothing but its own pla
         // A tree written back out gives `*` for the `_` that made an emphasis: the sweep must see it.
         const asWritten = (c: string) => c.replace(/(\w)_(\w)/g, '$1*$2');
         expect(sweep(c => (c.includes('||') ? asWritten(messagePreviewText(c)) : messagePreviewText(c)), true).length).toBeGreaterThan(0);
+    });
+});
+
+// ---- The property: a file the list hides is never named -------------------------------------------
+
+describe('property: a file the list hides is named in no preview', () => {
+    const PARTS = ['||', '||', '||', '_', '*', '__', '`', '```', '\n> ', ' ', ' ', 'w', '[', '](', ']', 'L', 'L', 'I', '||I||', 'https://x/a_b'];
+    /** Messages of files named `sec<N>x`, links and pictures, among bars and what pairs them otherwise. */
+    const messages = () => {
+        const next = rng(0xf11e5);
+        const out: string[] = [];
+        for (let k = 0; k < 15000; k++) {
+            let id = 0;
+            const n = 1 + Math.floor(next() * 12);
+            out.push(Array.from({ length: n }, () => PARTS[Math.floor(next() * PARTS.length)]).join('')
+                .replace(/L/g, () => `[sec${id}x.pdf](sovereign-enc:i${id}?k=K${id++}&m=application%2Fpdf)`)
+                .replace(/I/g, () => `![sec${id}x.png](sovereign-enc:i${id}?k=K${id++}&m=image%2Fpng)`));
+        }
+        return out;
+    };
+    const MESSAGES = messages();
+    /** The names of the files the list hides. */
+    const hiddenNames = (content: string) => {
+        const out: string[] = [];
+        const walk = (nodes: Node[], under: boolean) => {
+            for (const n of nodes) {
+                if (under && (n.type === 'image' || n.type === 'link') && /^sovereign-enc:/.test(n.href)) out.push(n.type === 'image' ? n.alt : n.label);
+                if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+            }
+        };
+        walk(parseMessage(content), false);
+        return out.flatMap(name => name.match(/sec\d+x/g) ?? []);
+    };
+
+    it('in a preview, in what search matches, or in a Quote', () => {
+        let withHidden = 0;
+        const named: string[] = [];
+        for (const content of MESSAGES) {
+            const names = hiddenNames(content);
+            if (!names.length) continue;
+            withHidden++;
+            for (const shown of [messagePreviewText(content), messageSearchText(content), messagePreviewText(content, undefined, { spoilers: 'keep' })]) {
+                const out = names.filter(name => shown.includes(name));
+                if (out.length && named.length < 3) named.push(`${JSON.stringify(content)} names ${out.join(', ')}`);
+            }
+        }
+        expect(withHidden).toBeGreaterThan(3000);
+        expect(named).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: counting the bars before a file (a pairing of its own) names some the list hides', () => {
+        let named = 0;
+        for (const content of MESSAGES) {
+            const names = new Set(hiddenNames(content));
+            for (const m of content.matchAll(/(\|\|)?!?\[([^[\]\n]*)\]\(sovereign-enc:[^)\s]*\)/g)) {
+                const odd = ((content.slice(0, m.index).match(/\|\|/g) ?? []).length % 2) === 1;
+                if (!m[1] && !odd && names.has(m[2].replace(/\..*$/, ''))) named++;
+            }
+        }
+        expect(named).toBeGreaterThan(50);
     });
 });
