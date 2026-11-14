@@ -190,15 +190,13 @@ WASAPI loopback, no Web Audio, no AAC), and the agent's frames reach the page
 as one stream relayed by the script, where the app sends a Tauri Channel
 message per frame (about 1 ms of the page's main thread per message, measured
 under "The desktop-audio wire" below: ~3% of a core at 30 frames a second).
-The agent's own figure (16.0-18.8% across both saved runs, below) is above
-the 13.5-13.7% for the whole host process that "Per-frame cost, profiled"
-(below) gives, which was measured with every slot a new picture, the
-costliest content, so what the screen showed cannot explain it; and the
-extra sits in its capture-loop thread (12-15% here, against the profile's
-~3.3 ms a slot, ~10% at 30 fps). The load on this machine or a change in the
-agent since may; not measured, and worth a look before the GPU-conversion
-work below (if it is the load, these figures overstate the agent on a quiet
-machine). The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
+The agent's own figure here (16.0-18.8%, in the quoted run and the later
+one below) is above the 13.5-13.7% for the whole host process that "Per-frame
+cost, profiled" (below) gives, which was measured with every slot a new
+picture, the costliest content, so what the screen showed does not explain
+it. Why is not known (the two were measured differently, on a differently
+loaded machine, by different builds); worth settling before the
+GPU-conversion work below. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
 1440p monitor (the owner's setting); the default 1080p30 records 24 fps there
 (0.8 of the frames; not measured).
 
