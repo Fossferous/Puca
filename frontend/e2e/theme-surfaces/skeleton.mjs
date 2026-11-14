@@ -25,9 +25,10 @@ const walk = (dir, out = []) => {
     return out;
 };
 
-// `side`: 'all' takes both arms of every ternary, 'first' and 'second' one arm each. Both arms at
-// once is a class pair no instance has (`danger` and `primary` on one button), so the sweep reads
-// each arm on its own.
+// `side`: 'all' takes both arms of every ternary. A number k takes one arm: k = 0 the first, and
+// otherwise the second with k - 1 passed down it, so `a ? 'x' : b ? 'y' : 'z'` reads x, y and z at
+// k = 0, 1 and 2 (and z beyond). Both arms at once is a class pair no instance has (`danger` and
+// `primary` on one button), so the sweep reads each arm on its own.
 // `ands`: false leaves out what an && adds, for the reading with no modifier on.
 const classNames = (node, into = [], side = 'all', ands = true) => {
     if (!node) return into;
@@ -39,9 +40,8 @@ const classNames = (node, into = [], side = 'all', ands = true) => {
     }
     // The test of a ternary or an && names a value, not a class.
     if (ts.isConditionalExpression(node)) {
-        if (side !== 'second') classNames(node.whenTrue, into, side, ands);
-        if (side !== 'first') classNames(node.whenFalse, into, side, ands);
-        return into;
+        if (side === 'all') { classNames(node.whenTrue, into, side, ands); classNames(node.whenFalse, into, side, ands); return into; }
+        return side === 0 ? classNames(node.whenTrue, into, 0, ands) : classNames(node.whenFalse, into, side - 1, ands);
     }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return ands ? classNames(node.right, into, side, ands) : into;
     ts.forEachChild(node, child => classNames(child, into, side, ands));
@@ -49,23 +49,35 @@ const classNames = (node, into = [], side = 'all', ands = true) => {
 };
 
 // A style={{ ... }} with literal colours: what the element really paints, where a class alone says
-// otherwise (a button made transparent inline keeps the browser's grey here without it).
-const inlineColours = (node) => {
-    if (!node || !ts.isObjectLiteralExpression(node)) return '';
+// otherwise (a button made transparent inline keeps the browser's grey here without it). And
+// whether it is display: none outright (a file input behind its label), which nobody sees.
+const inlineStyle = (node) => {
+    const found = { colours: '', hidden: false };
+    if (!node || !ts.isObjectLiteralExpression(node)) return found;
     const out = [];
     for (const prop of node.properties) {
         if (!ts.isPropertyAssignment(prop)) continue;
         const name = ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name) ? prop.name.text : null;
-        if (!name || !/^(background|backgroundColor|backgroundImage|color)$/.test(name)) continue;
-        if (!ts.isStringLiteralLike(prop.initializer)) continue;
+        if (!name || !ts.isStringLiteralLike(prop.initializer)) continue;
+        if (name === 'display' && prop.initializer.text === 'none') found.hidden = true;
+        if (!/^(background|backgroundColor|backgroundImage|color)$/.test(name)) continue;
         out.push(`${name.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}:${prop.initializer.text}`);
     }
-    return out.join(';');
+    found.colours = out.join(';');
+    return found;
 };
 
 // The classes with no modifier on: every && off, and a ternary on its last arm, since one of its
 // arms is always there (a card is always red or black; reading it as neither read white on white).
-const steadyClassNames = node => classNames(node, [], 'second', false);
+const steadyClassNames = node => classNames(node, [], Infinity, false);
+// How many arms the longest chain of ternaries in a className has: the readings k = 0 .. that - 1.
+const armCount = (node) => {
+    if (!node) return 1;
+    if (ts.isConditionalExpression(node)) return Math.max(armCount(node.whenTrue), 1 + armCount(node.whenFalse));
+    let most = 1;
+    ts.forEachChild(node, (child) => { most = Math.max(most, armCount(child)); });
+    return most;
+};
 
 const words = list => list.join(' ').split(/\s+/).filter(word => /^[a-zA-Z_][\w-]*$/.test(word));
 
@@ -81,19 +93,21 @@ const parseFile = (file, srcDir, components, all) => {
         const open = ts.isJsxSelfClosingElement(node) ? node : node.openingElement;
         const tag = open.tagName.getText(source);
         const found = {
-            tag, intrinsic: /^[a-z]/.test(tag), classes: [], steady: [], first: [], second: [], style: '',
+            tag, intrinsic: /^[a-z]/.test(tag), classes: [], steady: [], arms: [[]], style: '', hidden: false,
+            // In the top layer when shown (a popover, a modal dialog): no ancestor's opacity reaches it.
+            topLayer: tag === 'dialog',
             at: `${at}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`,
             kids: [], text: false,
         };
         for (const prop of open.attributes.properties) {
+            if (ts.isJsxAttribute(prop) && prop.name.getText(source) === 'popover') found.topLayer = true;
             if (!ts.isJsxAttribute(prop) || !prop.initializer) continue;
             const value = ts.isJsxExpression(prop.initializer) ? prop.initializer.expression : prop.initializer;
-            if (prop.name.getText(source) === 'style') { found.style = inlineColours(value); continue; }
+            if (prop.name.getText(source) === 'style') { ({ colours: found.style, hidden: found.hidden } = inlineStyle(value)); continue; }
             if (prop.name.getText(source) !== 'className') continue;
             found.classes = words(classNames(value));
             found.steady = words(steadyClassNames(value));
-            found.first = words(classNames(value, [], 'first'));
-            found.second = words(classNames(value, [], 'second'));
+            found.arms = Array.from({ length: armCount(value) }, (_, k) => words(classNames(value, [], k)));
         }
         const visit = (child) => {
             if (ts.isJsxText(child)) { if (child.text.trim()) found.text = true; return; }
@@ -172,16 +186,25 @@ const parseFile = (file, srcDir, components, all) => {
     // same component that names it (never one inside it), and the first is where its own place is
     // read from. Braces with words in them (`{busy ? 'Saving' : body}`), or naming nothing held,
     // are words.
+    // JSX made by a helper outside any component (MessageContent's renderNodes) is drawn by whoever
+    // calls it, and its place is a caller from outside it: the helper calling itself for a bold run
+    // is not where a message's words are.
     const within = (node, root) => { for (let n = node; n; n = n.parent) if (n === root) return true; return false; };
     const hostOf = (node) => { let top = node; while (top.parent) top = top.parent; return top.host; };
-    for (const [node, names, literal] of naming) {
+    const resolved = naming.map(([node, names, literal]) => {
         const host = hostOf(node);
-        const roots = names.flatMap(name => locals.get(name) ?? []).filter(root => root.host === host);
-        if (literal || !roots.length) node.text = true;
-        for (const root of roots) {
-            if (within(node, root)) continue;
-            node.kids.push(root);
-            root.parent ??= node;
+        const roots = names.flatMap(name => locals.get(name) ?? []).filter(root => root.host === host || !root.host);
+        return { node, literal, roots, inside: roots.some(root => within(node, root)) };
+    });
+    for (const { node, literal, roots } of resolved) if (literal || !roots.length) node.text = true;
+    for (const pass of [false, true]) {
+        for (const { node, roots, inside } of resolved) {
+            if (inside !== pass) continue;
+            for (const root of roots) {
+                if (within(node, root)) continue;
+                node.kids.push(root);
+                root.parent ??= node;
+            }
         }
     }
 };
@@ -204,7 +227,7 @@ export const readJsx = (srcDir) => {
 export const placesOf = ({ components, all }, { most = 3 } = {}) => {
     const sites = new Map();
     for (const node of all) if (!node.intrinsic) (sites.get(node.tag) ?? sites.set(node.tag, []).get(node.tag)).push(node);
-    const wrapper = node => ({ tag: node.tag.toLowerCase(), classes: node.steady });
+    const wrapper = node => ({ tag: node.tag.toLowerCase(), classes: node.steady, steady: node.steady, arms: node.arms });
     const toSlot = (node, trail = new Set()) => {
         if (node.slot) return [];
         if (trail.has(node)) return null;
@@ -283,11 +306,16 @@ export const placesOf = ({ components, all }, { most = 3 } = {}) => {
     return placeOf;
 };
 
-// `html` inside the elements of a place. What the HTML parser would move or drop around other
-// markup (a table's parts, SVG, a <p>) is a div with the same classes.
-export const inPlace = (place, html) => {
+// `html` inside the elements of a place, each with the classes of the same reading as what is in it
+// (toHtml's `steady` or `arm`): a row a mention marks (`.message.mentioned`) is read with the words
+// in it. What the HTML parser would move or drop around other markup (a table's parts, SVG, a <p>)
+// is a div with the same classes.
+export const classesFor = (node, { steady = false, arm = null } = {}) => (
+    steady ? node.steady : arm === null ? node.classes : node.arms[Math.min(arm, node.arms.length - 1)]
+);
+export const inPlace = (place, html, pick = { steady: true }) => {
     const tags = place.map(({ tag }) => (SKIP.has(tag) || /^(table|thead|tbody|tfoot|tr|td|th|caption|colgroup|col|p|select|option)$/.test(tag) ? 'div' : tag));
-    const open = place.map(({ classes }, i) => `<${tags[i]} class="${escape(classes.join(' '))}" data-place="1">`).join('');
+    const open = place.map((element, i) => `<${tags[i]} class="${escape((element.arms ? classesFor(element, pick) : element.classes).join(' '))}" data-place="1">`).join('');
     return `${open}${html}${tags.map(tag => `</${tag}>`).reverse().join('')}`;
 };
 
@@ -295,7 +323,7 @@ const SKIP = new Set(['svg', 'path', 'circle', 'rect', 'g', 'line', 'polyline', 
 const escape = text => text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
 // `steady`: only the classes every instance has. Otherwise every class any branch can give it, or
-// with `arm` ('first' or 'second') one arm of each ternary. `around` (placesOf's): with components
+// with `arm` (a number, classNames' k) one arm of each ternary. `around` (placesOf's): with components
 // not inlined, what a component puts around the children it is handed still goes around them.
 export const toHtml = (node, components, { steady = false, arm = null, around = null, depth = 0, seen = new Set(), slot = '', trail = new Set() } = {}) => {
     if (node.slot) return slot;
@@ -309,7 +337,7 @@ export const toHtml = (node, components, { steady = false, arm = null, around = 
         if (!known || seen.has(node.tag) || depth > 14) {
             const given = inner();
             const wrappers = given && around ? around(node.tag) : null;
-            return wrappers?.length ? inPlace(wrappers, given) : given;
+            return wrappers?.length ? inPlace(wrappers, given, { steady, arm }) : given;
         }
         const next = new Set(seen).add(node.tag);
         const given = inner();
@@ -317,11 +345,18 @@ export const toHtml = (node, components, { steady = false, arm = null, around = 
     }
     const tag = node.tag.toLowerCase();
     if (SKIP.has(tag)) return '';
-    const classes = steady ? node.steady : arm ? node[arm] : node.classes;
-    const attrs = ` class="${escape(classes.join(' '))}" data-at="${escape(node.at)}"${node.style ? ` style="${escape(node.style)}"` : ''}`;
+    const classes = classesFor(node, { steady, arm });
+    const attrs = ` class="${escape(classes.join(' '))}" data-at="${escape(node.at)}"${node.style ? ` style="${escape(node.style)}"` : ''}${node.hidden ? ' data-hidden="1"' : ''}${node.topLayer ? ' data-top-layer="1"' : ''}`;
     if (tag === 'input') return `<input${attrs} data-text="1" value="Sample" placeholder="Sample">`;
     if (tag === 'textarea') return `<textarea${attrs} data-text="1" placeholder="Sample">Sample</textarea>`;
     if (tag === 'select') return `<select${attrs} data-text="1"><option>Sample</option></select>`;
     const words = node.text ? 'Sample ' : '';
     return `<${tag}${attrs}${node.text ? ' data-text="1"' : ''}>${words}${inner()}</${tag}>`;
+};
+
+// The most arms any element drawn from `node` has: the readings arm = 0 .. that - 1 cover each.
+export const armsIn = (node, trail = new Set()) => {
+    if (node.slot || trail.has(node)) return 1;
+    const next = new Set(trail).add(node);
+    return Math.max(node.arms?.length ?? 1, ...(node.kids ?? []).map(kid => armsIn(kid, next)));
 };

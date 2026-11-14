@@ -19,12 +19,13 @@
 //   3. the screen itself: a screenshot's paper must be the colour computed and its ink readable, so
 //      nothing lying over a surface is missed;
 //   4. every component in the app on Light, inside the elements of each place it is used (skeleton's
-//      placesOf: its call sites, what a parent puts around its children, JSX held in a local where it
-//      is named, a portal on the page), with and without High Contrast, at both sizes: the same 4.5:1
-//      and 3:1, past the two entries in NOT_AS_DRAWN, each with its reason. Until 2026-11-14 this held
-//      only 3:1 and only where the dark theme held, and read each component on the chat's paper:
-//      223 places were under the bar then (203 with High Contrast), the role editor's panels
-//      inside Server Settings among them;
+//      placesOf: up to PLACES_PER_COMPONENT call sites, what a parent puts around its children, JSX
+//      held in a local or made by a helper where it is named, a portal on the page), in each arm of
+//      every branch with the elements around it in the same arm, with and without High Contrast, at
+//      both sizes: the same 4.5:1 and 3:1, with opacity counted (dimmed words are read dimmed), past
+//      the two entries in NOT_AS_DRAWN, each with its reason. Until 2026-11-14 this held only 3:1
+//      and only where the dark theme held, ignored opacity, and read each component on the chat's
+//      paper: the role editor's panels inside Light's Server Settings went unseen that way;
 //   5. NEGATIVE CONTROLS. OLD_LIGHT is Light's colours as they were: every surface must fail on it,
 //      or the checks above prove nothing, and the whole-app sweep must report it. OLD_SHARED does the
 //      same for the words that were below the bar on every theme. LIGHT_AT_RAISE is Light as it was
@@ -40,7 +41,7 @@ import { chromium } from 'playwright';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { inPlace, placesOf, readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
+import { armsIn, inPlace, placesOf, readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, '..', 'src');
@@ -52,6 +53,9 @@ mkdirSync(workDir, { recursive: true });
 const THEMES = ['light', 'dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
 const CONTRASTS = ['normal', 'high'];
 const LOOKS = THEMES.flatMap(theme => CONTRASTS.map(contrast => [theme, contrast]));
+// The sweep reads each component in up to this many of the places it is used (the first, in the
+// order the source has them). Of the components used in more, most are icons and small wrappers.
+const PLACES_PER_COMPONENT = 8;
 
 // A class, or a component (all its call sites, so a popover is measured with what is really in it).
 const SURFACES = [
@@ -109,7 +113,18 @@ const NOT_AS_DRAWN = [
 // The fill tokens Light now defines, the role editor's words that were Light's, the rules
 // lightTheme.css now answers, and the fixed colours since raised where they are drawn.
 const LIGHT_AT_RAISE = `
-[data-theme="light"] { --color-danger: #f23f43 !important; --color-success: #23a55a !important; --accent-lavender: #a78bfa !important; --status-offline: #80848e !important; }
+[data-theme="light"] { --color-danger: #f23f43 !important; --color-success: #23a55a !important; --accent-lavender: #a78bfa !important; --status-offline: #80848e !important; --text-warning: #8a5a00 !important; }
+.message-link { color: var(--mode-brand-text, var(--brand-primary)) !important; }
+.message-content.task-completed, .cal-row.done .cal-row-title, .gseat-folded { opacity: 0.6 !important; }
+.cal-chip.done { opacity: 0.55 !important; }
+.cal-cell.other, .option-hint-dim, .device-wake-countdown { opacity: 0.75 !important; }
+.tt-sched.ended, .blocked-message-stub, .message-attachment.loading { opacity: 0.7 !important; }
+.sub-icon { opacity: 0.6 !important; }
+.update-banner { background: linear-gradient(135deg, #4752c4 0%, #5865f2 100%) !important; }
+.member-item.offline .member-avatar { opacity: 0.5 !important; }
+.pcard-muted { opacity: 0.45 !important; filter: none !important; }
+.clip-duration-chip-size { opacity: 0.8 !important; }
+.user-profile-popup .friend-btn.pending { color: #8e9297 !important; }
 [data-theme="light"] .role-editor-embedded {
     --text-normal: #313338 !important; --text-muted: #5a5c64 !important; --text-faint: #62656e !important;
     --header-primary: #060607 !important; --header-secondary: #4e5058 !important; color: #313338 !important;
@@ -147,7 +162,6 @@ const LIGHT_AT_RAISE = `
 .login-container .loading-spinner { color: #9399b2 !important; }
 .login-container .success-message { color: var(--color-success, #23a55a) !important; }
 .connection-error .connection-error-hint { color: #7f849c !important; }
-.update-banner { background: linear-gradient(135deg, #5865f2 0%, #7289da 100%) !important; }
 .service-update-banner { background: linear-gradient(135deg, #3b6ea5 0%, #4f8bc9 100%) !important; }
 .update-gate h2 { background-image: linear-gradient(135deg, #7289da, #5865f2) !important; }
 .welcome-popup-header h2 { background-image: linear-gradient(135deg, #5865f2, #eb459e) !important; }
@@ -178,7 +192,7 @@ const RAISED = [
     'settings-close-hint', 'xfer-ok', 'xfer-bad', 'settings-hint-live', 'OwnVoiceBanner.tsx', 'upp-status',
     'unread-badge', 'secondary-btn active', 'danger-btn', 'add-friend-btn', 'copy-btn copied', 'friend-btn add',
     'add-status success', 'profile-success', 'profile-error', 'report-error', 'forward-error', 'save-note-error',
-    'ban-btn', 'notes-badge', 'identity-banner', 'dm-avatar', 'friend-avatar', 'avatar-placeholder', 'create-btn',
+    'ban-btn', 'notes-badge', 'identity-banner-btn', 'dm-avatar', 'friend-avatar', 'avatar-placeholder', 'create-btn',
     'role-name', 'color-custom', 'role-hint', 'permission-desc', 'cancel-btn', 'delete-role-btn', 'role-error', 'role-loading',
     // Fixed colours, the same on every theme, raised where they are drawn.
     'ac-hash', 'ac-sub', 'jump-latest-pill', 'live-badge-mini', 'watch-live-btn', 'server-unread-bubble', 'vs-live-badge',
@@ -188,10 +202,14 @@ const RAISED = [
     'mouse-mode-btn', 'keyboard-btn', 'device-stage-mobile-confirm-btn', 'DeviceStageMobileMenus.tsx', 'DeviceStage.tsx',
     'host-files-indicator-stop', 'discover-empty-hint', 'discover-member-count', 'join-error', 'invite-preview-icon',
     'recovery-word-num', 'stream-audio-error',
+    // Found once each component was read in its places, in each arm, and with opacity.
+    'message-link', 'mention everyone', 'clip-attachment-broken', 'task-completed', 'cal-chip done', 'cal-row-title',
+    'blocked-message-stub', 'option-hint-dim', 'device-wake-countdown', 'gseat-name', 'PlayingCard.tsx',
+    'clip-duration-chip-size', 'friend-btn pending', 'sub-icon', 'message-attachment loading', 'update-notes',
 ];
 // High Contrast's muted and faint words already held 4.5:1 at these, so they were below the bar
 // without it only.
-const NOT_WITH_HIGH_CONTRAST = new Set(['settings-close-hint', 'notes-login-note', 'notes-stay-hint']);
+const NOT_WITH_HIGH_CONTRAST = new Set(['settings-close-hint', 'notes-login-note', 'notes-stay-hint', 'option-hint-dim', 'gseat-name']);
 
 // ---- the real stylesheet ------------------------------------------------------------------------
 const define = {
@@ -271,17 +289,20 @@ const sectionsFor = (name, sheet) => {
 // Every component's own JSX, unnested, inside the elements of each place it is used (placesOf):
 // what a new surface would be caught by, read on what is drawn behind it there.
 const sweep = [];
-const placeOf = placesOf(jsx);
+const placeOf = placesOf(jsx, { most: PLACES_PER_COMPONENT });
 const nameOfPlace = place => place.slice(-2).map(({ tag, classes }) => `${tag}${classes.length ? `.${classes.join('.')}` : ''}`).join(' > ') || 'the page';
 // App's own screens (connecting, the connection error) are on the page's body, which App.css paints
 // the same dark on every theme; everything else is somewhere in the chat's container.
 const onTheBody = [];
 for (const node of Object.values(components).flat()) {
+    // With its fixed classes, and with each arm of every branch (all the && on): .active is where a
+    // colour moves. The elements around it take the same reading, so a row a mention marks is read
+    // with what is in it.
+    const picks = [{ steady: true }, ...Array.from({ length: armsIn(node) }, (_, arm) => ({ arm }))];
     for (const place of placeOf(node)) {
-        // With its fixed classes, and with what each arm of a branch gives it: .active is where a colour moves.
-        for (const pick of [{ steady: true }, { arm: 'first' }, { arm: 'second' }]) {
+        for (const pick of picks) {
             const html = toHtml(node, {}, { ...pick, around: placeOf.around });
-            if (html) (node.host === 'App' ? onTheBody : sweep).push(`<section data-sweep="1" data-from="${node.at}" data-in="${nameOfPlace(place).replace(/"/g, '&quot;')}">${inPlace(place, html)}</section>`);
+            if (html) (node.host === 'App' ? onTheBody : sweep).push(`<section data-sweep="1" data-from="${node.at}" data-in="${nameOfPlace(place).replace(/"/g, '&quot;')}">${inPlace(place, html, pick)}</section>`);
         }
     }
 }
@@ -353,8 +374,36 @@ const pageReader = () => {
         return answer;
     };
     const paint = (el, page) => paints(el, page)[0];
+    // Opacity: an element at opacity o paints all of itself, words and paper, at o over what is
+    // behind it, so dimmed words are read dimmed (a done task's words at 0.6 were 3.71:1 on Light
+    // where colours alone said 12.6). From 0.1 down it is a control shown elsewhere (one a hover
+    // brings up), read as it is shown then. Nested ones multiply, over what is behind the outermost.
+    // Not counted where the class says the control takes no press, as 1.4.3 exempts what cannot be
+    // used (:disabled is skipped outright, below): `disabled` (a menu item or a sound that cannot
+    // be chosen), `pending` (the clip button while it arms, a friend request already sent: both
+    // disabled then), `busy` and `updating` (a refresh, a role's box while it saves), and
+    // `dragging`, the item a drag is carrying, there for the drag and not to be read.
+    const UNUSABLE = ['disabled', 'pending', 'busy', 'updating', 'dragging'];
+    const dimOf = (el, dims) => {
+        if (!el || el === document.documentElement) return { o: 1, top: null };
+        if (dims.has(el)) return dims.get(el);
+        // A popover or a modal dialog is in the top layer: what is around it in the markup dims nothing.
+        const up = el.hasAttribute('data-top-layer') ? { o: 1, top: null } : dimOf(el.parentElement, dims);
+        // What it would be without those classes: a calendar chip that is done and being dragged
+        // is read as done.
+        let own = parseFloat(getComputedStyle(el).opacity);
+        const unusable = UNUSABLE.filter(name => el.classList.contains(name));
+        if (unusable.length && own < 1) {
+            el.classList.remove(...unusable);
+            own = parseFloat(getComputedStyle(el).opacity);
+            el.classList.add(...unusable);
+        }
+        const answer = own >= 0.1 && own < 1 ? { o: up.o * own, top: up.top ?? el } : up;
+        dims.set(el, answer);
+        return answer;
+    };
     const hasWords = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-    window.__measure = (root, page = pageColour(), memo = new Map()) => {
+    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map()) => {
         const rows = [];
         const add = (el, kind, need) => {
             const style = getComputedStyle(el);
@@ -368,11 +417,19 @@ const pageReader = () => {
             // background-clip went missing reads as the 1:1 it is.
             if (fill[3] === 0 && !stops.length) return;
             const unders = clipped ? paints(el.parentElement, page, memo) : paints(el, page, memo);
+            const dim = dimOf(el, dims);
+            const behinds = dim.top ? paints(dim.top.parentElement, page, memo) : [null];
             const worst = unders
-                .flatMap(under => (clipped ? stops : [fill]).map((colour) => { const ink = over(colour, under); return { under, ink, value: ratio(ink, under) }; }))
+                .flatMap(under => (clipped ? stops : [fill]).flatMap(colour => behinds.map((behind) => {
+                    let ink = over(colour, under);
+                    let paper = under;
+                    if (behind) { ink = over([...ink, dim.o], behind); paper = over([...paper, dim.o], behind); }
+                    return { under: paper, ink, value: ratio(ink, paper) };
+                })))
                 .sort((a, b) => a.value - b.value)[0];
             rows.push({
                 kind, need, at: el.getAttribute('data-at') || el.tagName, cls: String(el.className || '').slice(0, 60),
+                dim: dim.top ? String(dim.top.className || '') : '',
                 ratio: Math.round(worst.value * 100) / 100,
                 ink: worst.ink.map(Math.round).join(','), under: worst.under.map(Math.round).join(','),
             });
@@ -381,6 +438,7 @@ const pageReader = () => {
             if (el.hasAttribute('data-icon')) continue;
             if (el.tagName === 'OPTION' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
             if (el.matches(':disabled')) continue; // 1.4.3 and 1.4.11 exempt a control that cannot be used
+            if (el.closest('[data-hidden]')) continue; // style={{ display: 'none' }}: never shown
             // Visually hidden on purpose (.sr-only, a 2 px field that takes a phone's keyboard): not
             // painted for anyone to read. Its sizes as the stylesheet sets them, so this holds where
             // the skeleton's page does not lay it out.
@@ -399,8 +457,9 @@ const pageReader = () => {
     window.__measureSections = (attr) => {
         const page = pageColour();
         const memo = new Map();
+        const dims = new Map();
         return [...document.querySelectorAll(`section[${attr}]`)].flatMap(section => (
-            window.__measure(section, page, memo).map(row => ({
+            window.__measure(section, page, memo, dims).map(row => ({
                 ...row, surface: section.getAttribute(attr), from: section.getAttribute('data-from'),
                 ...(section.hasAttribute('data-in') ? { in: section.getAttribute('data-in') } : {}),
             }))
@@ -649,17 +708,24 @@ for (const [name, options, sheetName, url] of [
 // without High Contrast, at both sizes.
 {
     console.log('\nevery component in the app, where it is drawn, on Light');
+    // The rows under the bar no entry of NOT_AS_DRAWN excuses. Only the readings of Light as it is
+    // mark an entry used, so one that stops excusing a failure there is reported as stale.
     const used = new Set();
-    const explained = (row) => {
+    const unexcused = (rows, mark) => below(rows).filter((row) => {
         const entry = NOT_AS_DRAWN.find(([name]) => row.cls.split(' ').includes(name));
-        if (entry) used.add(entry[0]);
-        return !!entry;
-    };
+        if (entry && mark) used.add(entry[0]);
+        return !entry;
+    });
     const read = async (page, look) => {
         await page.evaluate(l => window.__look(l), look);
         return (await page.evaluate(() => window.__measureSections('data-sweep'))).map(row => ({ ...row, surface: `in ${row.in}` }));
     };
-    const failing = rows => new Set(below(rows).filter(row => !explained(row)).map(row => `${row.at} ${row.cls}`));
+    const failing = rows => unexcused(rows, false);
+    // A needle of RAISED: a file's name, or classes every one of which the place has, or what dims
+    // it with opacity has (a done task dims all the words in it).
+    const isAt = (needle, row) => (needle.endsWith('.tsx')
+        ? row.at.split(':')[0].split('/').pop() === needle
+        : [row.cls, row.dim].some(classes => needle.split(' ').every(word => classes.split(' ').includes(word))));
     let readings = 0;
     const byLook = [];
     for (const [name, options] of [
@@ -671,20 +737,21 @@ for (const [name, options, sheetName, url] of [
         for (const contrast of CONTRASTS) {
             const rows = await read(page, ['light', contrast]);
             readings += rows.length;
-            byLook.push([`light/${contrast} ${name}`, rows.filter(row => !explained(row))]);
+            byLook.push([`light/${contrast} ${name}`, unexcused(rows, true)]);
         }
         if (name.startsWith('1280')) {
             // 5. The controls: Light as it was in 0.9.855 ...
             await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
-            const old = failing(await read(page, ['light', 'normal']));
+            const old = new Set(failing(await read(page, ['light', 'normal'])).map(row => `${row.at} ${row.cls}`));
             check(old.size >= 300, 'CONTROL: the sweep finds Light as it was in 0.9.855', `${old.size} places`);
             // ... and as it was before this bar was raised: every place fixed then fails again.
             await page.evaluate(sheet => window.__old(sheet), LIGHT_AT_RAISE);
             for (const contrast of CONTRASTS) {
-                const then = [...failing(await read(page, ['light', contrast]))];
+                const then = failing(await read(page, ['light', contrast]));
+                const places = new Set(then.map(row => `${row.at} ${row.cls}`)).size;
                 const fixed = RAISED.filter(needle => contrast === 'normal' || !NOT_WITH_HIGH_CONTRAST.has(needle));
-                const held = fixed.filter(needle => !then.some(place => place.includes(needle)));
-                check(held.length === 0, `CONTROL: Light's colours before the bar was raised fail it (${contrast}), at ${then.length} places, each of the ${fixed.length} fixed then among them`, held.length ? `these still pass: ${held.join(' ')}` : '');
+                const held = fixed.filter(needle => !then.some(row => isAt(needle, row)));
+                check(held.length === 0, `CONTROL: Light's colours before the bar was raised fail it (${contrast}), at ${places} places, each of the ${fixed.length} fixed then among them`, held.length ? `these still pass: ${held.join(' ')}` : '');
             }
             await page.evaluate(() => window.__old(''));
         }
