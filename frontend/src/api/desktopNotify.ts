@@ -32,7 +32,7 @@ import {
 import { currentUserIdFromToken } from './auth';
 import { API_BASE_URL } from './config';
 import { hostSaysForeground, hostShowsNotifications, notifyHost } from './embedHost';
-import { NotifyGroups, navForGroupKey, type GroupMessage, type GroupStep } from './notifyGroups';
+import { NotifyGroups, TASKS_DUE_KEY, navForGroupKey, type GroupMessage, type GroupStep } from './notifyGroups';
 
 export type NotifyDecision =
     /** `quiet`: it only updated its conversation's notification where it
@@ -100,17 +100,57 @@ const groups = new NotifyGroups();
 const activations = new Map<string, () => void>();
 /** The web app's notification per conversation, while it exists. */
 const webLive = new Map<string, Notification>();
-/** Did the desktop app's own toasts (src-tauri/src/toasts.rs) answer?
- *  'no' where the shell refuses them: a build for anything but Windows. (The
- *  page ships inside the installer with its shell, so a Windows app always
- *  has them.) */
-let nativeToasts: 'unknown' | 'yes' | 'no' = 'unknown';
+/** The web app's task reminder, while it exists. */
+let webReminder: Notification | null = null;
+/** What the desktop app's own toasts (src-tauri/src/toasts.rs) last answered,
+ *  for the app as a whole: 'yes' Windows shows them; 'off' Windows shows none
+ *  of Púca's notifications (turned off in Settings, or a policy); 'no' the
+ *  shell has none (a build for anything but Windows: the page ships inside
+ *  the installer with its shell, so a Windows app always has them). Neither
+ *  is for good: every pop-up asks again, so turning Púca's notifications back
+ *  on, or a one-off refusal of the command, mends itself by the next burst. */
+type NativeToasts = 'unknown' | 'yes' | 'off' | 'no';
+let nativeToasts: NativeToasts = 'unknown';
+/** The toasts Windows refused to show, by key, until one of theirs is shown
+ *  again (or seen): a refusal is about that toast, so another conversation's
+ *  success must not make this one's next update look shown. */
+const refusedToasts = new Set<string>();
+/** Is this key's toast on screen to be updated, as far as we know? A quiet
+ *  update is quiet to the caller (no sound) only then. */
+const nativeToastShowing = (key: string) =>
+    (nativeToasts === 'yes' || nativeToasts === 'unknown') && !refusedToasts.has(key);
+/** What one toast_show came to. An older shell answered nothing: it showed it. */
+type ToastAnswer = 'shown' | 'queued' | 'off' | 'failed' | 'no';
+function readToastAnswer(key: string, answer: unknown): ToastAnswer {
+    if (answer === 'off') {
+        nativeToasts = 'off';
+        return 'off';
+    }
+    // Windows' switch is on either way: it showed it, or refused this one.
+    nativeToasts = 'yes';
+    if (answer === 'failed') {
+        refusedToasts.delete(key);
+        refusedToasts.add(key);
+        // Bounded like the counts; the oldest refusal goes first.
+        while (refusedToasts.size > 200) {
+            const oldest = refusedToasts.values().next().value;
+            if (oldest === undefined) break;
+            refusedToasts.delete(oldest);
+        }
+        return 'failed';
+    }
+    refusedToasts.delete(key);
+    // toasts.rs's ANSWER_WAIT ran out: Windows has it and will most likely
+    // show it, but nobody can say it did.
+    return answer === 'queued' ? 'queued' : 'shown';
+}
 let activationListener: Promise<void> | null = null;
 /** Every toast command goes through here, ONE at a time: Tauri does not
  *  promise to deliver two separate invokes in the order they were made
  *  (ordered_worker.rs), and a quiet update overtaking the pop-up it updates
- *  would pop the older words. Each command returns as soon as the shell has
- *  queued it, so waiting for the one before costs a round trip, no more. */
+ *  would pop the older words. A clear returns once the shell has queued it,
+ *  a show once Windows has answered (milliseconds; at most toasts.rs's
+ *  ANSWER_WAIT). */
 let nativeQueue: Promise<unknown> = Promise.resolve();
 function nativeCall(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     const call = nativeQueue.then(async () => {
@@ -131,7 +171,8 @@ function groupingOn(): boolean {
  * A click on a conversation's notification: it is about to be seen, so its
  * count goes, and the conversation opens. The caller's own action when this
  * page still has it; otherwise (a toast left from before a reload) the place
- * its key names.
+ * its key names. The task reminder's toast (TASKS_DUE_KEY) comes through
+ * here too, and opens the Reminders view.
  */
 export function activateConversation(key: string): void {
     const act = activations.get(key);
@@ -167,14 +208,16 @@ listenForToastClicks();
 export function seeConversation(key: string): void {
     groups.seen(key);
     activations.delete(key);
+    refusedToasts.delete(key);
     const n = webLive.get(key);
     if (n) {
         webLive.delete(key);
         try { n.close(); } catch { /* already gone */ }
     }
-    if (isTauri() && nativeToasts !== 'no') {
-        nativeCall('toast_clear', { key }).catch(() => { nativeToasts = 'no'; });
-    }
+    // Asked even after a refusal ('no' is not for good: one refused command
+    // must not leave every toast behind). A shell without them refuses this
+    // as cheaply as it would anything.
+    if (isTauri()) nativeCall('toast_clear', { key }).catch(() => undefined);
 }
 
 /** You came back to the window: whatever conversation goes on, its next
@@ -187,54 +230,109 @@ export function endConversationBursts(): void {
 export function clearAllConversationNotifications(): void {
     groups.clear();
     activations.clear();
+    refusedToasts.clear();
     for (const n of webLive.values()) {
         try { n.close(); } catch { /* already gone */ }
     }
     webLive.clear();
-    if (isTauri() && nativeToasts !== 'no') {
-        nativeCall('toast_clear_all').catch(() => { nativeToasts = 'no'; });
+    if (webReminder) {
+        try { webReminder.close(); } catch { /* already gone */ }
+        webReminder = null;
+    }
+    // Always: names stay in a notification centre after sign-out otherwise.
+    if (isTauri()) nativeCall('toast_clear_all').catch(() => undefined);
+}
+
+/** The notification plugin's toast, where the shell has none of its own:
+ *  permission asked first, as everywhere the plugin is used. (On a desktop
+ *  the plugin always answers granted today; asking is what keeps a refusal,
+ *  should a platform ever give one, from being shown nothing in silence.) It
+ *  carries no tag, no click and no sound. Says whether it was handed over. */
+async function pluginNotify(title: string, body: string): Promise<boolean> {
+    try {
+        const { isPermissionGranted, requestPermission, sendNotification } =
+            await import('@tauri-apps/plugin-notification');
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === 'granted';
+        if (!granted) return false;
+        sendNotification({ title, body });
+        return true;
+    } catch (err) {
+        console.warn('[notify] native notification failed:', err);
+        return false;
+    }
+}
+
+/** Ask the desktop app's own toasts (toasts.rs) for one, and keep what it
+ *  answered (readToastAnswer). 'no' when this shell has none. */
+async function askNativeToast(args: { key: string; title: string; body: string; popup: boolean; sound: boolean }): Promise<ToastAnswer> {
+    try {
+        const answer = readToastAnswer(args.key, await nativeCall('toast_show', args));
+        listenForToastClicks();
+        return answer;
+    } catch (err) {
+        if (nativeToasts !== 'no') console.warn('[notify] toasts that replace each other are unavailable here:', err);
+        nativeToasts = 'no';
+        return 'no';
     }
 }
 
 /** The desktop app's toast for one conversation. Where the shell refuses
  *  `toast_show` (see nativeToasts) the plugin raises one when the rule says
- *  pop, and nothing when it says update: it can neither replace nor update. */
+ *  pop, and nothing when it says update: it can neither replace nor update.
+ *  A quiet update after a refusal is not asked for (it has nothing to
+ *  change); the next pop asks again. 'off' and 'failed' fall back to nothing
+ *  for a message: the plugin's toasts go through the same Windows switch, and
+ *  the message is not quiet (nativeToastShowing), so the app's sound and its
+ *  unread marks still carry it. */
 async function showNativeToast(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): Promise<void> {
-    if (nativeToasts !== 'no') {
-        try {
-            await nativeCall('toast_show', { key, title: step.title, body: step.body, popup: step.pop });
-            nativeToasts = 'yes';
-            listenForToastClicks();
-            return;
-        } catch (err) {
-            nativeToasts = 'no';
-            console.warn('[notify] toasts that replace each other are unavailable here:', err);
-        }
-    }
-    if (!step.pop) return;
+    if (!step.pop && nativeToasts === 'no') return;
+    const answer = await askNativeToast({ key, title: step.title, body: step.body, popup: step.pop, sound: false });
+    if (answer === 'no' && step.pop) await pluginNotify(step.title, step.body);
+}
+
+/**
+ * Does this browser pop a replaced notification up again only when asked
+ * (`renotify`)? Chromium does, and replaces quietly otherwise. Firefox has no
+ * `renotify` at all and shows every replacement as a fresh pop-up (on Windows
+ * it closes the old toast and shows a new one: widget/windows/
+ * ToastNotification.cpp, ShowAlertWithCallbacks; on macOS the same, Mozilla
+ * bug 1789736). Safari has none either, and shows a same-tag notification at
+ * once, on iOS beside the old one (WebKit bug 258922). So a "quiet" update
+ * there would pop every message, which is the spam this module exists to end.
+ */
+function browserRenotifies(): boolean {
     try {
-        const { sendNotification } = await import('@tauri-apps/plugin-notification');
-        sendNotification({ title: step.title, body: step.body });
-    } catch (err) {
-        console.warn('[notify] native notification failed:', err);
+        return typeof Notification !== 'undefined' && 'renotify' in Notification.prototype;
+    } catch {
+        return false;
     }
 }
 
 /** The web app's notification for one conversation: tagged by it, so the
  *  browser replaces rather than adds; `renotify` only when it should pop. A
  *  quiet update with no notification left (the user closed it) shows
- *  nothing: a browser cannot add one without popping it. Says whether one is
- *  there now, so a message that shows nothing is not also kept quiet. */
+ *  nothing: a browser cannot add one without popping it. Where the browser
+ *  has no `renotify` (browserRenotifies), a quiet update leaves the one there
+ *  as it is (its count catches up at the next pop) and a pop closes it first,
+ *  so it pops whatever that browser does with a replacement. Says whether one
+ *  is there now, so a message that shows nothing is not also kept quiet. */
 function showWebNotification(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): boolean {
     const prev = webLive.get(key);
     if (!step.pop && !prev) return false;
+    const renotifies = browserRenotifies();
+    if (!step.pop && !renotifies) return true;
+    if (step.pop && prev && !renotifies) {
+        webLive.delete(key);
+        try { prev.close(); } catch { /* already gone */ }
+    }
     try {
         // `renotify` is in the spec and in Chromium, not in TypeScript's DOM types.
         const options: NotificationOptions & { renotify?: boolean } = {
             body: step.body,
             tag: key,
             silent: true, // the app plays its own sound; two is jarring
-            renotify: step.pop,
+            ...(renotifies ? { renotify: step.pop } : {}),
         };
         const n = new Notification(step.title, options);
         webLive.set(key, n);
@@ -259,7 +357,9 @@ export function resetConversationNotificationsForTests(): void {
     groups.clear();
     activations.clear();
     webLive.clear();
+    webReminder = null;
     nativeToasts = 'unknown';
+    refusedToasts.clear();
     nativeQueue = Promise.resolve();
 }
 
@@ -284,8 +384,12 @@ export function resetConversationNotificationsForTests(): void {
  *  - `outcome: 'updated'` → grouped into a conversation whose notification
  *    already popped in this burst: it changed in place, deliberately without
  *    popping up. `live.groups` says how many each conversation holds and
- *    `live.nativeToasts` whether the desktop app's own toasts answered
- *    ('no': a shell without them, so the plugin's toasts, one per burst).
+ *    `live.nativeToasts` what the desktop app's own toasts last answered
+ *    ('off': Windows has Púca's notifications turned off, so nothing shows;
+ *    'no': a shell without them, so the plugin's toasts, one per burst), and
+ *    `live.refusedToasts` the keys of toasts Windows refused to show (ids).
+ *  - a task entry 'windows-off', 'fired-plugin (...)' or 'not-shown (...)' →
+ *    the desktop reminder's toast was not shown by Windows, and what then.
  */
 export function notifyDiag() {
     return {
@@ -305,6 +409,7 @@ export function notifyDiag() {
             mobileBackgroundDelivery: loadSettings().mobileBackgroundDelivery,
             groupNotifications: groupingOn(),
             nativeToasts,
+            refusedToasts: [...refusedToasts],
             // Keys (ids only) and counts. Never the names the toast shows.
             groups: groups.keys().map(key => ({ key, count: groups.get(key)?.count ?? 0 })),
         },
@@ -353,7 +458,8 @@ export function notificationPermission(): NotificationPermission | 'unsupported'
  * webview that is the notification plugin's stand-in, which reads "denied"
  * until something first asks — so the banner said notifications were blocked
  * "for this site in the browser" on a desktop that shows them. The OS side is
- * granted on desktop, and notifyTasksDue asks again at fire time regardless.
+ * granted on desktop: Windows has no prompt, only a per-app switch in
+ * Settings, which toasts.rs reads before every toast it shows.
  */
 export function desktopNotificationState(): 'granted' | 'default' {
     return loadSettings().desktopNotifications ? 'granted' : 'default';
@@ -518,11 +624,15 @@ export function notifyNewMessage(opts: {
         if (isTauri()) {
             // Quiet here is still on screen: Windows updates the toast where it
             // is, or puts it back in the notification centre (toasts.rs).
+            // Not quiet where the last answer said nothing shows: the shell
+            // has no toasts of its own (a build for anything but Windows),
+            // Windows has Púca's notifications turned off, or refused the
+            // last one. There a quiet message shows nothing, so it must not
+            // take the app's sound away too. Read before this message's own
+            // answer: the burst's pop has answered by now.
+            const quiet = !step.pop && nativeToastShowing(group.key);
             void showNativeToast(group.key, step);
-            // Not quiet where the shell has refused its own toasts (a build
-            // for anything but Windows): there a quiet message shows nothing,
-            // so it must not take the app's sound away too.
-            return step.pop || nativeToasts === 'no' ? decision : { fire: true, quiet: true };
+            return quiet ? { fire: true, quiet: true } : decision;
         }
         // The web: a quiet message with nothing left to update (the user
         // closed it) shows nothing, so it is not quiet to the caller either,
@@ -540,18 +650,7 @@ export function notifyNewMessage(opts: {
     // at all while reporting success. The plugin calls the OS API from Rust and
     // sidesteps the webview entirely.
     if (isTauri()) {
-        void (async () => {
-            try {
-                const { isPermissionGranted, requestPermission, sendNotification } =
-                    await import('@tauri-apps/plugin-notification');
-                let granted = await isPermissionGranted();
-                if (!granted) granted = (await requestPermission()) === 'granted';
-                if (!granted) return;
-                sendNotification({ title: opts.title, body: 'New message' });
-            } catch (err) {
-                console.warn('[notify] native notification failed:', err);
-            }
-        })();
+        void pluginNotify(opts.title, 'New message');
         return decision;
     }
 
@@ -584,12 +683,20 @@ export function notifyNewMessage(opts: {
  * Deliberately does NOT suppress on focus, unlike a message: a message left
  * unread has badges and the channel list; a deadline that passes silently has
  * no other surface, and it is the one notification whose timing is the point.
- * Clicking it (web path) raises the app and opens the Tasks view on its
- * Reminders tab — the grouped list of what is due — via the
- * `sovereign:open-reminders` event Chat listens for. The event carries the
- * due ids, and Púca Notes opens that one item's note when exactly one is due
+ * Clicking it raises the app and opens the Tasks view on its Reminders tab —
+ * the grouped list of what is due — via the `sovereign:open-reminders` event
+ * Chat listens for: in the web app from the Notification's click, in the
+ * desktop app from its toast's (toasts.rs, `toast-activated` with
+ * TASKS_DUE_KEY), and from a toast left from before a reload through the
+ * 'reminders' navigation target. The event carries the due ids, and Púca
+ * Notes opens that one item's note when exactly one is due
  * (notes/native/useNativeReminders, which also carries the merge note about
  * this event's name). Drop the detail and that tap quietly stops working.
+ *
+ * There is no in-app sound for a reminder, so the OS's sound is its only
+ * audible cue: the web Notification is not `silent`, and the desktop toast
+ * asks for Windows' default sound (the plugin's toasts were silent: notify-rust
+ * hands tauri-winrt-notification no sound, written as `<audio silent="true"/>`).
  */
 export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (count <= 0) return;
@@ -605,12 +712,14 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
 
     const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
 
+    // Chat.tsx reads the ids to flash the item; Púca Notes opens its note (above).
+    const openReminders = () => {
+        try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
+    };
+
     if (hostShowsNotifications()) {
         record('fired');
-        notifyHost({ title: 'Púca Tasks', body, key: 'tasks-due', kind: 'tasks' }, () => {
-            // Chat.tsx ignores `detail`; Púca Notes reads the ids (above).
-            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
-        });
+        notifyHost({ title: 'Púca Tasks', body, key: TASKS_DUE_KEY, kind: 'tasks' }, openReminders);
         return;
     }
 
@@ -634,40 +743,61 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
             record('fired');
             // 'reminders' = the Tasks view's Reminders tab. Java passes nav
             // through as an opaque string, so an older APK needs no change.
-            await postMobileNotification('tasks-due', 'Púca Tasks', body, 'reminders');
+            await postMobileNotification(TASKS_DUE_KEY, 'Púca Tasks', body, 'reminders');
+        })();
+        return;
+    }
+
+    if (isTauri()) {
+        // The desktop app's own toast (toasts.rs), whatever the message
+        // grouping setting says: one reminder entry that each new one
+        // replaces, with Windows' default sound, and a click that opens
+        // Reminders (activateConversation). The newest due ids win.
+        activations.delete(TASKS_DUE_KEY);
+        activations.set(TASKS_DUE_KEY, openReminders);
+        void (async () => {
+            const answer = await askNativeToast({ key: TASKS_DUE_KEY, title: 'Púca Tasks', body, popup: true, sound: true });
+            // ONE diagnostics entry, once Windows has answered. 'off':
+            // Windows shows none of Púca's, the plugin's included.
+            if (answer === 'shown' || answer === 'queued' || answer === 'off') {
+                record(answer === 'shown' ? 'fired' : answer === 'queued' ? 'fired (unanswered)' : 'windows-off');
+                return;
+            }
+            // A shell without them (not Windows), or Windows refused this
+            // one: a deadline has no other surface, so the plugin's, which
+            // can neither sound nor be clicked through, but is something.
+            const handed = await pluginNotify('Púca Tasks', body);
+            record(handed ? `fired-plugin (${answer})` : `not-shown (${answer})`);
         })();
         return;
     }
     record('fired');
 
-    if (isTauri()) {
-        void (async () => {
-            try {
-                const { isPermissionGranted, requestPermission, sendNotification } =
-                    await import('@tauri-apps/plugin-notification');
-                let granted = await isPermissionGranted();
-                if (!granted) granted = (await requestPermission()) === 'granted';
-                if (!granted) return;
-                sendNotification({ title: 'Púca Tasks', body });
-            } catch (err) {
-                console.warn('[notify] task reminder failed:', err);
-            }
-        })();
-        return;
-    }
-
     if (notificationPermission() !== 'granted') return;
     try {
         // No `silent`: there is no in-app sound for reminders, so the OS
-        // default chime is the only audible cue.
-        const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
+        // default chime is the only audible cue. Tagged, so a new reminder
+        // replaces the last; and a replacement must alert again, or one still
+        // in the browser's list makes the next reminder silent (Chromium
+        // replaces a same-tag notification quietly unless `renotify`). Where
+        // there is no `renotify` (browserRenotifies) the old one is closed
+        // first, so the new one is a notification of its own.
+        const renotifies = browserRenotifies();
+        if (!renotifies && webReminder) {
+            try { webReminder.close(); } catch { /* already gone */ }
+        }
+        webReminder = null;
+        const options: NotificationOptions & { renotify?: boolean } = {
+            body, tag: TASKS_DUE_KEY, ...(renotifies ? { renotify: true } : {}),
+        };
+        const n = new Notification('Púca Tasks', options);
+        webReminder = n;
         n.onclick = () => {
             void focusApp();
-            // The ids it already holds ride along: Púca Notes opens the
-            // one item when exactly one is due (Chat.tsx ignores `detail`).
-            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
+            openReminders();
             n.close();
         };
+        n.onclose = () => { if (webReminder === n) webReminder = null; };
     } catch {
         // Construction can fail with permission granted (OS-level disable).
     }
@@ -714,19 +844,19 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
         }
     }
     // The desktop app's own toast, as a grouped message uses (toasts.rs):
-    // a second press replaces the first rather than adding one.
-    if (groupingOn() && nativeToasts !== 'no') {
-        try {
-            await nativeCall('toast_show', {
-                key: 'test', title: 'Púca', body: 'Test notification — this is what a new message looks like.', popup: true,
-            });
-            nativeToasts = 'yes';
-            listenForToastClicks();
-            return { ok: true };
-        } catch {
-            nativeToasts = 'no';
-            // A shell without them: the plugin below, as before.
-        }
+    // a second press replaces the first rather than adding one, and it says
+    // what Windows did with it, so a test that showed nothing says so. With
+    // grouping off a message goes through the plugin, so the test does too,
+    // and the plugin cannot tell whether Windows showed it.
+    if (groupingOn()) {
+        const answer = await askNativeToast({
+            key: 'test', title: 'Púca', body: 'Test notification — this is what a new message looks like.', popup: true, sound: false,
+        });
+        if (answer === 'off') return { ok: false, reason: 'Windows has notifications for Púca turned off' };
+        if (answer === 'failed') return { ok: false, reason: 'Windows refused to show it' };
+        if (answer === 'queued') return { ok: false, reason: 'Windows took too long to answer, so it may or may not appear' };
+        if (answer === 'shown') return { ok: true };
+        // A shell without them: the plugin below, as before.
     }
     try {
         const { isPermissionGranted, requestPermission, sendNotification } =
