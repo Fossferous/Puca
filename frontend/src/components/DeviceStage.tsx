@@ -274,9 +274,11 @@ const NO_EDGE_HOPS: EdgeHop[] = [];
  *  The mouse pad, pinned keys and the collapsed toolbar's toggle are drawn
  *  ABOVE the arrow (fixed, z-index 460/499); the paused banner is under it
  *  but would lose its words and Resume to it. Not the feedback line nor the
- *  older-agent band: both let touches through, are drawn under the arrow
- *  and come and go on their own timers, so an arrow that moved for them
- *  moved out from under a finger aimed at it. */
+ *  older-agent band: both let a tap through to the arrow (the line is drawn
+ *  over it, z-index 460, the band under it) and come and go without the
+ *  user (a note expires after 6 s, a host refusal when the host changes its
+ *  mind, the band 3 s after the trackpad takes the pointer), so an arrow
+ *  that moved for them moved out from under a finger aimed at it. */
 const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, .device-stage-mobile-toolbar-toggle';
 
 /** How long to wait for the peer's first caret report before placing the view
@@ -2760,10 +2762,10 @@ export function DeviceStage() {
     // nearest free spot (deviceStageHopPlace.ts; HOP_ARROW_OBSTACLES says
     // what counts).
     // NOT the feedback line (.device-stage-mobile-error) nor the older-agent
-    // band: they let touches through, are drawn under the arrow, and come
-    // and go on their own. An arrow that slid aside for a 6 s note and
-    // snapped back as it expired moved out from under the finger aimed at
-    // it, and that tap clicked the picture.
+    // band: both let a tap through to the arrow (the line paints over it, the
+    // band under it) and come and go without the user. An arrow that slid
+    // aside for a 6 s note and snapped back as it expired moved out from
+    // under the finger aimed at it, and that tap clicked the picture.
     // Measured when the arrows' directions or those controls change, when the
     // picture's box or the bars around it change, once more a frame later (a
     // cluster re-clamps itself after a change, and that commit lands after
