@@ -136,6 +136,37 @@ const harness = {
         for (const [uid, p] of peers) wire(uid, p.connection.addTrack(track, local));
     },
 
+    /** The server's CameraStarted / CameraStopped for a peer (B7), as the
+     *  app's always-on handler passes them on. */
+    announceCamera(id: number, on: boolean): void { mgr!.setPeerCamera(id, on); },
+
+    /** Flip the way 0.9.862 and older did it: the camera that is on stopped,
+     *  the next one put on the FIRST video sender (after an old off and on,
+     *  the dead one's), no renegotiation. */
+    legacyFlip(colour: string): void {
+        const media = mgr!.media as unknown as MediaManager;
+        const local = media.getLocalStreamSync()!;
+        for (const t of local.getVideoTracks()) { t.stop(); local.removeTrack(t); }
+        const track = media.addCamera(colour);
+        const peers = (mgr as unknown as { peers: Map<number, PeerView> }).peers;
+        for (const [, p] of peers) {
+            const first = p.connection.getSenders().find((x) => x.track?.kind === 'video');
+            void first?.replaceTrack(track);
+        }
+    },
+
+    /** Each video receiver's decoded frames so far, and whether it is the one shown (a failure report). */
+    async receiverFrames(id: number) {
+        const shown = cameras.get(id)?.srcObject as MediaStream | undefined;
+        const out = [];
+        for (const r of peer(id).connection.getReceivers().filter((x) => x.track.kind === 'video')) {
+            let n = 0;
+            (await r.getStats()).forEach((x: Record<string, unknown>) => { if (x.type === 'inbound-rtp') n += (x.framesDecoded as number) ?? 0; });
+            out.push({ id: r.track.id.slice(0, 9), frames: n, shown: !!shown?.getTracks().some((t) => t === r.track), muted: r.track.muted });
+        }
+        return out;
+    },
+
     /** How many times a peer's camera was handed over to be shown. */
     cameraDeliveries: (id: number) => cameraDeliveries.get(id) ?? 0,
 

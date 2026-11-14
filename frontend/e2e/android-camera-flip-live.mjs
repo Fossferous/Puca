@@ -515,15 +515,14 @@ try {
         check('OFF_ON: the viewer\'s TILE shows it (frames rising, the phone\'s picture)', !!b2.tile && !!a.tile && b2.tile.frames > a.tile.frames && likeness(b2.tile.grid, p2.grid) >= 0.6,
             { tileBefore: tileBefore?.frames, a: a.tile?.frames, b: b2.tile?.frames, tracks: b2.tracks, likeness: b2.tile ? r3(likeness(b2.tile.grid, p2.grid)) : null });
         if (!SFU) {
-            // The camera went back on its own sender: one video transceiver
-            // toward the viewer (it used to add a second, the viewer's stream
-            // then holding the dead track first).
-            const lines = await P.evaluate(async (id) => {
-                const { webrtcManager } = await import('/src/api/webrtc.ts');
-                const pc = webrtcManager.peers.get(id)?.connection;
-                return pc ? pc.getTransceivers().filter(t => t.receiver.track.kind === 'video').length : null;
-            }, uid.V).catch(() => null);
-            check("OFF_ON: the phone's camera went back on its own sender (one video transceiver toward the viewer)", lines === 1, { videoTransceivers: lines });
+            // The camera went back on its own sender: ONE video transceiver
+            // between the two (it used to add a second, the viewer's stream
+            // then holding the dead track first). Counted on the viewer's
+            // side, whose connections this walk tracks (the phone runs the
+            // APK's built bundle: none of its modules can be imported).
+            const lines = await V.evaluate(() => window.__pcs.filter(pc => pc.connectionState !== 'closed')
+                .flatMap(pc => pc.getTransceivers()).filter(t => t.receiver.track.kind === 'video').length);
+            check("OFF_ON: the phone's camera went back on its own sender (one video transceiver between them)", lines === 1, { videoTransceivers: lines });
         }
         throw new Error('OFF_ON done');
     }

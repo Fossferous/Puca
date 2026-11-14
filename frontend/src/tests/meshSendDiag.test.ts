@@ -33,6 +33,7 @@ function fakePc(rows: Row[], senders: unknown[] = [], receivers: unknown[] = [])
         getStats: async () => new Map(rows.map(r => [String(r.id), r])),
         getSenders: () => senders,
         getReceivers: () => receivers,
+        getTransceivers: () => [],
         signalingState: 'stable', connectionState: 'connected',
     };
 }

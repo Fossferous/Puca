@@ -1091,8 +1091,40 @@ export class WebRTCManager {
      *  is rendered only while one is in effect (B7). */
     setPeerCamera(userId: UserId, on: boolean): void {
         if (on) this.videoGate.announceCamera(userId);
-        else this.videoGate.stopCamera(userId);
-        this.releaseHeldVideo(userId);
+        else {
+            this.videoGate.stopCamera(userId);
+            this.cameraHidden.add(userId);
+        }
+        const released = this.releaseHeldVideo(userId);
+        if (on && released === 0) this.showCameraAgain(userId);
+    }
+
+    /** Peers whose camera was announced OFF (its tile taken down) since it was
+     *  last handed over. */
+    private cameraHidden = new Set<UserId>();
+    /** Each peer's current camera receiver (cameraTrackOf's, by receiver). */
+    private cameraReceiverOf = new Map<UserId, RTCRtpReceiver>();
+
+    /**
+     * A peer's camera announced ON again and nothing new arrived for it: its
+     * camera, turned off and on again, came back on the SAME receiver
+     * without the turn off ever being negotiated (another offer of theirs
+     * was still unanswered, and by the time theirs could go the camera was
+     * on again: no direction changed, so ontrack never fires again). Its
+     * tile went with the CameraStopped, and only a hand-over brings it back.
+     * Only while that receiver still receives as last negotiated: a turn
+     * off that WAS negotiated leaves it not receiving, and the ontrack the
+     * turn on brings hands it over.
+     */
+    private showCameraAgain(userId: UserId): void {
+        if (!this.cameraHidden.has(userId) || this.selfNoReceive) return;
+        const receiver = this.cameraReceiverOf.get(userId);
+        const pc = this.peers.get(userId)?.connection;
+        const t = receiver && pc?.getTransceivers().find(x => x.receiver === receiver);
+        if (!t || !receiver.track || receiver.track.readyState !== 'live') return;
+        if (t.currentDirection !== 'sendrecv' && t.currentDirection !== 'recvonly') return;
+        console.log(`[WebRTC] camera of ${userId} announced again on the receiver it had: handing it over again`);
+        this.deliverVideo(userId, 'camera', new MediaStream([receiver.track]), receiver);
     }
 
     /** What each delivered incoming video track is, by track id, so the
@@ -1106,10 +1138,106 @@ export class WebRTCManager {
      *  putCameraOn). */
     private cameraTrackOf = new Map<UserId, string>();
 
+    /**
+     * A peer on 0.9.862 or older that turned its camera off and on has TWO
+     * camera receivers here (it added a second sender), and its Flip then
+     * puts the next camera on the FIRST, dead one's sender, with no
+     * renegotiation and no event: frames come on the receiver the tile is not
+     * showing, and the tile froze on its last frame (an older viewer, which
+     * played the first, recovered there). So while any peer has more than one
+     * camera receiver, which a peer on this version never does, each is
+     * looked at every CAMERA_FOLLOW_MS, and one that frames arrive on while
+     * none do on the one shown is handed over in its place.
+     */
+    private cameraFollow: ReturnType<typeof setInterval> | null = null;
+    private readonly CAMERA_FOLLOW_MS = 1500;
+
+    private followCameraReceivers(): void {
+        const several = [...this.peers].some(([userId, p]) => this.cameraReceiversOf(userId, p.connection).length > 1);
+        if (several && !this.cameraFollow) {
+            this.cameraFollow = setInterval(() => { void this.followCameras(); }, this.CAMERA_FOLLOW_MS);
+        } else if (!several && this.cameraFollow) {
+            clearInterval(this.cameraFollow);
+            this.cameraFollow = null;
+        }
+    }
+
+    /** This peer's camera receivers on its connection (delivered as its camera). */
+    private cameraReceiversOf(userId: UserId, pc: RTCPeerConnection): RTCRtpReceiver[] {
+        return pc.getReceivers().filter(r => r.track?.kind === 'video' && r.track.readyState === 'live'
+            && this.inboundVideoKinds.get(r.track.id) === 'camera' && this.cameraPeerOf.get(r) === userId);
+    }
+
+    /** Frames each camera receiver had decoded at the last look (followCameras). */
+    private cameraFrames = new WeakMap<RTCRtpReceiver, number>();
+
+    /** A receiver's decoded video frames so far (its inbound-rtp), or null. */
+    private static async framesDecoded(r: RTCRtpReceiver): Promise<number | null> {
+        try {
+            let n: number | null = null;
+            (await r.getStats()).forEach((x: { type?: string; kind?: string; framesDecoded?: number }) => {
+                if (x.type === 'inbound-rtp' && x.kind === 'video' && typeof x.framesDecoded === 'number') n = (n ?? 0) + x.framesDecoded;
+            });
+            return n;
+        } catch {
+            return null;
+        }
+    }
+
+    /** The frames decoded on each receiver since the last look (0 when it
+     *  cannot say). Not its synchronization sources: packets that carry no
+     *  picture keep those fresh, and Firefox, its camera stopped, still
+     *  sends about a frame a second on that sender (both measured). */
+    private async cameraFrameDeltas(receivers: RTCRtpReceiver[]): Promise<Map<RTCRtpReceiver, number>> {
+        const out = new Map<RTCRtpReceiver, number>();
+        for (const r of receivers) {
+            const n = await WebRTCManager.framesDecoded(r);
+            const before = this.cameraFrames.get(r);
+            if (n !== null) this.cameraFrames.set(r, n);
+            out.set(r, n !== null && before !== undefined ? Math.max(0, n - before) : 0);
+        }
+        return out;
+    }
+
+    private followBusy = false;
+
+    private async followCameras(): Promise<void> {
+        if (this.followBusy) return;
+        this.followBusy = true;
+        try {
+            for (const [userId, peer] of [...this.peers]) {
+                const all = this.cameraReceiversOf(userId, peer.connection);
+                if (all.length < 2) continue;
+                const frames = await this.cameraFrameDeltas(all);
+                if (this.peers.get(userId) !== peer || this.cameraHidden.has(userId) || !this.videoGate.hasCamera(userId)) continue;
+                const shown = this.cameraReceiverOf.get(userId);
+                const shownFrames = shown ? frames.get(shown) ?? 0 : 0;
+                // The camera is where the frames are: one receiver with a
+                // picture's worth of them, the one shown with a trickle at most.
+                const live = all.find(r => r !== shown && (frames.get(r) ?? 0) >= 5 && (frames.get(r) ?? 0) > 3 * shownFrames);
+                if (!live) continue;
+                console.log(`[WebRTC] the camera of ${userId} came back on another receiver: handing that one over`);
+                this.deliverVideo(userId, 'camera', new MediaStream([live.track]), live);
+            }
+        } finally {
+            this.followBusy = false;
+            this.followCameraReceivers();
+        }
+    }
+
+    /** The peer each camera receiver was delivered for. */
+    private cameraPeerOf = new WeakMap<RTCRtpReceiver, UserId>();
+
     private deliverVideo(userId: UserId, kind: 'camera' | 'screen', stream: MediaStream, receiver: RTCRtpReceiver): void {
         if (receiver.track) {
             this.inboundVideoKinds.set(receiver.track.id, kind);
             if (kind === 'camera') this.cameraTrackOf.set(userId, receiver.track.id);
+        }
+        if (kind === 'camera') {
+            this.cameraReceiverOf.set(userId, receiver);
+            this.cameraPeerOf.set(receiver, userId);
+            this.cameraHidden.delete(userId);
+            this.followCameraReceivers();
         }
         if (kind === 'camera') {
             // The camera ALONE, not the stream it arrived in: that stream is
@@ -1132,7 +1260,7 @@ export class WebRTCManager {
 
     /** An announcement changed for this peer: hand over any video that was
      *  held for it (see AnnouncedVideoGate). */
-    private releaseHeldVideo(userId: UserId): void {
+    private releaseHeldVideo(userId: UserId): number {
         const voiceId = this.peers.get(userId)?.remoteStream?.id ?? null;
         const released = this.videoGate.release(userId, (sid) => ({
             isVoiceStream: voiceId !== null && sid === voiceId,
@@ -1142,6 +1270,7 @@ export class WebRTCManager {
             console.log(`[WebRTC] releasing held ${r.kind} video from ${userId} — now announced`);
             this.deliverVideo(userId, r.kind, r.payload.stream, r.payload.receiver);
         }
+        return released.length;
     }
 
     /** Acquire the camera WITHOUT publishing it: the track reaches peers only
@@ -2509,6 +2638,7 @@ export class WebRTCManager {
         // Held video rode this pc; the announcements are server state and stay.
         this.videoGate.forgetHeld(userId);
         this.heldShareAudio.delete(userId);
+        this.cameraReceiverOf.delete(userId); // its receiver went with the pc
         // The control lanes die with the pc; forget them so a rebuilt peer
         // starts from "no capability" rather than inheriting a hello that
         // belonged to a connection that no longer exists.
@@ -2536,6 +2666,9 @@ export class WebRTCManager {
         this.inVoice = false;
         this.videoGate.reset();
         this.heldShareAudio.clear();
+        this.cameraReceiverOf.clear();
+        this.cameraHidden.clear();
+        if (this.cameraFollow) { clearInterval(this.cameraFollow); this.cameraFollow = null; }
         this.noReceivePeers.clear();
         this.selfNoReceive = false;
         this.voiceEpoch++;
@@ -2775,6 +2908,7 @@ export class WebRTCManager {
         }
         for (const id of [...this.inboundVideoKinds.keys()]) if (!live.has(id)) this.inboundVideoKinds.delete(id);
         for (const u of [...this.cameraTrackOf.keys()]) if (!this.peers.has(u)) this.cameraTrackOf.delete(u);
+        for (const u of [...this.cameraReceiverOf.keys()]) if (!this.peers.has(u)) this.cameraReceiverOf.delete(u);
         return out;
     }
 }

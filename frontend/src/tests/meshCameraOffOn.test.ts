@@ -68,7 +68,7 @@ class FakeSender {
 type Direction = 'sendrecv' | 'sendonly' | 'recvonly' | 'inactive';
 class FakeTransceiver {
     readonly sender: FakeSender;
-    readonly receiver: { track: FakeTrack };
+    readonly receiver: { track: FakeTrack; frames: number; getStats(): Promise<Map<string, unknown>> };
     currentDirection: Direction | 'stopped' | null = null;
     /** The stream ids its sender was added with (the msid the other side sees). */
     streams: string[];
@@ -81,7 +81,13 @@ class FakeTransceiver {
         this.kind = kind;
         this.pc = pc;
         this.sender = sender;
-        this.receiver = { track: new FakeTrack(kind) };
+        const receiver = {
+            track: new FakeTrack(kind),
+            /** Video frames decoded on it so far (its inbound-rtp's framesDecoded). */
+            frames: 0,
+            getStats: async () => new Map([['in', { type: 'inbound-rtp', kind, framesDecoded: receiver.frames }]]),
+        };
+        this.receiver = receiver;
         this.dir = dir;
         this.streams = streams;
         this.usedToSend = !!sender.track;
@@ -361,5 +367,96 @@ describe('the camera turned off and on again (mesh), the receiving side', () => 
         v.mgr.setPeerCamera(2, true);
         expect(v.shown).toHaveLength(1);
         expect(v.shown[0].getVideoTracks()).toEqual([live]);
+    });
+});
+
+describe('the receiving side, when no new track comes for a camera', () => {
+    /** A viewer of peer 2 with its voice and the camera on `n` receivers of
+     *  their own transceivers, each handed over as it came (peer 2's camera
+     *  announced first, B7). */
+    async function viewing(n: number) {
+        const mgr = new WebRTCManager();
+        mgr.setLocalUserId(1);
+        mgr.setRequireMediaE2ee(false);
+        const media = mgr.media as unknown as Record<string, unknown>;
+        media.getLocalStreamSync = () => new FakeStream([new FakeTrack('audio', 'mic')], 'mine');
+        media.getScreenShareStreamSync = () => null;
+        const shown: MediaStream[] = [];
+        mgr.setOnCameraStream((_uid, s) => { shown.push(s); });
+        mgr.setOnRemoteStream(() => {});
+        await mgr.callUser(2);
+        const pc = pcs.at(-1)!;
+        const voice = new FakeStream([new FakeTrack('audio', 'their mic')], 'their-voice');
+        pc.ontrack!({ track: voice.getAudioTracks()[0], receiver: { track: voice.getAudioTracks()[0] }, streams: [voice] });
+        mgr.setPeerCamera(2, true);
+        const cams: FakeTransceiver[] = [];
+        for (let i = 0; i < n; i++) {
+            const t = pc.addTransceiver('video', { direction: 'recvonly' });
+            t.currentDirection = 'recvonly';
+            voice.addTrack(t.receiver.track);
+            pc.ontrack!({ track: t.receiver.track, receiver: t.receiver, streams: [voice] });
+            cams.push(t);
+        }
+        const last = () => shown.at(-1)?.getVideoTracks()[0];
+        return { mgr, pc, cams, shown, last };
+    }
+
+    it('REVIEW: turned off and on before the off was negotiated (no ontrack again): announced on, it is handed over again', async () => {
+        const v = await viewing(1);
+        expect(v.shown).toHaveLength(1);
+        v.mgr.setPeerCamera(2, false); // CameraStopped: the tile went
+        v.mgr.setPeerCamera(2, true); // CameraStarted, and the same receiver still receiving
+        expect(v.shown, 'its tile never came back').toHaveLength(2);
+        expect(v.last()).toBe(v.cams[0].receiver.track);
+    });
+
+    it('CONTROL: a turn off that WAS negotiated (the receiver no longer receives) waits for the ontrack the turn on brings', async () => {
+        const v = await viewing(1);
+        v.mgr.setPeerCamera(2, false);
+        v.cams[0].currentDirection = 'inactive';
+        v.mgr.setPeerCamera(2, true);
+        expect(v.shown).toHaveLength(1);
+    });
+
+    it('CONTROL: an announcement replayed while the tile is up hands nothing over again (no rebind, no flicker)', async () => {
+        const v = await viewing(1);
+        v.mgr.setPeerCamera(2, true);
+        expect(v.shown).toHaveLength(1);
+    });
+
+    it('REVIEW: a 0.9.862 peer (two camera receivers) that Flips onto its first, dead, sender: the receiver the frames come on is handed over', async () => {
+        vi.useFakeTimers();
+        try {
+            const v = await viewing(2);
+            const [dead, live] = v.cams;
+            expect(v.last(), 'precondition: the newest receiver is shown').toBe(live.receiver.track);
+            // The Flip: the frames move to the first receiver; the shown one
+            // gets a trickle (Firefox keeps sending a frame a second there).
+            for (let i = 0; i < 4; i++) {
+                dead.receiver.frames += 45;
+                live.receiver.frames += 1;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            expect(v.last(), 'the tile stayed on the receiver that no longer has the picture').toBe(dead.receiver.track);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('CONTROL: while the receiver shown has the frames, it stays shown', async () => {
+        vi.useFakeTimers();
+        try {
+            const v = await viewing(2);
+            const [dead, live] = v.cams;
+            for (let i = 0; i < 4; i++) {
+                dead.receiver.frames += 1;
+                live.receiver.frames += 45;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            expect(v.shown).toHaveLength(2);
+            expect(v.last()).toBe(live.receiver.track);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

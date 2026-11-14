@@ -1,10 +1,11 @@
 ### Fixed
 
-- **Turning your camera off and on again no longer freezes your picture for
-  the others.** In a call without the media server, everyone else's tile of
-  you stayed on your last picture, or went black, once you had turned your
-  camera off and on. Your camera now goes back out the way it went before,
-  and a picture from somebody on an older version is shown live too.
+- **Turning your camera off and on no longer freezes it for the others.** In
+  a call without the media server, everyone else's tile of you stayed on your
+  last picture, or went black, once you had turned your camera off and on.
+  Your camera now goes back out the way it went before, and the camera of
+  somebody still on an older version is shown live too, also after they flip
+  it.
 - **"Voice Connected" waits until you are connected.** On a channel whose
   calls go through the media server, the voice panel said "Voice Connected"
   while it was still connecting, with no sound in or out yet. It now says
@@ -29,6 +30,6 @@
   camera, a checkbox) tried to open a microphone again whenever Input Volume
   was not at 100%, which could bring back the permission question each
   time. Only picking a microphone does that now.
-- **Switching cameras under "Require encryption" in Firefox works in the
-  first moments of a camera.** Right after your camera came on, a switch
-  could fail because the old camera was still held open.
+- **Switching cameras right after turning one on works in Firefox.** Under
+  "Require encryption", a switch in the first moments of a camera could fail
+  because the old camera was still held open.

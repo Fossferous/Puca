@@ -235,6 +235,8 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
     const logs = { 1: [], 2: [] };
     const heldOffers = [];
     let glareDone = !glare;
+    /** Offers FROM a page held back (an answer that is slow to come): p.holdOffers(uid, on). */
+    const holding = { 1: null, 2: null };
     for (const [uid, eng, init] of [[1, a, initA], [2, b, initB]]) {
         const ctx = await eng.browser.newContext();
         const page = await ctx.newPage();
@@ -253,6 +255,7 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
             }
             const payload = type === 'IceCandidate' ? { from_user: uid, candidate: body } : { from_user: uid, sdp: body };
             const send = () => target.evaluate(([t, p]) => window.__deliver(t, p), [type, payload]).catch(() => {});
+            if (holding[uid] && type === 'Offer') { holding[uid].push(send); return; }
             if (!glareDone && type === 'Offer') {
                 heldOffers.push(send);
                 if (heldOffers.length < 2) return;
@@ -270,7 +273,13 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
     for (const uid of [1, 2]) keys[uid] = await pages[uid].evaluate(([pw, salt]) => window.harness.signIn(pw, salt), [`password-${uid}-${randomBytes(4).toString('hex')}`, randomBytes(16).toString('hex')]);
     await pages[1].evaluate((k) => window.harness.setPeerKeys(k), { 2: keys[2] });
     await pages[2].evaluate((k) => window.harness.setPeerKeys(k), { 1: keys[1] });
-    return { pages, logs, close: async () => { for (const p of Object.values(pages)) await p.context().close(); } };
+    const holdOffers = async (uid, on) => {
+        if (on) { holding[uid] ??= []; return; }
+        const queued = holding[uid] ?? [];
+        holding[uid] = null;
+        for (const f of queued) await f();
+    };
+    return { pages, logs, holdOffers, close: async () => { for (const p of Object.values(pages)) await p.context().close(); } };
 }
 
 /** Both in the channel first, then the call: as in the app, nobody's offer
@@ -554,21 +563,94 @@ await run('camera-off-on', async () => {
         await bothHear(p, tag, 'each still hears the other (the voice stream lost and regained a video track)');
         const refused = [1, 2].flatMap((uid) => p.logs[uid].filter((l) => /setRemoteDescription\(|Failed to parse|rejects the offer|rebuilding/i.test(l)));
         ck(refused.length === 0, `${tag} no description was refused and nothing was rebuilt`, refused.slice(0, 2).join(' / '));
-        // A peer on 0.9.862 or older: off leaves the stopped track on its
-        // sender, on ADDS another in the same stream (the dead one first).
-        const before = await p.pages[1].evaluate((id) => window.harness.videoTransceivers(id), 2);
+        // Off and on again before the off was ever negotiated: an offer of
+        // Edge's is still unanswered (a slow peer), so the turn off is never
+        // offered, and by the time it could be the camera is on again: no
+        // direction ever changed, so Firefox is told of no track, and its
+        // ontrack never fires again. In the app its tile went with the
+        // camera's CameraStopped and only a delivery brings it back.
         await p.pages[1].evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
-        ck((await shows(p.pages[2], 1, 0)).ok, `${tag} precondition: Firefox shows Edge's red camera`);
-        await p.pages[1].evaluate(() => window.harness.legacyCameraOff());
+        ck((await shows(p.pages[2], 1, 0)).ok, `${tag} precondition: Firefox shows Edge's red camera again`);
         await sleep(1500);
-        await p.pages[1].evaluate(() => window.harness.legacyCameraOn('rgb(0, 0, 230)'));
-        const legacyLines = await (async () => { await sleep(3000); return p.pages[1].evaluate((id) => window.harness.videoTransceivers(id), 2); })();
-        ck(legacyLines > before, `${tag} precondition: the old way added a second video transceiver`, `${before} -> ${legacyLines}`);
-        const blue = await shows(p.pages[2], 1, 2);
-        ck(blue.ok, `${tag} a peer that turned its camera on the OLD way: Firefox shows its live camera (blue), not the dead first track`, JSON.stringify(blue.last));
+        const handedBefore = await p.pages[2].evaluate((id) => window.harness.cameraDeliveries(id), 1);
+        // Held well under the 3 s after which the manager rebuilds a peer whose
+        // offer goes unanswered (scheduleStuckPeerRecovery): a rebuild would
+        // hand everything over afresh and hide this.
+        await p.holdOffers(1, true);
+        await p.pages[1].evaluate((id) => window.harness.restartIce(id), 2); // an offer that waits for its answer
+        await sleep(300);
+        await p.pages[1].evaluate(() => window.harness.stopCamera());
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, false), 1);
+        await sleep(300);
+        await p.pages[1].evaluate(() => window.harness.cameraOn('rgb(0, 200, 0)'));
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, true), 1);
+        await p.holdOffers(1, false);
+        const rebuilt = p.logs[1].some((l) => /unrecoverable .* rebuilding/.test(l));
+        await sleep(4000);
+        const handedAfter = await p.pages[2].evaluate((id) => window.harness.cameraDeliveries(id), 1);
+        ck(!rebuilt, `${tag} precondition: the peer was not rebuilt meanwhile (that would hand the camera over afresh)`);
+        ck(handedAfter > handedBefore, `${tag} off and on inside one negotiation: Firefox is handed the camera again when it is announced (its tile came back)`, `${handedBefore} -> ${handedAfter}`);
+        ck((await shows(p.pages[2], 1, 1)).ok, `${tag} off and on inside one negotiation: and shows the camera that is on (green)`);
+        await p.pages[1].evaluate(() => window.harness.stopCamera());
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, false), 1);
+        await sleep(1500);
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, true), 1);
     } finally {
         dumpLogs(p, tag);
         await p.close();
+    }
+});
+
+await run('camera-off-on-old-peer', async () => {
+    // A peer on 0.9.862 or older: off leaves the stopped track on its sender,
+    // on ADDS another in the same stream (the dead one first); its Flip then
+    // goes onto its FIRST, dead, sender with no renegotiation. Each engine
+    // as the viewer of an old peer, each in a call of its own.
+    const dominant = (c, ch) => !!c && c[ch] >= 90 && c[ch] > c[(ch + 1) % 3] + 50 && c[ch] > c[(ch + 2) % 3] + 50;
+    const shows = async (viewer, from, ch, ms = 15_000) => {
+        const end = Date.now() + ms;
+        let run = 0, last = null;
+        while (Date.now() < end) {
+            last = await viewer.evaluate((id) => window.harness.pictureColour(id), from);
+            run = dominant(last, ch) ? run + 1 : 0;
+            if (run >= 3) return { ok: true, last };
+            await sleep(250);
+        }
+        return { ok: false, last };
+    };
+    for (const [from, viewer] of [[1, 2], [2, 1]]) {
+        const p = await pair({ a: cr, b: ff });
+        const name = from === 1 ? cr.name : ff.name, other = from === 1 ? ff.name : cr.name;
+        const tag = `[${name} on 0.9.862 -> ${other} viewing]`;
+        try {
+            await enterCall(p, { camera: false });
+            await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+            const fromPage = p.pages[from], viewerPage = p.pages[viewer];
+            const before = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+            ck((await shows(viewerPage, from, 0)).ok, `${tag} precondition: ${other} shows the red camera`);
+            await fromPage.evaluate(() => window.harness.legacyCameraOff());
+            await sleep(1500);
+            await fromPage.evaluate(() => window.harness.legacyCameraOn('rgb(0, 0, 230)'));
+            await sleep(3000);
+            const lines = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            ck(lines > before, `${tag} precondition: the old way added a second video transceiver`, `${before} -> ${lines}`);
+            const blue = await shows(viewerPage, from, 2);
+            ck(blue.ok, `${tag} turned on the OLD way: ${other} shows its live camera (blue), not the dead first track`, JSON.stringify(blue.last));
+            await fromPage.evaluate(() => window.harness.legacyFlip('rgb(220, 0, 0)'));
+            const flipped = await shows(viewerPage, from, 0);
+            ck(flipped.ok, `${tag} then Flipped the old way (onto its first, dead, sender): ${other} shows the camera it flipped to (red), not the last frame of the one before`, JSON.stringify(flipped.last));
+            if (!flipped.ok) {
+                const a = await viewerPage.evaluate((id) => window.harness.receiverFrames(id), from);
+                await sleep(1500);
+                const b = await viewerPage.evaluate((id) => window.harness.receiverFrames(id), from);
+                console.log('   frames at the viewer, 1.5 s apart:', JSON.stringify(a), JSON.stringify(b));
+                console.log('   its log:', p.logs[viewer].filter((l) => /came back on another receiver|Received remote track/.test(l)).slice(-6).join(' || '));
+            }
+        } finally {
+            dumpLogs(p, tag);
+            await p.close();
+        }
     }
 });
 

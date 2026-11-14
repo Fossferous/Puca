@@ -218,8 +218,8 @@ describe('Flip on a phone', () => {
         off();
         expect(told, 'nobody holding a copy was told').toHaveLength(1);
         expect(told[0].track).toBe(front);
-        expect(told[0].live, 'told after the camera was stopped').toBe(true);
-        expect(told[0].asked, 'told after the next camera was asked for').toBe(asked);
+        expect(told[0].live, 'told only once the camera was already stopped (too late: a copy of it still held the camera)').toBe(true);
+        expect(told[0].asked, 'told only once the next camera was asked for (too late)').toBe(asked);
         await media.flipCamera();
         expect(told, 'an unregistered listener is not told').toHaveLength(1);
     });
