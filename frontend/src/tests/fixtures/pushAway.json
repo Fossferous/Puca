@@ -1,0 +1,4 @@
+{
+  "away": {"type":"SetPushAway","payload":{"away":true}},
+  "back": {"type":"SetPushAway","payload":{"away":false}}
+}

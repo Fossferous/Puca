@@ -332,6 +332,14 @@ pub struct Session {
     /// Announced the `games` capability (`crate::presence::CAP_GAMES`): the
     /// only connections that are sent Game* frames. Never a delivery socket.
     pub games: bool,
+    /// The page on this connection said it cannot show a notification by
+    /// itself right now (`ClientMessage::SetPushAway`): a phone's web app in
+    /// the background, which iOS freezes within seconds while its socket
+    /// stays up for another minute or more, or a page being left. For WEB
+    /// PUSH ONLY its browser then counts as away (`sid_is_present`), as if
+    /// this socket had closed; nothing else reads it. False at connect (an
+    /// older client never sends the frame), never set on a delivery socket.
+    pub push_away: bool,
 }
 
 /// One continuous stretch of a user's MEMBERSHIP of a voice room. `left_ms` is
@@ -1120,7 +1128,10 @@ pub struct AppState {
     /// its Session, so without this its teardown has no sid and records no
     /// `voice_drops` entry for a call the eviction ended. Consumed by that
     /// teardown; one entry per eviction, and evictions are bounded by the cap.
-    pub evicted_sids: DashMap<u64, String>,
+    /// The flag says whether that conn still counted its browser as present
+    /// for Web Push (visible, not `push_away`): the same teardown needs it to
+    /// tell whether this conn going is the moment its browser went away.
+    pub evicted_sids: DashMap<u64, (String, bool)>,
     /// Events seen while a resync's snapshot is in flight (None otherwise);
     /// the merge must not undo them. Lock order: this, then `sfu_rooms`.
     pub sfu_resync_journal: std::sync::Mutex<Option<crate::sfu::SfuResyncJournal>>,
@@ -1178,8 +1189,10 @@ pub struct AppState {
     pub web_push_seq: AtomicU64,
     /// Per subscription: the newest logged frame its worker has been told of.
     pub web_push_cursor: DashMap<i64, (u64, Instant)>,
-    /// Per session id: `web_push_seq` when its last connection closed. What
-    /// came before it, that browser saw while it was open.
+    /// Per session id: `web_push_seq` when its browser last went away (its
+    /// last present connection closed, or its page said it cannot notify;
+    /// see `sid_is_present`). What came before it, that browser saw while
+    /// it was open.
     pub web_push_away: DashMap<String, (u64, Instant)>,
     /// Per (user, channel): until when that user may finish a save of the channel's overwrites
     /// that hid the channel from them partway (channel_handlers::require_manage_overwrites).
@@ -1952,7 +1965,8 @@ impl AppState {
             // Likewise its sid, for the voice drop its teardown records
             // (rooms are reaped there, outside this shard lock).
             if !evicted.sid.is_empty() {
-                self.evicted_sids.insert(evicted.conn_id, evicted.sid.clone());
+                let present = !evicted.delivery && !evicted.push_away;
+                self.evicted_sids.insert(evicted.conn_id, (evicted.sid.clone(), present));
             }
             let was_in_device_session = protected.contains(&evicted.conn_id);
             // This eviction used to be completely silent, which is why it took
@@ -2002,6 +2016,7 @@ impl AppState {
             activity,
             presence_frames,
             games: false,
+            push_away: false,
         });
         if !delivery {
             // Under this shard lock: see PresenceRegistry::ensure.
@@ -2680,6 +2695,12 @@ impl AppState {
         // this block, so a fast reconnect can never observe a stale "empty"
         // and tear down state a brand-new connection depends on.
         let mut dropped_sid: Option<String> = None;
+        // Web Push: did this conn count its browser as present? Only then can
+        // its going be the moment that browser went away. Where the log
+        // stood is read BEFORE it goes, so a frame logged during the teardown
+        // is after the mark (named when the worker asks), never lost under it.
+        let mut dropped_present = false;
+        let log_mark = self.web_push_seq.load(Ordering::Relaxed);
         let last_visible_gone = match self.sessions.entry(user_id) {
             Entry::Occupied(mut occupied) => {
                 let was_visible = occupied
@@ -2687,6 +2708,10 @@ impl AppState {
                     .iter()
                     .any(|s| s.conn_id == conn_id && !s.delivery);
                 dropped_sid = occupied.get().iter().find(|s| s.conn_id == conn_id).map(|s| s.sid.clone());
+                dropped_present = occupied
+                    .get()
+                    .iter()
+                    .any(|s| s.conn_id == conn_id && !s.delivery && !s.push_away);
                 let departing = occupied
                     .get()
                     .iter()
@@ -2716,11 +2741,18 @@ impl AppState {
         };
         // A conn the cap evicted has no Session left to name its sid; the
         // eviction handed it over (`evicted_sids`). Always consumed here.
-        let handed_over = self.evicted_sids.remove(&conn_id).map(|(_, sid)| sid);
-        let dropped_sid = dropped_sid.or(handed_over);
-        // Web Push: a browser whose last connection this was is now "away".
-        if let Some(sid) = &dropped_sid {
-            self.note_sid_away(user_id, sid);
+        let handed_over = self.evicted_sids.remove(&conn_id).map(|(_, v)| v);
+        let (dropped_sid, dropped_present) = match (dropped_sid, handed_over) {
+            (Some(sid), _) => (Some(sid), dropped_present),
+            (None, Some((sid, present))) => (Some(sid), present),
+            (None, None) => (None, false),
+        };
+        // Web Push: a browser that was present through this connection and is
+        // not through any other is "away" from now. One already away (its page
+        // said so, `SetPushAway`) keeps the mark it got then: moving it here
+        // would bury what arrived while that page sat frozen in the background.
+        if let (Some(sid), true) = (&dropped_sid, dropped_present) {
+            self.note_sid_away(user_id, sid, log_mark);
         }
         let fully_offline = last_visible_gone;
 
@@ -3220,10 +3252,11 @@ impl AppState {
         self.web_push_users.contains_key(&user_id)
     }
 
-    /// Log a notification frame for a watched user. A no-op for anyone else.
-    pub fn web_push_record(&self, user_id: UserId, msg: ServerMessage) {
+    /// Log a notification frame for a watched user, and say where in the log
+    /// it went (its sequence number). A no-op, `None`, for anyone else.
+    pub fn web_push_record(&self, user_id: UserId, msg: ServerMessage) -> Option<u64> {
         if !self.web_push_watched(user_id) {
-            return;
+            return None;
         }
         let seq = self.web_push_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let mut q = self.web_push_log.entry(user_id).or_default();
@@ -3234,34 +3267,70 @@ impl AppState {
             q.pop_front();
         }
         q.push_back((seq, Instant::now(), msg));
+        Some(seq)
     }
 
-    /// Is the browser that holds session `sid` connected right now? A
-    /// delivery socket is the Android app, never a browser.
-    pub fn sid_is_live(&self, user_id: UserId, sid: &str) -> bool {
+    /// Is the browser that holds session `sid` PRESENT for Web Push: does it
+    /// have a connection whose page can show a notification by itself? A
+    /// delivery socket is the Android app, never a browser; and a connection
+    /// whose page said it cannot (`push_away`: a phone's web app in the
+    /// background, frozen by the OS while its socket lingers until the idle
+    /// reaper, 75 s) leaves its browser away, as if it had closed.
+    pub fn sid_is_present(&self, user_id: UserId, sid: &str) -> bool {
         !sid.is_empty()
             && self
                 .sessions
                 .get(&user_id)
-                .is_some_and(|v| v.iter().any(|s| s.sid == sid && !s.delivery))
+                .is_some_and(|v| v.iter().any(|s| s.sid == sid && !s.delivery && !s.push_away))
     }
 
-    /// A connection of session `sid` closed: if it was that browser's last,
-    /// note where the log stood. Everything before it, the open app showed.
-    fn note_sid_away(&self, user_id: UserId, sid: &str) {
-        if sid.is_empty() || !self.web_push_watched(user_id) || self.sid_is_live(user_id, sid) {
+    /// Where the log stood when session `sid`'s browser last went away (0 if
+    /// it is not known to have been present): what came before it, that
+    /// browser had while it could show it.
+    pub fn web_push_away_mark(&self, sid: &str) -> u64 {
+        self.web_push_away.get(sid).map(|a| a.0).unwrap_or(0)
+    }
+
+    /// Session `sid`'s browser was present and a connection of it just
+    /// stopped being (it closed, or its page said it cannot notify): if no
+    /// other one is, note `mark`, where the log stood just before. Everything
+    /// up to it, that browser showed.
+    fn note_sid_away(&self, user_id: UserId, sid: &str, mark: u64) {
+        if sid.is_empty() || !self.web_push_watched(user_id) || self.sid_is_present(user_id, sid) {
             return;
         }
         if self.web_push_away.len() > Self::WEB_PUSH_PRUNE_ABOVE {
             self.web_push_away.retain(|_, (_, at)| at.elapsed() < Self::UNDELIVERED_TTL);
         }
-        self.web_push_away
-            .insert(sid.to_string(), (self.web_push_seq.load(Ordering::Relaxed), Instant::now()));
+        self.web_push_away.insert(sid.to_string(), (mark, Instant::now()));
+    }
+
+    /// `ClientMessage::SetPushAway` from `conn_id`: whether the page on it can
+    /// show a notification by itself. Returns whether anything changed. A
+    /// delivery socket is never a page and is left alone. When this takes the
+    /// browser's last present connection away, where the log stood is noted
+    /// as a closing socket would note it, read BEFORE the change: a frame
+    /// logged as it lands is after the mark, so the push it rings names it.
+    pub fn set_conn_push_away(&self, user_id: UserId, conn_id: u64, away: bool) -> bool {
+        let mark = self.web_push_seq.load(Ordering::Relaxed);
+        let sid = {
+            let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
+            let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) else { return false };
+            if s.delivery || s.push_away == away {
+                return false;
+            }
+            s.push_away = away;
+            s.sid.clone()
+        }; // the shard lock is released here: note_sid_away reads `sessions`
+        if away {
+            self.note_sid_away(user_id, &sid, mark);
+        }
+        true
     }
 
     /// What subscription `sub_id` (the browser holding session `sid`) has not
     /// been told about yet, oldest first, and mark it told. Nothing while that
-    /// browser is open: the app on screen has it already.
+    /// browser is present (`sid_is_present`): the app on screen has it already.
     pub fn web_push_unseen(&self, user_id: UserId, sub_id: i64, sid: &str) -> Vec<ServerMessage> {
         let (newest, frames) = match self.web_push_log.get(&user_id) {
             Some(q) => (
@@ -3274,9 +3343,9 @@ impl AppState {
             None => (0, Vec::new()),
         };
         let told = self.web_push_cursor.get(&sub_id).map(|c| c.0).unwrap_or(0);
-        let away = self.web_push_away.get(sid).map(|a| a.0).unwrap_or(0);
+        let away = self.web_push_away_mark(sid);
         let floor = told.max(away);
-        let out = if self.sid_is_live(user_id, sid) {
+        let out = if self.sid_is_present(user_id, sid) {
             Vec::new()
         } else {
             frames.into_iter().filter(|(s, _)| *s > floor).map(|(_, m)| m).collect()
@@ -5583,5 +5652,140 @@ mod games_cap_tests {
         // Gone with the connection.
         state.unregister_session(7, desk);
         assert!(!state.conn_plays_games(7, desk));
+    }
+}
+
+/// Web Push's "is that browser here?" (`sid_is_present`) once the web app can
+/// say its page cannot notify by itself (`ClientMessage::SetPushAway`). The
+/// bug this answers: an iPhone's Home Screen app gone to the background is
+/// frozen by iOS within seconds, but its socket stays up until the 75 s idle
+/// reaper takes it, and until then the server counted that browser open, sent
+/// it no push, and the frozen page showed nothing either. The DB-backed half
+/// (who is actually rung) is in push_web_db_tests.rs.
+#[cfg(test)]
+mod web_push_away_tests {
+    use super::*;
+    use crate::protocol::{ServerMessage, UserInfo};
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        let state = AppState::new(pool, "test-secret".into(), None, std::sync::Arc::new(crate::wake::NullWake));
+        state.web_push_watch(7);
+        state
+    }
+
+    /// A page's connection, as the socket registers it; the receiver is
+    /// returned so the channel stays open.
+    fn connect(state: &AppState, sid: &str, delivery: bool) -> (u64, mpsc::Receiver<ServerMessage>) {
+        let (tx, rx) = mpsc::channel::<ServerMessage>(8);
+        let (conn, _, _) = state.register_session(7, "me".into(), tx, delivery, None, sid.into());
+        (conn, rx)
+    }
+
+    fn dm(conv: &str) -> ServerMessage {
+        ServerMessage::DirectMessage {
+            message_id: "m".into(),
+            conversation_id: conv.into(),
+            sender: UserInfo::new(8, "alice".into()),
+            content: "CIPHERTEXT".into(),
+            timestamp: 0,
+        }
+    }
+
+    fn convs(frames: &[ServerMessage]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::DirectMessage { conversation_id, .. } => Some(conversation_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_page_that_cannot_notify_leaves_its_browser_away_with_its_socket_up() {
+        let state = test_state();
+        let (phone, _rx) = connect(&state, "phone", false);
+        assert!(state.sid_is_present(7, "phone"), "control: an open page is present");
+        assert!(state.set_conn_push_away(7, phone, true));
+        assert!(!state.sid_is_present(7, "phone"), "its page said it cannot notify: away, socket or not");
+        assert!(!state.set_conn_push_away(7, phone, true), "a repeat changes nothing");
+        assert!(state.set_conn_push_away(7, phone, false));
+        assert!(state.sid_is_present(7, "phone"), "on screen again: present");
+
+        // Another page of the same browser on screen keeps it present.
+        let (tab, _rx2) = connect(&state, "phone", false);
+        state.set_conn_push_away(7, phone, true);
+        assert!(state.sid_is_present(7, "phone"), "a second tab on screen still shows it");
+        state.set_conn_push_away(7, tab, true);
+        assert!(!state.sid_is_present(7, "phone"));
+
+        // A delivery socket is never a page: never present, never marked.
+        let (pocket, _rx3) = connect(&state, "android", true);
+        assert!(!state.sid_is_present(7, "android"));
+        assert!(!state.set_conn_push_away(7, pocket, true), "a delivery socket is left alone");
+        // Unknown connection, unknown user: nothing.
+        assert!(!state.set_conn_push_away(7, 999_999, true));
+        assert!(!state.set_conn_push_away(8, phone, true));
+    }
+
+    /// The worker of a browser in the background is told what arrived after
+    /// its page said so, and not what that page had on screen before.
+    #[tokio::test]
+    async fn the_worker_is_told_what_arrived_after_the_page_went_to_the_background() {
+        let state = test_state();
+        let (phone, _rx) = connect(&state, "phone", false);
+        state.web_push_record(7, dm("seen"));
+        assert!(state.web_push_unseen(7, 1, "phone").is_empty(), "control: nothing while the page is on screen");
+        state.web_push_record(7, dm("seen-too"));
+        state.set_conn_push_away(7, phone, true);
+        state.web_push_record(7, dm("missed"));
+        assert_eq!(convs(&state.web_push_unseen(7, 1, "phone")), vec!["missed"], "only what came after it left");
+        // Back on screen: told nothing more, however much arrives.
+        state.set_conn_push_away(7, phone, false);
+        state.web_push_record(7, dm("on-screen"));
+        assert!(state.web_push_unseen(7, 1, "phone").is_empty());
+    }
+
+    /// The frozen page's socket is reaped a minute later (iOS): that close
+    /// must not move the mark, or what arrived meanwhile and was not yet told
+    /// (a burst inside the 30 s coalescing) would never be named.
+    #[tokio::test]
+    async fn the_socket_of_a_page_already_away_closing_buries_nothing() {
+        let state = test_state();
+        let (phone, _rx) = connect(&state, "phone", false);
+        state.web_push_record(7, dm("seen"));
+        state.set_conn_push_away(7, phone, true);
+        state.web_push_record(7, dm("missed"));
+        state.unregister_session(7, phone); // the idle reaper, 75 s on
+        state.web_push_record(7, dm("after"));
+        assert_eq!(convs(&state.web_push_unseen(7, 1, "phone")), vec!["missed", "after"]);
+
+        // CONTROL, the old client's way: a page that never said so is away
+        // from its socket's close, and what it had before is not named.
+        let (old, _rx2) = connect(&state, "laptop", false);
+        state.web_push_record(7, dm("laptop-seen"));
+        state.unregister_session(7, old);
+        state.web_push_record(7, dm("laptop-missed"));
+        assert_eq!(convs(&state.web_push_unseen(7, 2, "laptop")), vec!["laptop-missed"]);
+    }
+
+    /// The same for a connection the per-user cap evicted: its teardown finds
+    /// no Session and learns from the hand-over whether it was present.
+    #[tokio::test]
+    async fn an_evicted_page_already_away_buries_nothing_either() {
+        let state = test_state();
+        let (phone, _rx) = connect(&state, "phone", false); // the oldest: the cap's victim
+        state.set_conn_push_away(7, phone, true);
+        state.web_push_record(7, dm("missed"));
+        let mut held = Vec::new();
+        for i in 0..10 {
+            held.push(connect(&state, &format!("other-{i}"), false));
+        }
+        assert!(!state.conn_ids_of(7).contains(&phone), "the cap evicted the oldest");
+        state.unregister_session(7, phone);
+        assert_eq!(convs(&state.web_push_unseen(7, 1, "phone")), vec!["missed"]);
     }
 }

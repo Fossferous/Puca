@@ -180,6 +180,7 @@ import {
 } from '../hooks/queries';
 import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
+import { startWebPushAwayReporter } from '../api/webPushAway';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm, isRestricted } from '../api/permissionBits';
 import { notifyEmbedChanged, registerEmbedSession } from '../api/embedApi';
@@ -871,6 +872,13 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         if (!currentUserId) return;
         return startActivityReporter({ userId: currentUserId });
+    }, [currentUserId]);
+    // Web Push: tell the server when this page, on a phone gone to the
+    // background, cannot notify by itself, so it pushes instead. The same
+    // handshake: nothing is sent until this socket's server confirms it.
+    useEffect(() => {
+        if (!currentUserId) return;
+        return startWebPushAwayReporter();
     }, [currentUserId]);
 
     // May this user create invites on the CURRENT server? Server carries no

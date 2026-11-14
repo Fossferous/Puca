@@ -13,10 +13,16 @@
 //! the phone's own delivery socket is one of those sessions, so a healthy
 //! phone is told directly whoever else is online. A browser has no such
 //! socket, so a Web Push is decided PER BROWSER: a subscription is rung when
-//! the session that made it (its `sid`) has no live connection, whatever the
-//! user's other devices are doing. Otherwise the desktop app sitting in the
-//! tray would silence the user's iPhone for good — the Android phone in the
-//! same position is notified.
+//! the session that made it (its `sid`) is away, whatever the user's other
+//! devices are doing. Otherwise the desktop app sitting in the tray would
+//! silence the user's iPhone for good — the Android phone in the same
+//! position is notified. Away (`AppState::sid_is_present`) is no live
+//! connection, OR only connections whose page said it cannot notify by
+//! itself (`ClientMessage::SetPushAway`): an iPhone's web app in the
+//! background is frozen within seconds while its socket lingers until the
+//! 75 s idle reaper, and judged by the socket alone it went unannounced for
+//! that minute. A browser is rung only for what arrived after it went away
+//! (`web_push_away_mark`): what it had on screen is no reason to wake it.
 //!
 //! WHO DECIDES WHAT SHOWS. The Android app decides on the DEVICE whether a
 //! woken frame becomes a notification (PushGate), but a browser woken by a
@@ -445,16 +451,39 @@ pub async fn push_one(state: &Arc<AppState>, sub: &LiveSubscription) -> Result<(
     }
 }
 
+/// One event waiting for a user's ring task: what it is, what it concerns,
+/// and where in the user's Web Push log its frame went (`seq`), so each
+/// browser is rung only for what came after it went away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebPushEvent {
+    pub kind: WakeKind,
+    pub scope: WakeScope,
+    pub seq: u64,
+}
+
 /// The events waiting for a user's ring task. The entry exists exactly while
 /// that task runs.
 #[derive(Default)]
 pub struct WebPushQueue {
-    events: Vec<(WakeKind, WakeScope)>,
+    events: Vec<WebPushEvent>,
 }
 
 /// At most this many distinct events wait per user; a burst beyond it is
 /// already a reason to ring.
 const MAX_QUEUED_EVENTS: usize = 64;
+
+impl WebPushQueue {
+    /// Queue an event. The same kind and scope again keeps ONE entry, with
+    /// the newest log position: a browser that went away after the older
+    /// frame still has the newer one to be told about.
+    fn add(&mut self, ev: WebPushEvent) {
+        if let Some(e) = self.events.iter_mut().find(|e| e.kind == ev.kind && e.scope == ev.scope) {
+            e.seq = e.seq.max(ev.seq);
+        } else if self.events.len() < MAX_QUEUED_EVENTS {
+            self.events.push(ev);
+        }
+    }
+}
 
 /// Ring `user_id`'s subscribed browsers for this event. The event is queued
 /// and ONE task per user drains the queue, so a burst costs one task and one
@@ -474,17 +503,16 @@ fn ring_web(
     }
     // Logged first: a frame that arrives while a browser is coalescing is
     // still what that browser's next notification should name.
-    state.web_push_record(user_id, frame.clone());
+    let Some(seq) = state.web_push_record(user_id, frame.clone()) else {
+        return; // the last subscription went meanwhile
+    };
     let start = {
         let mut fresh = false;
         let mut q = state.web_push_queue.entry(user_id).or_insert_with(|| {
             fresh = true;
             WebPushQueue::default()
         });
-        let ev = (kind, scope);
-        if q.events.len() < MAX_QUEUED_EVENTS && !q.events.contains(&ev) {
-            q.events.push(ev);
-        }
+        q.add(WebPushEvent { kind, scope, seq });
         fresh
     };
     if !start {
@@ -521,27 +549,35 @@ fn ring_web(
 }
 
 /// One round: weigh `events` against every live subscription of the user and
-/// push once to each browser that is away, wants at least one of them, and is
-/// due. Returns how many browsers a wake was handed to.
-pub async fn ring_web_events(state: &Arc<AppState>, user_id: i64, events: &[(WakeKind, WakeScope)]) -> usize {
+/// push once to each browser that is away, wants at least one of them that
+/// came after it went away, and is due. Returns how many browsers a wake was
+/// handed to.
+pub async fn ring_web_events(state: &Arc<AppState>, user_id: i64, events: &[WebPushEvent]) -> usize {
     let mut kinds_allowed: Vec<(WakeKind, bool)> = Vec::new();
-    for (kind, _) in events {
-        if !kinds_allowed.iter().any(|(k, _)| k == kind) {
-            kinds_allowed.push((*kind, prefs_allow_wake(state, user_id, *kind).await));
+    for ev in events {
+        if !kinds_allowed.iter().any(|(k, _)| *k == ev.kind) {
+            kinds_allowed.push((ev.kind, prefs_allow_wake(state, user_id, ev.kind).await));
         }
     }
     let allowed = |kind: &WakeKind| kinds_allowed.iter().any(|(k, ok)| k == kind && *ok);
-    if !events.iter().any(|(k, _)| allowed(k)) {
+    if !events.iter().any(|ev| allowed(&ev.kind)) {
         return 0;
     }
     let mut rung = 0;
     for sub in live_subscriptions(&state.pool, user_id, None).await {
-        // That browser is open: it has the frame already, and shows its own
-        // notification if it is not on screen. A push would be a second one.
-        if state.sid_is_live(user_id, &sub.sid) {
+        // That browser is open and can show it itself: it has the frame
+        // already, and shows its own notification if it is not on screen. A
+        // push would be a second one. A page that said it cannot (a phone's
+        // web app in the background) leaves it away, its socket up or not.
+        if state.sid_is_present(user_id, &sub.sid) {
             continue;
         }
-        if !events.iter().any(|(k, scope)| allowed(k) && web_gates_permit(scope, &sub.gates)) {
+        // What it had before it went away is no reason to wake it: a message
+        // that arrived while it was on screen, whose ring task ran only after
+        // it left (the jitter above is up to 3 s), would wake a worker with
+        // nothing to name, so the generic "New activity in Púca".
+        let mark = state.web_push_away_mark(&sub.sid);
+        if !events.iter().any(|ev| ev.seq > mark && allowed(&ev.kind) && web_gates_permit(&ev.scope, &sub.gates)) {
             continue;
         }
         if !push_due(sub.since_push_secs, sub.failures, sub.since_failure_secs) {
@@ -559,9 +595,10 @@ pub async fn ring_web_events(state: &Arc<AppState>, user_id: i64, events: &[(Wak
     rung
 }
 
-/// `ring_web_events` for one event — what a single message does, awaited.
+/// `ring_web_events` for one event that has just happened — what a single
+/// message does, awaited. "Just happened": after every browser's away mark.
 pub async fn ring_web_now(state: &Arc<AppState>, user_id: i64, kind: WakeKind, scope: &WakeScope) -> usize {
-    ring_web_events(state, user_id, &[(kind, scope.clone())]).await
+    ring_web_events(state, user_id, &[WebPushEvent { kind, scope: scope.clone(), seq: u64::MAX }]).await
 }
 
 /// The `/notifications/test` probe: ring the caller's own devices, awaited so

@@ -322,6 +322,22 @@ pub enum ClientMessage {
         inactive_secs: Option<u32>,
     },
 
+    /// Web Push (capability `push_away`, see `crate::presence::ClientCaps`):
+    /// `away: true` = the page on this connection cannot show a notification
+    /// by itself right now — the web app on an iPhone, iPad or Android phone
+    /// gone to the background (iOS freezes it within seconds; its socket
+    /// stays up until the idle reaper, 75 s), or a page being left — so its
+    /// browser counts as AWAY for Web Push (`AppState::sid_is_present`), as
+    /// if this socket had closed, and a message wakes it. `away: false` = it
+    /// is on screen again. Sent by the web app only, only on a transition,
+    /// and only on a socket whose server confirmed `push_away` in
+    /// `ServerFeatures` (an older server answers an unknown variant with an
+    /// Error). Read by nothing but Web Push; never answered, never an Error.
+    SetPushAway {
+        #[serde(default)]
+        away: bool,
+    },
+
     // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
     // the pieces are in crate::games_wire). Sent ONLY on a socket whose server
     // confirmed `games` in ServerFeatures — an older server answers an unknown
@@ -1630,6 +1646,20 @@ mod presence_frame_tests {
         // A negative or fractional number is refused, not wrapped.
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":-1}}"#).is_err());
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":1.5}}"#).is_err());
+    }
+
+    /// The two frames the web app sends (api/webPushAway.ts), from the file
+    /// its own test (webPushAway.test.ts) checks it sends.
+    #[test]
+    fn set_push_away_parses_the_client_shapes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/pushAway.json")).expect("JSON");
+        let away: ClientMessage = serde_json::from_value(fixture["away"].clone()).expect("away");
+        assert!(matches!(away, ClientMessage::SetPushAway { away: true }));
+        let back: ClientMessage = serde_json::from_value(fixture["back"].clone()).expect("back");
+        assert!(matches!(back, ClientMessage::SetPushAway { away: false }));
+        // Anything but a boolean is refused rather than guessed at.
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetPushAway","payload":{"away":"yes"}}"#).is_err());
     }
 }
 

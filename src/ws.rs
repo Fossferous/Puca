@@ -48,7 +48,10 @@ pub struct WsQuery {
     ///   RoomLeft `reason`/`by` fields, so the server may push the account's
     ///   voice state to it;
     /// - `presence`: idle/away (`crate::presence`), confirmed back with
-    ///   `ServerFeatures`.
+    ///   `ServerFeatures`;
+    /// - `games`: the Game* frames, confirmed back likewise;
+    /// - `push_away`: the web app will say when its page cannot notify by
+    ///   itself (`ClientMessage::SetPushAway`), confirmed back likewise.
     /// A query parameter because an older server ignores one it does not
     /// know. It must stay a single `caps=a,b` list: this struct takes each
     /// key once, so a repeated `caps=` would fail the whole upgrade.
@@ -3188,6 +3191,13 @@ pub(crate) async fn handle_message(
             if state.report_session_activity(user_id, conn_id, since) {
                 crate::presence::refresh(state, user_id, now).await;
             }
+        }
+
+        // Web Push (src/wake/sender.rs): whether the page on this connection
+        // can show a notification by itself. In memory, per connection, read
+        // by nothing but Web Push. Never answered, never an Error.
+        ClientMessage::SetPushAway { away } => {
+            state.set_conn_push_away(user_id, conn_id, away);
         }
 
         // Games (docs/GAMES.md; src/games.rs). Every refusal is a typed
@@ -10090,7 +10100,7 @@ mod presence_ws_tests {
         /// already classified, then the presence half of connect.
         async fn open(state: &Arc<AppState>, uid: i32, caps: bool, headless: bool) -> Sock {
             let (tx, rx) = mpsc::channel::<ServerMessage>(256);
-            let caps = ClientCaps { presence: caps, games: false };
+            let caps = ClientCaps { presence: caps, games: false, push_away: false };
             let (conn, is_first, _) = state.register_session_classified(
                 uid as UserId,
                 format!("u{uid}"),
@@ -11212,5 +11222,53 @@ mod stream_only_ws_tests {
         assert!(bot_said.is_err(), "the cap carries no SEND_MESSAGES");
         assert!(still_in, "lifting NO_RECEIVE must not take the account out of the call");
         assert_eq!(after_lift, vec![(bot, false, true)], "the sweep tells the room it receives now, once");
+    }
+}
+
+/// The web app's `SetPushAway` through the real dispatch, in the very bytes
+/// its test pins it sends (frontend/src/tests/fixtures/pushAway.json): its
+/// browser goes away for Web Push and comes back, nothing is answered, and it
+/// is never an Error (the chat view shows every Error to the person).
+#[cfg(test)]
+mod push_away_ws_tests {
+    use super::handle_message;
+    use crate::protocol::ServerMessage;
+    use crate::state::AppState;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    #[tokio::test]
+    async fn the_web_apps_frame_marks_its_browser_away_and_back_and_is_never_answered() {
+        let state = test_state();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/pushAway.json")).expect("JSON");
+        let (away, back) = (fixture["away"].to_string(), fixture["back"].to_string());
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (conn, _, _) = state.register_session(7, "me".into(), tx, false, None, "phone".into());
+        let mut joined = HashSet::new();
+
+        assert!(state.sid_is_present(7, "phone"), "control: an open page is present");
+        assert_eq!(handle_message(&state, 7, conn, "me", &away, &mut joined, "").await, Ok(()));
+        assert!(!state.sid_is_present(7, "phone"), "in the background: away, with its socket up");
+        // Sent twice (a pagehide after the visibilitychange): still fine.
+        assert_eq!(handle_message(&state, 7, conn, "me", &away, &mut joined, "").await, Ok(()));
+        assert_eq!(handle_message(&state, 7, conn, "me", &back, &mut joined, "").await, Ok(()));
+        assert!(state.sid_is_present(7, "phone"), "on screen again: present");
+        assert!(rx.try_recv().is_err(), "nothing is answered");
+
+        // From a delivery socket (never a page): taken, changes nothing, no Error.
+        let (tx2, mut rx2) = mpsc::channel::<ServerMessage>(8);
+        let (pocket, _, _) = state.register_session(7, "me".into(), tx2, true, None, "android".into());
+        assert_eq!(handle_message(&state, 7, pocket, "me", &back, &mut joined, "").await, Ok(()));
+        assert!(!state.sid_is_present(7, "android"));
+        assert!(rx2.try_recv().is_err());
     }
 }

@@ -1554,11 +1554,12 @@ Púca is not open. Tap the switch and allow notifications when the browser asks.
 - Mutes and blocks on this device apply: a muted server (including one set to
   **Only @mentions**), a muted channel, or someone you blocked does not
   notify.
-- A device where Púca is open is not sent one: it notifies by itself. Púca
-  open somewhere else (the desktop app in the tray, say) does not stop this
-  device being notified. A burst of messages is one notification.
-- On an iPhone, a message in the first minute or so after you leave Púca may
-  not notify; it is there when you open Púca.
+- A device where Púca is open is not sent one: it notifies by itself. On an
+  iPhone, iPad or Android phone, Púca in the background counts as closed, so a
+  message that arrives a moment after you switch away notifies (and Púca
+  itself shows no second one). Púca open somewhere else (the desktop app in
+  the tray, say) does not stop this device being notified. A burst of
+  messages is one notification.
 - On an **iPhone or iPad** it needs iOS 16.4 or newer and works only in Púca
   added to your Home Screen. In a Safari tab the setting says so.
 - The **desktop app** and the **Android app** have their own notifications

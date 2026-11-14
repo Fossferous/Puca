@@ -32,13 +32,37 @@
 //    notifications above came from sw.js, not from the rig;
 //  - the stand-in refuses a body that is not the constant.
 //
+// THE PAGE'S HALF (api/webPushAway.ts, the backgrounded phone): the real
+// module, bundled, in a page this worker controls, on a REAL WebSocket to a
+// local stand-in backend (`ws`) that confirms `push_away` the way the server
+// does (presence.rs, ClientCaps):
+//  - the socket announces push_away in its one caps= list;
+//  - an Android page that goes hidden sends exactly the frame the server's
+//    test parses (src/tests/fixtures/pushAway.json), and on screen again the
+//    other one;
+//  - while it has said so, a DirectMessage arriving on its socket raises NO
+//    notification from the page, and the push that the server now sends shows
+//    one from sw.js: one notification for the message, not two;
+//  - a REAL pagehide (a navigation): the frame leaves the page BEFORE its
+//    socket closes, which only a browser can say;
+//  - NEGATIVE CONTROLS: a desktop browser's hidden tab sends nothing and
+//    shows its own notification; an OLDER server (no push_away confirmed) is
+//    sent nothing and the page notifies exactly as before.
+// Headless Chromium cannot hide a page (measured: a second tab brought to the
+// front, a minimised window and a frozen lifecycle all leave it "visible"),
+// so "hidden" is document.visibilityState answered by a stand-in plus a real
+// visibilitychange event, as in vitest. The pagehide is real.
+//
 // SILENT and headless: notifications are not audible in headless Chromium,
-// and nothing here plays media.
+// NativeNotifications is off, every page notification is `silent`, and
+// nothing here plays media.
 //
 //   cd frontend && node e2e/web-push-real-browser.mjs
 //
-// No server and no build needed.
+// No server and no build needed (esbuild bundles the page's modules).
 import { chromium } from '@playwright/test';
+import { build } from 'esbuild';
+import { WebSocketServer } from 'ws';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -114,8 +138,20 @@ function listen(handler) {
 }
 
 const PAGE = '<!doctype html><meta charset="utf-8"><title>push rig</title><body>rig</body>';
+// The page's half (section 7): its bundle is built once the stand-in backend
+// has a port, so the page's API address can be baked into it.
+let AWAY_BUNDLE = '';
+const AWAY_PAGE = '<!doctype html><meta charset="utf-8"><title>away rig</title><body>away rig<script src="/away.js"></script></body>';
 const app = await listen((req, res) => {
     const path = new URL(req.url, 'http://x').pathname;
+    if (path === '/away') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(AWAY_PAGE);
+    }
+    if (path === '/away.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(AWAY_BUNDLE);
+    }
     if (path === '/sw.js') {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(SW_SRC);
@@ -347,7 +383,207 @@ pushState.target = 'push';
 const refusedBefore = pushState.refused;
 ck((await wake(Buffer.from('{"from":"alice"}'))) === 400 && pushState.refused === refusedBefore + 1, 'CONTROL: a payload that is not the constant is refused, never delivered');
 
+// ---- 7. The page's half: the backgrounded phone (api/webPushAway.ts) -------
+
+const PUSH_AWAY = JSON.parse(fs.readFileSync(join(here, '..', 'src', 'tests', 'fixtures', 'pushAway.json'), 'utf8'));
+const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// A stand-in backend: the part of src/ws.rs this needs — the bearer
+// subprotocol, and ServerFeatures confirming what the socket announced AND
+// this "server" supports (presence.rs, ClientCaps::features) — recording each
+// socket's frames and its close, in the order they arrive.
+const backend = { features: ['presence', 'push_away'], log: [], caps: [], sockets: new Map() };
+const backendHttp = http.createServer((req, res) => { res.writeHead(404); res.end(); });
+const wss = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('bearer') ? 'bearer' : false) });
+backendHttp.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname !== '/ws') { socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+        const conn = backend.sockets.size + 1;
+        backend.sockets.set(conn, ws);
+        const caps = url.searchParams.getAll('caps');
+        backend.caps.push(caps);
+        const announced = (caps[0] ?? '').split(',');
+        const confirmed = backend.features.filter((f) => announced.includes(f));
+        if (confirmed.length > 0) ws.send(JSON.stringify({ type: 'ServerFeatures', payload: { features: confirmed } }));
+        ws.on('message', (data) => {
+            let frame;
+            try { frame = JSON.parse(String(data)); } catch { return; }
+            if (frame.type === 'Ping') { ws.send(JSON.stringify({ type: 'Pong' })); return; }
+            backend.log.push({ conn, kind: 'frame', frame });
+        });
+        ws.on('close', () => backend.log.push({ conn, kind: 'close' }));
+    });
+});
+await new Promise((resolve) => backendHttp.listen(0, '127.0.0.1', resolve));
+const backendOrigin = `http://127.0.0.1:${backendHttp.address().port}`;
+
+// The real modules, booted the way Chat.tsx does: the reporter, the socket,
+// and a DirectMessage handed to the real notifyNewMessage.
+const AWAY_ENTRY = `
+import { startWebPushAwayReporter } from './api/webPushAway';
+import { wsClient } from './api/websocket';
+import { notifyNewMessage } from './api/desktopNotify';
+import { pageToldAwayForPush } from './api/webPushLocal';
+const w = window as unknown as Record<string, unknown>;
+const decisions: unknown[] = [];
+w.__decisions = decisions;
+wsClient.on('DirectMessage', (m) => {
+    const p = m.payload as { conversation_id: string; message_id: string };
+    decisions.push({
+        conv: p.conversation_id,
+        toldAway: pageToldAwayForPush(),
+        d: notifyNewMessage({
+            title: 'alice sent you a message', isOwn: false, isMuted: false,
+            notifyKey: 'dm:' + p.conversation_id, nav: 'dm:' + p.conversation_id,
+            group: { key: 'dm:' + p.conversation_id, kind: 'dm', where: 'alice', author: 'alice', messageId: p.message_id },
+        }),
+    });
+});
+startWebPushAwayReporter();
+void wsClient.connect(localStorage.getItem('auth_token') as string).catch(() => {});
+`;
+AWAY_BUNDLE = (await build({
+    stdin: { contents: AWAY_ENTRY, resolveDir: join(here, '..', 'src'), loader: 'ts', sourcefile: 'away-rig.ts' },
+    bundle: true,
+    write: false,
+    format: 'iife',
+    platform: 'browser',
+    define: {
+        'process.env.NODE_ENV': '"production"',
+        'import.meta.env': JSON.stringify({ DEV: false, PROD: true, MODE: 'test', VITE_API_URL: backendOrigin }),
+        __APP_VERSION__: '"0.0.0"',
+        __RC_ENABLED__: 'true',
+    },
+    logLevel: 'error',
+})).outputFiles[0].text;
+
+// A signed-in account (user 5) that turned Web Push on in this browser; the
+// page's own Notification recorded (and still really shown by Chromium); the
+// window unfocused, as a headless page cannot be; and the visibility stand-in.
+const TOKEN = ['e30', Buffer.from(JSON.stringify({ sub: 5, exp: 4102444800 })).toString('base64url'), 'sig'].join('.');
+const AWAY_INIT = `(() => {
+    Document.prototype.hasFocus = () => false;
+    const Real = window.Notification;
+    const made = window.__made = [];
+    class Recorded extends Real {
+        constructor(title, options = {}) {
+            const entry = { title, tag: options.tag ?? null, shown: false };
+            made.push(entry);
+            super(title, options);
+            this.addEventListener('show', () => { entry.shown = true; });
+        }
+    }
+    window.Notification = Recorded;
+    window.__setHidden = (h) => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (h ? 'hidden' : 'visible') });
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => h });
+        document.dispatchEvent(new Event('visibilitychange'));
+    };
+    // The browser's own answer again (it says "hidden" while the page unloads).
+    window.__realVisibility = () => {
+        delete document.visibilityState;
+        delete document.hidden;
+    };
+    localStorage.setItem('auth_token', ${JSON.stringify(TOKEN)});
+    localStorage.setItem('puca_web_push_opt_in', '[5]');
+})();`;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(cond, ms = 5000) {
+    for (let t = 0; t < ms; t += 50) {
+        if (await cond()) return true;
+        await sleep(50);
+    }
+    return !!(await cond());
+}
+const awayFrames = (conn) => backend.log.filter((e) => e.conn === conn && e.kind === 'frame' && e.frame.type === 'SetPushAway').map((e) => e.frame);
+
+/** A Púca page with this user agent; resolves once its socket has connected. */
+async function openAwayPage(userAgent) {
+    const p = await context.newPage();
+    const s = await context.newCDPSession(p);
+    await s.send('Emulation.setUserAgentOverride', { userAgent });
+    await p.addInitScript(AWAY_INIT);
+    const before = backend.sockets.size;
+    await p.goto(app.origin + '/away');
+    await until(() => backend.sockets.size > before);
+    await sleep(300); // ServerFeatures in, and whatever the page says to it
+    return { p, conn: backend.sockets.size };
+}
+function sendDm(conn, conv) {
+    backend.sockets.get(conn).send(JSON.stringify({
+        type: 'DirectMessage',
+        payload: { message_id: 'm-' + conv, conversation_id: conv, sender: { id: 6, username: 'alice' }, content: 'CIPHERTEXT', timestamp: 0 },
+    }));
+}
+const decisionFor = (p, conv) => p.evaluate((c) => window.__decisions.find((d) => d.conv === c) ?? null, conv);
+const madeFor = (p, tag) => p.evaluate((t) => window.__made.filter((n) => n.tag === t), tag);
+
+// 7a. A phone (Android) on a server that understands it.
+await closeAll();
+const phone = await openAwayPage(ANDROID_UA);
+ck(backend.caps.at(-1).length === 1 && backend.caps.at(-1)[0].split(',').includes('push_away'), 'the socket announces push_away in its one caps= list', JSON.stringify(backend.caps.at(-1)));
+ck(awayFrames(phone.conn).length === 0, 'on screen, it says nothing (a fresh connection is present already)');
+await phone.p.evaluate(() => window.__setHidden(true));
+await until(() => awayFrames(phone.conn).length > 0);
+ck(JSON.stringify(awayFrames(phone.conn)) === JSON.stringify([PUSH_AWAY.away]), 'hidden, it says so at once, in the bytes the server parses', JSON.stringify(awayFrames(phone.conn)));
+
+// 7b. A message while it has said so: the push's notification, and no other.
+sendDm(phone.conn, 'conv-away');
+await until(async () => (await decisionFor(phone.p, 'conv-away')) !== null);
+const awayDecision = await decisionFor(phone.p, 'conv-away');
+ck(awayDecision?.toldAway === true && awayDecision?.d?.fire === true && awayDecision?.d?.quiet === true, 'the page takes the message quietly (no sound over the push)', JSON.stringify(awayDecision));
+await wake(); // what the server now does for this browser
+got = await waitShown(1);
+await sleep(300);
+const pageOwn = await madeFor(phone.p, 'dm:conv-away');
+ck(got.length === 1 && got[0].title === 'alice sent you a message' && pageOwn.length === 0, 'ONE notification for it: the push’s, none from the page', JSON.stringify({ worker: got, page: pageOwn }));
+await closeAll();
+
+// 7c. Back on screen.
+await phone.p.evaluate(() => window.__setHidden(false));
+await until(() => awayFrames(phone.conn).length > 1);
+ck(JSON.stringify(awayFrames(phone.conn)) === JSON.stringify([PUSH_AWAY.away, PUSH_AWAY.back]), 'on screen again, it takes it back', JSON.stringify(awayFrames(phone.conn)));
+
+// 7d. A REAL pagehide: leaving the page. The frame must leave before the
+// socket closes. The stand-in is taken away first: as the page unloads the
+// browser itself says "hidden" and fires visibilitychange (after pagehide,
+// measured), and a stand-in still saying "visible" would take it back.
+await phone.p.evaluate(() => window.__realVisibility());
+await phone.p.goto(app.origin + '/');
+await until(() => backend.log.some((e) => e.conn === phone.conn && e.kind === 'close'));
+const tail = backend.log.filter((e) => e.conn === phone.conn).slice(-2);
+ck(tail.length === 2 && tail[0].kind === 'frame' && JSON.stringify(tail[0].frame) === JSON.stringify(PUSH_AWAY.away) && tail[1].kind === 'close', 'a real pagehide: the frame reaches the server BEFORE the socket closes', JSON.stringify(tail));
+await phone.p.close();
+
+// 7e. NEGATIVE CONTROL: a desktop browser's hidden tab keeps running and notifies itself.
+const desk = await openAwayPage(DESKTOP_UA);
+await desk.p.evaluate(() => window.__setHidden(true));
+await sleep(500);
+ck(awayFrames(desk.conn).length === 0, 'NEGATIVE CONTROL: a desktop browser’s hidden tab says nothing');
+sendDm(desk.conn, 'conv-desk');
+await until(async () => (await madeFor(desk.p, 'dm:conv-desk')).some((n) => n.shown));
+const deskOwn = await madeFor(desk.p, 'dm:conv-desk');
+ck(deskOwn.length === 1 && deskOwn[0].shown, 'and shows its own notification, as before', JSON.stringify(deskOwn));
+await desk.p.close();
+
+// 7f. An OLDER server (it never confirms push_away): nothing is sent, and the page notifies as before.
+backend.features = ['presence'];
+const oldServer = await openAwayPage(ANDROID_UA);
+await oldServer.p.evaluate(() => window.__setHidden(true));
+await sleep(500);
+ck(awayFrames(oldServer.conn).length === 0, 'an older server is never sent the frame (it would answer an Error)');
+sendDm(oldServer.conn, 'conv-old');
+await until(async () => (await madeFor(oldServer.p, 'dm:conv-old')).some((n) => n.shown));
+const oldOwn = await madeFor(oldServer.p, 'dm:conv-old');
+ck(oldOwn.length === 1 && oldOwn[0].shown, 'and the page shows its own notification, exactly as before', JSON.stringify(oldOwn));
+await oldServer.p.close();
+
 await browser.close();
+wss.close();
+backendHttp.close();
 for (const s of [app, api, pushService]) s.srv.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

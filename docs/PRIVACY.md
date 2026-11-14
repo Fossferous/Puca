@@ -109,7 +109,8 @@ that limit — but cannot read content.
     channel, and, from wakes that alternate between two people, that you
     are talking to each other. The delay weakens that guess; it does not
     remove it. If it matters to you, leave this setting off: notifications
-    while Púca is open never involve the push service.
+    while Púca is open never involve the push service (on a phone, Púca in
+    the background counts as closed for this).
   Your browser then asks your operator's server, directly, what arrived, and
   shows the sender's name ("alice sent you a message"), never the message.
   Turning the setting off, or signing out, removes the push address from the
