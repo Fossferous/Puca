@@ -33,8 +33,9 @@
 //                   H.264 at the monitor's size) feeding the real replayWorker
 //                   through the same nativeVideoChunk message the app sends
 //   mesh1+native, sfu+native, mesh1+manual, sfu+manual: both at once
-//   mesh1+tap, sfu+tap: the share's own encoded frames handed to the ring
-//                   (what the integration does), with no second pipeline
+//   sfu+follow, mesh1+follow: the manual arm FOLLOWING the share
+//                   (replayBuffer.followShareCapture): the same ring, reading a
+//                   clone of the share's capture instead of a capture of its own
 //
 // Every receiving end DROPS its frames in a receiver transform, so no decode
 // lands in the measured tree: only what the sharer's machine pays.
@@ -54,7 +55,11 @@
 // SOURCE=pan draws e2e/encode-cost.mjs's fast-motion picture on a canvas and
 // shares canvas.captureStream() of it: reproducible, closer to a game, and
 // with no desktop capture in it at all (its drawing cost is the `idle` case's
-// floor under SOURCE=pan).
+// floor under SOURCE=pan). SOURCE=tab draws the same picture full page and
+// captures the TAB with getDisplayMedia (--auto-accept-this-tab-capture): a
+// real Chromium capture, one per call, of a surface that never stops moving,
+// which is what makes a SECOND capture's cost visible (the real screen is
+// often still, and Chromium does little for a still screen).
 //
 // READ THE RESULT ON THIS MACHINE ONLY, AND AS DIFFERENCES. A case's CPU minus
 // the floor case's is what that pipeline costs here.
@@ -75,11 +80,11 @@ const SHARES = { '1080p30': { w: 1920, h: 1080, fps: 30, kbps: 6000 }, '1440p30'
 const SHARE = SHARES[process.env.SHARE || '1080p30'];
 // The clip preset (manual arm): Settings' default, 1080p30 at 6 Mbps.
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
-const ALL = ['idle', 'capture', 'mesh1', 'mesh2', 'sfu', 'manual', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual'];
+const ALL = ['idle', 'capture', 'mesh1', 'mesh2', 'sfu', 'manual', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
 const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL;
 
 const workerFile = fs.existsSync(path.join(dist, 'assets')) && fs.readdirSync(path.join(dist, 'assets')).find((f) => /^replayWorker-.*\.js$/.test(f));
-if (CASES.some((c) => /manual|native|tap/.test(c)) && !workerFile) {
+if (CASES.some((c) => /manual|native|follow|agentonly/.test(c)) && !workerFile) {
     console.error('no replayWorker bundle in dist/assets: run `npx vite build` first');
     process.exit(2);
 }
@@ -258,7 +263,14 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
      *  one per call, as the app makes one getDisplayMedia per pipeline). */
     rig.capture = async ({ w, h, fps }) => {
         let track;
-        if (SOURCE === 'pan') {
+        if (SOURCE === 'tab') {
+            // A real Chromium capture (tab capture: the compositor's frames
+            // read back and converted, one capture per call) of a page that
+            // draws the pan picture full screen: the second capture's cost on
+            // a surface that is never still.
+            const s = await navigator.mediaDevices.getDisplayMedia({ video: { width: { max: w }, height: { max: h }, frameRate: { max: fps } }, audio: false, preferCurrentTab: true });
+            track = s.getVideoTracks()[0];
+        } else if (SOURCE === 'pan') {
             track = document.querySelector('canvas').captureStream(fps).getVideoTracks()[0];
             if (w < SHARE.w || h < SHARE.h) await track.applyConstraints({ width: { max: w }, height: { max: h } }).catch(() => {});
         } else {
@@ -402,6 +414,22 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         w.postMessage({ t: 'arm', cfg: ringCfg(CLIP, vs.width, vs.height), video: readable, audio: null }, [readable]);
     };
 
+    /** The manual arm FOLLOWING the share (replayBuffer.followShareCapture):
+     *  the same worker and preset, reading a clone of the share's capture
+     *  instead of a capture of its own. */
+    rig.followArm = async () => {
+        const track = rig.shareTrack.clone();
+        await track.applyConstraints({ width: { max: CLIP.maxWidth }, height: { max: CLIP.maxHeight }, frameRate: { max: CLIP.fps } }).catch(() => {});
+        rig.closers.push(() => track.stop());
+        const first = await new Promise((resolve) => {
+            const r = new MediaStreamTrackProcessor({ track: track.clone() }).readable.getReader();
+            r.read().then(({ value }) => { resolve(value ? [value.codedWidth, value.codedHeight] : [CLIP.maxWidth, CLIP.maxHeight]); value?.close(); r.cancel(); });
+        });
+        const { w } = rig.worker();
+        const readable = new MediaStreamTrackProcessor({ track }).readable;
+        w.postMessage({ t: 'arm', cfg: ringCfg(CLIP, first[0], first[1]), video: readable, audio: null }, [readable]);
+    };
+
     /** The native arm's page half: records from the agent, as nativeVideoChunk. */
     rig.nativeArm = async ({ width, height, fps, bitrate }) => {
         const { w } = rig.worker();
@@ -495,10 +523,9 @@ async function runCase(name) {
     const { browser, page } = await launch(id);
     let agent = null;
     try {
-        if (SOURCE === 'pan') await page.evaluate(() => window.rig.startPan());
-        const needsShare = parts.some((p) => /^(capture|mesh\d|sfu)$/.test(p));
+        if (SOURCE === 'pan' || SOURCE === 'tab') await page.evaluate(() => window.rig.startPan());
+        const needsShare = parts.some((p) => /^(capture|mesh\d|sfu|follow)$/.test(p));
         if (needsShare) await page.evaluate(async (S) => { window.rig.shareTrack = await window.rig.capture(S); }, SHARE);
-        const tap = parts.includes('tap');
         for (const p of parts) {
             if (p === 'capture') await page.evaluate(() => window.rig.drain(window.rig.shareTrack));
             else if (/^mesh(\d)$/.test(p)) {
@@ -506,6 +533,7 @@ async function runCase(name) {
                 await page.evaluate(async (k) => { for (let i = 0; i < k; i++) await window.rig.meshViewer(window.rig.shareTrack); }, k);
             } else if (p === 'sfu') await page.evaluate(() => window.rig.sfuShare(window.rig.shareTrack));
             else if (p === 'manual') await page.evaluate(() => window.rig.manualArm());
+            else if (p === 'follow') await page.evaluate(() => window.rig.followArm());
             else if (p === 'native' || p === 'agentonly') {
                 // agentonly: the host runs and its frames are counted and
                 // dropped here, so no page work rides on them (the control
@@ -516,7 +544,6 @@ async function runCase(name) {
                 if (p === 'native') await page.evaluate((a) => window.rig.nativeArm(a), { width: mon.width, height: mon.height, fps: agent.fps, bitrate: agent.kbps * 1000 });
             }
         }
-        void tap;
         await new Promise((r) => setTimeout(r, WARM_S * 1000));
         const agentPid = agent?.child.pid;
         const a = await snapshot(id);

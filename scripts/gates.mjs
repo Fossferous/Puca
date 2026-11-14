@@ -280,6 +280,9 @@ const GATES = [
         // Edge and WebKit. Rebuilds e2e-artifacts/iphone-stream-dist, as e2e-iphone-stream does:
         // fine here, where the real-browser scripts run one at a time.
         ['e2e-stream-volume-button', 'stream-volume-button-real-browser.mjs'],
+        // A hand-armed clip buffer follows a screen share of the same surface
+        // (one capture, not two). Its own harness, vite.clipshareharness.config.ts.
+        ['e2e-clip-share-follow', 'clip-share-follow-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

@@ -197,8 +197,10 @@ export class Ring {
      *  one's timeline stood (rebindVideo), so the encoder, the GOPs and the
      *  clip see one timeline. */
     videoTsShiftUs = 0;
-    /** The last (shifted) timestamp handed to the video encoder. */
+    /** The last (shifted) timestamp handed to the video encoder, and when
+     *  (this worker's clock) that frame was handed over. */
     lastVideoSrcUs: number | null = null;
+    lastVideoAtMs = 0;
     /** Native chunks that arrived while arm() was still awaiting (onmessage is
      *  async and unserialized — a nativeVideoChunk handler can run to
      *  completion in the middle of arm()'s awaits). Drained at the end of
@@ -413,6 +415,7 @@ export class Ring {
             try { venc.encode(shifted, { keyFrame: key }); } finally { shifted.close(); }
         }
         this.lastVideoSrcUs = srcUs;
+        this.lastVideoAtMs = nowMs();
         if (key) { this.lastKeyUs = tsUs; this.forceKeyNext = false; }
         this.encodedFrames++; this.framesThisSec++;
     }
@@ -431,9 +434,12 @@ export class Ring {
      * buffer (reconfigure()). Answers `videoRebound` either way.
      *
      * The new stream's capture clock has its own origin, so its frames are
-     * re-timed (videoTsShiftUs) to continue the ring's timeline where the
-     * wall clock says it stands — the same anchor the first frame and the
-     * audio use (wallV) — and never at or before the last frame encoded.
+     * re-timed (videoTsShiftUs) to carry on IN REAL TIME from the last frame
+     * encoded: the first new frame lands as long after it as really passed
+     * (never less than a frame). The old frames kept their place against the
+     * audio, which is anchored on its own (wallA - wallV), and the new ones
+     * keep the same capture-to-here delay as the old (one surface, one
+     * source), so sound and picture stay as they were.
      */
     async rebindVideo(seq: number, video: ReadableStream<VideoFrame>): Promise<void> {
         const reader = video.getReader();
@@ -460,10 +466,11 @@ export class Ring {
         if (old) void old.cancel().catch(() => { /* already gone */ });
         if (this.firstVideoTs !== null) {
             const frameUs = Math.round(1e6 / Math.max(1, this.cfg.preset.fps));
-            const wallUs = Math.round((nowMs() - this.wallV) * 1000);
-            const afterLastUs = this.lastVideoSrcUs === null ? 0 : this.lastVideoSrcUs - this.firstVideoTs + frameUs;
+            const targetUs = this.lastVideoSrcUs === null
+                ? Math.round((nowMs() - this.wallV) * 1000)
+                : this.lastVideoSrcUs - this.firstVideoTs + Math.max(frameUs, Math.round((nowMs() - this.lastVideoAtMs) * 1000));
             // 0 passes frames through untouched: the clocks already agree.
-            this.videoTsShiftUs = this.firstVideoTs + Math.max(wallUs, afterLastUs) - f.timestamp;
+            this.videoTsShiftUs = this.firstVideoTs + targetUs - f.timestamp;
         }
         post({ t: 'videoRebound', seq, ok: true, width: this.width, height: this.height });
         void this.pumpVideo(gen, reader, f);

@@ -48,6 +48,8 @@ picker); the **auto** arm uses the native crates `puca-capture`/`-encode`
 the agent sidecar — with WASAPI loopback for audio (`clip_desktop_audio.rs`)
 and a keyframe forced every 2 s (the agent's own use of those crates keeps
 its infinite GOP; the clip path does not). See "Arm automatically" below.
+A hand-armed buffer and a screen share of the same surface share ONE
+capture of it ("Sharing while armed" below).
 
 ## How the buffer works (`frontend/src/api/clips/`)
 
@@ -136,6 +138,83 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - **Discard / disarm / leave / channel switch / suspend / lock / quit** zero
   the buffers and drop the key (table below).
 
+## Sharing while armed (one capture of a surface, not two)
+
+"Can we integrate clipping and streaming so it doesn't use double the CPU"
+(the owner, 2026-11-14). Measured first, with
+`frontend/e2e/clip-share-cpu-measure.mjs` (headless Edge 157, the WebView2
+engine, on the owner's desktop: Ryzen 7 7800X3D, RTX 4080 SUPER; % of ONE
+core, each pipeline's own process tree; the clip buffer's figures include its
+worker and the agent):
+
+| what runs | costs | beside a share |
+|---|---|---|
+| SFU share, 1080p30 H.264 simulcast, hardware | ~32% (fast motion) | |
+| mesh share, 1080p30 VP8, software | ~55% **per viewer** (fast motion) | |
+| clip buffer, Arm automatically (agent, 2560x1440 at 30 fps) | ~20% (agent ~15%, page ~5%) | the same: +21% on SFU, +24% on mesh |
+| clip buffer, armed by hand (a 2nd getDisplayMedia + WebCodecs) | ~14-18% (its encoder ~4-5%) | +16-22% |
+
+Nothing contends: the agent's own threads stayed at 12-18% with or without a
+share, and GPU load, CPU and memory load, a second screen capture and a
+second hardware encode beside it did not move it. So "double" is about right
+on an SFU call (~1.6-1.7x the share alone), and the second cost is the clip's
+own CAPTURE (the readback and colour conversion of every frame) plus its
+ENCODE (hardware, small). On a mesh call the share's software VP8 dominates
+and Clips cannot remove it (it is the share's encoder, once per viewer).
+
+**What changed: a clip buffer armed BY HAND follows a share of the same
+surface.** The ring stops capturing the surface itself and reads a clone of
+the share's track instead (`replayBuffer.ts followShareCapture`, the worker's
+`rebindVideo`). Two encoders, one capture. It applies only when it changes
+nothing about the clip:
+
+- the same surface (the picker's `deviceId`, e.g. `screen:1:0` or
+  `window:<hwnd>:0`) and the same frame rate (a slower share would slow the
+  clip; a faster one would keep the capture running faster than the ring
+  needs after the share ends);
+- the worker takes the clone only if its first frame is exactly the size
+  the encoder runs at, so the SAME `VideoEncoder` carries on: same settings,
+  same keyframe every 2 s, same ring key, nothing buffered lost (a different
+  size would reconfigure it and cost the buffer, so a share captured smaller
+  than the clip preset is refused and the ring keeps its own capture);
+- the clone's frames are re-timed onto the ring's timeline (another capture's
+  clock has its own origin), never at or before the last frame encoded;
+- the ring's system-audio track is its own and is left alone; only its own
+  VIDEO capture stops.
+
+A clone is its own track on the share's source (measured in Edge 157: cutting
+the original to 640 px left the clone's frames as they were, and after the
+original stopped the clone kept getting frames). So the ring keeps that
+capture when the share ends and never needs a picker again; Stop on the share
+changes nothing for the buffer. The source itself ending (the shared window
+closed, Chromium's own "Stop sharing") ends both, and disarms the buffer as
+before. `rtc/media.ts` tells listeners about every share capture it starts
+(`onShareCapture`); a share already live when the buffer is armed is followed
+at once. puca.log gets one `[stream-diag] clips:` line either way: "now reads
+the screen share's capture", or "kept the clip buffer's own capture beside the
+screen share (<reason>)".
+
+**Arm automatically is not followed.** It captures the whole primary monitor
+in the agent with DXGI and the hardware MFT; moving it onto a browser capture
+mid-buffer would change what it records (the share's surface and size, not
+always the monitor), and the ring cannot carry a clip across a change of
+encoder: everything buffered before the switch would no longer be in a clip
+made after it (`selectWindow` keeps one decoder configuration). That is a
+trade-off for the owner to make, and the numbers for it are in the handover;
+nothing about it is built.
+
+Pinned by `clipFollowShare.test.ts` (the decisions: surface, frame rate, the
+worker's refusal, the audio left alone, teardown, the 'ended' watch moving to
+the clone, a native arm never followed, the media.ts announcement),
+`clipFollowShareRing.test.ts` (the worker: one encoder across the move, the
+old stream let go of, a clip across it continuous through the real muxer, a
+smaller stream refused) and `e2e/clip-share-follow-real-browser.mjs` (the real
+replayBuffer, media.ts and worker in headless Edge: one capture left after the
+share starts, the ring fed after the share stops, a clip spanning both
+switches sealed with nothing lost and played back frame by frame in order;
+CONTROLS: another surface and a smaller share keep two captures; NEGATIVE
+CONTROL: with the follow disabled its one-capture checks fail).
+
 ## What is guaranteed (mechanically checked)
 
 - No file-writing or persistent-storage API is reachable from `api/clips/**`
@@ -144,6 +223,15 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - The ring is ciphertext under a non-extractable key; plaintext exists only in
   flight (the open GOP, a seal's copy of it, the seal's transient mux
   buffers) and is zero-filled.
+- **Following a screen share changes nothing about the clip** (a hand-armed
+  buffer reading a clone of a share of the same surface; "Sharing while
+  armed" above): the same encoder, settings, keyframe interval and ring key
+  carry on, nothing buffered is lost, and anything that would change the
+  clip (another surface, another frame rate, another size) keeps the
+  buffer's own capture. The share's frames reach the ring the way its own
+  did, as VideoFrames inside its worker, never as encoded share media.
+  `clipFollowShare.test.ts`, `clipFollowShareRing.test.ts` and
+  `e2e/clip-share-follow-real-browser.mjs`, each with its control.
 - **A native capture never outlives its session by more than two minutes.**
   Nothing on screen admits to a native capture except the session's own
   status and the roster badge, so one that outlived its session (a stop
@@ -535,6 +623,7 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 | Leave voice / disconnect | `disarm('leave-voice')` before the room is left |
 | Channel switch (incl. VoiceMoved) | the panel remounts → `disarm('channel-switch')` — the ring must not span two rooms' rosters |
 | Chromium "Stop sharing" (manual/prompt arm only) | `disarm('capture-ended')` + notice |
+| Screen share stopped while a hand-armed buffer follows its capture | nothing: the buffer reads its own clone of that capture and keeps it (see "Sharing while armed") |
 | Native VIDEO capture error (`clip_capture.rs` mid-session) | `disarm('capture-error')` + notice; an encoder that never produces a usable H.264 sequence header fails outright after 5 consecutive SPS-less keyframes rather than hanging silently |
 | Native desktop-AUDIO error (`clip_desktop_audio.rs` mid-session) | notice only — the session stays armed and continues mic-only (deliberate: matches the manual arm's no-system-audio behaviour; the ring is not wiped for an audio device hiccup) |
 | Page/webview reload or navigation (native arm only) | `pagehide`/`beforeunload`'s `bail()` also calls `session.nativeStop` (best effort, not awaited) — otherwise the Rust-side DXGI/WASAPI threads would keep running with no session to stop them |

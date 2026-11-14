@@ -73,7 +73,8 @@ class FakeEncoder {
     state = 'unconfigured'; encodeQueueSize = 0;
     got: { src: string; n: number; ts: number; key: boolean }[] = [];
     private first = true;
-    constructor(private init: { output: (c: FakeChunk, m?: unknown) => void; error: (e: Error) => void }) { encoders.push(this); }
+    private init: { output: (c: FakeChunk, m?: unknown) => void; error: (e: Error) => void };
+    constructor(init: { output: (c: FakeChunk, m?: unknown) => void; error: (e: Error) => void }) { this.init = init; encoders.push(this); }
     configure() { this.state = 'configured'; }
     encode(f: FakeFrame, o: { keyFrame: boolean }) {
         this.got.push({ src: f.src, n: f.n, ts: f.timestamp, key: o.keyFrame });
@@ -201,11 +202,13 @@ describe('Ring.rebindVideo: the ring carries on from another stream', () => {
         expect(posts.some(p => p.t === 'reconfigured')).toBe(false);
         expect(got.slice(before).every(g => g.src === 'share')).toBe(true);
         expect(got.filter(g => g.src === 'share')).toHaveLength(181);
-        // One increasing timeline, one frame apart across the move.
+        // One increasing timeline across the move: the first new frame lands
+        // as long after the last old one as really passed, at least a frame
+        // (without the re-timing it would land ~25 h of capture clock away).
         for (let i = 1; i < got.length; i++) expect(got[i].ts).toBeGreaterThan(got[i - 1].ts);
         const gap = got[before].ts - got[before - 1].ts;
-        expect(gap).toBeGreaterThan(0);
-        expect(gap).toBeLessThan(FRAME_US * 3);
+        expect(gap).toBeGreaterThanOrEqual(FRAME_US - 1);
+        expect(gap).toBeLessThan(1_000_000);
 
         // A clip of the whole ring: its own capture AND the share's, as one.
         const s = await ring.seal(crypto.randomUUID(), 600_000);

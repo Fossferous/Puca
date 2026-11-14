@@ -51,7 +51,8 @@ class Track {
     clones: Track[] = [];
     constraints: unknown[] = [];
     private ended = new Set<Listener>();
-    constructor(public kind: string, public settings: Record<string, unknown>, public label = 'rig') { }
+    kind: string; settings: Record<string, unknown>; label: string;
+    constructor(kind: string, settings: Record<string, unknown>, label = 'rig') { this.kind = kind; this.settings = settings; this.label = label; }
     getSettings() { return { ...this.settings }; }
     addEventListener(t: string, l: Listener) { if (t === 'ended') this.ended.add(l); }
     removeEventListener(t: string, l: Listener) { if (t === 'ended') this.ended.delete(l); }
@@ -65,10 +66,12 @@ class Track {
 /** The worker: records messages; answers rebindVideo as told. */
 let answer: 'ok' | 'size' | 'never' = 'ok';
 const posted: { t: string;[k: string]: unknown }[] = [];
-let worker: StubWorker | null = null;
+const workers: StubWorker[] = [];
+/** The worker the session made last. */
+const worker = () => workers[workers.length - 1];
 class StubWorker {
     onmessage: ((ev: { data: unknown }) => void) | null = null; onerror: unknown = null;
-    constructor(_u: unknown, _o?: unknown) { worker = this; }
+    constructor(_u: unknown, _o?: unknown) { workers.push(this); }
     postMessage(m: { t: string; seq?: number }) {
         posted.push(m);
         if (m.t === 'rebindVideo' && answer !== 'never') {
@@ -89,7 +92,7 @@ const gdm = () => navigator.mediaDevices.getDisplayMedia as unknown as { mockRes
 let rb: typeof import('../api/clips/replayBuffer');
 beforeEach(async () => {
     vi.resetModules();
-    posted.length = 0; processed.length = 0; worker = null; answer = 'ok';
+    posted.length = 0; processed.length = 0; workers.length = 0; answer = 'ok';
     hub.listeners.clear(); hub.live = null;
     vi.stubGlobal('Worker', StubWorker);
     vi.stubGlobal('MediaStreamTrackProcessor', StubProcessor);
@@ -113,11 +116,14 @@ afterEach(async () => {
 });
 
 const share = (over: Record<string, unknown> = {}) => new Track('video', { ...SCREEN, ...over });
+/** The worker's ring is running: what it posts once its arm() is done. */
+const workerArmed = () => worker().onmessage!({ data: { t: 'armed', videoCodec: 'avc1.640028', audioCodec: null, width: 1920, height: 1080 } });
+async function armByHand() { await rb.arm({ maxSeconds: 120 }); workerArmed(); }
 const rebinds = () => posted.filter(m => m.t === 'rebindVideo');
 
 describe('followShareCapture', () => {
     test('a share of the same surface: the ring reads its clone and stops its own video capture, not its audio', async () => {
-        await rb.arm({ maxSeconds: 120 });
+        await armByHand();
         const s = share();
         for (const l of hub.listeners) l(s); // rtc/media.ts announcing the share
         await vi.waitFor(() => expect(rb.getReplayState().sharedCapture).toBe(true));
@@ -134,7 +140,7 @@ describe('followShareCapture', () => {
     });
 
     test('the clone outlives the share, and its source ending disarms the ring', async () => {
-        await rb.arm({ maxSeconds: 120 });
+        await armByHand();
         const s = share();
         expect(await rb.followShareCapture(s as unknown as MediaStreamTrack)).toBe('followed');
         s.stop(); // the share ends from the app: its tracks stop, the clone does not
@@ -150,7 +156,7 @@ describe('followShareCapture', () => {
     });
 
     test('teardown stops the clone', async () => {
-        await rb.arm({ maxSeconds: 120 });
+        await armByHand();
         const s = share();
         expect(await rb.followShareCapture(s as unknown as MediaStreamTrack)).toBe('followed');
         await rb.disarm('user');
@@ -160,7 +166,7 @@ describe('followShareCapture', () => {
     });
 
     test('another surface, or another frame rate: the ring keeps its own capture', async () => {
-        await rb.arm({ maxSeconds: 120 });
+        await armByHand();
         const other = share({ deviceId: 'screen:3:0' });
         expect(await rb.followShareCapture(other as unknown as MediaStreamTrack)).toBe('other-surface');
         const win = share({ deviceId: 'window:123:0', displaySurface: 'window' });
@@ -176,7 +182,7 @@ describe('followShareCapture', () => {
     });
 
     test('the worker refusing (another size): the clone is stopped and the ring keeps its own capture', async () => {
-        await rb.arm({ maxSeconds: 120 });
+        await armByHand();
         answer = 'size';
         const s = share();
         expect(await rb.followShareCapture(s as unknown as MediaStreamTrack)).toBe('size');
@@ -188,25 +194,64 @@ describe('followShareCapture', () => {
         await vi.waitFor(() => expect(rb.getReplayState().phase).toBe('idle'), { timeout: 4000 });
     });
 
-    test('a share already live when the ring is armed is followed at once', async () => {
+    test('a share already live when the ring is armed is followed once the worker has armed, not before', async () => {
         hub.live = share();
         await rb.arm({ maxSeconds: 120 });
+        await new Promise(r => setTimeout(r, 20));
+        // The worker is still inside its arm(): a rebind now would be refused.
+        expect(rebinds()).toHaveLength(0);
+        workerArmed();
         await vi.waitFor(() => expect(rb.getReplayState().sharedCapture).toBe(true));
         expect(ownVideo.stopped).toBe(true);
     });
 
-    test('a clone that never delivers a frame is stopped after the wait, and the ring keeps its own', async () => {
+    test('a share announced before the worker has armed waits for it', async () => {
         await rb.arm({ maxSeconds: 120 });
+        const s = share();
+        expect(await rb.followShareCapture(s as unknown as MediaStreamTrack)).toBe('busy');
+        expect(rebinds()).toHaveLength(0);
+        workerArmed();
+        await vi.waitFor(() => expect(rb.getReplayState().sharedCapture).toBe(true));
+    });
+
+    test('a clone that never delivers a frame is stopped after the wait, and the ring keeps its own', async () => {
+        await armByHand();
         vi.useFakeTimers();
         answer = 'never';
         const s = share();
         const out = rb.followShareCapture(s as unknown as MediaStreamTrack);
         await vi.advanceTimersByTimeAsync(rb.FOLLOW_FIRST_FRAME_MS + 1);
         expect(s.clones[0].stopped).toBe(true); // its stream ends; the worker then answers 'ended'
-        const seq = (rebinds()[0] as { seq: number }).seq;
-        worker!.onmessage!({ data: { t: 'videoRebound', seq, ok: false, reason: 'ended' } });
+        const seq = rebinds()[0].seq as number;
+        worker().onmessage!({ data: { t: 'videoRebound', seq, ok: false, reason: 'ended' } });
         expect(await out).toBe('refused');
         expect(ownVideo.stopped).toBe(false);
+    });
+
+    test('a share announced while another is being followed is tried after it, not dropped', async () => {
+        await armByHand();
+        const first = share({ deviceId: 'screen:2:0' });
+        const second = share();
+        const a = rb.followShareCapture(first as unknown as MediaStreamTrack);
+        expect(await rb.followShareCapture(second as unknown as MediaStreamTrack)).toBe('busy');
+        expect(await a).toBe('followed');
+        // The second share (the newer one) is followed once the first is done.
+        await vi.waitFor(() => expect(second.clones).toHaveLength(1));
+        await vi.waitFor(() => expect(first.clones[0].stopped).toBe(true));
+        expect(second.clones[0].stopped).toBe(false);
+        expect(rebinds()).toHaveLength(2);
+    });
+
+    test('a follow that throws before the worker answers stops its clone', async () => {
+        await armByHand();
+        vi.stubGlobal('MediaStreamTrackProcessor', class { constructor() { throw new Error('no processor'); } });
+        const s = share();
+        expect(await rb.followShareCapture(s as unknown as MediaStreamTrack)).toBe('refused');
+        expect(s.clones[0].stopped).toBe(true);
+        expect(ownVideo.stopped).toBe(false);
+        // And the next share can still be followed.
+        vi.stubGlobal('MediaStreamTrackProcessor', StubProcessor);
+        expect(await rb.followShareCapture(share() as unknown as MediaStreamTrack)).toBe('followed');
     });
 
     test('a native (auto) arm is never followed', async () => {
