@@ -323,7 +323,9 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
     };
     const kept = await hoverKeeps('real');
     ck('phone: a hovered danger and primary device button keep their own fill', kept.out.length === 0, kept.out.join('; '));
-    // NEGATIVE CONTROL: the same with the device buttons' touch rule taken out of the stylesheet.
+    // NEGATIVE CONTROL: the same with the device buttons' touch rule taken out of the stylesheet, and
+    // mobile.css's touch reset back at the weight it had until 2026-11-14 ((0,1,1), which beat a
+    // one-class fill; it is :where() now, so on its own it no longer empties one).
     const stripped = await page.evaluate(() => {
         let n = 0;
         for (const sheet of document.styleSheets) {
@@ -333,6 +335,9 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
                 if (r instanceof CSSMediaRule && r.conditionText === '(hover: none)' && /\.device-btn[\w-]*:hover/.test(r.cssText)) { sheet.deleteRule(i); n++; }
             }
         }
+        const old = document.createElement('style');
+        old.textContent = '@media (hover: none) { button:hover, .btn:hover { background-color: inherit; } }';
+        document.head.append(old);
         return n;
     });
     const tappedAgain = await powerOffTarget(page, 'Slim-Jim');

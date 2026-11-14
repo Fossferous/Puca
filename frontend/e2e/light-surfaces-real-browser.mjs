@@ -18,12 +18,22 @@
 //      says, so the skeleton cannot quietly measure something the app does not draw;
 //   3. the screen itself: a screenshot's paper must be the colour computed and its ink readable, so
 //      nothing lying over a surface is missed;
-//   4. every component in the app on Light: nothing under 3:1 that the dark theme holds, past the
-//      short list in NOT_AS_DRAWN, each entry with its reason;
+//   4. every component in the app on Light, inside the elements of each place it is used (skeleton's
+//      placesOf: up to PLACES_PER_COMPONENT call sites, what a parent puts around its children, JSX
+//      held in a local or made by a helper where it is named, a portal on the page), in each arm of
+//      every branch and each value a class from data can take (skeleton's dataVariants), with the
+//      elements around it in the same arm, with and without High Contrast, at both sizes, and again
+//      at both with every :hover and :focus on (a tap leaves a phone's on): the same 4.5:1 and 3:1, with opacity counted
+//      (dimmed words are read dimmed), past the two entries in NOT_AS_DRAWN, each with its reason.
+//      Until 2026-11-14 this held only 3:1 and only where the dark theme held, at rest, ignored
+//      opacity and data classes, and read each component on the chat's paper: the role editor's
+//      panels inside Light's Server Settings and the call's encryption badge (1.03:1) went unseen;
 //   5. NEGATIVE CONTROLS. OLD_LIGHT is Light's colours as they were: every surface must fail on it,
 //      or the checks above prove nothing, and the whole-app sweep must report it. OLD_SHARED does the
-//      same for the words that were below the bar on every theme. A colour this cannot read fails
-//      the run rather than being skipped (color-mix() once went unread that way, and passed).
+//      same for the words that were below the bar on every theme. LIGHT_AT_RAISE is Light as it was
+//      before (4) was raised: every place fixed then must fail the raised sweep on it. A colour this
+//      cannot read fails the run rather than being skipped (color-mix() once went unread that way,
+//      and passed).
 //
 // With an outdir: a screenshot of every real mount on Light, as it is and with OLD_LIGHT, and on the
 // worst look of the seven other themes. No server, no build. Headless and silent.
@@ -33,7 +43,7 @@ import { chromium } from 'playwright';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
+import { armsIn, dataVariants, inPlace, placesOf, readJsx, toHtml } from './theme-surfaces/skeleton.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, '..', 'src');
@@ -45,6 +55,9 @@ mkdirSync(workDir, { recursive: true });
 const THEMES = ['light', 'dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
 const CONTRASTS = ['normal', 'high'];
 const LOOKS = THEMES.flatMap(theme => CONTRASTS.map(contrast => [theme, contrast]));
+// The sweep reads each component in up to this many of the places it is used (the first, in the
+// order the source has them). Of the components used in more, most are icons and small wrappers.
+const PLACES_PER_COMPONENT = 8;
 
 // A class, or a component (all its call sites, so a popover is measured with what is really in it).
 const SURFACES = [
@@ -89,18 +102,132 @@ const OLD_SHARED = `
 .sched-btn.primary, .sched-seg button.on, .notes-update-strip-btn { background: var(--brand-primary) !important; }
 .nick-edit-actions .save-btn { background: var(--brand-primary) !important; color: var(--bg-primary) !important; }
 `;
-// In the whole-app sweep, what is not drawn as the skeleton has it. Each one read and reasoned, in
-// place of a filter that could hide the next real one. file:line is not used, as it would rot.
+// In the whole-app sweep, what is not drawn as the skeleton has it: a class, each one read and
+// reasoned, in place of a filter that could hide the next real one. file:line is not used, as it
+// would rot. The skeleton reads JSX and nothing that runs, so these two it cannot see as drawn.
 const NOT_AS_DRAWN = [
-    ['member-role-badge', 'its background is the role\'s colour, set inline'],
-    ['loading-spinner', 'on the page body or a sign-in card, both dark on every theme'],
-    ['App.tsx', 'the connection error is on the page body, which is dark on every theme'],
-    ['RoleSettingsModal.tsx', 'a sub-component of .role-modal, which is drawn dark: the skeleton has it apart from it'],
-    ['device-stage-btn', 'inside .device-stage, which is drawn dark'],
-    ['dsb-item', 'inside .dsb-menu, which is drawn dark'],
-    ['scm-', 'inside .stream-context-menu, which is drawn dark'],
-    ['notes-editor-backdrop', 'its words are the note editor inside it, which has its own surface'],
+    ['member-role-badge', 'its paper is the role\'s own colour, set from JavaScript (style={{ backgroundColor: ... }})'],
+    ['notes-editor-backdrop', 'it has no words of its own: what is in braces in it is {undo.bar}, the undo bar a hook hands it, read as .notes-undo above'],
 ];
+// Light as it was before this file held the sweep to the full bar (2026-11-14, when it allowed
+// anything above 3:1 and anything the dark theme also failed): every place in RAISED was below the
+// bar then and must fail on it again, with and without High Contrast, or the sweep proves nothing.
+// The fill tokens Light now defines, the role editor's words that were Light's, the rules
+// lightTheme.css now answers, and the fixed colours since raised where they are drawn.
+const LIGHT_AT_RAISE = `
+[data-theme="light"] { --color-danger: #f23f43 !important; --color-success: #23a55a !important; --accent-lavender: #a78bfa !important; --status-offline: #80848e !important; --text-warning: #8a5a00 !important; }
+.message-link { color: var(--mode-brand-text, var(--brand-primary)) !important; }
+.message-content.task-completed, .cal-row.done .cal-row-title, .gseat-folded { opacity: 0.6 !important; }
+.cal-chip.done { opacity: 0.55 !important; }
+.cal-cell.other, .option-hint-dim, .device-wake-countdown { opacity: 0.75 !important; }
+.tt-sched.ended, .blocked-message-stub, .message-attachment.loading { opacity: 0.7 !important; }
+.sub-icon { opacity: 0.6 !important; }
+.update-banner { background: linear-gradient(135deg, #4752c4 0%, #5865f2 100%) !important; }
+.member-item.offline .member-avatar { opacity: 0.5 !important; }
+.pcard-muted { opacity: 0.45 !important; filter: none !important; }
+.clip-duration-chip-size { opacity: 0.8 !important; }
+.user-profile-popup .friend-btn.pending { color: #8e9297 !important; }
+.voice-e2ee.on { color: #b8f5c8 !important; background: rgba(36, 128, 70, 0.18) !important; }
+.voice-e2ee.partial { color: #ffe0a3 !important; background: rgba(191, 149, 60, 0.18) !important; }
+.voice-e2ee.off { color: #ffc4c4 !important; background: rgba(191, 60, 60, 0.15) !important; }
+.user-profile-popup .verify-btn.changed { color: #ffc4c4 !important; }
+button.ta-file.saved { color: #7fd18b !important; } button.ta-file.error { color: #ffb4b4 !important; }
+.report-badge.spam, .audit-badge.kick, .report-status.pending { color: #f0b232 !important; }
+.report-badge.harassment, .audit-badge.ban { color: #f04747 !important; }
+.report-badge.inappropriate { color: #eb459e !important; } .report-status.resolved { color: #23a55a !important; }
+.user-profile-bar .user-status.idle, .user-profile-bar .user-status.away, .active-status.idle, .active-status.away { color: var(--status-idle) !important; }
+.cal-chip-time, .cal-chip-span { color: var(--text-muted) !important; }
+.attachment-saved { opacity: 0.75 !important; }
+.share-row-status-accepted-live { color: var(--success, #43b581) !important; }
+[data-theme="light"] .role-editor-embedded {
+    --text-normal: #313338 !important; --text-muted: #5a5c64 !important; --text-faint: #62656e !important;
+    --header-primary: #060607 !important; --header-secondary: #4e5058 !important; color: #313338 !important;
+}
+[data-theme="light"][data-contrast="high"] .role-editor-embedded { --text-normal: #000 !important; --text-muted: #26282d !important; --text-faint: #43464e !important; color: #000 !important; }
+.server-settings-nav .nav-item.active { background: rgba(79, 84, 92, 0.6) !important; color: #fff !important; }
+.voice-controls-compact, .voice-clip-status { background: rgba(0, 0, 0, 0.2) !important; }
+.voice-error-mini { background: rgba(237, 66, 69, 0.2) !important; color: #ed4245 !important; }
+.voice-e2ee-blocked { background: rgba(191, 60, 60, 0.15) !important; color: #ffc4c4 !important; }
+.voice-e2ee-warning { background: rgba(191, 130, 40, 0.15) !important; }
+.reply-preview-banner .replying-to strong, .typing-dots, .note-link, .nb-conflict-actions button, .nb-retry, .app-version { color: var(--brand-primary) !important; }
+.message-author, .message-reply-ref .reply-author { color: var(--mode-brand-text, var(--brand-primary)) !important; }
+.channel-perms-role-flag { color: var(--accent-color, #5865f2) !important; }
+.settings-close-hint { color: var(--text-faint) !important; }
+.xfer-ok { color: #3ba55d !important; } .xfer-bad { color: #ed4245 !important; }
+.settings-hint.settings-hint-live { color: #a6e3a1 !important; }
+.settings-coming-soon { color: #a6adc8 !important; } .settings-coming-soon h4 { color: #cdd6f4 !important; }
+.own-voice-banner-btn.leave { background: rgba(237, 66, 69, 0.9) !important; }
+.user-profile-popup .upp-status.idle, .user-profile-popup .upp-status.away { color: var(--status-idle) !important; }
+.autocomplete-item.active .ac-hash { color: var(--text-muted, #949ba4) !important; }
+.autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75) !important; }
+.jump-latest-pill { background: linear-gradient(135deg, #7c3aed 0%, #4cc4ff 100%) !important; }
+.live-badge-mini, .server-unread-bubble { background: #ed4245 !important; }
+.watch-live-btn, .watch-streams-btn { background: linear-gradient(135deg, #ed4245, #dc3545) !important; }
+.vs-live-badge { background: var(--text-danger, #f23f43) !important; }
+.live-indicator, .permission-reset-btn { background: linear-gradient(135deg, #ed4245, #ff6b6b) !important; }
+.permission-retry-btn, .error-buttons button.primary { background: linear-gradient(135deg, #7c3aed 0%, #00d9ff 100%) !important; }
+.notes-dialog-body .notes-textbtn.primary { background: var(--brand-active) !important; color: var(--brand-primary) !important; }
+.login-title { background-image: linear-gradient(90deg, #00d9ff, #7c3aed, #ff6b9d) !important; }
+.login-button { background-image: linear-gradient(135deg, var(--login-accent-2, #7c3aed) 0%, var(--login-accent, #00d9ff) 100%) !important; }
+.login-subtitle, .forgot-password-link { color: rgba(255, 255, 255, 0.5) !important; }
+.login-container .form-group label, .notes-login-note, .notes-stay-hint { color: var(--text-muted) !important; }
+.notes-login-note a { color: var(--text-link) !important; }
+.login-container .error-message { color: #f04747 !important; }
+.login-container .loading-spinner { color: #9399b2 !important; }
+.login-container .success-message { color: var(--color-success, #23a55a) !important; }
+.connection-error .connection-error-hint { color: #7f849c !important; }
+.service-update-banner { background: linear-gradient(135deg, #3b6ea5 0%, #4f8bc9 100%) !important; }
+.update-gate h2 { background-image: linear-gradient(135deg, #7289da, #5865f2) !important; }
+.welcome-popup-header h2 { background-image: linear-gradient(135deg, #5865f2, #eb459e) !important; }
+.device-stage-hint kbd { color: inherit !important; }
+.device-stage-mobile-toolbar-toggle, .mouse-mode-btn.active { background-color: #1e88e5 !important; }
+.keyboard-btn.kb-locked { background: #1e88e5 !important; }
+.mouse-mode-btn.inactive { color: #b9bbbe !important; }
+.device-stage-mobile-menu-item.danger .label { color: var(--color-danger, #ed4245) !important; }
+.device-stage-mobile-confirm-btn.danger { background: var(--color-danger, #ed4245) !important; }
+.device-stage-minimized { background: #007aff !important; }
+.host-files-indicator-stop { background: var(--danger, #f04747) !important; }
+.role-error, .confirm-delete-btn { background: #f04747 !important; }
+.delete-role-btn { color: #f04747 !important; }
+.role-hint, .permission-desc, .no-role-selected p { color: var(--text-faint) !important; }
+.role-loading { color: #8e9297 !important; }
+.role-modal-content .cancel-btn { color: var(--text-muted) !important; }
+.invite-preview-icon, .discover-card-icon { background: linear-gradient(135deg, var(--brand-primary), var(--accent-pink)) !important; }
+.discover-empty-hint, .discover-member-count { color: #72767d !important; }
+.join-error { color: var(--color-danger) !important; }
+.recovery-word-num { color: #6d6f78 !important; }
+.stream-audio-error { color: var(--text-danger, #f23f43) !important; }
+`;
+// A class, or a file where no class names the place.
+const RAISED = [
+    // Light's own: the fill tokens, the rules in styles/lightTheme.css, the role editor's words.
+    'nav-item active', 'voice-clip-status-text', 'voice-clip-link', 'voice-clip-save', 'voice-clip-arm', 'voice-error-mini',
+    'reply-author', 'message-author', 'typing-dots', 'note-link', 'nb-retry', 'app-version', 'channel-perms-role-flag',
+    'settings-close-hint', 'xfer-ok', 'xfer-bad', 'settings-hint-live', 'OwnVoiceBanner.tsx', 'upp-status',
+    'unread-badge', 'secondary-btn active', 'danger-btn', 'add-friend-btn', 'copy-btn copied', 'friend-btn add',
+    'add-status success', 'profile-success', 'profile-error', 'report-error', 'forward-error', 'save-note-error',
+    'ban-btn', 'notes-badge', 'identity-banner-btn', 'dm-avatar', 'friend-avatar', 'avatar-placeholder', 'create-btn',
+    'role-name', 'color-custom', 'role-hint', 'permission-desc', 'cancel-btn', 'delete-role-btn', 'role-error', 'role-loading',
+    // Fixed colours, the same on every theme, raised where they are drawn.
+    'ac-hash', 'ac-sub', 'jump-latest-pill', 'live-badge-mini', 'watch-live-btn', 'server-unread-bubble', 'vs-live-badge',
+    'live-indicator', 'permission-reset-btn', 'permission-retry-btn', 'notes-textbtn primary', 'login-button', 'login-title',
+    'login-subtitle', 'forgot-password-link', 'error-message', 'success-message', 'notes-login-note', 'notes-stay-hint',
+    'connection-error-hint', 'update-later-btn', 'UpdateGate.tsx', 'WelcomePopup.tsx', 'ServiceUpdateBanner.tsx',
+    'mouse-mode-btn', 'keyboard-btn', 'device-stage-mobile-confirm-btn', 'DeviceStageMobileMenus.tsx', 'DeviceStage.tsx',
+    'host-files-indicator-stop', 'discover-empty-hint', 'discover-member-count', 'join-error', 'invite-preview-icon',
+    'recovery-word-num', 'stream-audio-error',
+    // Found once each component was read in its places, in each arm, and with opacity.
+    'message-link', 'mention everyone', 'clip-attachment-broken', 'task-completed', 'cal-chip done', 'cal-row-title',
+    'blocked-message-stub', 'option-hint-dim', 'device-wake-countdown', 'gseat-name', 'PlayingCard.tsx',
+    'clip-duration-chip-size', 'friend-btn pending', 'sub-icon', 'message-attachment loading', 'update-notes',
+    // Found once a class from data was read in each value the stylesheet gives it.
+    'voice-e2ee-label', 'verify-btn changed', 'ta-file saved', 'ta-file error', 'report-badge spam', 'audit-badge ban',
+    'report-status pending', 'user-status idle', 'active-status away', 'cal-chip-time', 'attachment-saved',
+    'share-row-status-accepted-live',
+];
+// High Contrast's muted and faint words already held 4.5:1 at these, so they were below the bar
+// without it only.
+const NOT_WITH_HIGH_CONTRAST = new Set(['settings-close-hint', 'notes-login-note', 'notes-stay-hint', 'option-hint-dim', 'gseat-name']);
 
 // ---- the real stylesheet ------------------------------------------------------------------------
 const define = {
@@ -150,7 +277,10 @@ const mountsJs = mounts.outputFiles.find(file => file.path.endsWith('.js')).text
 const mountsCss = mounts.outputFiles.find(file => file.path.endsWith('.css')).text;
 
 // ---- what is on the page ------------------------------------------------------------------------
-const { components, all } = readJsx(srcDir);
+const jsx = readJsx(srcDir);
+// What a class that comes from data can be, as the stylesheet the sweep reads under names it.
+dataVariants(jsx, `${appCss}\n${inlineNotes}`);
+const { components, all } = jsx;
 const instancesOf = (surface) => {
     if (surface.startsWith('<')) return all.filter(node => node.tag === surface.slice(1));
     return all.filter(node => node.intrinsic && node.classes.includes(surface.slice(1)));
@@ -176,13 +306,24 @@ const sectionsFor = (name, sheet) => {
     }
     return sections;
 };
-// Every component's own JSX, unnested: what a new surface would be caught by.
+// Every component's own JSX, unnested, inside the elements of each place it is used (placesOf):
+// what a new surface would be caught by, read on what is drawn behind it there.
 const sweep = [];
+const placeOf = placesOf(jsx, { most: PLACES_PER_COMPONENT });
+const nameOfPlace = place => place.slice(-2).map(({ tag, classes }) => `${tag}${classes.length ? `.${classes.join('.')}` : ''}`).join(' > ') || 'the page';
+// App's own screens (connecting, the connection error) are on the page's body, which App.css paints
+// the same dark on every theme; everything else is somewhere in the chat's container.
+const onTheBody = [];
 for (const node of Object.values(components).flat()) {
-    // With its fixed classes, and with every class a branch can give it: .active is where a colour moves.
-    for (const steady of [true, false]) {
-        const html = toHtml(node, {}, { steady });
-        if (html) sweep.push(`<section data-sweep="1" data-from="${node.at}">${html}</section>`);
+    // With its fixed classes, and with each arm of every branch (all the && on): .active is where a
+    // colour moves. The elements around it take the same reading, so a row a mention marks is read
+    // with what is in it.
+    const picks = [{ steady: true }, ...Array.from({ length: armsIn(node) }, (_, arm) => ({ arm }))];
+    for (const place of placeOf(node)) {
+        for (const pick of picks) {
+            const html = toHtml(node, {}, { ...pick, around: placeOf.around });
+            if (html) (node.host === 'App' ? onTheBody : sweep).push(`<section data-sweep="1" data-from="${node.at}" data-in="${nameOfPlace(place).replace(/"/g, '&quot;')}">${inPlace(place, html, pick)}</section>`);
+        }
     }
 }
 const stillness = '*,*::before,*::after{transition:none!important;animation:none!important}';
@@ -194,7 +335,10 @@ const pageWith = (name, body, sheet, script = '') => {
 // The chat's own container around them, whose words and paper they inherit in the app.
 const inApp = inner => `<div id="root" class="chat-container" style="display:block;height:auto;min-height:0;color:var(--text-normal);background:var(--bg-primary)">${inner}</div>`;
 const surfacesUrls = STYLESHEETS.map(([name, sheet], i) => [name, pageWith(`surfaces-${i}.html`, inApp(sectionsFor(name, sheet).join('\n')), sheet)]);
-const sweepUrl = pageWith('sweep.html', inApp(sweep.join('\n')), STYLESHEETS[2][1]);
+const sweepUrl = pageWith('sweep.html', `${onTheBody.join('\n')}${inApp(sweep.join('\n'))}`, STYLESHEETS[2][1]);
+// The same with every :hover and :focus on: `:not(.__never)` matches as they would, with their weight.
+const hovered = sheet => sheet.replace(/:(hover|focus-visible|focus-within|focus)(?![\w-])/g, ':not(.__never)');
+const sweepHoveredUrl = pageWith('sweep-hovered.html', `${onTheBody.join('\n')}${inApp(sweep.join('\n'))}`, hovered(STYLESHEETS[2][1]));
 const mountsUrl = pageWith('mounts.html', '<div id="root"></div>', mountsCss, mountsJs);
 // The call's header as VoiceStage draws it, alone on a page, for a real pointer to rest on.
 const callHeaders = instancesOf('.voice-stage-header');
@@ -237,34 +381,78 @@ const pageReader = () => {
     // Translucent layers composited down to the first opaque one, or the theme's page behind it. A
     // gradient has no one colour behind the words, so each of its stops is an answer: this returns
     // them all, and the reading takes the worst. Skipping gradients once hid the card table's tile.
-    const paints = (el, page) => {
-        let stacks = [[]];
-        for (let e = el; e && e !== document.documentElement; e = e.parentElement) {
-            const style = getComputedStyle(e);
-            const stops = stopsOf(style.backgroundImage);
-            if (stops.length) stacks = stacks.flatMap(stack => stops.map(stop => [...stack, stop]));
-            const colour = parts(style.backgroundColor);
-            if (colour[3] > 0) stacks = stacks.map(stack => [...stack, colour]);
-            if (colour[3] >= 1 || (stops.length && stops.every(stop => stop[3] >= 1))) break;
-        }
-        return stacks.map((stack) => {
-            let under = page.slice(0, 3);
-            for (const layer of [...stack].reverse()) under = over(layer, under);
-            return under;
-        });
+    // `memo` keeps each element's answer for one reading, so a deep tree costs one pass.
+    const paints = (el, page, memo = new Map()) => {
+        if (!el || el === document.documentElement) return [page.slice(0, 3)];
+        if (memo.has(el)) return memo.get(el);
+        const style = getComputedStyle(el);
+        const stops = stopsOf(style.backgroundImage);
+        const colour = parts(style.backgroundColor);
+        let under;
+        if (colour[3] >= 1) under = [colour.slice(0, 3)];
+        else if (stops.length && stops.every(stop => stop[3] >= 1)) under = [[0, 0, 0]];
+        else under = paints(el.parentElement, page, memo).map(below => (colour[3] > 0 ? over(colour, below) : below));
+        const answer = stops.length ? under.flatMap(below => stops.map(stop => over(stop, below))) : under;
+        memo.set(el, answer);
+        return answer;
     };
     const paint = (el, page) => paints(el, page)[0];
+    // Opacity: an element at opacity o paints all of itself, words and paper, at o over what is
+    // behind it, so dimmed words are read dimmed (a done task's words at 0.6 were 3.71:1 on Light
+    // where colours alone said 12.6). From 0.1 down it is a control shown elsewhere (one a hover
+    // brings up), read as it is shown then. Nested ones multiply, over what is behind the outermost.
+    // Not counted where the class says the control takes no press, as 1.4.3 exempts what cannot be
+    // used (:disabled is skipped outright, below): `disabled` (a menu item or a sound that cannot
+    // be chosen), `pending` (the clip button while it arms, a friend request already sent: both
+    // disabled then), `busy` and `updating` (a refresh, a role's box while it saves), and
+    // `dragging`, the item a drag is carrying, there for the drag and not to be read.
+    const UNUSABLE = ['disabled', 'pending', 'busy', 'updating', 'dragging'];
+    const dimOf = (el, dims) => {
+        if (!el || el === document.documentElement) return { o: 1, top: null };
+        if (dims.has(el)) return dims.get(el);
+        // A popover or a modal dialog is in the top layer: what is around it in the markup dims nothing.
+        const up = el.hasAttribute('data-top-layer') ? { o: 1, top: null } : dimOf(el.parentElement, dims);
+        // What it would be without those classes: a calendar chip that is done and being dragged
+        // is read as done.
+        let own = parseFloat(getComputedStyle(el).opacity);
+        const unusable = UNUSABLE.filter(name => el.classList.contains(name));
+        if (unusable.length && own < 1) {
+            el.classList.remove(...unusable);
+            own = parseFloat(getComputedStyle(el).opacity);
+            el.classList.add(...unusable);
+        }
+        const answer = own >= 0.1 && own < 1 ? { o: up.o * own, top: up.top ?? el } : up;
+        dims.set(el, answer);
+        return answer;
+    };
     const hasWords = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-    window.__measure = (root) => {
-        const page = pageColour();
+    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map()) => {
         const rows = [];
         const add = (el, kind, need) => {
-            const colour = parts(getComputedStyle(el).color);
-            const worst = paints(el, page)
-                .map((under) => { const ink = over(colour, under); return { under, ink, value: ratio(ink, under) }; })
+            const style = getComputedStyle(el);
+            const fill = parts(style.webkitTextFillColor || style.color);
+            const stops = stopsOf(style.backgroundImage);
+            // Words filled with their own gradient (background-clip: text, as the sign-in page's
+            // title is): every stop is a colour of the words, and the paper is what is behind them.
+            const clipped = stops.length && (style.backgroundClip === 'text' || style.webkitBackgroundClip === 'text') && fill[3] === 0;
+            // Words in no colour and over no gradient are painted for nobody (a field that only
+            // takes a phone's keyboard). Over a gradient they are read, so a title whose
+            // background-clip went missing reads as the 1:1 it is.
+            if (fill[3] === 0 && !stops.length) return;
+            const unders = clipped ? paints(el.parentElement, page, memo) : paints(el, page, memo);
+            const dim = dimOf(el, dims);
+            const behinds = dim.top ? paints(dim.top.parentElement, page, memo) : [null];
+            const worst = unders
+                .flatMap(under => (clipped ? stops : [fill]).flatMap(colour => behinds.map((behind) => {
+                    let ink = over(colour, under);
+                    let paper = under;
+                    if (behind) { ink = over([...ink, dim.o], behind); paper = over([...paper, dim.o], behind); }
+                    return { under: paper, ink, value: ratio(ink, paper) };
+                })))
                 .sort((a, b) => a.value - b.value)[0];
             rows.push({
                 kind, need, at: el.getAttribute('data-at') || el.tagName, cls: String(el.className || '').slice(0, 60),
+                dim: dim.top ? String(dim.top.className || '') : '',
                 ratio: Math.round(worst.value * 100) / 100,
                 ink: worst.ink.map(Math.round).join(','), under: worst.under.map(Math.round).join(','),
             });
@@ -273,6 +461,12 @@ const pageReader = () => {
             if (el.hasAttribute('data-icon')) continue;
             if (el.tagName === 'OPTION' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
             if (el.matches(':disabled')) continue; // 1.4.3 and 1.4.11 exempt a control that cannot be used
+            if (el.closest('[data-hidden]')) continue; // style={{ display: 'none' }}: never shown
+            // Visually hidden on purpose (.sr-only, a 2 px field that takes a phone's keyboard): not
+            // painted for anyone to read. Its sizes as the stylesheet sets them, so this holds where
+            // the skeleton's page does not lay it out.
+            const size = getComputedStyle(el);
+            if (parseFloat(size.width) <= 2 && parseFloat(size.height) <= 2) continue;
             if (hasWords(el) || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) add(el, 'text', 4.5);
             else if (el.tagName === 'BUTTON' && el.querySelector(':scope > [data-icon], :scope > svg')) add(el, 'mark', 3);
         }
@@ -283,11 +477,17 @@ const pageReader = () => {
         document.documentElement.setAttribute('data-contrast', contrast);
     };
     window.__old = (sheet) => { document.getElementById('old').textContent = sheet; };
-    window.__measureSections = (attr) => [...document.querySelectorAll(`section[${attr}]`)].flatMap(section => (
-        window.__measure(section).map(row => ({
-            ...row, surface: section.getAttribute(attr), from: section.getAttribute('data-from'),
-        }))
-    ));
+    window.__measureSections = (attr) => {
+        const page = pageColour();
+        const memo = new Map();
+        const dims = new Map();
+        return [...document.querySelectorAll(`section[${attr}]`)].flatMap(section => (
+            window.__measure(section, page, memo, dims).map(row => ({
+                ...row, surface: section.getAttribute(attr), from: section.getAttribute('data-from'),
+                ...(section.hasAttribute('data-in') ? { in: section.getAttribute('data-in') } : {}),
+            }))
+        ));
+    };
     window.__paper = el => paint(el, pageColour()).map(Math.round).join(',');
     // The text fields of a form with nothing to tell them from what they are on: neither their fill
     // nor a border of theirs is at `edge` against it. Words in them read fine all the same. The
@@ -527,33 +727,94 @@ for (const [name, options, sheetName, url] of [
     await close();
 }
 
-// 4. Every component, on Light.
+// 4. Every component, where it is drawn, on Light: the same bar as the surfaces above, with and
+// without High Contrast, at both sizes.
 {
-    console.log('\nevery component in the app, on Light');
-    const { page, close } = await open(sweepUrl);
-    const read = async (theme) => {
-        await page.evaluate(l => window.__look(l), [theme, 'normal']);
-        return page.evaluate(() => window.__measureSections('data-sweep'));
-    };
-    const dark = await read('dark');
-    const light = await read('light');
-    const worse = (rows) => rows.filter((row, i) => row.ratio < 3 && dark[i].ratio >= dark[i].need);
+    console.log('\nevery component in the app, where it is drawn, on Light');
+    // The rows under the bar no entry of NOT_AS_DRAWN excuses. Only the readings of Light as it is
+    // mark an entry used, so one that stops excusing a failure there is reported as stale.
     const used = new Set();
-    const explained = (row) => {
-        const entry = NOT_AS_DRAWN.find(([name]) => `${row.at} ${row.cls}`.includes(name));
-        if (entry) used.add(entry[0]);
-        return !!entry;
+    const unexcused = (rows, mark) => below(rows).filter((row) => {
+        const entry = NOT_AS_DRAWN.find(([name]) => row.cls.split(' ').includes(name));
+        if (entry && mark) used.add(entry[0]);
+        return !entry;
+    });
+    const read = async (page, look) => {
+        await page.evaluate(l => window.__look(l), look);
+        return (await page.evaluate(() => window.__measureSections('data-sweep'))).map(row => ({ ...row, surface: `in ${row.in}` }));
     };
-    const found = worse(light).filter(row => !explained(row));
+    const failing = rows => unexcused(rows, false);
+    // A needle of RAISED: a file's name, or classes every one of which the place has, or what dims
+    // it with opacity has (a done task dims all the words in it).
+    const isAt = (needle, row) => (needle.endsWith('.tsx')
+        ? row.at.split(':')[0].split('/').pop() === needle
+        : [row.cls, row.dim].some(classes => needle.split(' ').every(word => classes.split(' ').includes(word))));
+    let readings = 0;
+    const byLook = [];
+    for (const [name, options] of [
+        ['1280x800', { viewport: { width: 1280, height: 800 } }],
+        ['390x844 touch', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
+    ]) {
+        const { page, close } = await open(sweepUrl, options);
+        if (name.startsWith('390')) check(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), 'CONTROL: this is a coarse pointer');
+        for (const contrast of CONTRASTS) {
+            const rows = await read(page, ['light', contrast]);
+            readings += rows.length;
+            byLook.push([`light/${contrast} ${name}`, unexcused(rows, true)]);
+        }
+        if (name.startsWith('1280')) {
+            // 5. The controls: Light as it was in 0.9.855 ...
+            await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
+            const old = new Set(failing(await read(page, ['light', 'normal'])).map(row => `${row.at} ${row.cls}`));
+            check(old.size >= 300, 'CONTROL: the sweep finds Light as it was in 0.9.855', `${old.size} places`);
+            // ... and as it was before this bar was raised: every place fixed then fails again.
+            await page.evaluate(sheet => window.__old(sheet), LIGHT_AT_RAISE);
+            for (const contrast of CONTRASTS) {
+                const then = failing(await read(page, ['light', contrast]));
+                const places = new Set(then.map(row => `${row.at} ${row.cls}`)).size;
+                const fixed = RAISED.filter(needle => contrast === 'normal' || !NOT_WITH_HIGH_CONTRAST.has(needle));
+                const held = fixed.filter(needle => !then.some(row => isAt(needle, row)));
+                check(held.length === 0, `CONTROL: Light's colours before the bar was raised fail it (${contrast}), at ${places} places, each of the ${fixed.length} fixed then among them`, held.length ? `these still pass: ${held.join(' ')}` : '');
+            }
+            await page.evaluate(() => window.__old(''));
+        }
+        await close();
+    }
+    // Under a mouse and with the keyboard's focus: the same sweep with every :hover and :focus rule
+    // on, each selector keeping its weight. A pointer resting on something hovers all around it too,
+    // so those come on together, as they do. At 1280x800 for a mouse, and at 390x844 for a tap, which
+    // leaves its :hover on (sticky) under mobile.css's touch rules.
+    for (const [name, options] of [
+        ['1280x800', { viewport: { width: 1280, height: 800 } }],
+        ['390x844 touch', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
+    ]) {
+        const { page, close } = await open(sweepHoveredUrl, options);
+        if (name.startsWith('1280')) check(await page.evaluate(() => [...document.styleSheets].every(sheet => [...sheet.cssRules].every(rule => !/:hover|:focus/.test(rule.cssText)))), 'CONTROL: no :hover or :focus is left to wait for a pointer in the hovered sweep');
+        else check(await page.evaluate(() => matchMedia('(hover: none)').matches), 'CONTROL: the tapped sweep is a device that cannot hover, as a phone');
+        for (const contrast of CONTRASTS) {
+            const rows = await read(page, ['light', contrast]);
+            readings += rows.length;
+            byLook.push([`light/${contrast} ${name} hovered and focused`, unexcused(rows, true)]);
+        }
+        if (name.startsWith('1280')) {
+            // CONTROL: Settings' Log Out under the pointer as it was (white words on a faint pink).
+            await page.evaluate(sheet => window.__old(sheet), '.settings-modal .danger-btn:not(.__never) { color: #fff !important; background: rgba(243, 139, 168, 0.1) !important; }');
+            const then = failing(await read(page, ['light', 'normal']));
+            check(then.some(row => row.cls.split(' ').includes('danger-btn')), 'CONTROL: the hovered sweep finds a button whose words go white under the pointer on Light', `${then.length} places`);
+        } else {
+            // CONTROL: mobile.css's touch reset as it was, a weight that beat a button's own fill.
+            await page.evaluate(sheet => window.__old(sheet), '@media (pointer: coarse) and (max-width: 1024px) { @media (hover: none) { button:not(.__never), .btn:not(.__never) { background-color: inherit; } } }');
+            const then = failing(await read(page, ['light', 'normal']));
+            check(then.some(row => row.cls.split(' ').includes('games-btn-primary')), 'CONTROL: the tapped sweep finds a filled button the touch reset emptied (the card table\'s Sit)', `${then.length} places`);
+        }
+        await page.evaluate(() => window.__old(''));
+        await close();
+    }
     const stale = NOT_AS_DRAWN.filter(([name]) => !used.has(name)).map(([name]) => name);
-    check(stale.length === 0, 'and every entry of that list still explains something', stale.join(' '));
-    const distinct = new Map(found.map(row => [`${row.at} .${row.cls}`, row]));
-    for (const row of distinct.values()) console.log(describe(row, ['light/normal']));
-    check(distinct.size === 0, `no word on Light under 3:1 that the dark theme holds, in ${light.length} readings of ${sweep.length} blocks of the app's JSX (past ${NOT_AS_DRAWN.length} explained)`, `${distinct.size} found`);
-    await page.evaluate(sheet => window.__old(sheet), OLD_LIGHT + OLD_DARK_SURFACES);
-    const old = worse(await read('light')).filter(row => !explained(row));
-    check(new Set(old.map(row => row.at)).size >= 40, 'CONTROL: the sweep finds Light as it was', `${new Set(old.map(row => row.at)).size} places, down to ${Math.min(...old.map(row => row.ratio))}:1`);
-    await close();
+    check(stale.length === 0, 'and every entry of the list of what is not drawn as the skeleton has it still explains something', stale.join(' '));
+    const poor = collect(byLook);
+    for (const { worst, looks } of poor) console.log(describe(worst, looks));
+    check(poor.length === 0, `every run of words 4.5:1 and every icon-only control 3:1 on Light, with and without high contrast, at both sizes, in ${readings} readings of ${sweep.length + onTheBody.length} blocks of the app's JSX where they are drawn (past ${NOT_AS_DRAWN.length} explained)`, `${poor.length} below`);
 }
 
 // 6. What a reading of words cannot see.

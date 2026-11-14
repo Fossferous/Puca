@@ -379,7 +379,7 @@
 .stream-audio-error {
     margin: 0 24px 12px;
     font-size: 13px;
-    color: var(--text-danger, #f23f43);
+    color: #ff6b6e; /* --text-danger was 4.37:1 on the modal */
 }
 
 /* Stream quality while live (LiveShareQualityModal). */

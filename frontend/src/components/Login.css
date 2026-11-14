@@ -29,7 +29,8 @@
   font-size: 2.5rem;
   font-weight: 700;
   text-align: center;
-  background: linear-gradient(90deg, #00d9ff, #7c3aed, #ff6b9d);
+  /* Each stop 4.5:1 on the card at its lightest: #7c3aed was 1.9:1 and #ff6b9d 4.05:1 there. */
+  background: linear-gradient(90deg, #00d9ff, #b69cff, #ff8fb6);
   background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -51,7 +52,7 @@
 
 .login-subtitle {
   text-align: center;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.7);
   margin: 0 0 2rem;
   font-size: 0.9rem;
 }
@@ -132,9 +133,11 @@
 
 .login-button {
   padding: 0.875rem 1.5rem;
+  /* White on the stock cyan end was 1.7:1; these hold it at 5.9:1 or more. A colour theme's own
+     --login-accent pair is its brand, as before. */
   background: linear-gradient(135deg,
-      var(--login-accent-2, #7c3aed) 0%,
-      var(--login-accent, #00d9ff) 100%);
+      var(--login-accent-2, #6d28d9) 0%,
+      var(--login-accent, #0369a1) 100%);
   border: none;
   border-radius: 10px;
   color: #fff;
@@ -144,6 +147,11 @@
   transition: all 0.2s ease;
   margin-top: 0.5rem;
 }
+
+/* index.css's a:hover would turn an <a class="login-button"> (Invite's Open in the app) blue on blue. */
+a.login-button:hover { color: #fff; }
+/* And a link on the card: --brand-primary was 2.6 to 3.5:1 on it. */
+.login-container a:not(.login-button):hover { color: #fff; }
 
 .login-button:hover:not(:disabled) {
   transform: translateY(-2px);
@@ -183,6 +191,16 @@
   color: var(--color-success, #23a55a);
 }
 
+/* On the sign-in card. Chat.css, Modal.css and App.css style the same .form-group label,
+   .error-message and .loading-spinner and load after this file, so their colours, made for a
+   theme's surface, reached this card: labels at 3.86:1 and errors at 2.81:1. */
+.login-container .form-group label { color: rgba(255, 255, 255, 0.7); }
+.login-container .error-message { color: #fca5a5; }
+.login-container .loading-spinner { color: rgba(255, 255, 255, 0.7); }
+.login-container .success-message { color: #4ade80; }
+/* High Contrast's muted words are lighter still. */
+[data-contrast="high"] .login-container .form-group label { color: var(--text-muted); }
+
 .success-icon {
   font-size: 3rem;
   margin-bottom: 1rem;
@@ -196,7 +214,7 @@
 .forgot-password-link {
   display: block;
   margin-top: 0.75rem;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.7);
   font-size: 0.8rem;
   text-decoration: none;
   transition: color 0.2s;

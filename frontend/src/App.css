@@ -57,7 +57,7 @@ body {
 
 .connection-error .connection-error-hint {
   font-size: 0.8rem;
-  color: #7f849c;
+  color: #a6adc8; /* #7f849c was 4.09:1 */
 }
 
 .error-buttons {
@@ -84,7 +84,8 @@ body {
 }
 
 .error-buttons button.primary {
-  background: linear-gradient(135deg, #7c3aed 0%, #00d9ff 100%);
+  /* White on #00d9ff was 1.7:1. */
+  background: linear-gradient(135deg, #6d28d9 0%, #0369a1 100%);
   border-color: transparent;
   color: #fff;
   font-weight: 600;

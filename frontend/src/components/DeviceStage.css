@@ -288,6 +288,7 @@
 }
 
 .device-stage-hint kbd {
+    color: var(--text-normal, #dbdee1); /* the hint's muted grey was 3.36:1 on a key */
     padding: 1px 5px;
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.12);
@@ -570,10 +571,11 @@
 .dsb-item:hover:not(:disabled),
 .dsb-item:focus-visible { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); }
 .dsb-item:disabled { opacity: 0.5; cursor: default; }
-.dsb-item.danger { color: #ff6b6e; }
+.dsb-item.danger { color: #ff8a8d; } /* #ff6b6e was 4.39:1 under the pointer */
 .dsb-item-icon { display: inline-flex; width: 18px; flex: 0 0 18px; justify-content: center; }
 .dsb-item-label { flex: 1 1 auto; }
-.dsb-item-hint { color: var(--text-muted, #949ba4); font-size: 12px; }
+.dsb-item-hint { color: #b5bac1; font-size: 12px; } /* --text-muted was 4.33:1 under the pointer */
+[data-contrast="high"] .dsb-item-hint { color: var(--text-muted, #d7dbe2); }
 /* A ticked row: the box marks it, so checkboxes and radios read the same. */
 .dsb-item[aria-checked] .dsb-item-icon::before {
     content: '';

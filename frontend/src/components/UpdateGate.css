@@ -44,7 +44,7 @@
     font-weight: 700;
     color: #fff;
     margin: 0;
-    background: linear-gradient(135deg, #7289da, #5865f2);
+    background: linear-gradient(135deg, #aab4ff, #9aa5ff); /* the words' own colours: #5865f2 was 2.71:1 on the gate */
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;

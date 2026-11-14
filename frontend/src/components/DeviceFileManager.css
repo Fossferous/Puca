@@ -205,6 +205,11 @@
     padding: 8px 14px;
     border-radius: 6px;
     cursor: pointer;
+    /* Its own colours: the browser's grey button, once a tap on a phone left it hovered (mobile.css
+       empties a hovered button's fill there), was black words on this dark panel, 1.26:1. */
+    border: none;
+    background: var(--brand-active);
+    color: #fff;
 }
 
 .dfm-gate button:disabled {
