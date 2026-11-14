@@ -860,6 +860,9 @@ await run('no-false-alarms', async () => {
         ck(shareHolds.held === 0, `${tag} Firefox's share sender, held until its transform sealed, carries the share`, JSON.stringify(shareHolds));
         const st = [await statusOf(p.pages[1], 2), await statusOf(p.pages[2], 1)];
         ck(st.every((s) => s?.encrypted), `${tag} still encrypted both ways`, JSON.stringify(st.map((s) => s?.reason)));
+        // Counted over every video receiver: until a camera turned off stopped
+        // sending on its sender, Firefox's stopped camera's frames were counted
+        // here too, and made up for its share's (stubs/media.ts canvasTrack).
         const [atEdge, atFf] = await Promise.all([moved(p.pages[1], 2, 'open', 'video', 6000), moved(p.pages[2], 1, 'open', 'video', 6000)]);
         ck(atEdge.done >= 3 && atEdge.dropped === 0, `${tag} Edge opens Firefox's share at a frame a second`, JSON.stringify(atEdge));
         ck(atFf.done >= 3 && atFf.dropped === 0, `${tag} Firefox opens Edge's`, JSON.stringify(atFf));
