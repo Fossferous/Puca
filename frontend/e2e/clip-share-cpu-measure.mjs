@@ -119,7 +119,8 @@ const SHARE = SHARES[process.env.SHARE || '1080p30'];
 // The clip preset (manual arm): Settings' default, 1080p30 at 6 Mbps.
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
 const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'sfu1', 'manual', 'agentonly', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
-// With no AGENT, the default list leaves out the cases that need one.
+// The default list leaves out the cases that need an AGENT when none is
+// given, and the second-capture cases under SOURCE=pan (they need a real capture).
 const CASES = process.env.CASES ? process.env.CASES.split(',')
     : ALL.filter((c) => (AGENT || !/native|agentonly/.test(c)) && (SOURCE !== 'pan' || !/capture2|captureclone|capturelow/.test(c)));
 
