@@ -1275,37 +1275,40 @@ async fn require_manage_visible(
     Ok(server_id)
 }
 
-/// How long after the overwrite routes let a caller through for a channel they could SEE that
-/// they may still finish editing its overwrites ([`require_manage_overwrites`]).
+/// How long a write that hid a channel from the person making it leaves them to finish the save
+/// it belongs to ([`require_manage_overwrites`]).
 const OVERWRITE_SAVE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How the overwrite routes let a caller through.
+struct OverwriteGate {
+    server_id: String,
+    /// They can see the channel. False: let through only to finish their own save.
+    sees: bool,
+}
 
 /// [`require_manage_visible`] for the overwrite routes, with one allowance: Edit Channel saves
 /// one role per request, highest role first, so a save can hide the channel from the person
 /// saving it before it is done. "Make #staff public" from a manager who sees it through their
 /// own role's allow takes that allow away first, and the @everyone row after it was refused
-/// as not found: the channel was left hidden from everyone but the owner. So a caller let
-/// through for this channel's overwrites while they could see it, in the last
-/// [`OVERWRITE_SAVE_GRACE`], is let through again, if the channel is still there and they
-/// still hold Manage Channels. Only a pass WITH view starts the window, so it cannot be
-/// stretched, and it tells them nothing they did not know a moment ago. In memory, per
-/// process.
+/// as not found: the channel was left hidden from everyone but the owner. So the WRITE that
+/// hides the channel from its writer ([`open_save_window`]) lets them on for
+/// [`OVERWRITE_SAVE_GRACE`], if the channel is still there and they still hold Manage Channels.
+/// Nothing else opens it: not a read, not a write that leaves them the channel, not a pass
+/// inside the window, so a hide by anyone else stays a hide. In memory, per process: a restart
+/// in the middle of a save forgets it.
 async fn require_manage_overwrites(
     state: &AppState,
     channel_id: i64,
     user_id: i64,
-) -> Result<String, (StatusCode, &'static str)> {
-    let key = (user_id, channel_id);
+) -> Result<OverwriteGate, (StatusCode, &'static str)> {
     let refused = match require_manage_visible(&state.pool, channel_id, user_id).await {
-        Ok(server_id) => {
-            if state.overwrite_saves.len() > 4096 {
-                state.overwrite_saves.retain(|_, at| at.elapsed() < OVERWRITE_SAVE_GRACE);
-            }
-            state.overwrite_saves.insert(key, std::time::Instant::now());
-            return Ok(server_id);
-        }
+        Ok(server_id) => return Ok(OverwriteGate { server_id, sees: true }),
         Err(refused) => refused,
     };
-    let saving = state.overwrite_saves.get(&key).is_some_and(|at| at.elapsed() < OVERWRITE_SAVE_GRACE);
+    let saving = state
+        .overwrite_saves
+        .get(&(user_id, channel_id))
+        .is_some_and(|until| *until > std::time::Instant::now());
     if !saving || refused.0 != StatusCode::NOT_FOUND {
         return Err(refused);
     }
@@ -1316,7 +1319,21 @@ async fn require_manage_overwrites(
     if !user_has_permission(&state.pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
         return Err(refused);
     }
-    Ok(server_id)
+    Ok(OverwriteGate { server_id, sees: false })
+}
+
+/// After an overwrite write that went through: if the writer could see the channel before it
+/// and cannot now, this write hid it from them, and the rest of their save may follow
+/// ([`require_manage_overwrites`]).
+async fn open_save_window(state: &AppState, gate: &OverwriteGate, channel_id: i64, user_id: i64) {
+    if !gate.sees || sees_channel_in(&state.pool, &gate.server_id, channel_id, user_id).await {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if state.overwrite_saves.len() > 4096 {
+        state.overwrite_saves.retain(|_, until| *until > now);
+    }
+    state.overwrite_saves.insert((user_id, channel_id), now + OVERWRITE_SAVE_GRACE);
 }
 
 /// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup says no.
@@ -1379,10 +1396,11 @@ pub async fn put_overwrite(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<PutOverwriteRequest>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_overwrites(&state, channel_id, claims.sub).await {
-        Ok(sid) => sid,
+    let gate = match require_manage_overwrites(&state, channel_id, claims.sub).await {
+        Ok(gate) => gate,
         Err(e) => return e.into_response(),
     };
+    let server_id = gate.server_id.clone();
 
     // A bit cannot be both allowed and denied at once.
     if payload.allow & payload.deny != 0 {
@@ -1449,6 +1467,7 @@ pub async fn put_overwrite(
 
     match result {
         Ok(_) => {
+            open_save_window(&state, &gate, channel_id, claims.sub).await;
             crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
             StatusCode::OK.into_response()
         }
@@ -1473,10 +1492,11 @@ pub async fn delete_overwrite(
     Path((channel_id, role_id)): Path<(i64, i64)>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_overwrites(&state, channel_id, claims.sub).await {
-        Ok(sid) => sid,
+    let gate = match require_manage_overwrites(&state, channel_id, claims.sub).await {
+        Ok(gate) => gate,
         Err(e) => return e.into_response(),
     };
+    let server_id = gate.server_id.clone();
 
     let result = sqlx::query(
         "DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2",
@@ -1490,6 +1510,7 @@ pub async fn delete_overwrite(
         Ok(res) => {
             // Only a real change needs the broadcast + eviction pass.
             if res.rows_affected() > 0 {
+                open_save_window(&state, &gate, channel_id, claims.sub).await;
                 crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
             }
             StatusCode::NO_CONTENT.into_response()

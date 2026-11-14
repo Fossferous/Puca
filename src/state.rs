@@ -1181,9 +1181,9 @@ pub struct AppState {
     /// Per session id: `web_push_seq` when its last connection closed. What
     /// came before it, that browser saw while it was open.
     pub web_push_away: DashMap<String, (u64, Instant)>,
-    /// Per (user, channel): when that user last passed the overwrite routes' gate for that
-    /// channel while able to SEE it. Lets them finish a save that hides the channel from
-    /// them partway (channel_handlers::require_manage_overwrites). In memory, pruned.
+    /// Per (user, channel): until when that user may finish a save of the channel's overwrites
+    /// that hid the channel from them partway (channel_handlers::require_manage_overwrites).
+    /// In memory, pruned.
     pub overwrite_saves: DashMap<(UserId, i64), Instant>,
     /// Notification frames that found no live session, awaiting the delivery
     /// socket the wake signal summons. Bounded + TTL'd; see enqueue/drain.

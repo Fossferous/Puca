@@ -1156,11 +1156,13 @@ How the settings combine:
 - Denies never apply to the server owner or to administrators.
 - A **Deny** of View Channel holds for people with Manage Channels too. A
   channel they cannot see (on its own, or through its collection) is not in
-  their list, and they cannot rename it, move it, delete it or change its
-  permissions by any other way either: the server answers them as if it did
-  not exist. To undo a deny that hides a channel from you, ask the owner, an
-  administrator or someone who can still see it. Nor can they put a channel
-  into a collection they cannot see.
+  their list, and they cannot rename it, move it, delete it or change the
+  permissions set on it by any other way either: the server answers them as if
+  it did not exist. To undo a deny that hides a channel from you, ask the
+  owner, an administrator or someone who can still see it (a save of your own
+  that hides it from you partway still finishes). Nor can they put a channel
+  into a collection they cannot see. A collection's own permissions, which
+  they can see, still reach every channel inside it.
 - When a member's roles disagree, an **Allow** on any of them wins over a
   **Deny**. Any role's setting also wins over the @everyone role's, so to
   silence one role in a channel where @everyone is allowed to speak, deny
