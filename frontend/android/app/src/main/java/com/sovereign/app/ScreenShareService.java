@@ -46,7 +46,8 @@ import java.nio.ByteBuffer;
  *   <li>From Android 14 one consent is good for ONE VirtualDisplay, and the
  *       callback must be registered before it is created. A resize (the phone
  *       turned, or the shared app's window changed) therefore resizes the
- *       display it has, never makes a second one.</li>
+ *       display it has, never makes a second one, and hands it the new
+ *       surface BEFORE the new size ({@link ScreenShareFrames#swapReader}).</li>
  *   <li>The system can end the projection itself (the status-bar chip's Stop,
  *       another app starting one, the screen locking on some versions):
  *       {@code onStop} ends the share exactly as Stop Sharing does.</li>
@@ -377,6 +378,14 @@ public class ScreenShareService extends Service {
         return r;
     }
 
+    /** The running display and its readers, for {@link ScreenShareFrames#swapReader}. Capture thread. */
+    private final ScreenShareFrames.Resizable<ImageReader> resizable = new ScreenShareFrames.Resizable<ImageReader>() {
+        @Override public ImageReader newReader(int w, int h) { return ScreenShareService.this.newReader(w, h); }
+        @Override public void setSurface(ImageReader r) { display.setSurface(r.getSurface()); }
+        @Override public void resizeDisplay(int w, int h) { display.resize(w, h, dpi); }
+        @Override public void close(ImageReader r) { r.close(); }
+    };
+
     /** The real screen size in pixels, as it is turned right now. */
     private int[] screenSize() {
         DisplayMetrics m = new DisplayMetrics();
@@ -426,11 +435,11 @@ public class ScreenShareService extends Service {
         if (size[0] == width && size[1] == height) return;
         width = size[0];
         height = size[1];
-        ImageReader old = reader;
-        reader = newReader(width, height);
-        display.resize(width, height, dpi);
-        display.setSurface(reader.getSurface());
-        if (old != null) old.close();
+        // The new surface before the new size (ScreenShareFrames.swapReader
+        // says why: the other way round, a turned phone could be drawn for its
+        // old shape for the rest of the share).
+        reader = ScreenShareFrames.swapReader(resizable, reader, width, height);
+        Log.i(TAG, "capture re-sized to " + width + "x" + height + " for content " + contentW + "x" + contentH);
         padded = null;
         cropped = null;
         croppedCanvas = null;

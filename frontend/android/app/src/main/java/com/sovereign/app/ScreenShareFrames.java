@@ -101,6 +101,42 @@ final class ScreenShareFrames {
     }
 
     /**
+     * What a live re-size does to the share: a new reader at the new size
+     * (an ImageReader's size is fixed), the virtual display pointed at it, the
+     * display re-sized, and the old reader closed. {@code R} is the reader;
+     * the service's is an ImageReader, a test's a name.
+     */
+    interface Resizable<R> {
+        R newReader(int width, int height);
+        void setSurface(R reader);
+        void resizeDisplay(int width, int height);
+        void close(R reader);
+    }
+
+    /**
+     * Re-sizes the capture in place and answers the new reader. The ORDER is
+     * the point: the new surface goes in BEFORE the display is re-sized.
+     *
+     * <p>From Android 14 the system draws the mirrored screen into the
+     * capture with a scale and an offset it works out from the size of the
+     * surface it finds when the virtual display changes, and the re-size is
+     * what tells it the display changed. Swapping one surface for another
+     * tells it nothing (VirtualDisplayAdapter sends no change for it). So
+     * with the re-size first, the system could read the OLD reader's size
+     * before the new one arrived, and every frame after that was drawn for
+     * the old shape: turned sideways, the screen a strip in one corner of a
+     * black picture, for as long as the share lasted or until the next turn.
+     * It raced, so it came and went (3 turns in 16 on an emulator).
+     */
+    static <R> R swapReader(Resizable<R> target, R old, int width, int height) {
+        R fresh = target.newReader(width, height);
+        target.setSurface(fresh);
+        target.resizeDisplay(width, height);
+        if (old != null) target.close(old);
+        return fresh;
+    }
+
+    /**
      * Whether the next frame may be encoded: not sooner than the frame rate
      * allows, and not while the page still has {@link #MAX_IN_FLIGHT} frames
      * it has not acknowledged. Thread-safe: frames arrive on the capture
