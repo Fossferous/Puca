@@ -230,6 +230,14 @@ pub async fn list_channels(
         }
     };
 
+    // The rows the reader is listed a child of: their own modes are what that child is listed
+    // by (list_row_parent).
+    let holds_listed: std::collections::HashSet<i32> = channels
+        .iter()
+        .filter(|c| perms_map.get(&(c.0 as i64)).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL)))
+        .filter_map(|c| c.5)
+        .collect();
+
     let response: Vec<ChannelResponse> = channels
         .into_iter()
         .filter_map(
@@ -261,7 +269,7 @@ pub async fn list_channels(
                     perms_map.get(&(*p as i64)).is_some_and(|pp| pp.has(Permissions::VIEW_CHANNEL))
                 });
                 let (parent_id, row_modes, row_parent_modes) =
-                    list_row_parent(channel_type, parent_id, parent_seen.is_some(), own_modes, parent_modes);
+                    list_row_parent(holds_listed.contains(&id), parent_id, parent_seen.is_some(), own_modes, parent_modes);
                 Some(ChannelResponse {
                     id: id as i64,
                     name,
@@ -329,7 +337,7 @@ pub async fn create_channel(
     // cannot see it neither learns it exists nor puts a channel in it (update_channel's rule).
     if let Some(parent_id) = parent_id {
         if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
-            || !sees_channel(&state.pool, parent_id as i64, claims.sub).await
+            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
         {
             return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
@@ -546,15 +554,17 @@ pub async fn update_channel(
     // channel list sends none for a collection hidden from them (list_channels), so a client
     // from before 0.9.855, which sends the parent on every save, sends null for a channel taken
     // back inside a collection it cannot see, and that must not take the channel out of it.
+    // Nor does the list name a parent in another server (rows from before the same-server
+    // guard), so that is not one the caller sees here either.
     let parent_seen = match before.and_then(|(_, _, parent)| parent) {
-        Some(parent) if sees_channel(&state.pool, parent as i64, claims.sub).await => Some(parent),
+        Some(parent) if sees_channel_in(&state.pool, &server_id, parent as i64, claims.sub).await => Some(parent),
         _ => None,
     };
     let parent_change = parent_change(payload.parent_id, parent_seen);
     if let Some(Some(parent_id)) = parent_change {
         if parent_id as i64 == channel_id
             || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
-            || !sees_channel(&state.pool, parent_id as i64, claims.sub).await
+            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
             || parent_would_loop(&state.pool, &server_id, channel_id, parent_id as i64).await
         {
             return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
@@ -764,11 +774,12 @@ const NO_MODE: i64 = 0;
 /// [`NO_MODE`] when they share none (listed nowhere, as for everyone). That is what the reader's
 /// list shows over time anyway, and nothing more of the collection.
 ///
-/// A collection's row is the exception: its `mode_ids` are what its own subchannels are listed
-/// by (the client takes them from that row, the one level the server's hide reads), so a
-/// collection inside one hidden from the reader keeps its own modes and only loses the parent.
+/// A row the reader is listed a child of is the exception (`holds_listed`): its `mode_ids` are
+/// what that child is listed by (the client takes them from the row, the one level the
+/// server's hide reads), so a collection inside one hidden from the reader, or a legacy parent
+/// that is no collection, keeps its own modes and only loses its parent.
 fn list_row_parent(
-    channel_type: i32,
+    holds_listed: bool,
     parent_id: Option<i32>,
     parent_seen: bool,
     own_modes: Vec<i64>,
@@ -777,7 +788,7 @@ fn list_row_parent(
     if parent_id.is_none() || parent_seen {
         return (parent_id, own_modes, parent_modes);
     }
-    if channel_type == COLLECTION || parent_modes.is_empty() {
+    if holds_listed || parent_modes.is_empty() {
         return (None, own_modes, Vec::new());
     }
     if own_modes.is_empty() {
@@ -1264,11 +1275,56 @@ async fn require_manage_visible(
     Ok(server_id)
 }
 
-/// May `user_id` see channel `channel_id`? A failed lookup says no.
-async fn sees_channel(pool: &sqlx::PgPool, channel_id: i64, user_id: i64) -> bool {
+/// How long after the overwrite routes let a caller through for a channel they could SEE that
+/// they may still finish editing its overwrites ([`require_manage_overwrites`]).
+const OVERWRITE_SAVE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`require_manage_visible`] for the overwrite routes, with one allowance: Edit Channel saves
+/// one role per request, highest role first, so a save can hide the channel from the person
+/// saving it before it is done. "Make #staff public" from a manager who sees it through their
+/// own role's allow takes that allow away first, and the @everyone row after it was refused
+/// as not found: the channel was left hidden from everyone but the owner. So a caller let
+/// through for this channel's overwrites while they could see it, in the last
+/// [`OVERWRITE_SAVE_GRACE`], is let through again, if the channel is still there and they
+/// still hold Manage Channels. Only a pass WITH view starts the window, so it cannot be
+/// stretched, and it tells them nothing they did not know a moment ago. In memory, per
+/// process.
+async fn require_manage_overwrites(
+    state: &AppState,
+    channel_id: i64,
+    user_id: i64,
+) -> Result<String, (StatusCode, &'static str)> {
+    let key = (user_id, channel_id);
+    let refused = match require_manage_visible(&state.pool, channel_id, user_id).await {
+        Ok(server_id) => {
+            if state.overwrite_saves.len() > 4096 {
+                state.overwrite_saves.retain(|_, at| at.elapsed() < OVERWRITE_SAVE_GRACE);
+            }
+            state.overwrite_saves.insert(key, std::time::Instant::now());
+            return Ok(server_id);
+        }
+        Err(refused) => refused,
+    };
+    let saving = state.overwrite_saves.get(&key).is_some_and(|at| at.elapsed() < OVERWRITE_SAVE_GRACE);
+    if !saving || refused.0 != StatusCode::NOT_FOUND {
+        return Err(refused);
+    }
+    let server_id = match get_user_channel_permissions(&state.pool, channel_id, user_id).await {
+        ChannelPermAccess::Allowed { server_id, .. } => server_id,
+        _ => return Err(refused),
+    };
+    if !user_has_permission(&state.pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
+        return Err(refused);
+    }
+    Ok(server_id)
+}
+
+/// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup says no.
+async fn sees_channel_in(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, user_id: i64) -> bool {
     matches!(
         get_user_channel_permissions(pool, channel_id, user_id).await,
-        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
+        ChannelPermAccess::Allowed { server_id: in_server, perms }
+            if in_server == server_id && perms.has(Permissions::VIEW_CHANNEL)
     )
 }
 
@@ -1278,7 +1334,7 @@ pub async fn list_overwrites(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_manage_visible(&state.pool, channel_id, claims.sub).await {
+    if let Err(e) = require_manage_overwrites(&state, channel_id, claims.sub).await {
         return e.into_response();
     }
 
@@ -1323,7 +1379,7 @@ pub async fn put_overwrite(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<PutOverwriteRequest>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_visible(&state.pool, channel_id, claims.sub).await {
+    let server_id = match require_manage_overwrites(&state, channel_id, claims.sub).await {
         Ok(sid) => sid,
         Err(e) => return e.into_response(),
     };
@@ -1417,7 +1473,7 @@ pub async fn delete_overwrite(
     Path((channel_id, role_id)): Path<(i64, i64)>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_visible(&state.pool, channel_id, claims.sub).await {
+    let server_id = match require_manage_overwrites(&state, channel_id, claims.sub).await {
         Ok(sid) => sid,
         Err(e) => return e.into_response(),
     };
@@ -1481,17 +1537,17 @@ mod tests {
 
     #[test]
     fn a_row_names_a_parent_only_its_reader_sees() {
-        let row = |t: i32, p: Option<i32>, seen: bool, own: &[i64], parent: &[i64]| {
-            list_row_parent(t, p, seen, own.to_vec(), parent.to_vec())
+        let row = |holds: bool, p: Option<i32>, seen: bool, own: &[i64], parent: &[i64]| {
+            list_row_parent(holds, p, seen, own.to_vec(), parent.to_vec())
         };
-        assert_eq!(row(0, Some(9), true, &[1], &[2]), (Some(9), vec![1], vec![2]), "seen: as stored");
-        assert_eq!(row(0, None, false, &[1], &[]), (None, vec![1], vec![]), "no parent: as stored");
-        assert_eq!(row(0, Some(9), false, &[], &[]), (None, vec![], vec![]), "hidden: no parent, nothing to fold");
-        assert_eq!(row(0, Some(9), false, &[1, 3], &[]), (None, vec![1, 3], vec![]));
-        assert_eq!(row(0, Some(9), false, &[], &[2, 5]), (None, vec![2, 5], vec![]), "the collection's modes");
-        assert_eq!(row(1, Some(9), false, &[1, 2, 3], &[2, 3, 4]), (None, vec![2, 3], vec![]), "the ones both allow");
-        assert_eq!(row(0, Some(9), false, &[1], &[2]), (None, vec![NO_MODE], vec![]), "none both allow");
-        assert_eq!(row(COLLECTION, Some(9), false, &[1], &[2]), (None, vec![1], vec![]), "a collection keeps its own");
+        assert_eq!(row(false, Some(9), true, &[1], &[2]), (Some(9), vec![1], vec![2]), "seen: as stored");
+        assert_eq!(row(false, None, false, &[1], &[]), (None, vec![1], vec![]), "no parent: as stored");
+        assert_eq!(row(false, Some(9), false, &[], &[]), (None, vec![], vec![]), "hidden: no parent, nothing to fold");
+        assert_eq!(row(false, Some(9), false, &[1, 3], &[]), (None, vec![1, 3], vec![]));
+        assert_eq!(row(false, Some(9), false, &[], &[2, 5]), (None, vec![2, 5], vec![]), "the collection's modes");
+        assert_eq!(row(false, Some(9), false, &[1, 2, 3], &[2, 3, 4]), (None, vec![2, 3], vec![]), "the ones both allow");
+        assert_eq!(row(false, Some(9), false, &[1], &[2]), (None, vec![NO_MODE], vec![]), "none both allow");
+        assert_eq!(row(true, Some(9), false, &[1], &[2]), (None, vec![1], vec![]), "a row holding a listed one keeps its own");
     }
 
     /// The fold lists a row exactly as before, under every mode and under none, by the client's
@@ -1503,7 +1559,7 @@ mod tests {
         let sets: Vec<Vec<i64>> = (0u8..8).map(|bits| (1..=3).filter(|m| bits & (1 << (m - 1)) != 0).collect()).collect();
         for own in &sets {
             for parent in &sets {
-                let (folded_parent, folded, folded_parent_modes) = list_row_parent(0, Some(9), false, own.clone(), parent.clone());
+                let (folded_parent, folded, folded_parent_modes) = list_row_parent(false, Some(9), false, own.clone(), parent.clone());
                 assert_eq!((folded_parent, folded_parent_modes.len()), (None, 0));
                 for active in [None, Some(1), Some(2), Some(3), Some(4)] {
                     assert_eq!(

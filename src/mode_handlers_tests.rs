@@ -3579,4 +3579,182 @@ mod db {
         assert_eq!(story(&first_frames), vec!["mode:None".to_string(), format!("left:{room}")], "told its own call ended");
         assert_eq!(story(&second_frames), vec!["mode:None".to_string(), format!("left:{room}")]);
     }
+
+    async fn manager_role(pool: &sqlx::PgPool, sid: &str) -> i64 {
+        sqlx::query_scalar("SELECT id FROM server_roles WHERE server_id = $1 AND name = 'manager'")
+            .bind(sid)
+            .fetch_one(pool)
+            .await
+            .expect("manager role")
+    }
+
+    /// Edit Channel saves one role per request, highest role first. "Make #staff public", by a
+    /// manager who sees #staff only through their own role's allow, takes that allow away first:
+    /// the channel is hidden from them before the @everyone row's request. That request must
+    /// still go through, or the channel is left hidden from everyone but the owner. Only a pass
+    /// made while they could see the channel opens the window, a pass inside it does not move
+    /// it, and it closes. CONTROL: a window that has closed is a 404, and the row stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_save_that_hides_the_channel_from_its_saver_partway_still_finishes() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let everyone = everyone_role(&pool, &f.sid).await;
+        let managers = manager_role(&pool, &f.sid).await;
+        let staff = channel(&pool, &f.sid, "staff", 0).await;
+        deny_everyone_view(&pool, &f.sid, staff).await;
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+            .bind(staff as i64)
+            .bind(managers)
+            .bind(P::VIEW_CHANNEL.bits() as i64)
+            .execute(&pool)
+            .await
+            .expect("allow");
+        let inherit = |channel: i32, role: i64| {
+            let state = Arc::clone(&state);
+            async move {
+                crate::channel_handlers::delete_overwrite(State(state), Path((channel as i64, role)), Extension(claims(f.manager)))
+                    .await
+                    .into_response()
+                    .status()
+            }
+        };
+        let opened = |channel: i32| state.overwrite_saves.get(&(f.manager, channel as i64)).map(|at| *at);
+
+        // The save, in the order Edit Channel sends it.
+        let own_role = inherit(staff, managers).await;
+        let window = opened(staff);
+        let everyone_row = inherit(staff, everyone).await;
+        let window_after = opened(staff);
+        let plain_sees = crate::permissions::get_user_channels_permissions(&pool, &f.sid, f.plain, &[staff as i64])
+            .await
+            .unwrap()[&(staff as i64)]
+            .has(P::VIEW_CHANNEL);
+
+        // CONTROL: the same request on a channel hidden from them whose window closed.
+        let long_ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(61)).expect("uptime");
+        state.overwrite_saves.insert((f.manager, f.secret as i64), long_ago);
+        let closed = inherit(f.secret, everyone).await;
+        let secret_rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_permission_overwrites WHERE channel_id = $1")
+            .bind(f.secret as i64)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        teardown(&pool, &f).await;
+
+        assert_eq!(own_role, StatusCode::NO_CONTENT, "the first request: they see it");
+        assert!(window.is_some(), "and it opens the window");
+        assert_eq!(everyone_row, StatusCode::NO_CONTENT, "the save's next request goes through though the first hid the channel from them");
+        assert_eq!(window_after, window, "a pass inside the window does not move it");
+        assert!(plain_sees, "and the channel is public, as the save meant");
+        assert_eq!(closed, StatusCode::NOT_FOUND, "control: a closed window is no way in");
+        assert_eq!(secret_rows.0, 1, "control: and the row stays");
+    }
+
+    /// A row the raw API left under a channel of ANOTHER server is listed with no parent (the
+    /// list names only parents of this server), and an installed client's whole-form save
+    /// sends that none back. It is no change: the row is not taken out, nothing is swept and no
+    /// key moves. (The same server's parent check used to accept a parent the caller could see
+    /// on any server they are in.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parent_in_another_server_is_not_one_the_caller_sees_here() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let other = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&other)
+            .bind(format!("md_other_{}", &other[..8]))
+            .bind(f.owner as i32)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for u in [f.owner, f.manager] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&other)
+                .bind(u as i32)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        let _: (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true) RETURNING id",
+        )
+        .bind(&other)
+        .bind((P::VIEW_CHANNEL | P::CONNECT | P::SPEAK).bits() as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("@everyone");
+        let far = channel(&pool, &other, "far", 2).await;
+        let stray = channel(&pool, &f.sid, "stray", 0).await;
+        move_under(&pool, stray, far).await;
+        let generation = || {
+            let pool = pool.clone();
+            let sid = f.sid.clone();
+            async move { sqlx::query_scalar::<_, i32>("SELECT member_generation FROM servers WHERE id = $1").bind(sid).fetch_one(&pool).await.unwrap() }
+        };
+        let listed = parent_in_list(&state, &f, f.manager, stray).await;
+        let g0 = generation().await;
+        let saved = crate::channel_handlers::update_channel(
+            State(Arc::clone(&state)),
+            Path(stray as i64),
+            Extension(claims(f.manager)),
+            Json(serde_json::from_value(json!({ "name": "stray-2", "parent_id": null })).unwrap()),
+        )
+        .await
+        .into_response()
+        .status();
+        let g1 = generation().await;
+        let parent: Option<i32> = sqlx::query_scalar("SELECT parent_id FROM channels WHERE id = $1").bind(stray).fetch_one(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM channels WHERE server_id = $1").bind(&f.sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM channels WHERE server_id = $1").bind(&other).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&other).execute(&pool).await;
+        teardown(&pool, &f).await;
+
+        assert_eq!(listed, Value::Null, "listed with no parent");
+        assert_eq!(saved, StatusCode::OK);
+        assert_eq!(parent, Some(far), "the none it was listed with is no change");
+        assert_eq!(g1, g0, "and nothing was swept");
+    }
+
+    /// A row that holds a channel the reader is listed keeps its own modes when its own parent
+    /// is hidden from them: the client lists that channel by them, and the server's hide reads
+    /// that one level. A legacy parent that is no collection counts as much as a collection.
+    /// CONTROL: a row beside it that holds nothing is folded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_row_holding_a_listed_channel_keeps_its_own_modes() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = state_of(&pool);
+        let vault = channel(&pool, &f.sid, "vault", 2).await;
+        deny_everyone_view(&pool, &f.sid, vault).await;
+        let everyone = everyone_role(&pool, &f.sid).await;
+        // A text channel inside the vault, allowed back, with a legacy child of its own; and one
+        // beside it, allowed back too, holding nothing.
+        let legacy = subchannel(&pool, &f.sid, "legacy-parent", 0, vault).await;
+        let lonely = subchannel(&pool, &f.sid, "lonely", 0, vault).await;
+        for id in [legacy, lonely] {
+            sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+                .bind(id as i64)
+                .bind(everyone)
+                .bind(P::VIEW_CHANNEL.bits() as i64)
+                .execute(&pool)
+                .await
+                .expect("allow");
+        }
+        let child = subchannel(&pool, &f.sid, "legacy-child", 0, legacy).await;
+        let a = make(&state, &f, "A", &[vault]).await as i64;
+        let b = make(&state, &f, "B", &[legacy, lonely]).await as i64;
+        let (status, rows) = read(crate::channel_handlers::list_channels(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(claims(f.plain))).await.into_response()).await;
+        teardown(&pool, &f).await;
+        let row = |id: i32| rows.as_array().unwrap().iter().find(|r| r["id"] == json!(id)).cloned().unwrap_or(Value::Null);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(row(child)["parent_id"], json!(legacy), "the child's parent is one the reader sees");
+        assert_eq!(row(child)["parent_mode_ids"], json!([b]));
+        assert_eq!(row(legacy)["parent_id"], Value::Null, "the vault is not named");
+        assert_eq!(row(legacy)["mode_ids"], json!([b]), "its own modes, which its child is listed by");
+        assert_eq!(row(lonely)["mode_ids"], json!([0]), "control: one holding nothing is folded ({a} and {b} share nothing)");
+    }
 }
