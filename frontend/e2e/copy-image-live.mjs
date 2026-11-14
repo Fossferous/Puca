@@ -28,7 +28,7 @@ const check = (n, ok, d) => {
     if (!ok) failures++;
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('PAGEERROR:', String(e).slice(0, 200)));

@@ -46,7 +46,7 @@ const watchdog = setTimeout(() => {
 }, 120000);
 watchdog.unref?.();
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const page = await browser.newPage();
 page.on('console', m => {
     if (m.type() === 'error') console.log('[page error]', m.text().slice(0, 300));

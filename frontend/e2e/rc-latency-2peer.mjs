@@ -37,6 +37,7 @@ const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const PGDB = process.env.PGDB || 'puca_rclat';
 const PGPORT = process.env.PGPORT || '5433';
 const PASS = 'Password123!';
+const INVITE = process.env.INVITE || ''; // the server's sign-up code, if it requires one
 const RES = process.env.RES || '1080';
 const FPS = Number(process.env.FPS || 30);
 const WINDOW_MS = Number(process.env.WINDOW_MS || 12000);
@@ -363,7 +364,11 @@ async function register(ctx, user, tag, consoleSink) {
     await page.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 120000 });
     await page.waitForSelector('#username', { timeout: 60000 });
     await page.click('.toggle-mode');
-    try { await page.waitForSelector('#inviteCode', { timeout: 3000 }); } catch { /* invite not required */ }
+    // The sign-up form, by its password field: #inviteCode is shown only when
+    // the server requires an invite code, so waiting for it cost 3 s on one that
+    // does not. INVITE= gives the code to a server that does.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]', { timeout: 5000 });
+    if (INVITE) await page.fill('#inviteCode', INVITE);
     await page.fill('#username', user);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');
@@ -521,6 +526,7 @@ const consoleSink = result.console;
 
 const browser = await chromium.launch({
     args: [
+        '--mute-audio',
         '--use-fake-ui-for-media-stream',
         '--use-fake-device-for-media-stream',
         '--disable-features=WebRtcHideLocalIpsWithMdns',

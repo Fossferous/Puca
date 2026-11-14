@@ -34,6 +34,7 @@
 // No server, no backend, no audio: the pages play nothing. Screenshots land in
 // outdir (default e2e-artifacts/ios-web-app-shots, git-ignored).
 import { webkit, devices } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -108,7 +109,7 @@ const site = await serve((req, res) => {
 // ------------------------------------------------------------------ WebKit ---
 let browser;
 try {
-    browser = await webkit.launch();
+    browser = muteWebkit(await webkit.launch());
 } catch (e) {
     console.error(String(e.message || e).split('\n')[0]);
     console.error('FAIL  WebKit is not installed here. Run:  npx playwright install webkit');

@@ -15,7 +15,7 @@
 //   node e2e/rc-dc-mutual-close.mjs
 import { chromium } from '@playwright/test';
 
-const browser = await chromium.launch({ args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] });
+const browser = await chromium.launch({ args: ['--mute-audio', '--disable-features=WebRtcHideLocalIpsWithMdns'] });
 const page = await browser.newPage();
 await page.goto('http://127.0.0.1:5173/login', { waitUntil: 'domcontentloaded' });
 const res = await page.evaluate(async () => {

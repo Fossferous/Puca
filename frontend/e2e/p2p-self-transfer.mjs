@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const PASS = 'Password123!';
+const INVITE = process.env.INVITE || ''; // the server's sign-up code, if it requires one
 const stamp = Date.now().toString(36);
 const USER = 'p2pself_' + stamp;
 // Over the 25 MB server-upload cap (which is what routes it peer-to-peer) and
@@ -35,7 +36,7 @@ writeFileSync(filePath, buf);
 const browser = await chromium.launch({
     // Headless Chromium otherwise hides local IPs behind mDNS candidates the
     // other context cannot resolve, and ICE flakes for unrelated reasons.
-    args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+    args: ['--mute-audio', '--disable-features=WebRtcHideLocalIpsWithMdns'],
 });
 
 async function signIn(ctx, label, { register }) {
@@ -50,7 +51,11 @@ async function signIn(ctx, label, { register }) {
     await page.waitForSelector('#username');
     if (register) {
         await page.click('.toggle-mode');
-        await page.waitForSelector('#inviteCode');
+        // The sign-up form, by its password field: #inviteCode is shown only when
+        // the server requires an invite code, so waiting for it stalled on one that
+        // does not. INVITE= gives the code to a server that does.
+        await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]');
+        if (INVITE) await page.fill('#inviteCode', INVITE);
     }
     await page.fill('#username', USER);
     await page.fill('#password', PASS);

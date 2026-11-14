@@ -49,7 +49,8 @@ const ck = (cond, label, extra = '') => {
 const child = spawn(EXE, [], {
     env: {
         ...process.env,
-        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+        // --mute-audio: the app is driven, not listened to (it plays sounds of its own).
+        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT} --mute-audio`,
     },
     detached: false,
     stdio: 'ignore',

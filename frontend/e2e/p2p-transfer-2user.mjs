@@ -40,6 +40,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const PASS = 'Password123!';
+const INVITE = process.env.INVITE || ''; // the server's sign-up code, if it requires one
 const stamp = Date.now().toString(36);
 const SENDER = 'p2ps_' + stamp;
 const RECVER = 'p2pr_' + stamp;
@@ -61,7 +62,7 @@ const browser = await chromium.launch({
     // WITHOUT THIS, headless Chromium hides local IPs behind mDNS candidates
     // that the other context cannot resolve, and ICE flakes for reasons that
     // have nothing to do with the code under test (see the voice e2e notes).
-    args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+    args: ['--mute-audio', '--disable-features=WebRtcHideLocalIpsWithMdns'],
 });
 
 async function register(ctx, user) {
@@ -74,7 +75,11 @@ async function register(ctx, user) {
     await page.goto('http://localhost:5173/login');
     await page.waitForSelector('#username');
     await page.click('.toggle-mode');
-    await page.waitForSelector('#inviteCode');
+    // The sign-up form, by its password field: #inviteCode is shown only when
+    // the server requires an invite code, so waiting for it stalled on one that
+    // does not. INVITE= gives the code to a server that does.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]');
+    if (INVITE) await page.fill('#inviteCode', INVITE);
     await page.fill('#username', user);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');

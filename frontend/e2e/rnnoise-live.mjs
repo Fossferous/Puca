@@ -35,7 +35,7 @@ const check = (n, ok, d) => {
 const info = (n, d) => console.log(`INFO  ${n}${d !== undefined ? '  — ' + d : ''}`);
 
 const browser = await chromium.launch({
-    args: ['--autoplay-policy=no-user-gesture-required'],
+    args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required'],
 });
 const page = await (await browser.newContext()).newPage();
 const consoleLines = [];

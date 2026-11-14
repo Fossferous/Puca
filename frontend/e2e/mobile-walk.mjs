@@ -8,7 +8,7 @@ const username = process.argv[3] || ('mob_' + Math.random().toString(36).slice(2
 fs.mkdirSync(outdir, { recursive: true });
 
 const iphone = devices['iPhone 13'];
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({
     ...iphone,
     defaultBrowserType: undefined,
