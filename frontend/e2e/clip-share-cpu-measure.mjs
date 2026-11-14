@@ -32,10 +32,18 @@
 //   native          the auto arm: the agent's --clip-capture host (DXGI + MFT
 //                   H.264 at the monitor's size) feeding the real replayWorker
 //                   through the same nativeVideoChunk message the app sends
+//   agentonly       the agent alone, its frames counted and dropped here (the
+//                   control for what the ring's page-side ingest costs)
 //   mesh1+native, sfu+native, mesh1+manual, sfu+manual: both at once
-//   sfu+follow, mesh1+follow: the manual arm FOLLOWING the share
-//                   (replayBuffer.followShareCapture): the same ring, reading a
-//                   clone of the share's capture instead of a capture of its own
+//   sfu+follow, mesh1+follow: the manual arm's ring reading a CLONE of the
+//                   share's capture instead of a getDisplayMedia of its own
+//   capture+capture2, capture+captureclone: a SECOND capture of the same
+//                   surface, drained, against a clone of the first. Chromium
+//                   runs ONE capturer for every capture of one screen (its
+//                   VideoCaptureManager shares the device), so the two cost the
+//                   same: a hand-armed clip buffer and a share of the same
+//                   screen were never two captures (docs/CLIPS.md, "Sharing
+//                   while armed")
 //
 // Every receiving end DROPS its frames in a receiver transform, so no decode
 // lands in the measured tree: only what the sharer's machine pays.
@@ -80,7 +88,7 @@ const SHARES = { '1080p30': { w: 1920, h: 1080, fps: 30, kbps: 6000 }, '1440p30'
 const SHARE = SHARES[process.env.SHARE || '1080p30'];
 // The clip preset (manual arm): Settings' default, 1080p30 at 6 Mbps.
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
-const ALL = ['idle', 'capture', 'mesh1', 'mesh2', 'sfu', 'manual', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
+const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'manual', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
 const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL;
 
 const workerFile = fs.existsSync(path.join(dist, 'assets')) && fs.readdirSync(path.join(dist, 'assets')).find((f) => /^replayWorker-.*\.js$/.test(f));
@@ -185,10 +193,8 @@ function gpuFor(acc, pids, names) {
     }
     return [...sums].filter(([, v]) => v >= 0.1).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v.toFixed(1)}%`).join(', ') || '-';
 }
-/** luid (low part, hex) -> adapter name, from DXGI's view via WMI's PnP list is
- *  not available; the counters name only luids, so read them off the
- *  `GPU Adapter Memory` instances and pair them with Win32_VideoController by
- *  order is not reliable either. Name what can be named: the luid itself. */
+/** The counters name adapters only by LUID (low part, hex); a run prints
+ *  those as they are. */
 const gpuNames = {};
 
 // ---- the browser side --------------------------------------------------------
@@ -414,9 +420,8 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         w.postMessage({ t: 'arm', cfg: ringCfg(CLIP, vs.width, vs.height), video: readable, audio: null }, [readable]);
     };
 
-    /** The manual arm FOLLOWING the share (replayBuffer.followShareCapture):
-     *  the same worker and preset, reading a clone of the share's capture
-     *  instead of a capture of its own. */
+    /** The manual arm's ring reading a clone of the share's capture instead
+     *  of a getDisplayMedia of its own: the same worker and preset. */
     rig.followArm = async () => {
         const track = rig.shareTrack.clone();
         await track.applyConstraints({ width: { max: CLIP.maxWidth }, height: { max: CLIP.maxHeight }, frameRate: { max: CLIP.fps } }).catch(() => {});
@@ -528,6 +533,8 @@ async function runCase(name) {
         if (needsShare) await page.evaluate(async (S) => { window.rig.shareTrack = await window.rig.capture(S); }, SHARE);
         for (const p of parts) {
             if (p === 'capture') await page.evaluate(() => window.rig.drain(window.rig.shareTrack));
+            else if (p === 'capture2') await page.evaluate(async (S) => { window.rig.drain(await window.rig.capture(S)); }, SHARE);
+            else if (p === 'captureclone') await page.evaluate(() => { const c = window.rig.shareTrack.clone(); window.rig.closers.push(() => c.stop()); window.rig.drain(c); });
             else if (/^mesh(\d)$/.test(p)) {
                 const k = Number(/^mesh(\d)$/.exec(p)[1]);
                 await page.evaluate(async (k) => { for (let i = 0; i < k; i++) await window.rig.meshViewer(window.rig.shareTrack); }, k);

@@ -16,7 +16,7 @@ import { hideCaptureBar, releaseCaptureBar } from '../captureBar';
 import { webrtcManager } from '../webrtc';
 import { loadSettings } from '../../components/settingsStore';
 import { trackUpload } from '../workInFlight';
-import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB, ringSecondsFor, type ClipPreset } from './clipPresets';
+import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB, ringSecondsFor } from './clipPresets';
 import { isNativeCaptureSupported, preferredLoopbackDeviceName, startNativeSystemAudioTrack, startNativeVideo, type NativeCaptureTarget } from './nativeCapture';
 import type { ArmConfig, FromWorker, SealedInfo, ToWorker, WorkerStatus } from './clipTypes';
 
@@ -36,10 +36,6 @@ export interface ReplayState {
     /** A system-audio track is feeding the mix (getDisplayMedia's audio
      *  track, or the native WASAPI loopback for an auto arm). */
     hasSystemAudio: boolean;
-    /** Picker arms: the ring is reading a clone of your screen share's
-     *  capture of the same surface instead of capturing it a second time
-     *  (followShareCapture). It keeps reading it after the share ends. */
-    sharedCapture: boolean;
     /** Native sessions only: WHY there is no system audio, when there isn't.
      *  'start-failed' = the loopback never opened; 'died' = it opened and
      *  then a WASAPI error killed it mid-buffer (a device change, typically).
@@ -71,7 +67,7 @@ export interface ReplayState {
 
 const initial = (): ReplayState => ({
     phase: 'idle', bufferedMs: 0, ringBytes: 0, droppedFrames: 0, fps: 0, kbps: 0, presetId: '1080p30',
-    width: 0, height: 0, hasSystemAudio: false, sharedCapture: false, systemAudioLost: null, systemAudioDevice: null,
+    width: 0, height: 0, hasSystemAudio: false, systemAudioLost: null, systemAudioDevice: null,
     hasMic: false, videoCodec: null, audioCodec: null,
     captureReason: null, notice: null, error: null, sealed: null, sealedAt: null, upload: null,
 });
@@ -192,26 +188,6 @@ interface Session {
     /** The system-audio leg of the mix graph (source + gain), so a retry can
      *  unhook the dead leg before splicing the fresh one into `dest`. */
     sysSrc: MediaStreamAudioSourceNode | null;
-    /** Picker sessions: the video track the ring reads NOW — the picker's
-     *  own, or a clone of a share's capture it followed (followShareCapture).
-     *  Not in `stream` once it is a clone, so teardown stops it by name. */
-    video?: MediaStreamTrack | null;
-    /** Removes the 'ended' watch on `video`. */
-    unVideoEnded?: (() => void) | null;
-    /** The preset the picker capture was constrained to (a followed clone
-     *  gets the same constraints). */
-    preset?: ClipPreset;
-    /** The share-capture subscription (rtc/media.ts onShareCapture). */
-    unShare?: (() => void) | null;
-    /** A followShareCapture is waiting on the worker. */
-    following?: boolean;
-    /** The newest share announced while one was in flight, or before the
-     *  worker had armed: tried after it. */
-    queuedShare?: MediaStreamTrack | null;
-    /** The worker said 'armed': its ring runs and can take a stream. A
-     *  rebind sent before that would find it mid-arm and be refused. */
-    workerArmed?: boolean;
-    rebindSeq?: number;
 }
 let session: Session | null = null;
 let armGeneration = 0;
@@ -627,15 +603,10 @@ export async function arm(opts: { repick?: boolean; maxSeconds?: number } = {}):
         const msg: ToWorker = { t: 'arm', cfg, video: vproc.readable, audio: audioReadable };
         worker.postMessage(msg, transfer);
         hideCaptureBar('clip-ring');
-        s.video = videoTrack;
-        s.preset = preset;
-        s.unVideoEnded = watchVideoEnded(s, videoTrack);
-        // One capture of a surface, not two: a screen share of the SAME
-        // surface (now, or started later) is read through a clone instead.
-        // A share already live is followed once the worker has armed.
-        const hub = shareCaptureHub();
-        s.unShare = hub?.onShareCapture?.((t) => { void followShareCapture(t); }) ?? null;
-        s.queuedShare = hub?.getScreenShareStreamSync?.()?.getVideoTracks()[0] ?? null;
+        videoTrack.addEventListener('ended', () => {
+            // The user hit Chromium's "Stop sharing" — a dead recorder must not claim to be armed.
+            if (session === s) { void disarm('capture-ended'); emit({ notice: 'Screen capture ended — the clip buffer is off.' }); }
+        });
         // The picker path's mirror of armNative's onAudioError: a system-audio
         // track that ends mid-buffer (audio share stopped, device change) must
         // flip the flags, or the session keeps recording mic-only clips that
@@ -654,148 +625,13 @@ export async function arm(opts: { repick?: boolean; maxSeconds?: number } = {}):
     }
 }
 
-/** The ring's picker capture ending under it: the user hit Chromium's "Stop
- *  sharing", or the shared window closed. A dead recorder must not claim to
- *  be armed. Watches whichever track the ring reads now (its own, or the
- *  clone of a share it followed). */
-function watchVideoEnded(s: Session, track: MediaStreamTrack): () => void {
-    const onEnded = () => {
-        if (session === s && s.video === track) { void disarm('capture-ended'); emit({ notice: 'Screen capture ended — the clip buffer is off.' }); }
-    };
-    track.addEventListener('ended', onEnded);
-    return () => { try { track.removeEventListener('ended', onEnded); } catch { /* a track without listeners */ } };
-}
-
-/** The share half of the app (rtc/media.ts), as far as the ring needs it.
- *  Optional all the way down: a test's webrtc stand-in may carry none of it. */
-function shareCaptureHub(): { onShareCapture?: (cb: (video: MediaStreamTrack) => void) => () => void; getScreenShareStreamSync?: () => MediaStream | null } | undefined {
-    return (webrtcManager as unknown as { media?: ReturnType<typeof shareCaptureHub> }).media;
-}
-
-/** How long a followShareCapture waits for the clone's first frame. */
-export const FOLLOW_FIRST_FRAME_MS = 10_000;
-
-export type FollowOutcome = 'followed' | 'no-session' | 'native' | 'busy' | 'not-live' | 'other-surface' | 'frame-rate' | 'size' | 'refused' | 'disarmed';
-
-/**
- * ONE CAPTURE OF A SURFACE, NOT TWO (docs/CLIPS.md, "Sharing while armed").
- *
- * A picker arm captures a surface with getDisplayMedia. Starting a screen
- * share of the SAME surface used to capture it again, beside it: two
- * readbacks and two colour conversions of every frame. Now the ring moves
- * onto a CLONE of the share's track and stops its own capture of that
- * surface. A clone is its own track on the same source: the share can be
- * re-sized or stopped without touching it (measured in Edge 157: the
- * original cut to 640 px left the clone's frames as they were, and after
- * the original stopped the clone kept getting frames), so the ring keeps
- * this capture after the share ends and never has to ask for a picker again.
- *
- * NOTHING ABOUT THE CLIP CHANGES, which is the rule this follows: same
- * surface (the picker's `deviceId`), the same frame rate, and the worker
- * takes the clone only if its frames are exactly the size its encoder runs
- * at (rebindVideo), so the same encoder carries on with the same settings,
- * the same keyframe every 2 s and the same ring key, and nothing buffered
- * is lost. Anything else, and the ring keeps its own capture, as before.
- * The ring's system audio is a track of its own and is left alone.
- *
- * Native (auto) arms are not followed: they capture in the agent, and
- * moving one onto a browser capture changes what it records and costs the
- * footage buffered before the switch (the handover's question).
- */
-export async function followShareCapture(shareVideo: MediaStreamTrack): Promise<FollowOutcome> {
-    const s = session;
-    if (!s) return 'no-session';
-    if (s.nativeStop || !s.video || !s.preset) return 'native';
-    // One at a time, and not before the worker's ring runs: the newest
-    // share announced meanwhile is tried after ('armed', or the follow).
-    if (s.following || !s.workerArmed) { s.queuedShare = shareVideo; return 'busy'; }
-    const own = s.video;
-    if (own.readyState !== 'live' || shareVideo.readyState !== 'live') return 'not-live';
-    const a = own.getSettings(), b = shareVideo.getSettings();
-    if (!a.deviceId || a.deviceId !== b.deviceId || (a.displaySurface ?? '') !== (b.displaySurface ?? '')) return 'other-surface';
-    // A slower share would slow the clip; a faster one would leave the
-    // capture running faster than the ring needs once the share ends.
-    if (!a.frameRate || !b.frameRate || Math.round(a.frameRate) !== Math.round(b.frameRate)) return 'frame-rate';
-    const preset = s.preset;
-    s.following = true;
-    let clone: MediaStreamTrack | null = null;
-    try {
-        clone = shareVideo.clone();
-        await clone.applyConstraints({ width: { max: preset.maxWidth }, height: { max: preset.maxHeight }, frameRate: { max: preset.fps } }).catch(() => { /* the worker checks the frames themselves */ });
-        if (session !== s) { clone.stop(); return 'disarmed'; }
-        const readable = new MediaStreamTrackProcessor({ track: clone as MediaStreamVideoTrack }).readable;
-        const seq = (s.rebindSeq = (s.rebindSeq ?? 0) + 1);
-        // Keyed by the message's own name, so a worker error naming it
-        // (handleWorker 'error') settles it too; one at a time (`following`).
-        const reply = new Promise<Extract<FromWorker, { t: 'videoRebound' }>>((resolve, reject) => {
-            s.pending.set('rebindVideo', { resolve: resolve as (v: unknown) => void, reject });
-        });
-        // A clone of a still screen may not deliver a frame at once; past
-        // this the clone is stopped, its stream ends, and the worker answers.
-        const c = clone;
-        const timer = setTimeout(() => { try { c.stop(); } catch { /* gone */ } }, FOLLOW_FIRST_FRAME_MS);
-        const msg: ToWorker = { t: 'rebindVideo', seq, video: readable };
-        s.worker.postMessage(msg, [readable as unknown as Transferable]);
-        let r: Extract<FromWorker, { t: 'videoRebound' }>;
-        try { r = await reply; } catch { clone.stop(); return 'disarmed'; } finally { clearTimeout(timer); }
-        if (session !== s) { clone.stop(); return 'disarmed'; }
-        if (!r.ok) {
-            clone.stop();
-            diagLine(`clips: kept the clip buffer's own capture beside the screen share (${r.reason ?? 'refused'}${r.width ? ` ${r.width}x${r.height}` : ''})`);
-            return r.reason === 'size' ? 'size' : 'refused';
-        }
-        // The worker reads the clone now and has cancelled the old stream;
-        // the old capture can go. Video only: system audio is its own track.
-        s.unVideoEnded?.();
-        s.video = clone;
-        s.unVideoEnded = watchVideoEnded(s, clone);
-        clone = null;
-        try { own.stop(); } catch { /* already stopped */ }
-        emit({ sharedCapture: true });
-        diagLine('clips: the clip buffer now reads the screen share\'s capture (one capture of the surface)');
-        return 'followed';
-    } catch (e) {
-        // Callers fire and forget (the share's announcement): never a
-        // rejection nobody handles. The ring keeps its own capture.
-        diagLine(`clips: kept the clip buffer's own capture beside the screen share (${e instanceof Error ? e.message : String(e)})`);
-        return 'refused';
-    } finally {
-        // A clone the ring did not take must not outlive this: it would keep
-        // the share's capture running after the share ends, unseen.
-        if (clone) { try { clone.stop(); } catch { /* gone */ } }
-        s.pending.delete('rebindVideo');
-        s.following = false;
-        const next = s.queuedShare;
-        s.queuedShare = null;
-        if (next && next !== shareVideo && session === s && next.readyState === 'live') void followShareCapture(next);
-    }
-}
-
-/** A silent line for puca.log (desktop only), as streamDiag writes them. */
-function diagLine(line: string): void {
-    console.info(`[clips] ${line}`);
-    if (!isTauri()) return;
-    void import('@tauri-apps/api/core')
-        .then(({ invoke }) => invoke('log_stream_diag', { line }))
-        .catch(() => { /* best effort */ });
-}
-
 function handleWorker(s: Session, m: FromWorker): void {
     if (session !== s) return;
     switch (m.t) {
-        case 'videoRebound':
-            if (m.seq !== s.rebindSeq) break; // an answer to a follow this session gave up on
-            s.pending.get('rebindVideo')?.resolve(m); s.pending.delete('rebindVideo');
-            break;
-        case 'armed': {
+        case 'armed':
             emit({ phase: 'armed', videoCodec: m.videoCodec, audioCodec: m.audioCodec, width: m.width, height: m.height });
             notifyArmed(true);
-            s.workerArmed = true;
-            const queued = s.queuedShare;
-            s.queuedShare = null;
-            if (queued && queued.readyState === 'live' && !s.nativeStop) void followShareCapture(queued);
             break;
-        }
         case 'status': {
             const st: WorkerStatus = m.s;
             emit({ bufferedMs: st.bufferedMs, ringBytes: st.ringBytes, droppedFrames: st.droppedFrames, fps: st.fps, kbps: st.kbps, width: st.width, height: st.height });
@@ -972,13 +808,7 @@ export async function disarm(reason = 'user'): Promise<void> {
     if (s.nativeStop) await s.nativeStop().catch(() => { /* best effort */ });
     if (s.resumeTimer) clearInterval(s.resumeTimer);
     s.unMic?.();
-    // Nothing here may throw: the worker's wipe below must always be reached.
-    try { s.unShare?.(); } catch { /* ignore */ }
-    try { s.unVideoEnded?.(); } catch { /* ignore */ }
     s.stream.getTracks().forEach(t => { try { t.stop(); } catch { /* ignore */ } });
-    // A followed share's clone is not in `stream`. Stopping it ends this
-    // capture; the share's own track, if it still runs, is untouched.
-    try { s.video?.stop(); } catch { /* ignore */ }
     if (s.previewEl) { try { s.previewEl.srcObject = null; } catch { /* ignore */ } }
     for (const p of s.pending.values()) p.reject(new Error(`disarmed (${reason})`));
     s.pending.clear();
@@ -1002,7 +832,6 @@ if (typeof window !== 'undefined') {
         if (session) {
             try { session.worker.terminate(); } catch { /* ignore */ }
             session.stream.getTracks().forEach(t => t.stop());
-            try { session.video?.stop(); } catch { /* ignore */ }
             // Best effort, not awaited: a page/webview teardown cannot wait on
             // an async Tauri round-trip. Without this a native session's DXGI
             // capture + WASAPI loopback threads keep running in the Rust

@@ -36,13 +36,6 @@ export interface ArmConfig {
 export type ToWorker =
     | { t: 'arm'; cfg: ArmConfig; video: ReadableStream<VideoFrame> | null; audio: ReadableStream<AudioData> | null }
     | { t: 'rebindAudio'; audio: ReadableStream<AudioData> | null }
-    /** Picker arms only: carry on from THIS video stream (a clone of a
-     *  screen share's track of the same surface, replayBuffer.ts
-     *  followShareCapture), through the SAME encoder, so the ring loses
-     *  nothing. Taken only if its first frame is the size the encoder runs
-     *  at; otherwise refused and cancelled, and the ring keeps the stream it
-     *  had. `video` is TRANSFERRED. Answered by `videoRebound`. */
-    | { t: 'rebindVideo'; seq: number; video: ReadableStream<VideoFrame> }
     /** Native captures: the loopback context's scheduling lead, per
      *  SEGMENT (nativeCapture.ts onLead). `newSegment`: the loopback
      *  (re-)primed and `leadMs` governs render times from `renderAtMs` on;
@@ -150,12 +143,6 @@ export type FromWorker =
     | { t: 'uploaded'; href: string; partIds: string[] }
     | { t: 'uploadFailed'; message: string; status?: number; failedIdx: number[] }
     | { t: 'reconfigured'; width: number; height: number; lostMs: number }
-    /** The answer to `rebindVideo`. `ok`: the ring now reads the new stream
-     *  and has let go of the old one. Not ok: the new stream was cancelled
-     *  and the old one is still read — `reason` says why ('size': its frames
-     *  are not the encoder's size; 'native': a native arm takes no stream;
-     *  'ended': it ended before a frame; 'stopped': the ring is not running). */
-    | { t: 'videoRebound'; seq: number; ok: boolean; reason?: 'size' | 'native' | 'ended' | 'stopped'; width?: number; height?: number }
     /** `stage` is a pipeline stage OR the `t` of the message that threw (the
      *  main thread settles that message's pending promise by this name). */
     | { t: 'error'; stage: 'video' | 'audio' | 'crypto' | 'mux' | ToWorker['t']; message: string; fatal: boolean }

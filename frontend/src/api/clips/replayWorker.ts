@@ -188,19 +188,6 @@ export class Ring {
     // pumps
     videoReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
     audioReader: ReadableStreamDefaultReader<AudioData> | null = null;
-    /** Picker path: which video stream the pump reads (bumped by
-     *  rebindVideo; a superseded pump stops at its next frame). */
-    videoGen = 0;
-    /** Added to every picker frame's timestamp before it is encoded. 0 until
-     *  rebindVideo moves the ring onto another stream, whose capture clock
-     *  has its own origin: the shift carries that stream on from where this
-     *  one's timeline stood (rebindVideo), so the encoder, the GOPs and the
-     *  clip see one timeline. */
-    videoTsShiftUs = 0;
-    /** The last (shifted) timestamp handed to the video encoder, and when
-     *  (this worker's clock) that frame was handed over. */
-    lastVideoSrcUs: number | null = null;
-    lastVideoAtMs = 0;
     /** Native chunks that arrived while arm() was still awaiting (onmessage is
      *  async and unserialized — a nativeVideoChunk handler can run to
      *  completion in the middle of arm()'s awaits). Drained at the end of
@@ -243,7 +230,7 @@ export class Ring {
         this.running = true;
         if (video) {
             this.videoReader = video.getReader();
-            void this.pumpVideo(this.videoGen, this.videoReader);
+            void this.pumpVideo();
         }
         if (audio && this.audioCodec) this.bindAudio(audio);
         this.statusTimer = setInterval(() => this.emitStatus(), STATUS_INTERVAL_MS);
@@ -369,111 +356,31 @@ export class Ring {
     }
 
     // ---- pumps ---------------------------------------------------------------
-    /** `first`: a frame rebindVideo already read off `reader`, encoded first. */
-    private async pumpVideo(gen: number, reader: ReadableStreamDefaultReader<VideoFrame>, first?: VideoFrame): Promise<void> {
-        let pending = first;
+    private async pumpVideo(): Promise<void> {
+        const reader = this.videoReader!;
         for (;;) {
-            let frame: VideoFrame;
-            if (pending) {
-                frame = pending; pending = undefined;
-            } else {
-                let res: ReadableStreamReadResult<VideoFrame>;
-                try { res = await reader.read(); } catch { break; }
-                if (res.done || !this.running || gen !== this.videoGen) { res.value?.close(); break; }
-                frame = res.value;
-            }
+            let res: ReadableStreamReadResult<VideoFrame>;
+            try { res = await reader.read(); } catch { break; }
+            if (res.done || !this.running) { res.value?.close(); break; }
+            const frame = res.value;
             try {
                 if (this.fatal) continue;
-                this.encodeVideoFrame(frame);
+                if (frame.codedWidth !== this.width || frame.codedHeight !== this.height) this.reconfigure(frame.codedWidth, frame.codedHeight);
+                if (this.firstVideoTs === null) { this.firstVideoTs = frame.timestamp; this.wallV = nowMs(); }
+                const venc = this.venc!;
+                if (venc.state !== 'configured') continue;
+                if (venc.encodeQueueSize > MAX_ENCODE_QUEUE) { this.dropped++; continue; }
+                const tsUs = frame.timestamp - this.firstVideoTs;
+                const key = this.forceKeyNext || tsUs - this.lastKeyUs >= GOP_US;
+                venc.encode(frame, { keyFrame: key });
+                if (key) { this.lastKeyUs = tsUs; this.forceKeyNext = false; }
+                this.encodedFrames++; this.framesThisSec++;
             } catch (e) {
                 this.fail('video', e instanceof Error ? e.message : String(e));
             } finally {
                 frame.close(); // ALWAYS — a leaked VideoFrame starves the capture pool and the track stops
             }
         }
-    }
-
-    private encodeVideoFrame(frame: VideoFrame): void {
-        if (frame.codedWidth !== this.width || frame.codedHeight !== this.height) this.reconfigure(frame.codedWidth, frame.codedHeight);
-        if (this.firstVideoTs === null) { this.firstVideoTs = frame.timestamp; this.wallV = nowMs(); }
-        const venc = this.venc!;
-        if (venc.state !== 'configured') return;
-        if (venc.encodeQueueSize > MAX_ENCODE_QUEUE) { this.dropped++; return; }
-        const srcUs = frame.timestamp + this.videoTsShiftUs;
-        // A frame at or before the last one would make the encoder's output
-        // go backwards, which the muxer refuses: drop it (a capture's own
-        // clock does not do this; a rebind's shift is chosen so it cannot).
-        if (this.lastVideoSrcUs !== null && srcUs <= this.lastVideoSrcUs) { this.dropped++; return; }
-        const tsUs = srcUs - this.firstVideoTs;
-        const key = this.forceKeyNext || tsUs - this.lastKeyUs >= GOP_US;
-        if (this.videoTsShiftUs === 0) {
-            venc.encode(frame, { keyFrame: key });
-        } else {
-            // The same picture under the ring's timeline (no copy: a
-            // VideoFrame made from a VideoFrame shares its media resource).
-            const shifted = new VideoFrame(frame, { timestamp: srcUs });
-            try { venc.encode(shifted, { keyFrame: key }); } finally { shifted.close(); }
-        }
-        this.lastVideoSrcUs = srcUs;
-        this.lastVideoAtMs = nowMs();
-        if (key) { this.lastKeyUs = tsUs; this.forceKeyNext = false; }
-        this.encodedFrames++; this.framesThisSec++;
-    }
-
-    /**
-     * Carry on from another video stream (picker arms only): replayBuffer's
-     * followShareCapture hands over a clone of a screen share's track of the
-     * SAME surface, so the share and the ring stop capturing that surface
-     * twice. Same encoder, same settings, same keyframe cadence, same ring
-     * key: nothing buffered is lost and nothing about the clip changes, which
-     * is only true while the new frames are the encoder's size. So the first
-     * frame decides: the encoder's size, and the ring lets go of its old
-     * stream and reads this one; any other size (a share captured smaller
-     * than the clip preset, say), and this one is cancelled and the old one
-     * kept, because taking it would reconfigure the encoder and cost the
-     * buffer (reconfigure()). Answers `videoRebound` either way.
-     *
-     * The new stream's capture clock has its own origin, so its frames are
-     * re-timed (videoTsShiftUs) to carry on IN REAL TIME from the last frame
-     * encoded: the first new frame lands as long after it as really passed
-     * (never less than a frame). The old frames kept their place against the
-     * audio, which is anchored on its own (wallA - wallV), and the new ones
-     * keep the same capture-to-here delay as the old (one surface, one
-     * source), so sound and picture stay as they were.
-     */
-    async rebindVideo(seq: number, video: ReadableStream<VideoFrame>): Promise<void> {
-        const reader = video.getReader();
-        const refuse = (reason: 'size' | 'native' | 'ended' | 'stopped', width?: number, height?: number) => {
-            void reader.cancel().catch(() => { /* already gone */ });
-            post({ t: 'videoRebound', seq, ok: false, reason, width, height });
-        };
-        if (!this.running || this.fatal) { refuse('stopped'); return; }
-        if (this.cfg.nativeVideo || !this.venc) { refuse('native'); return; }
-        let res: ReadableStreamReadResult<VideoFrame>;
-        try { res = await reader.read(); } catch { refuse('ended'); return; }
-        if (res.done || !res.value) { refuse('ended'); return; }
-        const f = res.value;
-        if (!this.running || this.fatal) { f.close(); refuse('stopped'); return; }
-        if (f.codedWidth !== this.width || f.codedHeight !== this.height) {
-            const w = f.codedWidth, h = f.codedHeight;
-            f.close();
-            refuse('size', w, h);
-            return;
-        }
-        const old = this.videoReader;
-        const gen = ++this.videoGen;
-        this.videoReader = reader;
-        if (old) void old.cancel().catch(() => { /* already gone */ });
-        if (this.firstVideoTs !== null) {
-            const frameUs = Math.round(1e6 / Math.max(1, this.cfg.preset.fps));
-            const targetUs = this.lastVideoSrcUs === null
-                ? Math.round((nowMs() - this.wallV) * 1000)
-                : this.lastVideoSrcUs - this.firstVideoTs + Math.max(frameUs, Math.round((nowMs() - this.lastVideoAtMs) * 1000));
-            // 0 passes frames through untouched: the clocks already agree.
-            this.videoTsShiftUs = this.firstVideoTs + targetUs - f.timestamp;
-        }
-        post({ t: 'videoRebound', seq, ok: true, width: this.width, height: this.height });
-        void this.pumpVideo(gen, reader, f);
     }
 
     private async pumpAudio(gen: number): Promise<void> {
@@ -1218,11 +1125,6 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 break;
             }
             case 'rebindAudio': ring?.bindAudio(m.audio); break;
-            case 'rebindVideo': {
-                if (!ring) { void m.video.cancel().catch(() => { /* gone */ }); post({ t: 'videoRebound', seq: m.seq, ok: false, reason: 'stopped' }); break; }
-                await ring.rebindVideo(m.seq, m.video);
-                break;
-            }
             case 'nativeVideoChunk': ring?.ingestNativeVideoChunk(m, nowMs()); break;
             case 'audioLead': ring?.noteAudioLead(m); break;
             case 'seal': {
