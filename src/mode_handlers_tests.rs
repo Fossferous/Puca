@@ -3591,10 +3591,12 @@ mod db {
     /// Edit Channel saves one role per request, highest role first. "Make #staff public", by a
     /// manager who sees #staff only through their own role's allow, takes that allow away first:
     /// the channel is hidden from them before the @everyone row's request. That request must
-    /// still go through, or the channel is left hidden from everyone but the owner. Only the
-    /// write that hid it from them opens the window, a pass inside it does not move it, and it
-    /// closes. CONTROLS: a read, or a write that leaves them the channel, opens nothing, so a hide
-    /// by someone else after it is a 404 and stays; a window that has closed is a 404.
+    /// still go through, or the channel is left hidden from everyone but the owner. Only a write
+    /// that takes View away and leaves its writer without the channel opens the window; a pass
+    /// inside it does not move it; it closes once they see the channel again, and when its time is
+    /// up. CONTROLS: a read, or a write that takes no View away, opens nothing, so a hide by
+    /// someone else after it is a 404 and stays; so is one after a window of their own that they
+    /// closed by giving themselves the channel back; a window whose time is up is a 404.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_save_that_hides_the_channel_from_its_saver_partway_still_finishes() {
         let Some(pool) = crate::migrator::test_pool(8).await else { return };
@@ -3660,7 +3662,33 @@ mod db {
             .await
             .unwrap();
 
-        // CONTROL: the same request on a channel hidden from them whose window closed.
+        // CONTROL: a window of their own, kept open by a pass inside it that leaves them hidden,
+        // then closed by giving themselves the channel back; then the owner hides it from them.
+        let lounge = channel(&pool, &f.sid, "lounge", 0).await;
+        deny_everyone_view(&pool, &f.sid, lounge).await;
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+            .bind(lounge as i64)
+            .bind(managers)
+            .bind(P::VIEW_CHANNEL.bits() as i64)
+            .execute(&pool)
+            .await
+            .expect("allow");
+        let hid_self = inherit(lounge, managers).await;
+        let lounge_window = opened(lounge);
+        let still_hidden = put_as(f.manager, lounge, everyone, P::empty(), P::VIEW_CHANNEL | P::SPEAK).await;
+        let lounge_window_kept = opened(lounge);
+        let back = put_as(f.manager, lounge, managers, P::VIEW_CHANNEL, P::empty()).await;
+        let lounge_window_closed = opened(lounge);
+        let owner_hides_lounge = put_as(f.owner, lounge, managers, P::empty(), P::VIEW_CHANNEL).await;
+        let undone = put_as(f.manager, lounge, managers, P::VIEW_CHANNEL, P::empty()).await;
+        let lounge_rows = sqlx::query_as::<_, (i64, i64)>("SELECT allow, deny FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2")
+            .bind(lounge as i64)
+            .bind(managers)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+        // CONTROL: the same request on a channel hidden from them whose window's time is up.
         state.overwrite_saves.insert((f.manager, f.secret as i64), std::time::Instant::now());
         let closed = inherit(f.secret, everyone).await;
         let secret_rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_permission_overwrites WHERE channel_id = $1")
@@ -3673,14 +3701,23 @@ mod db {
         assert_eq!(own_role, StatusCode::NO_CONTENT, "the first request: they see it");
         assert!(window.is_some(), "and it opens the window");
         assert_eq!(everyone_row, StatusCode::NO_CONTENT, "the save's next request goes through though the first hid the channel from them");
-        assert_eq!(window_after, window, "a pass inside the window does not move it");
+        assert_eq!(window_after, None, "and the window closes: they see the channel again");
         assert!(plain_sees, "and the channel is public, as the save meant");
         assert_eq!((read_town, harmless), (StatusCode::OK, StatusCode::OK));
         assert_eq!(hidden_by_owner, StatusCode::OK);
         assert_eq!(taken_back, StatusCode::NOT_FOUND, "control: a hide by someone else is not theirs to undo");
         assert_eq!(window_after_reading, None, "control: a read and a write that leaves them the channel open nothing");
         assert_eq!(town_rows, vec![(0, P::VIEW_CHANNEL.bits() as i64)], "control: and the owner's row stays");
-        assert_eq!(closed, StatusCode::NOT_FOUND, "control: a closed window is no way in");
+        assert_eq!(hid_self, StatusCode::NO_CONTENT);
+        assert!(lounge_window.is_some(), "their own hide opens a window");
+        assert_eq!(still_hidden, StatusCode::OK, "a write inside it goes through");
+        assert_eq!(lounge_window_kept, lounge_window, "a pass inside it that leaves them hidden does not move it");
+        assert_eq!(back, StatusCode::OK);
+        assert_eq!(lounge_window_closed, None, "giving themselves the channel back closes it");
+        assert_eq!(owner_hides_lounge, StatusCode::OK);
+        assert_eq!(undone, StatusCode::NOT_FOUND, "control: so the owner's hide after it is not theirs to undo");
+        assert_eq!(lounge_rows, vec![(0, P::VIEW_CHANNEL.bits() as i64)], "control: and the owner's row stays");
+        assert_eq!(closed, StatusCode::NOT_FOUND, "control: a window whose time is up is no way in");
         assert_eq!(secret_rows.0, 1, "control: and the row stays");
     }
 

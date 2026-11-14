@@ -1290,19 +1290,23 @@ struct OverwriteGate {
 /// one role per request, highest role first, so a save can hide the channel from the person
 /// saving it before it is done. "Make #staff public" from a manager who sees it through their
 /// own role's allow takes that allow away first, and the @everyone row after it was refused
-/// as not found: the channel was left hidden from everyone but the owner. So the WRITE that
-/// hides the channel from its writer ([`open_save_window`]) lets them on for
-/// [`OVERWRITE_SAVE_GRACE`], if the channel is still there and they still hold Manage Channels.
-/// Nothing else opens it: not a read, not a write that leaves them the channel, not a pass
-/// inside the window, so a hide by anyone else stays a hide. In memory, per process: a restart
-/// in the middle of a save forgets it.
+/// as not found: the channel was left hidden from everyone but the owner. So a write that takes
+/// View away and leaves its own writer without the channel ([`settle_save_window`]) lets them
+/// on for [`OVERWRITE_SAVE_GRACE`], if the channel is still there and they still hold Manage
+/// Channels. Nothing else opens it (a read, a write that takes no View away, a pass inside the
+/// window), and it closes as soon as they can see the channel again, so a hide by anyone else
+/// stays a hide. In memory, per process: a restart in the middle of a save forgets it.
 async fn require_manage_overwrites(
     state: &AppState,
     channel_id: i64,
     user_id: i64,
 ) -> Result<OverwriteGate, (StatusCode, &'static str)> {
     let refused = match require_manage_visible(&state.pool, channel_id, user_id).await {
-        Ok(server_id) => return Ok(OverwriteGate { server_id, sees: true }),
+        Ok(server_id) => {
+            // They see it: whatever save hid it from them is over.
+            state.overwrite_saves.remove(&(user_id, channel_id));
+            return Ok(OverwriteGate { server_id, sees: true });
+        }
         Err(refused) => refused,
     };
     let saving = state
@@ -1322,18 +1326,43 @@ async fn require_manage_overwrites(
     Ok(OverwriteGate { server_id, sees: false })
 }
 
-/// After an overwrite write that went through: if the writer could see the channel before it
-/// and cannot now, this write hid it from them, and the rest of their save may follow
-/// ([`require_manage_overwrites`]).
-async fn open_save_window(state: &AppState, gate: &OverwriteGate, channel_id: i64, user_id: i64) {
-    if !gate.sees || sees_channel_in(&state.pool, &gate.server_id, channel_id, user_id).await {
+/// Does replacing overwrite row `old` by `new` (`None`: no row) take View away from what that
+/// row gives: an allow of it gone, or a deny of it new?
+fn hides_view(old: Option<(i64, i64)>, new: Option<(i64, i64)>) -> bool {
+    let view = Permissions::VIEW_CHANNEL.bits() as i64;
+    let (old_allow, old_deny) = old.unwrap_or((0, 0));
+    let (new_allow, new_deny) = new.unwrap_or((0, 0));
+    (old_allow & view != 0 && new_allow & view == 0) || (old_deny & view == 0 && new_deny & view != 0)
+}
+
+/// After an overwrite write that went through, the window of [`require_manage_overwrites`]:
+/// opened when the write took View away (`hid`, [`hides_view`]), was made by someone who could
+/// see the channel, and left them without it; closed when its writer can see the channel again.
+/// A lookup that does not answer opens and closes nothing.
+async fn settle_save_window(state: &AppState, gate: &OverwriteGate, channel_id: i64, user_id: i64, hid: bool) {
+    let key = (user_id, channel_id);
+    // A pass that could see the channel has already closed any window (the gate), and a write
+    // that took no View away cannot open one.
+    if gate.sees && !hid {
         return;
     }
-    let now = std::time::Instant::now();
-    if state.overwrite_saves.len() > 4096 {
-        state.overwrite_saves.retain(|_, until| *until > now);
+    let sees_now = match get_user_channel_permissions(&state.pool, channel_id, user_id).await {
+        ChannelPermAccess::Allowed { server_id, perms } if server_id == gate.server_id => {
+            perms.has(Permissions::VIEW_CHANNEL)
+        }
+        _ => return,
+    };
+    if sees_now {
+        state.overwrite_saves.remove(&key);
+        return;
     }
-    state.overwrite_saves.insert((user_id, channel_id), now + OVERWRITE_SAVE_GRACE);
+    if gate.sees && hid {
+        let now = std::time::Instant::now();
+        if state.overwrite_saves.len() > 4096 {
+            state.overwrite_saves.retain(|_, until| *until > now);
+        }
+        state.overwrite_saves.insert(key, now + OVERWRITE_SAVE_GRACE);
+    }
 }
 
 /// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup says no.
@@ -1452,23 +1481,31 @@ pub async fn put_overwrite(
             .into_response();
     }
 
-    let result = sqlx::query(
-        "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
+    // The row it replaces comes back with it (the CTE reads the snapshot before the write), so
+    // whether THIS write took View away is the write's own answer (settle_save_window).
+    let result: Result<(Option<i64>, Option<i64>), sqlx::Error> = sqlx::query_as(
+        "WITH old AS (SELECT allow, deny FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2) \
+         INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (channel_id, role_id) \
-         DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny",
+         DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny \
+         RETURNING (SELECT allow FROM old), (SELECT deny FROM old)",
     )
     .bind(channel_id)
     .bind(role_id)
     .bind(payload.allow)
     .bind(payload.deny)
-    .execute(&state.pool)
+    .fetch_one(&state.pool)
     .await;
 
     match result {
-        Ok(_) => {
-            open_save_window(&state, &gate, channel_id, claims.sub).await;
-            crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+        Ok((old_allow, old_deny)) => {
+            // The sweep starts straight after the commit, with nothing awaited in between
+            // (ws::start_perms_change): a request cancelled from here on cannot lose it.
+            let sweep = crate::ws::start_perms_change(&state, &server_id);
+            let hid = hides_view(old_allow.zip(old_deny), Some((payload.allow, payload.deny)));
+            settle_save_window(&state, &gate, channel_id, claims.sub, hid).await;
+            sweep.wait().await;
             StatusCode::OK.into_response()
         }
         Err(e) => {
@@ -1498,20 +1535,23 @@ pub async fn delete_overwrite(
     };
     let server_id = gate.server_id.clone();
 
-    let result = sqlx::query(
-        "DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2",
+    // What it removed comes back with it: whether THIS write took View away (settle_save_window).
+    let result: Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(
+        "DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2 RETURNING allow",
     )
     .bind(channel_id)
     .bind(role_id)
-    .execute(&state.pool)
+    .fetch_optional(&state.pool)
     .await;
 
     match result {
-        Ok(res) => {
-            // Only a real change needs the broadcast + eviction pass.
-            if res.rows_affected() > 0 {
-                open_save_window(&state, &gate, channel_id, claims.sub).await;
-                crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+        Ok(removed) => {
+            // Only a real change needs the broadcast + eviction pass. Started straight after
+            // the commit, with nothing awaited in between (ws::start_perms_change).
+            if let Some(old_allow) = removed {
+                let sweep = crate::ws::start_perms_change(&state, &server_id);
+                settle_save_window(&state, &gate, channel_id, claims.sub, hides_view(Some((old_allow, 0)), None)).await;
+                sweep.wait().await;
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1544,6 +1584,37 @@ mod tests {
         assert_eq!(parse(serde_json::json!({ "parent_id": 7 })), Ok(Some(Some(7))), "a value: set it");
         assert_eq!(parse(serde_json::json!({ "parent_id": "7" })), Err(()), "not a channel id");
         assert_eq!(parse(serde_json::json!({ "parent_id": 5_000_000_000_i64 })), Err(()), "wider than the column");
+    }
+
+    #[test]
+    fn only_taking_view_away_can_hide_a_channel() {
+        let view = Permissions::VIEW_CHANNEL.bits() as i64;
+        let speak = Permissions::SPEAK.bits() as i64;
+        assert!(hides_view(Some((view, 0)), None), "an allow of View removed");
+        assert!(hides_view(Some((view | speak, 0)), Some((speak, 0))), "an allow of View taken out of the row");
+        assert!(hides_view(None, Some((0, view))), "a new deny of View");
+        assert!(hides_view(Some((0, speak)), Some((0, speak | view))), "a deny of View added to the row");
+        assert!(!hides_view(Some((0, view)), None), "a deny of View removed gives, it does not take");
+        assert!(!hides_view(Some((0, view)), Some((0, view))), "the same row again");
+        assert!(!hides_view(None, Some((0, speak))), "a deny of something else");
+        assert!(!hides_view(Some((speak, 0)), Some((view, 0))), "an allow of View added");
+        assert!(!hides_view(Some((view, 0)), Some((view, 0))), "an allow of View kept");
+    }
+
+    /// A request may be cancelled at any await, and the overwrite routes' sweep (the frames, the key,
+    /// the evictions) runs only once it is started: nothing but the write's own `.await` comes
+    /// between the write and `start_perms_change`.
+    #[test]
+    fn nothing_is_awaited_between_an_overwrite_write_and_its_sweep() {
+        let src = include_str!("channel_handlers.rs");
+        for (what, write) in [
+            ("put", "\"WITH old AS (SELECT allow, deny FROM channel_permission_overwrites"),
+            ("delete", "\"DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2 RETURNING allow\""),
+        ] {
+            let from = src.find(write).unwrap_or_else(|| panic!("the {what} write"));
+            let to = from + src[from..].find("crate::ws::start_perms_change(").unwrap_or_else(|| panic!("the {what} sweep"));
+            assert_eq!(src[from..to].matches(".await").count(), 1, "{what}: only the write's own await: {}", &src[from..to]);
+        }
     }
 
     #[test]
