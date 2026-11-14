@@ -33,10 +33,13 @@ import { currentUserIdFromToken } from './auth';
 import { API_BASE_URL } from './config';
 import { hostSaysForeground, hostShowsNotifications, notifyHost } from './embedHost';
 import { NotifyGroups, TASKS_DUE_KEY, navForGroupKey, type GroupMessage, type GroupStep } from './notifyGroups';
+import { pageToldAwayForPush } from './webPushLocal';
 
 export type NotifyDecision =
     /** `quiet`: it only updated its conversation's notification where it
-     *  is: no pop-up, so the caller plays no sound for it either. */
+     *  is: no pop-up, so the caller plays no sound for it either. Also quiet:
+     *  a message a Web Push carries (`pageToldAwayForPush`), whose
+     *  notification, and sound, the push brings. */
     | { fire: true; quiet?: true }
     | { fire: false; reason: 'setting-off' | 'no-permission' | 'own-message' | 'muted' | 'focused' | 'mobile' };
 
@@ -79,7 +82,8 @@ interface NotifyLogEntry {
     key: string;
     /** 'fired' (shown, popping up), 'updated' (its conversation's
      *  notification changed where it is, no pop-up), 'duplicate' (a message
-     *  counted already), or the reason it was suppressed. */
+     *  counted already), 'web-push' (a push to this browser carries it), or
+     *  the reason it was suppressed. */
     outcome: string;
     inputs?: NotifyInput;
 }
@@ -558,6 +562,24 @@ export function notifyNewMessage(opts: {
         mobileNative,
     };
     const decision = shouldNotify(inputs);
+    // The web app on a phone in the background, or a page being left, has
+    // told its server it cannot notify by itself (api/webPushAway.ts): the
+    // server pushes this browser now and its service worker shows the push,
+    // so one from this page as well would be the same message twice. Quiet,
+    // so the caller plays no sound over the push's own. Only this page's own
+    // Notification: the desktop app, Android's plugin and an embedding host
+    // never send the report and are never stopped here.
+    if (decision.fire && !host && !isTauri() && !(inputs.mobile && inputs.mobileNative) && pageToldAwayForPush()) {
+        recordNotify({
+            at: new Date().toISOString(),
+            kind: 'message',
+            key: opts.group?.key ?? opts.notifyKey ?? '(no key)',
+            outcome: 'web-push',
+            inputs,
+        });
+        if (isBadgeWorthy(inputs)) setUnreadBadge(true);
+        return { fire: true, quiet: true };
+    }
     // Grouped only where this module draws the notification itself: Android's
     // plugin and an embedding host already replace by notifyKey, and are left
     // exactly as they were.

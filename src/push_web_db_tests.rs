@@ -624,6 +624,145 @@ async fn a_browser_is_rung_when_it_is_away_whatever_the_other_devices_do() {
     drop_user(&pool, &alice).await;
 }
 
+/// THE BACKGROUNDED PHONE. An iPhone's Home Screen app (or an Android phone's
+/// web app) gone to the background is frozen within seconds, but its socket
+/// stays up until the server's 75 s idle reaper takes it. Until this change
+/// that browser counted as open the whole time: no push for a message in the
+/// first minute or so, and the frozen page showed nothing either. Its page now
+/// says so (`SetPushAway`), and from that moment it is rung like a closed one;
+/// back on screen, it is not.
+#[tokio::test]
+async fn a_phone_in_the_background_is_rung_although_its_socket_is_still_up() {
+    let Some((pool, state, rec)) = setup().await else { return };
+    let me = signed_in(&pool, "background").await;
+    let alice = signed_in(&pool, "alice3").await;
+    may_dm(&pool, &me, &alice).await;
+    let (id, secret) = subscribe(&state, &me, &endpoint(), GatesBody::default()).await;
+    let phone = connect(&state, &me, &me.sid);
+
+    // On screen: not rung (control).
+    let seen = dm_from(&alice, "conv-seen");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &seen, true);
+    assert_eq!(settle(&rec, 1).await, 0, "a page on screen shows it itself");
+
+    // To the background: the very next message rings it, its socket still up.
+    assert!(state.set_conn_push_away(me.sub, phone, true));
+    let missed = dm_from(&alice, "conv-missed");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &missed, true);
+    assert_eq!(settle(&rec, 1).await, 1, "rung while the socket is up");
+    assert!(state.conn_ids_of(me.sub).contains(&phone), "the socket really was still there");
+    let (_, v) = pending(&state, id, &secret).await;
+    let navs: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["nav"].as_str().unwrap()).collect();
+    assert_eq!(navs, vec!["dm:conv-missed"], "named: what arrived after it left, not what it had on screen");
+
+    // Back on screen: not rung again, whatever arrives (past the coalescing).
+    later(&pool, id).await;
+    assert!(state.set_conn_push_away(me.sub, phone, false));
+    let on_screen = dm_from(&alice, "conv-on-screen");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &on_screen, true);
+    assert_eq!(settle(&rec, 2).await, 1, "on screen again: no push");
+
+    drop_user(&pool, &me).await;
+    drop_user(&pool, &alice).await;
+}
+
+/// The reply in a back-and-forth. The phone is woken for a DM, opens Púca,
+/// replies, switches away, and the answer comes a few seconds later: that is
+/// a NEW burst (it answered the last ring), so the 30 s coalescing must not
+/// swallow it — the frozen page could not show it either. CONTROL: a phone
+/// that never came back is still one push per burst.
+#[tokio::test]
+async fn the_answer_after_you_reply_and_switch_away_is_pushed() {
+    let Some((pool, state, rec)) = setup().await else { return };
+    let me = signed_in(&pool, "reply").await;
+    let alice = signed_in(&pool, "alice5").await;
+    may_dm(&pool, &me, &alice).await;
+    let phone_ep = endpoint();
+    let (id, secret) = subscribe(&state, &me, &phone_ep, GatesBody::default()).await;
+    let phone = connect(&state, &me, &me.sid);
+    // A second browser of the same account that stays in the background: the control.
+    let tablet = Claims { sid: new_session(&pool, me.sub).await, ..me.clone() };
+    let tablet_ep = endpoint();
+    subscribe(&state, &tablet, &tablet_ep, GatesBody::default()).await;
+    let tablet_conn = connect(&state, &tablet, &tablet.sid);
+    state.set_conn_push_away(me.sub, phone, true);
+    state.set_conn_push_away(me.sub, tablet_conn, true);
+
+    let first = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &first, true);
+    assert_eq!(settle(&rec, 2).await, 2, "both woken for the first message");
+    let _ = pending(&state, id, &secret).await;
+
+    // The phone opens Púca from it, replies, and switches away again (the
+    // database counts seconds since the push, rounded, so they go by).
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    state.set_conn_push_away(me.sub, phone, false);
+    state.set_conn_push_away(me.sub, phone, true);
+    let answer = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &answer, true);
+    assert_eq!(settle(&rec, 3).await, 3, "a new burst for the phone");
+    assert_eq!(rec.pushed_to(&phone_ep), 2, "the answer woke the phone, well inside 30 s");
+    assert_eq!(rec.pushed_to(&tablet_ep), 1, "CONTROL: the tablet never came back: still one push per burst");
+    let (_, v) = pending(&state, id, &secret).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "and its worker names it: {v}");
+
+    // And the phone, still away, is one push per burst again.
+    let more = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &more, true);
+    assert_eq!(settle(&rec, 4).await, 3, "no second push inside the new burst");
+
+    drop_user(&pool, &me).await;
+    drop_user(&pool, &alice).await;
+}
+
+/// A message that reached the page while it was on screen does not wake it
+/// once it has left: the ring task waits a random moment (the privacy
+/// jitter, up to 3 s) before it looks, and a person who reads a message and
+/// switches away within it would be woken to a worker with nothing to name —
+/// the generic "New activity in Púca". Rung only for what came after.
+#[tokio::test]
+async fn what_the_page_had_before_it_left_wakes_nothing() {
+    let Some((pool, state, rec)) = setup().await else { return };
+    let me = signed_in(&pool, "jitter").await;
+    let alice = signed_in(&pool, "alice4").await;
+    may_dm(&pool, &me, &alice).await;
+    let (id, secret) = subscribe(&state, &me, &endpoint(), GatesBody::default()).await;
+    let phone = connect(&state, &me, &me.sid);
+
+    // Delivered to the open page and queued for ringing. The ring task is
+    // spawned on this (single-threaded) runtime and cannot run before the
+    // next await, so the page goes to the background first.
+    let seen = dm_from(&alice, "conv-seen");
+    assert!(state.send_to_user(me.sub, seen.clone()));
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &seen, true);
+    state.set_conn_push_away(me.sub, phone, true);
+    assert_eq!(settle(&rec, 1).await, 0, "what it had on screen is no reason to wake it");
+
+    // CONTROL: the next message is.
+    let missed = dm_from(&alice, "conv-missed");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &missed, true);
+    assert_eq!(settle(&rec, 1).await, 1);
+    let (_, v) = pending(&state, id, &secret).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["items"][0]["nav"], "dm:conv-missed");
+
+    // The same for a socket that closes inside the jitter (an old client's
+    // way of leaving): its earlier message wakes nothing.
+    let other = signed_in(&pool, "closing").await;
+    may_dm(&pool, &other, &alice).await;
+    subscribe(&state, &other, &endpoint(), GatesBody::default()).await;
+    let laptop = connect(&state, &other, &other.sid);
+    let before = rec.count();
+    let seen = dm_from(&alice, "conv-laptop");
+    sender::wake_user_scoped(&state, other.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &seen, true);
+    state.unregister_session(other.sub, laptop);
+    assert_eq!(settle(&rec, before + 1).await, before, "nothing new since it closed");
+
+    drop_user(&pool, &me).await;
+    drop_user(&pool, &other).await;
+    drop_user(&pool, &alice).await;
+}
+
 /// The test button pushes to THIS session's browser only, now.
 #[tokio::test]
 async fn the_test_button_rings_only_the_calling_sessions_browser() {

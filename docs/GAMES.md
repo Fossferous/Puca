@@ -358,7 +358,7 @@ the client's tests then say what the change broke.
 The 0.9.832 handshake, unchanged in shape:
 
 - The client puts `games` in its ONE caps list — `CLIENT_CAPS` in
-  `frontend/src/api/websocket.ts`, sent as `/ws?caps=own_voice,presence,games`.
+  `frontend/src/api/websocket.ts`, sent as `/ws?caps=own_voice,presence,games,push_away`.
   Never a second `caps=` (it fails the upgrade); `check-docs-consistency.mjs`
   rule 14 pins every documented `caps=` to that list.
 - The server reads it with the one tokeniser (`presence::ClientCaps`,

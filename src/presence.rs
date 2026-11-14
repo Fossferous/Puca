@@ -59,6 +59,12 @@ pub const CAP_PRESENCE: &str = "presence";
 /// other name in the one `caps=` list.
 pub const CAP_GAMES: &str = "games";
 
+/// The Web Push away capability (src/wake/sender.rs): the web app may say
+/// that its page cannot show a notification by itself right now
+/// (`ClientMessage::SetPushAway`), and a server that understands the frame
+/// confirms it in `ServerFeatures`. Read by the same tokeniser.
+pub const CAP_PUSH_AWAY: &str = "push_away";
+
 /// The longest inactivity a client may claim in one report. Anything longer is
 /// "away" anyway; the clamp keeps an absurd value from meaning anything.
 pub const MAX_REPORTED_INACTIVE_SECS: u32 = 24 * 3600;
@@ -234,6 +240,8 @@ pub struct ClientCaps {
     pub presence: bool,
     /// Announced `games`: may be sent Game* frames.
     pub games: bool,
+    /// Announced `push_away`: will send `SetPushAway` once it is confirmed.
+    pub push_away: bool,
 }
 
 impl ClientCaps {
@@ -250,7 +258,11 @@ impl ClientCaps {
     }
 
     pub fn parse(raw: Option<&str>) -> Self {
-        ClientCaps { presence: Self::announced(raw, CAP_PRESENCE), games: Self::announced(raw, CAP_GAMES) }
+        ClientCaps {
+            presence: Self::announced(raw, CAP_PRESENCE),
+            games: Self::announced(raw, CAP_GAMES),
+            push_away: Self::announced(raw, CAP_PUSH_AWAY),
+        }
     }
 
     /// The features to confirm back: what was announced AND is supported.
@@ -267,6 +279,9 @@ impl ClientCaps {
         }
         if self.games && games_served {
             out.push(CAP_GAMES.to_string());
+        }
+        if self.push_away {
+            out.push(CAP_PUSH_AWAY.to_string());
         }
         out
     }
@@ -821,6 +836,24 @@ mod rule_tests {
         assert_eq!(ClientCaps::parse(Some("presence")).features_given(true), vec!["presence".to_string()]);
         // What a connection is told today follows the switch.
         assert_eq!(caps.features(), caps.features_given(crate::games_wire::GAMES_SERVED));
+    }
+
+    /// `push_away` (the web app saying its page cannot notify by itself,
+    /// `ClientMessage::SetPushAway`) rides the same list, and is confirmed
+    /// back exactly when it was announced: the client sends the frame only
+    /// after that, so an OLD server (which never confirms it) is never sent
+    /// one, and an OLD client (which never announces it) is never told.
+    #[test]
+    fn push_away_is_read_from_the_one_list_and_confirmed_only_when_announced() {
+        let caps = ClientCaps::parse(Some("own_voice,presence,games,push_away"));
+        assert!(caps.presence && caps.games && caps.push_away);
+        assert!(ClientCaps::parse(Some(" PUSH_AWAY ")).push_away);
+        assert!(!ClientCaps::parse(Some("push,away,push_aways")).push_away, "whole names only");
+        assert!(!ClientCaps::parse(Some("own_voice,presence,games")).push_away, "today's client list does not have it");
+        assert_eq!(caps.features_given(false), vec!["presence".to_string(), "push_away".to_string()]);
+        assert_eq!(ClientCaps::parse(Some("push_away")).features(), vec!["push_away".to_string()]);
+        // Not announced: never confirmed.
+        assert_eq!(ClientCaps::parse(Some("own_voice,presence,games")).features_given(true), vec!["presence".to_string(), "games".to_string()]);
     }
 
     #[test]

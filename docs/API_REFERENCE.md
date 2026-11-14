@@ -322,10 +322,11 @@ subprotocol header `Sec-WebSocket-Protocol: bearer, <JWT>` (the server echoes
 proxy access log.
 
 **Client capabilities and device kind.** The URL also says what the client
-can read and what it is: `/ws?caps=own_voice,presence,games&kind=<desktop|mobile|browser>[&form=tablet]`,
+can read and what it is: `/ws?caps=own_voice,presence,games,push_away&kind=<desktop|mobile|browser>[&form=tablet]`,
 all optional. `caps` is ONE comma-separated list carrying every capability
 (`own_voice`: the account's call on another device, below; `presence`: idle
-and away, below; `games`: the in-call card games, below); names are trimmed
+and away, below; `games`: the in-call card games, below; `push_away`: the web
+app saying when its page cannot notify by itself, below); names are trimmed
 and compared case-insensitively, and an
 unknown name is ignored, so a client can announce what an older server has
 never heard of. A query parameter rather than a frame because an older server
@@ -599,6 +600,39 @@ user's status is broadcast at most once per 10 seconds when it drops (a
 return to online is never held); a held change is delivered by the server's
 sweep. The shapes are pinned by `frontend/src/tests/fixtures/userStatus.json`
 and `serverFeatures.json`, which both sides' tests parse.
+
+**Web Push: a page that cannot notify by itself.** A browser that turned Web
+Push on is pushed only while it is away (see *Web Push (the web app)*). A
+client that puts `push_away` in its `caps` list, and whose socket's
+`ServerFeatures` confirms it, may say when its page cannot show a notification
+by itself, and when it can again:
+
+```json
+{"type":"SetPushAway","payload":{"away":true}}
+{"type":"SetPushAway","payload":{"away":false}}
+{"type":"SetPushAway","payload":{"away":true,"carried":true}}
+```
+
+The third is the first word of a NEW socket from a page that has been away
+without a break since it last said so (a phone that reconnected in the
+background): the browser goes away as with the first, but the moment it
+really left is kept, so what arrived since is still named and the reconnect
+does not count as a return. The server honours `carried` only as a
+connection's first report; after any other it is a plain `away`.
+
+The web app sends them only where this account has turned Web Push on in that
+browser: `true` when it goes to the background on an iPhone, iPad or Android
+device, and as any page is closed (`pagehide`), and `false` back on screen;
+never from a desktop browser's hidden tab, which keeps running and notifies by
+itself, nor from the desktop or Android apps. From `true` that
+connection no longer keeps its browser present, so a message wakes it although
+the socket is still up (iOS freezes the page within seconds; the socket stays
+until the 75 s idle reaper takes it), and only what arrives after it is named
+to the woken worker. A connection starts present. The frame is never answered
+and never an `Error`; from a delivery socket it changes nothing. A server that
+does not confirm the capability is never sent it, and a client that never
+announces it is never told (an older client is pushed, as before, once its
+socket is gone). Shape pinned by `frontend/src/tests/fixtures/pushAway.json`.
 
 ### Games (Poker, Blackjack in a voice call)
 

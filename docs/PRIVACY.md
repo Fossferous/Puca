@@ -100,8 +100,12 @@ that limit — but cannot read content.
     standard requires. The push service also knows your browser — it issued
     its push address — and, for Apple and Google, usually the account signed
     into the phone or browser.
-  - **When.** Each wake is a timestamped request. At most one per browser
-    every 30 seconds: a burst is one wake.
+  - **When.** Each wake is a timestamped request. A burst is one wake: at
+    most one per browser every 30 seconds while it stays away. A phone that
+    opened Púca after a wake and left it again starts a new burst once your
+    server has heard it come back (its connection up, or reconnected), so it
+    can be woken sooner than that; the service then also learns, roughly,
+    that you looked in between.
   - **Who else that server wakes at the same time.** A channel message wakes
     every member who is away and turned this on, within a few seconds (each
     is delayed at random by up to 3 seconds, to blur this). A push service
@@ -109,7 +113,8 @@ that limit — but cannot read content.
     channel, and, from wakes that alternate between two people, that you
     are talking to each other. The delay weakens that guess; it does not
     remove it. If it matters to you, leave this setting off: notifications
-    while Púca is open never involve the push service.
+    while Púca is open never involve the push service (on a phone, Púca in
+    the background counts as closed for this).
   Your browser then asks your operator's server, directly, what arrived, and
   shows the sender's name ("alice sent you a message"), never the message.
   Turning the setting off, or signing out, removes the push address from the
