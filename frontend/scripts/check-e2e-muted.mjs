@@ -42,8 +42,9 @@
  *     output, so --mute-audio is not relied on for it;
  *   - a file that grants 'notifications' (the word anywhere beside a permission grant)
  *     must launch Chromium with NativeNotifications in EVERY --disable-features= switch
- *     it passes, because Chromium keeps only the last one: a native toast plays
- *     Windows' notification sound.
+ *     it passes, because Chromium keeps only the last one, and may launch no Firefox or
+ *     WebKit at all (nothing here switches their system notifications off): a native
+ *     toast plays Windows' notification sound.
  *
  * Parsed, not grepped: the flag has to be in THIS launch's options, followed through
  * the variables, spreads, .concat()s, ternaries (both sides) and option-building
@@ -123,6 +124,8 @@ const GROWERS = new Set(['push', 'unshift', 'sort', 'reverse']);
 const MUTATING_STATICS = new Set(['assign', 'defineProperty', 'defineProperties', 'set', 'deleteProperty', 'setPrototypeOf']);
 
 function problemsIn(fileName, text, relName) {
+    /** const { chromium } = require('@playwright/test'): the declarations that are imports. */
+    const requireDecls = new Set();
     const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true,
         /\.(c|m)?tsx?$/.test(fileName) ? ts.ScriptKind.TS : ts.ScriptKind.JS);
     const problems = [];
@@ -153,8 +156,7 @@ function problemsIn(fileName, text, relName) {
         };
         walk(root);
     };
-    /** A `var` named `name` anywhere in this function (or file) scope: it hoists over consts outside it. */
-    /** Each scope-wide walk once per scope and name: a big walk names `page` thousands of times. */
+    /** Each scope-wide walk once per scope and name (a long walk declares many names). */
     const memo = (fn) => {
         const byScope = new WeakMap();
         return (scope, name) => {
@@ -164,6 +166,7 @@ function problemsIn(fileName, text, relName) {
             return byName.get(name);
         };
     };
+    /** A `var` named `name` anywhere in this function (or file) scope: it hoists over consts outside it. */
     const hoistedVar = memo((scope, name) => {
         let found = false;
         walkOwnScope(scope, (n) => {
@@ -232,7 +235,9 @@ function problemsIn(fileName, text, relName) {
                             const isConst = (st.declarationList.flags & ts.NodeFlags.Const) !== 0;
                             return { init: d.initializer, followable: isConst && !!d.initializer, local: true };
                         }
-                        if (!ts.isIdentifier(d.name) && bindsName(d.name, name)) return { followable: false, local: true };
+                        if (!ts.isIdentifier(d.name) && bindsName(d.name, name)) {
+                            return requireDecls.has(d) ? { followable: false } : { followable: false, local: true };
+                        }
                     }
                 }
                 if (ts.isFunctionDeclaration(st) && st.name?.text === name) return { fn: st, followable: true, local: true };
@@ -474,6 +479,7 @@ function problemsIn(fileName, text, relName) {
         if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectBindingPattern(n.name)) {
             const from = moduleOf(n.initializer);
             if (from) {
+                requireDecls.add(n);
                 for (const el of n.name.elements) {
                     const key = (el.propertyName ?? el.name).getText(source);
                     if (ts.isIdentifier(el.name)) imported.set(el.name.text, { name: key, from });
@@ -493,9 +499,11 @@ function problemsIn(fileName, text, relName) {
         obj = unwrap(obj);
         if (ts.isIdentifier(obj)) {
             const imp = imported.get(obj.text);
-            if (imp) return PLAYWRIGHT_MODULES.has(imp.from) ? imp.name : null;
-            if (!ENGINES.has(obj.text)) return null; // only an engine's own name can be one
-            return declarationOf(obj).local ? null : obj.text;
+            if (imp && !PLAYWRIGHT_MODULES.has(imp.from)) return null;
+            if (!imp && !ENGINES.has(obj.text)) return null; // only an engine's own name can be one
+            // A parameter or variable of that name shadows the import: anyone's guess.
+            if (declarationOf(obj).local) return null;
+            return imp ? imp.name : obj.text;
         }
         if (ts.isPropertyAccessExpression(obj) && ts.isIdentifier(unwrap(obj.expression)) && namespaces.has(unwrap(obj.expression).text)) return obj.name.text;
         return null;
@@ -546,7 +554,7 @@ function problemsIn(fileName, text, relName) {
             const engine = engineOf(node.expression.expression);
             if (LAUNCH.has(method)) {
                 const opts = method === 'launchPersistentContext' ? node.arguments[1] : node.arguments[0];
-                const where = `${engine ?? '?'}.${method}()`;
+                const where = `${engine ?? node.expression.expression.getText(source)}.${method}()`;
                 if (!ENGINES.has(engine)) {
                     report(node, `${where}: cannot tell which browser this starts, so not how it is muted: call chromium/firefox/webkit.${method} by name`);
                 } else if (engine === 'chromium') {

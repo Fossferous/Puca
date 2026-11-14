@@ -1267,9 +1267,10 @@ Other things you'd find anyway:
   requests, and its alerts and security updates arrive only while the repository has them
   switched on in its settings, which is not something this tree can show. While they are
   on, GitHub's dependency graph covers the npm lockfiles too, but still not the Gradle
-  builds or the pinned actions, as far as the tree shows: it reads Gradle only through
-  dependency submission (a workflow, of which the tree has none, or GitHub's automatic
-  submission, which is another repository setting), and it raises no alert for an action
+  builds, the Swift package or the pinned actions, as far as the tree shows: it reads
+  Gradle only through dependency submission (a workflow, of which the tree has none, or
+  GitHub's automatic submission, which is another repository setting), Swift only from a
+  `Package.resolved`, which the tree does not have, and it raises no alert for an action
   pinned by SHA rather than by version. There is no Renovate.
 - **Bus factor 1.** One author, no second reviewer, and no outside audit has ever been
   performed. The source is now public, so one is at least *possible* — but

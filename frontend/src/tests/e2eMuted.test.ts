@@ -17,7 +17,9 @@ import { muteWebkit, silencePage } from '../../e2e/muted.mjs';
 
 const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SCRIPT = join(FRONTEND, 'scripts', 'check-e2e-muted.mjs');
-const check = (dir?: string) => spawnSync(process.execPath, dir ? [SCRIPT, dir] : [SCRIPT], { cwd: FRONTEND, encoding: 'utf8' });
+// A timeout of its own: vitest cannot cut a synchronous spawn short, so a check that slowed
+// down again would hold the worker for minutes before any test timeout could say so.
+const check = (dir?: string) => spawnSync(process.execPath, dir ? [SCRIPT, dir] : [SCRIPT], { cwd: FRONTEND, encoding: 'utf8', timeout: 50_000 });
 
 /** The check run over these files; which of them it named, and how often. */
 function flagged(files: Record<string, string>): { named: Record<string, number>; status: number | null; output: string } {
@@ -128,6 +130,8 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'local-engine.mjs': "const chromium = globalThis.firefoxLike;\nconst b = await chromium.launch({ args: ['--mute-audio'] });",
             'through-object.mjs': "import { firefox } from '@playwright/test';\nconst pw = { chromium: firefox };\nconst b = await pw.chromium.launch({ args: ['--mute-audio'] });",
             'nested-destructure.mjs': "const { chromium: { launch } } = await import('playwright');\nconst b = await launch();",
+            'shadowed-import.mjs': "import { chromium, firefox } from 'playwright';\nasync function launchWith(chromium) { return chromium.launch({ args: ['--mute-audio'] }); }\nawait launchWith(firefox);",
+            'shadowed-loop.mjs': "import { chromium, firefox } from 'playwright';\nfor (const chromium of [firefox]) await chromium.launch({ args: ['--mute-audio'] });",
             'webkit-stand-in.mjs': `${IMPORT_MUTE}async function go() { const muteWebkit = (b) => b; return muteWebkit(await webkit.launch()); }`,
             'webkit-other-helper.mjs': "import { muteWebkit } from './lib/muted.mjs';\nconst w = muteWebkit(await webkit.launch());",
             // Playwright Test, switched to a browser launchOptions' flag does not reach.
@@ -150,8 +154,8 @@ describe('scripts/check-e2e-muted.mjs', () => {
     }, 60_000);
 
     it('a walk the size of notes-walk.mjs, several times over, is checked in seconds', () => {
-        // Every page.x() asked for whole-file walks once (38 s for e2e/, 20 s of it one
-        // file), which would have outgrown the 60 s test above as the walks grew.
+        // Every page.x() once cost whole-file walks (38 s for e2e/, 20 s of it one file),
+        // which would have outgrown the 60 s test above as the walks grew.
         const calls = Array.from({ length: 12000 }, (_, i) => `await page.click('#b${i}');`).join('\n');
         const started = Date.now();
         const { status, output } = flagged({

@@ -14,7 +14,7 @@
  *     what they would have), while the element underneath stays muted. It is muted before
  *     play() or load(), when it is given a src, srcObject or autoplay (as a property or an
  *     attribute), as the parser puts it in the page or in a shadow root (autoplay in the
- *     page's own HTML), and on loadstart / play / playing. Unmuted from outside script
+ *     page's own HTML), and on loadstart / loadedmetadata / play / playing. Unmuted from outside script
  *     (its own controls), it reads unmuted, as it would, and is muted again underneath;
  *   - Web Audio: whatever is connected to a real AudioContext's destination goes through a
  *     gain at 0 instead (an OfflineAudioContext renders to a buffer, not a speaker, so it
