@@ -18,7 +18,7 @@
     "@decky/ui": "4.12.1",
     "@rollup/plugin-typescript": "11.1.6",
     "@types/react": "19.2.18",
-    "rollup": "4.53.3",
+    "rollup": "4.68.3",
     "tslib": "2.8.1",
     "typescript": "5.9.3",
     "vitest": "4.0.16"
