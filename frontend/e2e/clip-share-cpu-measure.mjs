@@ -14,7 +14,7 @@
 // native arm, the agent's own `--clip-capture` host, for WINDOW_S seconds
 // after a warm-up. The CPU of each process tree is read from Windows itself
 // (Win32_Process kernel + user time, as % of ONE core), dwm.exe separately
-// (reported, not counted in either: it moves between runs), and the GPU engines each tree
+// (reported, in neither tree's figure), and the GPU engines each tree
 // used (\GPU Engine counters). Nothing is saved: frames are encoded and
 // dropped, the clip ring is the real replay worker's (sealed, in memory),
 // and no window is opened anywhere.

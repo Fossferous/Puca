@@ -185,14 +185,17 @@ quoted here came just before that check, and its own lines show every
 encoder sending 28-30 frames a second over the window and the agent writing
 about 30 a second), and the clean share cases saw no keyframe requests.
 
-The clip buffer's figures are lower bounds: no arm here mixes audio (no
+At this rate the clip buffer's figures are lower bounds: no arm here mixes audio (no
 WASAPI loopback, no Web Audio, no AAC), and the agent's frames reach the page
 as one stream relayed by the script, where the app sends a Tauri Channel
 message per frame (about 1 ms of the page's main thread per message, measured
 under "The desktop-audio wire" below: ~3% of a core at 30 frames a second).
-The agent's figure is above the 13.5-13.7% "Per-frame cost, profiled" (below)
-gives; that was one screen at one time, this a busy machine and whatever the
-primary screen showed. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
+The agent's figure (16.0-18.8%) is above the 13.5-13.7% "Per-frame cost,
+profiled" (below) gives, which was measured with every slot a new picture,
+the costliest content there is, so the screen cannot explain it: the load on
+this machine, the method (the whole process here, sampled by Windows) or a
+change in the agent since may; not measured, and worth a look before the
+GPU-conversion work below. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
 1440p monitor (the owner's setting); the default 1080p30 records 24 fps there
 (0.8 of the frames; not measured).
 
@@ -200,9 +203,10 @@ primary screen showed. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
 the interleaved `pan` run it read 51-59% of a core in every case without the
 agent and 68-82% in every case with it (means +14 and +22 points by round),
 but a later, shorter run of the same tool (10 s windows) read 31.4% and 35.6%
-for the native arm and the agent alone, 50.8% for the agent beside a one-layer
-share, and 33.3% for the hand arm, and dwm.exe's level moves between runs on
-this machine (the `screen` run's two idle readings were 51.3% and 66.4%).
+for the native arm and the agent alone, 50.8% for the native arm beside a
+one-layer share, and 33.3% for the hand arm, and dwm.exe's level moves even between
+rounds of one run (the `screen` run's two idle readings were 51.3% and
+66.4%).
 Whether the agent's desktop duplication costs the compositor anything, these
 runs do not settle; a controlled screen (the same content, with and without
 the agent) would.
@@ -249,7 +253,9 @@ What that says:
   owner's call and nothing about it is built. The change with no trade-off is
   converting on the GPU in the agent ("Per-frame cost, profiled" below: the
   readback, the CPU BGRA->NV12 convert and the system-memory sample are its
-  capture loop's cost), for every auto-armed buffer, sharing or not.
+  capture loop's cost), for every auto-armed buffer, sharing or not; it
+  takes the agent's CPU down, not whatever the duplication may cost dwm.exe
+  (open, above).
 
 **Known: the first capture of a screen sets its size and frame rate for
 both.** Because the device is shared: in Edge 157, a capture asking
