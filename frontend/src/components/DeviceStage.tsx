@@ -3925,12 +3925,18 @@ export function DeviceStage() {
                 {edgeHops.map((hop: EdgeHop) => {
                     const label = session.monitors.find(m => m.id === hop.neighbourId)?.label
                         ?? `Screen ${hop.neighbourId}`;
+                    // On the touch layout the chip is the arrow alone (the
+                    // name filled 42% of a phone's width over the picture,
+                    // DeviceStage.css says more); the name stays its
+                    // accessible name, and its title for a long name the
+                    // desktop pill cuts short.
                     return (
                         <button
                             key={hop.dir}
                             type="button"
-                            className={`device-stage-hop device-stage-hop-${hop.dir}`}
+                            className={`device-stage-hop device-stage-hop-${hop.dir}${isMobile ? ' device-stage-hop-compact' : ''}`}
                             aria-label={`Show ${label}`}
+                            title={`Show ${label}`}
                             // THE TAP IS FOR THE CHIP, NOT THE REMOTE MACHINE.
                             // This sits inside the input surface, whose own
                             // pointer handlers turn a single contact into a

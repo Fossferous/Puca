@@ -404,6 +404,58 @@
    banner is the more urgent message, so the chip steps up out of its way. */
 .device-stage-paused ~ .device-stage-hop-down { bottom: 60px; }
 
+/* ON A TOUCH SCREEN the chip is a small round arrow (DeviceStage adds
+   `-compact` on the stage's touch layout). The owner, 2026-11-14, on a
+   390 pt iPhone: "This button is too big". The named pill grew to its 42%
+   cap there, about 164x47 of opaque black over the very picture it sits on,
+   because a monitor name like "Main display (2560x1440)" fills any width.
+   On a phone the arrow alone says enough: the screen it goes to lies the way
+   it points. The name stays the button's accessible name (aria-label) and
+   its title.
+   The TARGET is unchanged: the button stays a 44px square (the coarse-pointer
+   floor, docs/DESIGN_PHILOSOPHY.md) at the same place, transparent; only the
+   32px disc inside it is painted. Square, not round: a border-radius clips
+   hit testing, and a round button would give up its corners.
+   The disc is 55% black, so the picture shows through it; the white chevron
+   on it is at least 4.7:1 even over a white picture (55% black over white is
+   #737373), above the 3:1 an icon needs. */
+.device-stage-hop.device-stage-hop-compact {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    max-width: none;
+    padding: 0;
+    justify-content: center;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.device-stage-hop-compact .device-stage-hop-label { display: none; }
+
+.device-stage-hop-compact .device-stage-hop-icon {
+    box-sizing: border-box;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.device-stage-hop-compact .device-stage-hop-icon svg { width: 18px; height: 18px; }
+
+/* The press shows on the disc (the tap highlight would flash the whole
+   transparent square), and so does keyboard focus. */
+.device-stage-hop-compact:active .device-stage-hop-icon { background: rgba(0, 0, 0, 0.8); }
+.device-stage-hop-compact:focus-visible { outline: none; }
+.device-stage-hop-compact:focus-visible .device-stage-hop-icon {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 2px;
+}
+
 /* A game has taken the host's pointer: offer Game mode. Interactive (its
    button), unlike the click-to-capture hint, and parked above it. */
 .device-stage-capture-hint {
