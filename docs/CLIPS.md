@@ -179,21 +179,33 @@ share and hand-arm figures carry no desktop capture; in the app each adds a
 desktop capture. The `screen` rows captured the first screen Chromium lists,
 here a 1440x2560 portrait monitor delivered at 608x1080: a 1080p share of the
 2560x1440 primary delivers three times the pixels, so its capture likely
-costs more than ~13-15%. Every case checks that each track, encoder and ring
+costs more than ~13-14%. Every case checks that each track, encoder and ring
 it names moved frames in the window (or it fails as INVALID; the `pan` run
 quoted here came just before that check, and its own lines show every
 encoder sending 28-30 frames a second over the window and the agent writing
 about 30 a second), and the clean share cases saw no keyframe requests.
 
+The clip buffer's figures are lower bounds: no arm here mixes audio (no
+WASAPI loopback, no Web Audio, no AAC), and the agent's frames reach the page
+as one stream relayed by the script, where the app sends a Tauri Channel
+message per frame (about 1 ms of the page's main thread per message, measured
+under "The desktop-audio wire" below: ~3% of a core at 30 frames a second).
+The agent's figure is above the 13.5-13.7% "Per-frame cost, profiled" (below)
+gives; that was one screen at one time, this a busy machine and whatever the
+primary screen showed. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
+1440p monitor (the owner's setting); the default 1080p30 records 24 fps there
+(0.8 of the frames; not measured).
+
 **And the compositor: open.** `dwm.exe` is not in any of these figures. In
 the interleaved `pan` run it read 51-59% of a core in every case without the
 agent and 68-82% in every case with it (means +14 and +22 points by round),
-but a later, shorter run of the same tool (`manual`, `agentonly`, `native`,
-`sfu1+native`, 10 s windows) read 31-36% with the agent and 33% without, and dwm.exe drifts with whatever is on
-screen (the `screen` run's two idle readings were 51.3% and 66.4%). Whether
-the agent's desktop duplication costs the compositor anything, these runs do
-not settle; a controlled screen (the same content, with and without the
-agent) would.
+but a later, shorter run of the same tool (10 s windows) read 31.4% and 35.6%
+for the native arm and the agent alone, 50.8% for the agent beside a one-layer
+share, and 33.3% for the hand arm, and dwm.exe's level moves between runs on
+this machine (the `screen` run's two idle readings were 51.3% and 66.4%).
+Whether the agent's desktop duplication costs the compositor anything, these
+runs do not settle; a controlled screen (the same content, with and without
+the agent) would.
 
 What that says:
 
@@ -226,8 +238,10 @@ What that says:
   browser: `native` minus `manual` is ~4-5% of a core per round (those two
   encode different pictures), less the ~1-2% a second track on the share's
   capture costs, plus the Tauri channel's ~3% the native figure leaves out:
-  ~5-7%, an estimate, never a measured switch, and more only if the
-  duplication turns out to cost dwm.exe (open, above). It changes what is recorded (the shared
+  ~5-7%, an estimate, never a measured switch. It could be more: `manual`
+  includes a canvas capture of its own that a switched buffer would not pay
+  (not measured), and the duplication may cost dwm.exe (open, above); and at
+  the default preset (24 fps in the agent) less. It changes what is recorded (the shared
   surface at the share's size, not always the whole monitor at its own), and
   the ring cannot carry a clip across a change of encoder (`selectWindow`
   keeps one decoder configuration), so for up to the buffer's length after
