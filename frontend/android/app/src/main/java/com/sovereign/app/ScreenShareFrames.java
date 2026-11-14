@@ -117,16 +117,23 @@ final class ScreenShareFrames {
      * Re-sizes the capture in place and answers the new reader. The ORDER is
      * the point: the new surface goes in BEFORE the display is re-sized.
      *
-     * <p>From Android 14 the system draws the mirrored screen into the
+     * <p>Since Android 12L the system draws the mirrored screen into the
      * capture with a scale and an offset it works out from the size of the
-     * surface it finds when the virtual display changes, and the re-size is
-     * what tells it the display changed. Swapping one surface for another
-     * tells it nothing (VirtualDisplayAdapter sends no change for it). So
-     * with the re-size first, the system could read the OLD reader's size
-     * before the new one arrived, and every frame after that was drawn for
-     * the old shape: turned sideways, the screen a strip in one corner of a
-     * black picture, for as long as the share lasted or until the next turn.
-     * It raced, so it came and went (3 turns in 16 on an emulator).
+     * surface it finds when the virtual display changes (ContentRecorder),
+     * and the re-size is what tells it the display changed. Swapping one
+     * surface for another tells it nothing (VirtualDisplayAdapter sends no
+     * change for it). So with the re-size first, the system could read the
+     * OLD reader's size before the new one arrived, and every frame after
+     * that was drawn for the old shape: turned sideways, the screen a strip
+     * in one corner of a black picture, until something changed the display
+     * again (the next turn). It raced, so it came and went: on Android 16
+     * (an emulator) 3 turns in 16 before, none in 40 after.
+     *
+     * <p>Not tried on 12L or 13, where the system reads the surface again
+     * only when the captured screen's bounds or orientation changed, never
+     * for a new surface size: this order is what lets that read see the new
+     * surface, but a read the turn itself set off before the re-size is not
+     * repeated there.
      */
     static <R> R swapReader(Resizable<R> target, R old, int width, int height) {
         R fresh = target.newReader(width, height);

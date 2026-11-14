@@ -16,7 +16,7 @@
 //     "decodes" to is noise; that is why framesDecoded alone proves nothing);
 //   - both panels say Encrypted;
 //   - the phone turned sideways: the picture turns with it (wider than tall)
-//     and is still the phone's screen, and back; TURNS times (default 3);
+//     and is still the phone's screen, and back; TURNS times (default 5);
 //   - the app in the BACKGROUND keeps sharing (the launcher appears on the
 //     viewer's side, frames still rising);
 //   - "Stop sharing" in the notification ends the share on both sides, the
@@ -48,7 +48,7 @@
 // throwaway LiveKit's) add a check that LiveKit itself sees the phone publish
 // a screen share.
 //
-// Usage: SERIAL=emulator-5584 API=http://127.0.0.1:3010 APP=http://127.0.0.1:5196 [SFU=1] [TURNS=3] [OUT=dir] node e2e/android-share-live.mjs
+// Usage: SERIAL=emulator-5584 API=http://127.0.0.1:3010 APP=http://127.0.0.1:5196 [SFU=1] [TURNS=5] [OUT=dir] node e2e/android-share-live.mjs
 import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -63,6 +63,12 @@ const OUT = process.env.OUT || '';
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const PKG = 'com.sovereign.app';
 const CDP_PORT = Number(process.env.CDP_PORT || 9347);
+// How many times the phone is turned sideways and back (each way checked).
+const TURNS = process.env.TURNS === undefined || process.env.TURNS === '' ? 5 : Number(process.env.TURNS);
+if (!Number.isInteger(TURNS) || TURNS < 1) {
+    console.error('TURNS must be a whole number, 1 or more.');
+    process.exit(2);
+}
 const PASS = 'Password123!pw';
 const stamp = Date.now().toString(36);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -554,12 +560,11 @@ try {
     await sleep(1500);
     sh('settings put system accelerometer_rotation 0');
     rotated = true;
-    // TURNS times (default 3), each way checked for the phone's own screen.
+    // TURNS times (default 5), each way checked for the phone's own screen.
     // A turn used to leave viewers, now and then, on frames drawn for the
     // OLD shape (a strip in a corner of black, ScreenShareFrames.swapReader):
-    // 3 turns in 16 on an emulator, so one turn let a broken APK pass about
-    // four runs in five.
-    const TURNS = Math.max(1, Number(process.env.TURNS) || 3);
+    // 3 turns in 16 on an emulator. One checked turn let that APK pass about
+    // four runs in five; ten (the default) about one in eight.
     const tag = SFU ? 'sfu' : 'mesh';
     for (let turn = 1; turn <= TURNS; turn++) {
         const of = TURNS > 1 ? ` (turn ${turn} of ${TURNS})` : '';
