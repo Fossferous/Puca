@@ -1294,8 +1294,11 @@ struct OverwriteGate {
 /// View away and leaves its own writer without the channel ([`settle_save_window`]) lets them
 /// on for [`OVERWRITE_SAVE_GRACE`], if the channel is still there and they still hold Manage
 /// Channels. Nothing else opens it (a read, a write that takes no View away, a pass inside the
-/// window), and it closes as soon as they can see the channel again, so a hide by anyone else
-/// stays a hide. In memory, per process: a restart in the middle of a save forgets it.
+/// window), and their next request on these routes that finds them able to see the channel
+/// closes it. What it does not see: someone else giving them the channel back and hiding it
+/// again inside those 60 s, with no request of theirs between (and a hide by someone else that
+/// lands between a write of theirs and its check). In memory, per process: a restart in the
+/// middle of a save forgets it.
 async fn require_manage_overwrites(
     state: &AppState,
     channel_id: i64,

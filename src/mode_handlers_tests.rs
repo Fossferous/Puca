@@ -3662,6 +3662,25 @@ mod db {
             .await
             .unwrap();
 
+        // The hiding write a PUT this time: their role's allow of View replaced by a deny of
+        // something else (the row the write replaced is what says it took View away).
+        let den = channel(&pool, &f.sid, "den", 0).await;
+        deny_everyone_view(&pool, &f.sid, den).await;
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+            .bind(den as i64)
+            .bind(managers)
+            .bind(P::VIEW_CHANNEL.bits() as i64)
+            .execute(&pool)
+            .await
+            .expect("allow");
+        let put_hid = put_as(f.manager, den, managers, P::empty(), P::SPEAK).await;
+        let den_window = opened(den);
+        let den_everyone = inherit(den, everyone).await;
+        let den_public = crate::permissions::get_user_channels_permissions(&pool, &f.sid, f.plain, &[den as i64])
+            .await
+            .unwrap()[&(den as i64)]
+            .has(P::VIEW_CHANNEL);
+
         // CONTROL: a window of their own, kept open by a pass inside it that leaves them hidden,
         // then closed by giving themselves the channel back; then the owner hides it from them.
         let lounge = channel(&pool, &f.sid, "lounge", 0).await;
@@ -3708,6 +3727,10 @@ mod db {
         assert_eq!(taken_back, StatusCode::NOT_FOUND, "control: a hide by someone else is not theirs to undo");
         assert_eq!(window_after_reading, None, "control: a read and a write that leaves them the channel open nothing");
         assert_eq!(town_rows, vec![(0, P::VIEW_CHANNEL.bits() as i64)], "control: and the owner's row stays");
+        assert_eq!(put_hid, StatusCode::OK);
+        assert!(den_window.is_some(), "a PUT that takes their View away opens the window too");
+        assert_eq!(den_everyone, StatusCode::NO_CONTENT, "and the save's next row goes through");
+        assert!(den_public, "so that channel is public too");
         assert_eq!(hid_self, StatusCode::NO_CONTENT);
         assert!(lounge_window.is_some(), "their own hide opens a window");
         assert_eq!(still_hidden, StatusCode::OK, "a write inside it goes through");
