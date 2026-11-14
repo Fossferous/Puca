@@ -48,6 +48,9 @@ picker); the **auto** arm uses the native crates `puca-capture`/`-encode`
 the agent sidecar — with WASAPI loopback for audio (`clip_desktop_audio.rs`)
 and a keyframe forced every 2 s (the agent's own use of those crates keeps
 its infinite GOP; the clip path does not). See "Arm automatically" below.
+A hand-armed buffer and a screen share of the same screen are already ONE
+capture inside the browser engine; the auto arm is a capture of its own
+("Sharing while armed" below).
 
 ## How the buffer works (`frontend/src/api/clips/`)
 
@@ -135,6 +138,140 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   of the fix) and by `e2e/clip-av-emulation.mjs`'s per-run end check.
 - **Discard / disarm / leave / channel switch / suspend / lock / quit** zero
   the buffers and drop the key (table below).
+
+## Sharing while armed: what it costs, and why nothing was merged
+
+"Can we integrate clipping and streaming so it doesn't use double the CPU"
+(the owner, 2026-11-14). Measured first, with
+`frontend/e2e/clip-share-cpu-measure.mjs` (its header explains every case
+and what it leaves out). Headless Edge 157, the WebView2 engine, on the
+owner's desktop (Ryzen 7 7800X3D, RTX 4080 SUPER; the browser on the RTX,
+the default adapter, where the app's WebView2 may be pinned to an integrated
+GPU), each figure the % of ONE core a case's processes spent above that
+round's floor, two interleaved rounds, a machine also running other work. The
+floor is `idle` for the `screen` rows and, for the `pan` rows, the mean of
+`idle` and `agentonly`'s browser (both only draw the picture: one reading
+alone moved by ~5 points); a native case adds the agent's own CPU:
+
+```
+AGENT=<puca-agent.exe> SOURCE=pan WINDOW_S=20 WARM_S=6 \
+  CASES=idle,sfu,sfu1,mesh1,manual,agentonly,native,sfu+native,sfu1+native,mesh1+native,<the same again> \
+  node e2e/clip-share-cpu-measure.mjs
+SOURCE=screen WINDOW_S=20 WARM_S=6 \
+  CASES=idle,capture,capture+capture2,capture+captureclone,<the same again> \
+  node e2e/clip-share-cpu-measure.mjs
+```
+
+| case (SOURCE) | what it is | above the floor |
+|---|---|---|
+| `capture` (screen) | one desktop capture, drained: 608x1080 at 29.2-29.3 fps | 13.9, 12.9 |
+| `capture+capture2` (screen) | and a SECOND getDisplayMedia of the same screen (both tracks 29.2 fps) | 14.7, 15.0 |
+| `capture+captureclone` (screen) | and a clone of the first instead (both 29.2-29.3 fps) | 14.5, 14.4 |
+| `sfu1` (pan) | one H.264 layer, hardware, AES-GCM sealing | 9.4, 12.9 |
+| `sfu` (pan) | H.264 simulcast f/h/q (an overestimate: see the script) | 27.5, 27.2 |
+| `mesh1` (pan) | VP8 to one viewer, software | 46.8, 49.2 |
+| `native` | Arm automatically: the agent (the real primary monitor, 2560x1440, 30 fps, whatever SOURCE says) and the ring | 17.2, 20.0 (the agent 17.3, 18.6) |
+| `sfu1+native` / `sfu+native` / `mesh1+native` (pan) | both at once | 28.6, 33.2 / 48.6, 49.2 / 67.9, 75.5 |
+| `manual` (pan) | armed by hand: WebCodecs H.264 and the ring, on a canvas capture | 12.2, 16.1 |
+
+`pan` shares a canvas (e2e/encode-cost.mjs's fast-motion picture), so its
+share and hand-arm figures carry no desktop capture; in the app each adds a
+desktop capture. The `screen` rows captured the first screen Chromium lists,
+here a 1440x2560 portrait monitor delivered at 608x1080: a 1080p share of the
+2560x1440 primary delivers three times the pixels, so its capture likely
+costs more than ~13-14%. Every case checks that each track, encoder and ring
+it names moved frames in the window (or it fails as INVALID; the `pan` run
+quoted here came just before that check, and its own lines show every
+encoder sending 28-30 frames a second over the window and the agent writing
+about 30 a second), and the clean share cases saw no keyframe requests.
+
+For what they leave out, the clip buffer's figures are lower bounds: no arm here mixes audio (no
+WASAPI loopback, no Web Audio, no AAC), and the agent's frames reach the page
+as one stream relayed by the script, where the app sends a Tauri Channel
+message per frame (about 1 ms of the page's main thread per message, measured
+under "The desktop-audio wire" below: ~3% of a core at 30 frames a second).
+The agent's own figure here (16.0-18.8%, in the quoted run and the later
+one below) is above the 13.5-13.7% for the whole host process that "Per-frame
+cost, profiled" (below) gives, which was measured with every slot a new
+picture, the costliest content, so what the screen showed does not explain
+it. Why is not known (the profile's method is not recorded in full, this
+machine was loaded differently, and the agent's capture code has changed
+since); worth settling before the GPU-conversion work below. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
+1440p monitor (the owner's setting); the default 1080p30 records 24 fps there
+(0.8 of the frames; not measured).
+
+**And the compositor: open.** `dwm.exe` is not in any of these figures. In
+the interleaved `pan` run it read 51-59% of a core in every case without the
+agent and 68-82% in every case with it (means +14 and +22 points by round),
+but a later, shorter run of the same tool (10 s windows) read 31.4% and 35.6%
+for the native arm and the agent alone, 50.8% for the native arm beside a
+one-layer share, and 33.3% for the hand arm, and dwm.exe's level moves even between
+rounds of one run (the `screen` run's two idle readings were 51.3% and
+66.4%).
+Whether the agent's desktop duplication costs the compositor anything, these
+runs do not settle; a controlled screen (the same content, with and without
+the agent) would.
+
+What that says:
+
+- **The costs add.** The agent's own CPU was 16.5-18.8% of a core in every
+  native case of the quoted run, beside a share or not (16.0-18.4% in the
+  later one; its threads by start time: the first, its capture loop, 12-15%;
+  the next 3-4%), and each combination cost about its parts' sum, 0-6 points
+  more (always more, ~3 on average).
+- **"Double" is about right on an SFU call.** A share there is its desktop
+  capture (~13-14% here, likely more for the primary) plus its encode (one
+  hardware layer ~9-13%, simulcast more): ~22-27%. Arm automatically adds
+  ~17-20%. On these figures alone (the capture from the `screen` run, the
+  rest from `pan`, so not one measurement) that is ~1.6-1.9x the share with
+  one layer, ~1.5x with the simulcast overestimate. On a mesh
+  call the share's software VP8 dominates (~47-49% per viewer at 720p, once
+  per viewer) and
+  Clips cannot remove it: it is the share's encoder.
+- **A buffer armed by hand and a share of the same screen are already one
+  capture.** Chromium runs one capturer for every capture of one screen (its
+  video capture manager shares the device): a second getDisplayMedia of the
+  screen, both tracks delivering 29 fps, cost ~1-2% above the first, the same
+  as a clone. A
+  branch that moved the buffer onto a clone of the share's track
+  (2026-11-14) therefore bought nothing and was reverted; it also tied the
+  buffer to the share's capture, so Chromium's own "Stop sharing" on the
+  share's bar (shown by default: `hideOsCaptureBar`) would have wiped it.
+- **Arm automatically is the second capture**, in the agent with DXGI and the
+  hardware MFT. Moving it onto the share's capture while sharing would save
+  the agent's 17-19%, while the buffer would still encode and seal in the
+  browser: `native` minus `manual` is ~4-5% of a core per round (those two
+  encode different pictures), less the ~1-2% a second track on the share's
+  capture costs, plus the Tauri channel's ~3% the native figure leaves out:
+  ~5-7%, an estimate, never a measured switch. It could be more: `manual`
+  includes a canvas capture of its own that a switched buffer would not pay
+  (not measured), and the duplication may cost dwm.exe (open, above); and at
+  the default preset (24 fps in the agent) less. It changes what is recorded (the shared
+  surface at the share's size, not always the whole monitor at its own), and
+  the ring cannot carry a clip across a change of encoder (`selectWindow`
+  keeps one decoder configuration), so for up to the buffer's length after
+  the share starts a clip would reach back only to that moment. That is the
+  owner's call and nothing about it is built. The change with no trade-off is
+  converting on the GPU in the agent ("Per-frame cost, profiled" below: the
+  readback, the CPU BGRA->NV12 convert and the system-memory sample are its
+  capture loop's cost), for every auto-armed buffer, sharing or not; it
+  takes the agent's CPU down, not whatever the duplication may cost dwm.exe
+  (open, above).
+
+**Known: the first capture of a screen sets its size and frame rate for
+both.** Because the device is shared: in Edge 157, a capture asking
+1280x720 at 15 fps started first, then one asking 1920x1080 at 30 fps, got
+720p at 15 fps (the other order is fine: the second is scaled down). So a
+buffer armed by hand at a low preset caps a share of the same screen started
+after it, and a share started first caps a buffer armed after it. To see it:
+two getDisplayMedia calls for one screen in Edge, the first with
+`{ width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }`,
+then read the second's VideoFrames, or `SOURCE=screen
+CASES=capturelow+capture2,capture+capturelow` with the measuring script
+(here: 404x720 at 14.7 fps for a second capture that asked for 1920x1080 at
+30, and 608x1080 at 29.2 then 406x720 at 15.1 the other way round; this desk's
+first-listed screen is a 1440x2560 portrait one). Not fixed yet; Arm
+automatically is not affected (its capture is the agent's).
 
 ## What is guaranteed (mechanically checked)
 
@@ -485,8 +622,9 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - `Uint8Array.fill(0)` is best effort: V8 may already have copied a small
   buffer. The ring is stored as few large per-GOP buffers for that reason.
 - The WebView2 "… is sharing your screen" bar is hidden while armed **in the
-  getDisplayMedia (manual/prompt) path**, exactly as it is for screen share
-  (`api/captureBar.ts`). For a **native (`auto`)** arm there was never a bar
+  getDisplayMedia (manual/prompt) path** only if the hide-the-bar setting is
+  on (`hideOsCaptureBar`, off by default since 0.8.130), exactly as for
+  screen share (`api/captureBar.ts`). For a **native (`auto`)** arm there was never a bar
   to hide — DXGI Desktop Duplication has no OS-drawn indicator of any kind,
   the same reason it's what the unattended remote-desktop agent uses. That is
   a UX choice either way, not a protection: it only ever informed the
