@@ -985,10 +985,11 @@
     cursor: inherit;
 }
 
-/* Its own hover, so mobile.css's touch rule (button:hover { background-color:
-   inherit }, which outranks a bare class) cannot reach it: a tap on a phone
-   leaves the button hovered, and inherited it was the self-view's opaque
-   background, laid over the camera picture while the menu was open. */
+/* Its own hover, so mobile.css's touch rule (a hovered button's background-color:
+   inherit, which outranked a bare class until it became :where() on 2026-11-14)
+   cannot reach it: a tap on a phone leaves the button hovered, and inherited it
+   was the self-view's opaque background, laid over the camera picture while the
+   menu was open. */
 .pip-open-menu:hover {
     background: transparent;
 }

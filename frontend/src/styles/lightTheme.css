@@ -142,6 +142,10 @@
 [data-theme="light"] .user-profile-bar .user-status.away,
 [data-theme="light"] .active-status.idle,
 [data-theme="light"] .active-status.away { color: #8f4500; }
+/* A device share that is live: --success, which no theme defines, fell back to #43b581 (2.32:1). */
+[data-theme="light"] .share-row-status-accepted-live { color: var(--text-positive); }
+/* The encryption badge's focus ring was white on the pale voice panel. */
+[data-theme="light"] .voice-e2ee:focus-visible { box-shadow: 0 0 0 2px var(--brand-primary); }
 /* A saved file's note was at 0.75. */
 [data-theme="light"] .attachment-saved { opacity: 1; }
 
@@ -154,8 +158,8 @@
    on). A .close-btn's hover is a red fill (ServerSettingsModal.css) under the theme's dark words
    or FriendsPanel's pink (1.92 and 2.84:1 on Light's deeper red); Settings' danger buttons go
    white on a faint pink (1.21:1); a modal's X, Settings' secondary buttons and the microphone
-   help's Dismiss go white on Light's pale greys (1.09 to 1.44:1); a link goes --brand-primary
-   (index.css, 3.5 to 4.07:1). */
+   help's Dismiss go white on Light's pale greys (1.09 to 1.44:1). (A link's is --link-hover,
+   theme.css.) */
 [data-theme="light"] .close-btn:hover { color: #fff; }
 [data-theme="light"] .danger-btn:hover { color: var(--color-danger); }
 [data-theme="light"] .forward-modal-close:hover,
@@ -165,7 +169,6 @@
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { color: var(--text-normal); }
 [data-theme="light"] .permission-dismiss-btn:hover,
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
-[data-theme="light"] a:hover { color: var(--brand-text); }
 [data-theme="light"] .search-result-item strong { color: var(--brand-text); }
 /* Dark words on the pale pink a hover gives these: white on it was 2.32:1. */
 [data-theme="light"] .emoji-delete-btn:hover,

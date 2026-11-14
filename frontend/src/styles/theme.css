@@ -98,6 +98,8 @@
     --brand-active: #3c45a5;
     /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
     --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
+    /* A link under the pointer (index.css). */
+    --link-hover: var(--brand-primary);
 
     /* Status colors */
     --status-online: #23a55a;
@@ -290,6 +292,8 @@
     --text-muted: #5a5c64;
     /* 5.16:1 on a row a hover greys twice over; the 90% mix was 4.47 there. */
     --brand-text: color-mix(in srgb, var(--brand-hover) 80%, #000);
+    /* --brand-primary was 3.5 to 4.07:1 under a link on Light's surfaces. */
+    --link-hover: var(--brand-text);
     /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
     --text-faint: #62656e;
     --faint-fill: #62656e;

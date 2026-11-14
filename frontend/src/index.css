@@ -63,7 +63,7 @@ a {
 }
 
 a:hover {
-  color: var(--brand-primary);
+  color: var(--link-hover);
   text-decoration: underline;
 }
 

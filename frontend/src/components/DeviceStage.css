@@ -497,6 +497,7 @@
 .dsb-item-icon { display: inline-flex; width: 18px; flex: 0 0 18px; justify-content: center; }
 .dsb-item-label { flex: 1 1 auto; }
 .dsb-item-hint { color: #b5bac1; font-size: 12px; } /* --text-muted was 4.33:1 under the pointer */
+[data-contrast="high"] .dsb-item-hint { color: var(--text-muted, #d7dbe2); }
 /* A ticked row: the box marks it, so checkboxes and radios read the same. */
 .dsb-item[aria-checked] .dsb-item-icon::before {
     content: '';

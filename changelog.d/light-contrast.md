@@ -20,4 +20,6 @@
   In button meets it on the Dark, AMOLED and Light themes (the colour themes draw it in their own
   colour, as before). A Notes dialog's main button and the drawing's Save inside Púca no longer turn
   blue on blue while Notes is open, nor the invite page's "Open in the Púca app" under the pointer.
-  Arrives as an ordinary update.
+  On a phone, a button you tap keeps its own colour: many filled buttons (the card table's Sit, a
+  mode notice's Join, Approve, Allow, Send) lost their fill after a tap, white words on white on
+  Light. Arrives as an ordinary update.

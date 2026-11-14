@@ -452,8 +452,10 @@
     /* Disable hover effects on touch */
     @media (hover: none) {
 
-        button:hover,
-        .btn:hover {
+        /* At no weight (:where): it still undoes an element-wide hover, and no longer beats a
+           button's own one-class fill, which a tap's sticky :hover emptied (white words on the
+           page behind them: 1:1 on Light for the card table's Sit, the mode notice's Join). */
+        :where(button:hover, .btn:hover) {
             background-color: inherit;
         }
     }
