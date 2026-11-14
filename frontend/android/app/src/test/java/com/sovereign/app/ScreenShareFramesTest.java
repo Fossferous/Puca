@@ -175,6 +175,42 @@ public class ScreenShareFramesTest {
         assertTrue("unknown: end it, to be safe", ScreenShareFrames.taskRemovalEndsShare(null, main));
     }
 
+    /** Writes down what a re-size did, in order. */
+    private static final class Recorder implements ScreenShareFrames.Resizable<String> {
+        final java.util.List<String> steps = new java.util.ArrayList<>();
+        @Override public String newReader(int w, int h) { steps.add("new " + w + "x" + h); return "reader " + w + "x" + h; }
+        @Override public void setSurface(String r) { steps.add("surface " + r); }
+        @Override public void resizeDisplay(int w, int h) { steps.add("resize " + w + "x" + h); }
+        @Override public void close(String r) { steps.add("close " + r); }
+    }
+
+    @Test
+    public void turnedSidewaysTheNewSurfaceGoesInBeforeTheDisplayIsResized() {
+        // The emulator's sideways frames drawn for the OLD shape (a strip in a
+        // corner of black, 3 turns in 16): the re-size made the system read the
+        // surface's size before the new surface had arrived.
+        Recorder r = new Recorder();
+        String now = ScreenShareFrames.swapReader(r, "reader 864x1920", 1920, 864);
+        assertEquals("reader 1920x864", now);
+        assertEquals(java.util.Arrays.asList(
+                "new 1920x864",
+                "surface reader 1920x864",
+                "resize 1920x864",
+                "close reader 864x1920"), r.steps);
+    }
+
+    @Test
+    public void theOldReaderIsClosedOnlyOnceTheDisplayHasLeftIt() {
+        Recorder r = new Recorder();
+        ScreenShareFrames.swapReader(r, "reader 576x1280", 1280, 576);
+        assertTrue(r.steps.indexOf("close reader 576x1280") > r.steps.indexOf("surface reader 1280x576"));
+        assertTrue(r.steps.indexOf("close reader 576x1280") > r.steps.indexOf("resize 1280x576"));
+        // No reader yet: nothing to close.
+        Recorder first = new Recorder();
+        ScreenShareFrames.swapReader(first, null, 1280, 576);
+        assertFalse(first.steps.stream().anyMatch(s -> s.startsWith("close")));
+    }
+
     @Test
     public void moreReleasesThanFramesNeverOpenTheGateWider() {
         ScreenShareFrames.Gate g = new ScreenShareFrames.Gate(30);
