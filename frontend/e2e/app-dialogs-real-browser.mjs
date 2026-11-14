@@ -633,7 +633,12 @@ async function holdsUntilAnswered(page, site) {
     await page.evaluate(() => window.__sheet(true));
     await page.waitForSelector('.notes-dialog');
     const measureLooks = () => page.evaluate(() => {
-        const parts = c => c.match(/[\d.]+/g).map(Number);
+        // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read as
+        // 0 to 255 it is black (--brand-text, the sheet's main button, read 1.08:1 that way).
+        const parts = (c) => {
+            const [r, g, b, a = 1] = c.match(/[\d.]+/g).map(Number);
+            return c.startsWith('color(srgb') ? [r * 255, g * 255, b * 255, a] : [r, g, b, a];
+        };
         // Translucent layers composited down to the first opaque one.
         const paint = el => {
             const layers = [];
@@ -671,10 +676,11 @@ async function holdsUntilAnswered(page, site) {
             text('sheet\'s Close', q('.notes-dialog-head .notes-iconbtn'), 3),
             // The app-wide tokens as text, on any surface of any theme: their own figures as
             // a floor, none of which this surface can do anything about. --text-faint was
-            // 3.4 to 4:1 (4.5:1 or more since 2026-11-12, theme.css), --brand-primary 4.15
-            // to 4.3:1, and --color-danger over its own tint 4.45:1 on the yellow theme.
+            // 3.4 to 4:1 (4.5:1 or more since 2026-11-12, theme.css), and --color-danger over
+            // its own tint 4.45:1 on the yellow theme. The main button's words are --brand-text
+            // since 2026-11-14 (they were --brand-primary, 4.15 to 4.3:1), so 4.5:1.
             text('sheet\'s hint', q('.notes-dialog-body .notes-labels-hint'), 3),
-            text('sheet\'s main button', q('.notes-dialog-body .notes-textbtn.primary'), 4),
+            text('sheet\'s main button', q('.notes-dialog-body .notes-textbtn.primary'), 4.5),
             text('sheet\'s error', q('.notes-send-error'), 4.4),
         ];
     });

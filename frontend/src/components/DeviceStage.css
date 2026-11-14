@@ -288,6 +288,7 @@
 }
 
 .device-stage-hint kbd {
+    color: var(--text-normal, #dbdee1); /* the hint's muted grey was 3.36:1 on a key */
     padding: 1px 5px;
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.12);

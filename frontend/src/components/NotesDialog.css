@@ -43,7 +43,10 @@
 }
 .notes-dialog-body .notes-textbtn:hover { background: var(--bg-modifier-hover); }
 .notes-dialog-body .notes-textbtn:disabled { opacity: 0.5; cursor: default; }
-.notes-dialog-body .notes-textbtn.primary { color: var(--brand-primary); font-weight: 600; }
+/* A text button here, also under notes.css (Notes open, or the Notes page), whose filled
+   .notes-textbtn.primary put these brand words on the brand's own fill: 1.76:1. */
+.notes-dialog-body .notes-textbtn.primary { background: none; color: var(--brand-text); font-weight: 600; }
+.notes-dialog-body .notes-textbtn.primary:hover { background: var(--bg-modifier-hover); }
 .notes-dialog-body .notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
 .notes-dialog-head .notes-iconbtn {
     display: inline-flex;

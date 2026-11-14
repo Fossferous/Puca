@@ -57,7 +57,7 @@
 }
 
 .recovery-word-num {
-    color: #6d6f78;
+    color: #9a9da6; /* #6d6f78 was 3.29:1 on the grid */
     font-size: 0.7rem;
     min-width: 16px;
     text-align: right;

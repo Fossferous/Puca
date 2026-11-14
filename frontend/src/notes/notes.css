@@ -979,7 +979,8 @@
 .notes-login-note {
     margin-top: 16px;
     font-size: 13px;
-    color: var(--text-muted);
+    /* The sign-in card's own (Login.css): --text-muted was 3.86:1 on it, and a link 4.13:1. */
+    color: rgba(255, 255, 255, 0.7);
     line-height: 1.5;
     text-align: center;
 }
@@ -992,8 +993,11 @@
     margin: 0;
     font-size: 12px;
     line-height: 1.45;
-    color: var(--text-muted);
+    color: rgba(255, 255, 255, 0.7);
 }
+.notes-login-note a { color: #7dd3fc; }
+[data-contrast="high"] .notes-login-note,
+[data-contrast="high"] .notes-stay-hint { color: var(--text-muted); }
 @media (pointer: coarse) and (max-width: 1024px) {
     /* §5: the whole row is one 44px tap target, and the label beside a real
        input is 16px — below that iOS zooms the card on focus and the layout

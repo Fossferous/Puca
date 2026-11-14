@@ -27,7 +27,7 @@
 
 .host-files-indicator-stop {
     flex: 0 0 auto;
-    background: var(--danger, #f04747);
+    background: #c62828; /* white on #f04747 was 3.69:1 */
     color: #fff;
     border: none;
     border-radius: 14px;

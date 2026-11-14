@@ -863,7 +863,8 @@
     padding: 6px 14px;
     border: none;
     border-radius: 999px;
-    background: linear-gradient(135deg, #7c3aed 0%, #4cc4ff 100%);
+    /* White on #4cc4ff was 1.97:1: both ends now hold it at 5.9:1 or more. */
+    background: linear-gradient(135deg, #6d28d9 0%, #0369a1 100%);
     color: #fff;
     font-size: 0.85em;
     font-weight: 600;
@@ -2713,7 +2714,7 @@ button.message-attachment.error { color: #ffb4b4; }
 .live-badge-mini {
     display: inline-flex;
     align-items: center;
-    background: #ed4245;
+    background: #cc3336; /* white on #ed4245 was 3.84:1 */
     color: white;
     font-size: 0.55rem;
     font-weight: 700;
@@ -2751,7 +2752,7 @@ button.message-attachment.error { color: #ffb4b4; }
 
 /* Watch Streams Button in Header */
 .watch-streams-btn {
-    background: linear-gradient(135deg, #ed4245, #dc3545);
+    background: linear-gradient(135deg, #cc3336, #b02a37);
     color: white;
     border: none;
     padding: 0.4rem 0.8rem;
@@ -2833,7 +2834,7 @@ button.message-attachment.error { color: #ffb4b4; }
     align-items: center;
     gap: 8px;
     padding: 12px 20px;
-    background: linear-gradient(135deg, #ed4245, #dc3545);
+    background: linear-gradient(135deg, #cc3336, #b02a37);
     color: white;
     border: none;
     border-radius: 24px;
@@ -3182,7 +3183,9 @@ body.voice-drag-active {
 .ac-name, .ac-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ac-name { font-weight: 500; flex: 0 1 auto; }
 .ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; flex: 0 10 auto; padding-left: 4px; }
-.autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75); }
+/* The row's own white on the brand: the muted grey and three-quarter white were 1.45 and 3.3:1. */
+.autocomplete-item.active .ac-hash,
+.autocomplete-item.active .ac-sub { color: #fff; }
 
 /* ---- Empty channel welcome ---- */
 .channel-welcome {
