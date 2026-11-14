@@ -1978,11 +1978,6 @@ offline bullet below); it is never queued.
 - **Sending a note to several places, or several notes at once.** The bulk bar
   offers *Copy as text*, not a bulk send: N messages from one click is a spam
   hazard, and a send that is refused half way through has no sensible undo.
-- **A due-item notification that opens anything on the desktop.** The
-  notification plugin reports no click there (it registers no listener
-  command on the desktop), so a desktop reminder appears but opens nothing
-  when clicked; Notes' *Reminders* is one click away on the rail. Fixing it is
-  a native change that ships in the installer, not in the web bundle.
 - **Undoing an item's position, or an edit to its text.** An item put back by
   Undo is appended to its group rather than returned to its old slot, and
   there is no undo of a committed item edit (Escape still cancels one that

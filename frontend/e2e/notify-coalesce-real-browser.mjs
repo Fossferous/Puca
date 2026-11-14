@@ -417,7 +417,9 @@ await browser.close();
     const r = spawnSync(process.execPath, [probe], { encoding: 'utf8', env: process.env, timeout: 180_000 });
     process.stdout.write(r.stdout || '');
     if (r.stderr) process.stderr.write(r.stderr);
-    ck(r.status === 0, 'Firefox and WebKit: no renotify on Notification.prototype (notify-renotify-probe.mjs)', `(exit ${r.status}${r.error ? ', ' + r.error.message : ''})`);
+    // Exit 3: every browser skipped, so nothing was asked; a SKIP, never a pass.
+    if (r.status === 3) console.log('SKIP', 'Firefox and WebKit: renotify not checked (notify-renotify-probe.mjs skipped both)');
+    else ck(r.status === 0, 'Firefox and WebKit: no renotify on Notification.prototype (notify-renotify-probe.mjs)', `(exit ${r.status}${r.error ? ', ' + r.error.message : ''})`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

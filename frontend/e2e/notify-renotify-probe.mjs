@@ -10,7 +10,8 @@
 // property on the prototype is read, so nothing is shown and nothing sounds.
 // Both browsers launch muted (Firefox's volume pref, WebKit through muteWebkit).
 //
-// FIREFOX=0 / WEBKIT=0 skip a browser. Exit 0 pass (or skipped), 1 a check failed.
+// FIREFOX=0 / WEBKIT=0 skip a browser. Exit 0 pass, 1 a check failed, 3 nothing
+// was checked (every browser skipped), which the walk prints as a SKIP, never a pass.
 import { firefox, webkit } from '@playwright/test';
 import { muteWebkit } from './muted.mjs';
 
@@ -45,4 +46,4 @@ for (const [label, start, skip] of [
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+process.exit(fail ? 1 : pass ? 0 : 3);
