@@ -162,7 +162,7 @@ SOURCE=screen WINDOW_S=20 WARM_S=6 \
   node e2e/clip-share-cpu-measure.mjs
 ```
 
-| case (SOURCE) | what it is | above idle |
+| case (SOURCE) | what it is | above the floor |
 |---|---|---|
 | `capture` (screen) | one desktop capture, drained: 608x1080 at 29.2 fps | 13.9, 12.9 |
 | `capture+capture2` (screen) | and a SECOND getDisplayMedia of the same screen (both tracks 29.2 fps) | 14.7, 15.0 |
@@ -182,15 +182,16 @@ here a 1440x2560 portrait monitor delivered at 608x1080: a 1080p share of the
 costs more than ~13-15%. Every case checks that each track, encoder and ring
 it names moved frames in the window (or it fails as INVALID; the `pan` run
 quoted here came just before that check, and its own lines show every
-encoder and ring moving 28-30 frames a second), and the clean share cases saw
-no keyframe requests.
+encoder sending 28-30 frames a second over the window and the agent writing
+647-668 frames in it), and the clean share cases saw no keyframe requests.
 
 **And the compositor.** `dwm.exe` is not in any of these figures. In the
 same interleaved `pan` run it read 51-59% of a core in every case without the
 agent and 68-82% in every case with it (means +14 and +22 points by round):
 the agent's desktop duplication makes the compositor work too. dwm.exe follows
-whatever is on screen (a later run read 33-37% with the agent), so that is a
-sign of a second real cost of Arm automatically, not a measure of its size.
+whatever is on screen (the `screen` run's two idle readings were 51.3% and
+66.4%), so that is a sign of a second real cost of Arm automatically, not a
+measure of its size.
 A desktop capture in the browser costs dwm.exe something too (`capture`
 +16.5 over `idle` in the first `screen` round; the second round's idle read
 66.4, so it says nothing). The clip buffer's figures are lower bounds: no audio
@@ -204,14 +205,16 @@ preset's on a 1440p monitor (the owner's); the default 1080p30 records 24 fps.
 
 What that says:
 
-- **The costs add; nothing contends.** The agent's own CPU was 16.5-18.8% of
-  a core in every native case, beside a share or not (its threads by start
-  time: the first, its capture loop, 13-15%; the next 3-4%), and each
-  combination is its parts' sum within the rounds' spread.
+- **The costs add.** The agent's own CPU was 16.5-18.8% of a core in every
+  native case, beside a share or not (its threads by start time: the first,
+  its capture loop, 13-15%; the next 3-4%), and each combination cost about
+  its parts' sum, 0-6 points more (always more, ~3 on average).
 - **"Double" is about right on an SFU call.** A share there is its desktop
   capture (~13-15% here, likely more for the primary) plus its encode (one
   hardware layer ~9-13%, simulcast more): ~22-28%. Arm automatically adds
-  ~17-20%, and more in dwm.exe. On these figures alone that is ~1.6-1.9x the
+  ~17-20%, and more in dwm.exe (as the share's own capture does). On these
+  figures alone (the capture from the `screen` run, the rest from `pan`) that
+  is ~1.6-1.9x the
   share with one layer, ~1.4-1.5x with the simulcast overestimate. On a mesh
   call the share's software VP8 dominates (~47-49% per viewer at 720p, once
   per viewer) and
@@ -230,9 +233,10 @@ What that says:
   the agent's 17-19% and its share of dwm.exe, while the buffer would still
   encode and seal in the browser (`native` minus `manual`: ~4-5% of a core per
   round from the processes measured here, those two encoding different
-  pictures; plus whatever of dwm.exe's +14-22 points the duplication causes,
-  and the Tauri channel: an estimate somewhere between ~5% and ~25%, never a
-  measured switch). It changes what is recorded (the shared
+  pictures, less the ~1-2% the clone of the share's track would cost; plus
+  whatever of dwm.exe's +14-22 points the duplication causes, and the Tauri
+  channel's ~3%: an estimate somewhere between ~3% and ~30%, never a measured
+  switch). It changes what is recorded (the shared
   surface at the share's size, not always the whole monitor at its own), and
   the ring cannot carry a clip across a change of encoder (`selectWindow`
   keeps one decoder configuration), so for up to the buffer's length after

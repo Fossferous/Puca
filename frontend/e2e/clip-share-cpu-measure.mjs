@@ -120,7 +120,8 @@ const SHARE = SHARES[process.env.SHARE || '1080p30'];
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
 const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'sfu1', 'manual', 'agentonly', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
 // With no AGENT, the default list leaves out the cases that need one.
-const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL.filter((c) => AGENT || !/native|agentonly/.test(c));
+const CASES = process.env.CASES ? process.env.CASES.split(',')
+    : ALL.filter((c) => (AGENT || !/native|agentonly/.test(c)) && (SOURCE !== 'pan' || !/capture2|captureclone|capturelow/.test(c)));
 
 const workerFile = fs.existsSync(path.join(dist, 'assets')) && fs.readdirSync(path.join(dist, 'assets')).find((f) => /^replayWorker-.*\.js$/.test(f));
 if (CASES.some((c) => /manual|native|follow|agentonly/.test(c)) && !workerFile) {
@@ -583,7 +584,8 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
 
 // ---- the agent's --clip-capture host -------------------------------------------
 async function primaryMonitor() {
-    // DPI-aware first: Windows PowerShell is not, and on a display scaled
+    // DPI-aware first (system-aware: exact while the primary's scale is the
+    // one the session signed in with): Windows PowerShell is not, and on a display scaled
     // above 100% it would report the primary's LOGICAL size (2048x1152 for a
     // 2560x1440 at 125%), which the agent's encoder takes as the frame size
     // and silently encodes a crop of.
