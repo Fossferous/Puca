@@ -2333,6 +2333,18 @@ describe('a text read before is not read again', () => {
         expect(parseMessageUncached(content)).not.toBe(parseMessageUncached(content));
     });
 
+    it('keeps only so much: a few long messages are as many as it keeps', () => {
+        // A message of 8000 can be a tree of a megabyte, and five hundred of those is half a gigabyte.
+        const long = (i: number) => `${i} ${'||a|| '.repeat(1300)}`;
+        const first = parseMessage(long(0));
+        for (let i = 1; i < 40; i++) parseMessage(long(i));
+        expect(parseMessage(long(0))).not.toBe(first);
+        // CONTROL: forty short ones leave it kept.
+        const short = parseMessage('short ||x||');
+        for (let i = 0; i < 40; i++) parseMessage(`short ${i}`);
+        expect(parseMessage('short ||x||')).toBe(short);
+    });
+
     it('keeps only so many: one asked for long ago is read anew', () => {
         const content = 'read long ago ||x||';
         const first = parseMessage(content);

@@ -140,7 +140,8 @@ function hiddenAt(index: number, opener: number, spoilers: readonly Span[], stra
 
 function segmentFor(hidden: boolean, bang: boolean, label: string | undefined, href: string): RefMatch['segment'] {
     if (/^sovereign-clip:/i.test(href)) return { type: 'clip', label: clipLabel(href) };
-    const cleaned = (label ?? '').replace(/\s+/g, ' ').trim();
+    // A label is the name the list draws, but one holding an address would print its key here.
+    const cleaned = (label ?? '').replace(/sovereign-(?:enc|clip):\S*/gi, '').replace(/\s+/g, ' ').trim();
     const kind = kindOf(href, bang, cleaned);
     const name = cleaned || (kind === 'image' ? 'image' : label === undefined ? 'attachment' : kind);
     return { type: 'attachment', kind, name, spoiler: hidden };
@@ -387,70 +388,97 @@ export function messageSearchText(content: string): string {
 }
 
 /** A ref that leaves the edit box: what was typed from `start` to `end`, and whether the message hides it. */
-interface Taken { start: number; end: number; hidden: boolean; ownBars: boolean }
+interface Taken { start: number; end: number; hidden: boolean }
+
+/** Every `sovereign-enc:` or `sovereign-clip:` address as typed, wherever it is, up to what ends one. */
+const ADDRESS_RE = /sovereign-(?:enc|clip):[^\s)\]|\uE000\uE001]*/gi;
 
 /**
- * The refs Edit takes out of the box, read off the parse the message list draws: every file it
- * draws, and every ref's address it draws as words. Not a pattern of its own: a ref it draws as code
- * or as an address stays in the box as the text it is, or saving would turn it into a live file;
- * and one it draws as a file comes out, or its key is in the box. `` `[g](sovereign-enc:…)``` `` is
- * a backtick, a FILE and a fence never closed: a code range read with a regex of its own saw a
- * span of code and left the file, key and all, in the box.
+ * The refs Edit takes out of the box, read off the parse the message list draws, and the spoilers
+ * it draws that are in no other (`outer`): every file it draws, and every address it draws as words.
+ * Not a pattern of its own: a ref it draws as code or as an address stays in the box as the text it
+ * is, or saving would turn it into a live file; and one it draws as a file comes out, or its key is
+ * in the box. `` `[g](sovereign-enc:…)``` `` is a backtick, a FILE and a fence never closed: a code
+ * range read with a regex of its own saw a span of code and left the file, key and all, in the box.
  *
  * An address it draws as words (a bare `sovereign-enc:…` someone typed, or one in what looks like a
- * file and is drawn as words: `[](…)`, `[a](… )`) comes out, its key is a key, as far as its run of
- * the words goes where something the list draws starts there; where markup does, it stays whole,
- * as it is drawn. A pattern of what an address
- * holds took a backtick after it, and the code that backtick opened was gone from the box
- * (`` sovereign-enc:…`||` ||[f](…)|| `` saved its file in the clear), or the `[docs` of a link; and
- * a `_` in a key can close an emphasis, which taken out pairs the bars after it otherwise.
+ * file and is drawn as words: `[](…)`, `[a](… )`, a label) comes out, its key is a key, as far as its
+ * run of the words goes where something the list draws starts there; where markup does, it stays
+ * whole, as it is drawn. A pattern of what an address holds took a backtick after it, and the code
+ * that backtick opened was gone from the box (`` sovereign-enc:…`||` ||[f](…)|| `` saved its file in
+ * the clear), or the `[docs` of a link; and a `_` in a key can close an emphasis, which taken out
+ * pairs the bars after it otherwise.
  */
-function refsToTake(content: string): Taken[] {
+function refsToTake(content: string): { taken: Taken[]; outer: Span[] } {
     const spoilers: Span[] = [];
+    const outer: Span[] = [];
     const drawn: Span[] = [];
     const words: Span[] = [];
-    const files: Array<{ span: Span; spoiler: Spoiler | null; only: boolean }> = [];
-    const walk = (nodes: Node[], spoiler: Spoiler | null) => {
+    const taken: Taken[] = [];
+    const walk = (nodes: Node[], hidden: boolean) => {
         for (const n of nodes) {
             if (n.type === 'spoiler') {
                 const span = spoilerSpan(n);
-                if (span) spoilers.push(span);
-                walk(n.children, n);
+                if (span) {
+                    spoilers.push(span);
+                    if (!hidden) outer.push(span);
+                }
+                walk(n.children, true);
             } else if ('children' in n) {
-                walk(n.children, spoiler);
+                walk(n.children, hidden);
             } else {
                 const span = typedSpan(n);
                 if (!span) continue;
                 (n.type === 'text' ? words : drawn).push(span);
-                if (isFile(n)) files.push({ span, spoiler, only: spoiler !== null && spoiler.children.length === 1 && spoiler.children[0] === n });
+                if (isFile(n)) taken.push({ start: span[0], end: span[1], hidden });
             }
         }
     };
-    walk(parseMessage(content), null);
-    const taken: Taken[] = files.map(({ span, spoiler, only }) => {
-        const bars = spoiler && spoilerSpan(spoiler);
-        // A spoiler of its own goes with it, bars and all, unless the bars are another's too (where
-        // every stretch between two `||` is a spoiler, one's closing bars open the next).
-        const ownBars = only && !!bars && bars[0] === span[0] - 2 && bars[1] === span[1] + 2
-            && !spoilers.some(s => s !== bars && s[1] > bars[0] && s[0] < bars[1]);
-        return ownBars ? { start: span[0] - 2, end: span[1] + 2, hidden: true, ownBars } : { start: span[0], end: span[1], hidden: spoiler !== null, ownBars };
-    });
-    for (const m of content.matchAll(REF_RE)) {
-        const href = m[6] ?? m[4];
-        // The address's own start: after the `](` of a ref, whose label holds no `]`.
-        const start = m[6] !== undefined ? m.index : m.index + m[0].indexOf(href, m[0].indexOf('](') + 2);
+    walk(parseMessage(content), false);
+    for (const m of content.matchAll(ADDRESS_RE)) {
+        const start = m.index;
         const run = words.find(([from, to]) => start >= from && start < to);
         if (!run) continue;
         // Past the words, it runs on into what the list draws next (code, a link) or into markup.
         // Up to the next drawn thing is words, and goes; markup is not, and it all stays.
-        let end = start + href.length;
+        let end = start + m[0].length;
         if (end > run[1]) {
             if (!drawn.some(([from]) => from === run[1])) continue;
             end = run[1];
         }
-        taken.push({ start, end, hidden: inside(spoilers, start), ownBars: false });
+        taken.push({ start, end, hidden: inside(spoilers, start) });
     }
-    return taken.sort((a, b) => a.start - b.start);
+    return { taken: taken.sort((a, b) => a.start - b.start), outer };
+}
+
+/**
+ * Text put together from pieces of the message, where some pieces had a ref cut out from between
+ * them: across a cut the spaces either side become one, as the composer has them (`text ref ref`),
+ * and a line break stays. Where two pieces meet that were not beside each other (a cut, or a
+ * spoiler given bars of its own: `made`), a `|` against another would be a `||`, and pair, so a space
+ * keeps them apart. Pieces that were beside each other are put back as they were typed.
+ */
+function joiner() {
+    let text = '';
+    let cut = false;
+    let seam = false;
+    return {
+        add(piece: string, made = false) {
+            if (!piece) return;
+            if ((seam || made) && text.endsWith('|') && piece.startsWith('|')) piece = ` ${piece}`;
+            if (cut && text) {
+                const left = text.replace(/[ \t]+$/, '');
+                const right = piece.replace(/^[ \t]+/, '');
+                text = left + (left.endsWith('\n') || right.startsWith('\n') || !left || !right ? '' : ' ') + right;
+            } else {
+                text += piece;
+            }
+            cut = false;
+            seam = made;
+        },
+        cut() { cut = true; seam = true; },
+        get text() { return text; },
+    };
 }
 
 /**
@@ -458,33 +486,53 @@ function refsToTake(content: string): Taken[] {
  * refs (verbatim — key, capability, spoiler bars and all) that must ride
  * along untouched. The edit box used to be prefilled with the raw markdown,
  * which showed the key and let one stray keystroke break the attachment.
+ *
+ * Each spoiler the list draws keeps what is left of its words between bars of its own, and one left
+ * with none goes, bars and all. Where every stretch between two `||` is a spoiler, one's closing bars
+ * open the next: `my_file ||a.png|| b.png ||c.png||` left `my_file || || || ||` in the box when its
+ * files went, the bars paired among themselves on a save, and the next stretch's words printed. A
+ * `|` that would touch a spoiler's bars is kept apart.
  */
 export function splitEditableContent(content: string): { text: string; refs: string[] } {
-    const refs = /sovereign-(?:enc|clip):/i.test(content) ? refsToTake(content) : [];
-    if (refs.length === 0) return { text: content, refs: [] };
-    let text = '';
-    let at = 0;
-    const glue = (piece: string) => {
-        if (!piece) return;
-        if (!text) { text = piece; return; }
-        const left = text.replace(/[ \t]+$/, '');
-        const right = piece.replace(/^[ \t]+/, '');
-        const joint = left.endsWith('\n') || right.startsWith('\n') || !left || !right ? '' : ' ';
-        text = left + joint + right;
+    const found = /sovereign-(?:enc|clip):/i.test(content) ? refsToTake(content) : null;
+    if (!found || found.taken.length === 0) return { text: content, refs: [] };
+    const { taken, outer } = found;
+    const piecesOf = (into: ReturnType<typeof joiner>, from: number, to: number) => {
+        let at = from;
+        for (const r of taken) {
+            if (r.start < from || r.start >= to) continue;
+            into.add(content.slice(at, r.start));
+            into.cut();
+            at = r.end;
+        }
+        into.add(content.slice(at, to));
     };
-    for (const r of refs) {
-        glue(content.slice(at, r.start));
-        at = r.end;
+    const text = joiner();
+    let at = 0;
+    for (const [from, to] of outer) {
+        if (from > at) piecesOf(text, at, from);
+        const start = Math.max(from + 2, at);
+        // One nothing leaves, with bars no other spoiler shares, is as it was typed.
+        if (start === from + 2 && !taken.some(r => r.start >= from && r.start < to)) {
+            text.add(content.slice(from, to));
+            at = to;
+            continue;
+        }
+        const words = joiner();
+        piecesOf(words, start, to - 2);
+        const said = words.text;
+        if (said.trim()) text.add(`||${said.startsWith('|') ? ' ' : ''}${said}${said.endsWith('|') ? ' ' : ''}||`, true);
+        else text.cut();
+        at = Math.max(at, to);
     }
-    glue(content.slice(at));
-    // A file that rendered hidden stays hidden: one whose spoiler was a wider
-    // span (`||text <ref>||`) leaves that span when it leaves the text, so it
-    // takes bars of its own. One with its own bars keeps them verbatim.
-    const kept = refs.map(r => {
+    piecesOf(text, at, content.length);
+    // A file that rendered hidden stays hidden: it leaves its spoiler when it leaves the text, so it
+    // takes bars of its own. One that had a spoiler to itself has the same bars it had.
+    const refs = taken.map(r => {
         const raw = content.slice(r.start, r.end);
-        return r.hidden && !r.ownBars ? `||${raw}||` : raw;
+        return r.hidden ? `||${raw}||` : raw;
     });
-    return { text: text.trim(), refs: kept };
+    return { text: text.text.trim(), refs };
 }
 
 /** The files the message list draws in `content`, each with whether a spoiler hides it. */

@@ -359,7 +359,12 @@ export function parseMessage(content: string): Node[] {
     }
     const nodes = frozen(parseMessageUncached(content));
     kept.set(content, nodes);
-    if (kept.size > KEPT_MOST) kept.delete(kept.keys().next().value as string);
+    keptLength += content.length;
+    while (kept.size > KEPT_MOST || (keptLength > KEPT_LENGTH_MOST && kept.size > 1)) {
+        const oldest = kept.keys().next().value as string;
+        kept.delete(oldest);
+        keptLength -= oldest.length;
+    }
     return nodes;
 }
 
@@ -371,7 +376,11 @@ export function parseMessage(content: string): Node[] {
  * it is frozen, since everyone who asks for it holds the same one: nothing may change it for the next.
  */
 const KEPT_MOST = 500;
+// And so many characters of them: a message of 8000 can be a tree of a megabyte (`||a||` over and
+// over), and five hundred of those is half a gigabyte. Messages are mostly short: this is most of them.
+const KEPT_LENGTH_MOST = 200_000;
 const kept = new Map<string, Node[]>();
+let keptLength = 0;
 
 function frozen(nodes: Node[]): Node[] {
     for (const n of nodes) {
@@ -753,19 +762,21 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
     const { asItWas } = reading;
     const linkIsInReach = linkInReach(input);
     const nodes: Node[] = [];
-    let buf = '';
-    // Where the words in `buf` begin: they are typed in one run, up to `i`.
+    // The words not yet in a node: `size` of them, typed in one run from `from`. A run is the input
+    // from there, sliced, not a string put together a character at a time, which the engine keeps
+    // as a chain of every piece it was made of for as long as the tree is kept (`kept`).
     let from = 0;
+    let size = 0;
     let i = 0;
 
     const say = (words: string) => {
-        if (!buf) from = i;
-        buf += words;
+        if (!size) from = i;
+        size += words.length;
     };
     const flush = () => {
-        if (buf) {
-            nodes.push(typed({ type: 'text', value: buf }, at, from, from + buf.length));
-            buf = '';
+        if (size) {
+            nodes.push(typed({ type: 'text', value: input.slice(from, from + size) }, at, from, from + size));
+            size = 0;
         }
     };
 
