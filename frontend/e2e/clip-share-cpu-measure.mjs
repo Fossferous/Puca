@@ -70,7 +70,7 @@
 // compare cases of ONE run, interleaved (CASES=a,b,a,b).
 //
 // Usage (from frontend/, after `npx vite build` for dist/assets/replayWorker-*.js):
-//   node e2e/clip-share-cpu-measure.mjs
+//   node e2e/clip-share-cpu-measure.mjs              (no AGENT: the cases without one)
 //   AGENT=<path to puca-agent.exe> CASES=idle,mesh1,native,mesh1+native node e2e/clip-share-cpu-measure.mjs
 //   WINDOW_S=30 SHARE=1440p30 SOURCE=pan node e2e/clip-share-cpu-measure.mjs
 //   ADAPTER_LUID=<high>,<low> ...   put the browser on another GPU (the app's
@@ -119,7 +119,8 @@ const SHARE = SHARES[process.env.SHARE || '1080p30'];
 // The clip preset (manual arm): Settings' default, 1080p30 at 6 Mbps.
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
 const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'sfu1', 'manual', 'agentonly', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
-const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL;
+// With no AGENT, the default list leaves out the cases that need one.
+const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL.filter((c) => AGENT || !/native|agentonly/.test(c));
 
 const workerFile = fs.existsSync(path.join(dist, 'assets')) && fs.readdirSync(path.join(dist, 'assets')).find((f) => /^replayWorker-.*\.js$/.test(f));
 if (CASES.some((c) => /manual|native|follow|agentonly/.test(c)) && !workerFile) {
@@ -232,6 +233,9 @@ async function gpuSample(samples, every) {
 }
 function gpuFor(acc, pids, names) {
     if (!acc.samples) return 'n/a (no GPU counter samples)';
+    // '-' below means samples came but none for these processes: not proof
+    // that nothing ran on the GPU (a short-lived engine use can fall between
+    // the samples).
     const sums = new Map();
     for (const [k, v] of acc) {
         const [pid, luid, eng] = k.split('|');
@@ -579,7 +583,11 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
 
 // ---- the agent's --clip-capture host -------------------------------------------
 async function primaryMonitor() {
-    const out = await ps(`Add-Type -Namespace W -Name M -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr MonitorFromPoint(System.Drawing.Point pt, uint flags);' -ReferencedAssemblies System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $s=[System.Windows.Forms.Screen]::PrimaryScreen; $h=[W.M]::MonitorFromPoint((New-Object System.Drawing.Point 0,0), 1); "$($h.ToInt64()) $($s.Bounds.Width) $($s.Bounds.Height)"`);
+    // DPI-aware first: Windows PowerShell is not, and on a display scaled
+    // above 100% it would report the primary's LOGICAL size (2048x1152 for a
+    // 2560x1440 at 125%), which the agent's encoder takes as the frame size
+    // and silently encodes a crop of.
+    const out = await ps(`Add-Type -Namespace W -Name M -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr MonitorFromPoint(System.Drawing.Point pt, uint flags); [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -ReferencedAssemblies System.Drawing; [void][W.M]::SetProcessDPIAware(); Add-Type -AssemblyName System.Windows.Forms; $s=[System.Windows.Forms.Screen]::PrimaryScreen; $h=[W.M]::MonitorFromPoint((New-Object System.Drawing.Point 0,0), 1); "$($h.ToInt64()) $($s.Bounds.Width) $($s.Bounds.Height)"`);
     const [h, w, ht] = out.trim().split(/\s+/).map(Number);
     return { hmonitor: h, width: w, height: ht };
 }
@@ -626,7 +634,11 @@ function startAgent(mon) {
 async function runCase(name) {
     const id = `${name.replace(/\W/g, '_')}-${Date.now()}`;
     const parts = name.split('+');
-    const known = /^(capture|capture2|captureclone|mesh\d|sfu|sfu1|manual|follow|native|agentonly|idle)$/;
+    const known = /^(capture|capture2|captureclone|capturelow|mesh\d|sfu|sfu1|manual|follow|native|agentonly|idle)$/;
+    // A second capture of the same surface means something only for a real
+    // capture: under SOURCE=pan each is a separate canvas.captureStream().
+    if (parts.some((p) => /^(capture2|captureclone|capturelow)$/.test(p)) && SOURCE === 'pan') throw new Error('capture2, captureclone and capturelow need SOURCE=screen or tab');
+    if (parts.filter((p) => /^(manual|follow|native)$/.test(p)).length > 1) throw new Error('one ring a case');
     const unknown = parts.filter((p) => !known.test(p));
     if (unknown.length) throw new Error(`unknown case part(s): ${unknown.join(', ')}`);
     if (parts.filter((p) => p === 'native' || p === 'agentonly').length > 1) throw new Error('one agent a case');
@@ -639,6 +651,10 @@ async function runCase(name) {
         for (const p of parts) {
             if (p === 'capture') await page.evaluate(() => window.rig.drain(window.rig.shareTrack));
             else if (p === 'capture2') await page.evaluate(async (S) => { window.rig.drain(await window.rig.capture(S)); }, SHARE);
+            // 1280x720 at 15 fps: put FIRST, it shows what a later capture of
+            // the same screen gets (capturelow+capture2), Chromium sharing
+            // one device: the captured: line has both tracks' size and fps.
+            else if (p === 'capturelow') await page.evaluate(async () => { window.rig.drain(await window.rig.capture({ w: 1280, h: 720, fps: 15 })); });
             else if (p === 'captureclone') await page.evaluate(() => { const c = window.rig.shareTrack.clone(); window.rig.closers.push(() => c.stop()); window.rig.drain(c); });
             else if (/^mesh(\d)$/.test(p)) {
                 const k = Number(/^mesh(\d)$/.exec(p)[1]);
@@ -664,9 +680,11 @@ async function runCase(name) {
         const ta = agentPid ? await agentThreads(agentPid) : null;
         const gpuP = gpuSample(Math.max(2, Math.floor(WINDOW_S / 2) - 1), 2);
         const encA = await page.evaluate(() => window.rig.encoders());
+        const ringA = await page.evaluate(() => window.rig.stats.ring?.encodedFrames ?? 0);
         const drainA = await page.evaluate(() => ({ at: performance.now(), list: window.rig.drainCounts() }));
         await new Promise((r) => setTimeout(r, WINDOW_S * 1000));
         const encB = await page.evaluate(() => window.rig.encoders());
+        const ringB = await page.evaluate(() => window.rig.stats.ring?.encodedFrames ?? 0);
         const drainB = await page.evaluate(() => ({ at: performance.now(), list: window.rig.drainCounts() }));
         const tb = agentPid ? await agentThreads(agentPid) : null;
         const b = await snapshot(id);
@@ -709,7 +727,9 @@ async function runCase(name) {
         if (wantEnc && (!encoders.length || encB.list.some((e, i) => (e.frames - (encA.list[i]?.frames ?? 0)) < encWin))) problems.push('an encoder sent under 1 fps (or none connected)');
         const wantRing = parts.some((p) => /^(manual|follow|native)$/.test(p));
         const errs = await page.evaluate(() => window.rig.stats.workerErrors ?? []);
-        if (wantRing && (!ring || !(ring.fps >= 1))) problems.push(`the ring took ${ring?.fps ?? 0} fps`);
+        const ringFps = (ringB - ringA) / ((encB.at - encA.at) / 1000);
+        if (wantRing && !(ringFps >= 1)) problems.push(`the ring took ${ringFps.toFixed(1)} fps over the window`);
+        if (agentA && agentB && (agentB.frames - agentA.frames) < (encB.at - encA.at) / 1000) problems.push(`the agent wrote ${agentB.frames - agentA.frames} frames in the window`);
         if (errs.length) problems.push(`worker: ${errs.join('; ')}`);
         if (problems.length) throw new Error(`INVALID: ${problems.join('; ')}`);
         return {

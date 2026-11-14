@@ -147,8 +147,11 @@ capture inside the browser engine; the auto arm is a capture of its own
 and what it leaves out). Headless Edge 157, the WebView2 engine, on the
 owner's desktop (Ryzen 7 7800X3D, RTX 4080 SUPER; the browser on the RTX,
 the default adapter, where the app's WebView2 may be pinned to an integrated
-GPU), each figure the % of ONE core a case spent above that round's `idle`,
-two interleaved rounds, a machine also running other work:
+GPU), each figure the % of ONE core a case's processes spent above that
+round's floor, two interleaved rounds, a machine also running other work. The
+floor is `idle` for the `screen` rows and, for the `pan` rows, the mean of
+`idle` and `agentonly`'s browser (both only draw the picture: one reading
+alone moved by ~5 points); a native case adds the agent's own CPU:
 
 ```
 AGENT=<puca-agent.exe> SOURCE=pan WINDOW_S=20 WARM_S=6 \
@@ -164,12 +167,12 @@ SOURCE=screen WINDOW_S=20 WARM_S=6 \
 | `capture` (screen) | one desktop capture, drained: 608x1080 at 29.2 fps | 13.9, 12.9 |
 | `capture+capture2` (screen) | and a SECOND getDisplayMedia of the same screen (both tracks 29.2 fps) | 14.7, 15.0 |
 | `capture+captureclone` (screen) | and a clone of the first instead (both 29.2-29.3 fps) | 14.5, 14.4 |
-| `sfu1` (pan) | one H.264 layer, hardware, AES-GCM sealing | 6.8, 13.7 |
-| `sfu` (pan) | H.264 simulcast f/h/q (an overestimate: see the script) | 24.9, 28.0 |
-| `mesh1` (pan) | VP8 to one viewer, software | 44.2, 50.0 |
-| `native` | Arm automatically: the agent (the real primary monitor, 2560x1440, 30 fps, whatever SOURCE says) and the ring | 14.7, 20.8 (the agent 17.3, 18.6) |
-| `sfu1+native` / `sfu+native` / `mesh1+native` (pan) | both at once | 26.0, 34.0 / 46.1, 50.0 / 65.3, 76.3 |
-| `manual` (pan) | armed by hand: WebCodecs H.264 and the ring, on a canvas capture | 9.7, 16.9 |
+| `sfu1` (pan) | one H.264 layer, hardware, AES-GCM sealing | 9.4, 12.9 |
+| `sfu` (pan) | H.264 simulcast f/h/q (an overestimate: see the script) | 27.5, 27.2 |
+| `mesh1` (pan) | VP8 to one viewer, software | 46.8, 49.2 |
+| `native` | Arm automatically: the agent (the real primary monitor, 2560x1440, 30 fps, whatever SOURCE says) and the ring | 17.2, 20.0 (the agent 17.3, 18.6) |
+| `sfu1+native` / `sfu+native` / `mesh1+native` (pan) | both at once | 28.6, 33.2 / 48.6, 49.2 / 67.9, 75.5 |
+| `manual` (pan) | armed by hand: WebCodecs H.264 and the ring, on a canvas capture | 12.2, 16.1 |
 
 `pan` shares a canvas (e2e/encode-cost.mjs's fast-motion picture), so its
 share and hand-arm figures carry no desktop capture; in the app each adds a
@@ -177,10 +180,20 @@ desktop capture. The `screen` rows captured the first screen Chromium lists,
 here a 1440x2560 portrait monitor delivered at 608x1080: a 1080p share of the
 2560x1440 primary delivers three times the pixels, so its capture likely
 costs more than ~13-15%. Every case checks that each track, encoder and ring
-it names moved frames in the window (or it fails as INVALID), and the clean
-share cases saw no keyframe requests. The floor itself moved by up to ~4
-points between rounds (one `idle` sample a round), which is most of the
-spread between a case's two figures. The clip buffer's figures are lower bounds: no audio
+it names moved frames in the window (or it fails as INVALID; the `pan` run
+quoted here came just before that check, and its own lines show every
+encoder and ring moving 28-30 frames a second), and the clean share cases saw
+no keyframe requests.
+
+**And the compositor.** `dwm.exe` is not in any of these figures. In the
+same interleaved `pan` run it read 51-59% of a core in every case without the
+agent and 68-82% in every case with it (means +14 and +22 points by round):
+the agent's desktop duplication makes the compositor work too. dwm.exe follows
+whatever is on screen (a later run read 33-37% with the agent), so that is a
+sign of a second real cost of Arm automatically, not a measure of its size.
+A desktop capture in the browser costs dwm.exe something too (`capture`
++16.5 over `idle` in the first `screen` round; the second round's idle read
+66.4, so it says nothing). The clip buffer's figures are lower bounds: no audio
 path, and the agent's frames reach the page here as one stream, where the app
 sends a Tauri Channel message per frame (about 1 ms of the page's main thread
 per message, measured under "The desktop-audio wire" below: ~3% of a core at
@@ -193,12 +206,15 @@ What that says:
 
 - **The costs add; nothing contends.** The agent's own CPU was 16.5-18.8% of
   a core in every native case, beside a share or not (its threads by start
-  time: the first, its capture loop, 13-15%; the next 3-4%).
+  time: the first, its capture loop, 13-15%; the next 3-4%), and each
+  combination is its parts' sum within the rounds' spread.
 - **"Double" is about right on an SFU call.** A share there is its desktop
   capture (~13-15% here, likely more for the primary) plus its encode (one
-  hardware layer ~7-14%, simulcast more); Arm automatically adds its own
-  ~15-21%. On a mesh call the share's
-  software VP8 dominates (~44-50% per viewer at 720p, once per viewer) and
+  hardware layer ~9-13%, simulcast more): ~22-28%. Arm automatically adds
+  ~17-20%, and more in dwm.exe. On these figures alone that is ~1.6-1.9x the
+  share with one layer, ~1.4-1.5x with the simulcast overestimate. On a mesh
+  call the share's software VP8 dominates (~47-49% per viewer at 720p, once
+  per viewer) and
   Clips cannot remove it: it is the share's encoder.
 - **A buffer armed by hand and a share of the same screen are already one
   capture.** Chromium runs one capturer for every capture of one screen (its
@@ -211,10 +227,12 @@ What that says:
   share's bar (shown by default: `hideOsCaptureBar`) would have wiped it.
 - **Arm automatically is the second capture**, in the agent with DXGI and the
   hardware MFT. Moving it onto the share's capture while sharing would save
-  less than it sounds, because the buffer would still encode and seal (an
-  estimate from `native` minus `manual`, not a measured switch: ~4-5% of a
-  core per round, and those two encode different pictures), and it changes
-  what is recorded (the shared
+  the agent's 17-19% and its share of dwm.exe, while the buffer would still
+  encode and seal in the browser (`native` minus `manual`: ~4-5% of a core per
+  round from the processes measured here, those two encoding different
+  pictures; plus whatever of dwm.exe's +14-22 points the duplication causes,
+  and the Tauri channel: an estimate somewhere between ~5% and ~25%, never a
+  measured switch). It changes what is recorded (the shared
   surface at the share's size, not always the whole monitor at its own), and
   the ring cannot carry a clip across a change of encoder (`selectWindow`
   keeps one decoder configuration), so for up to the buffer's length after
@@ -222,7 +240,8 @@ What that says:
   owner's call and nothing about it is built. The change with no trade-off is
   converting on the GPU in the agent ("Per-frame cost, profiled" below: the
   readback, the CPU BGRA->NV12 convert and the system-memory sample are its
-  capture loop's cost), for every auto-armed buffer, sharing or not.
+  capture loop's cost), for every auto-armed buffer, sharing or not; it
+  takes the agent's CPU down, not whatever the duplication costs dwm.exe.
 
 **Known: the first capture of a screen sets its size and frame rate for
 both.** Because the device is shared: in Edge 157, a capture asking
@@ -232,8 +251,12 @@ buffer armed by hand at a low preset caps a share of the same screen started
 after it, and a share started first caps a buffer armed after it. To see it:
 two getDisplayMedia calls for one screen in Edge, the first with
 `{ width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }`,
-then read the second's VideoFrames. Not fixed yet; Arm automatically is not
-affected (its capture is the agent's).
+then read the second's VideoFrames, or `SOURCE=screen
+CASES=capturelow+capture2,capture+capturelow` with the measuring script
+(here: 404x720 at 14.7 fps for a second capture that asked for 1920x1080 at
+30, and 608x1080 at 29.2 then 406x720 at 15.1 the other way round; this desk's
+first-listed screen is a 1440x2560 portrait one). Not fixed yet; Arm
+automatically is not affected (its capture is the agent's).
 
 ## What is guaranteed (mechanically checked)
 
