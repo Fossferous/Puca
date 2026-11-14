@@ -757,9 +757,10 @@ export class WebRTCManager {
         if (!real || this.heldSenders.has(sender)) return Promise.resolve();
         const held: HeldSender = { userId, real, stand: real, swaps: 0, since: Date.now() };
         this.heldSenders.set(sender, held);
-        const put = this.putStand(sender, held, real);
+        // The sweep first: a stand-in that cannot be made ends the hold at once
+        // (putStand), and that end clears the sweep only if there is one.
         this.heldSweep ??= setInterval(() => this.sweepHeldSenders(), 1000);
-        return put;
+        return this.putStand(sender, held, real);
     }
 
     /** End a hold: put `next` on the sender (null: nothing; undefined: leave
@@ -1221,8 +1222,10 @@ export class WebRTCManager {
             const n = await WebRTCManager.framesDecoded(r);
             const before = this.cameraFrames.get(r);
             if (n !== null) this.cameraFrames.set(r, n);
-            // null: nothing to compare with yet (its first look).
-            out.set(r, n !== null && before !== undefined ? Math.max(0, n - before) : null);
+            // null: nothing to compare with yet (its first look). A receiver
+            // that reports no frames at all (no packet yet) is 0, or the one
+            // shown would hold every look back for good.
+            out.set(r, n === null ? 0 : before === undefined ? null : Math.max(0, n - before));
         }
         return out;
     }
@@ -1241,7 +1244,7 @@ export class WebRTCManager {
                 const shown = this.cameraReceiverOf.get(userId);
                 // The one shown just arrived (no look at it yet): its frames
                 // are not known, so nothing is judged against them this time.
-                if (shown && frames.get(shown) == null) continue;
+                if (shown && frames.get(shown) === null) continue;
                 const shownFrames = shown ? frames.get(shown) ?? 0 : 0;
                 // The camera is where the frames are: one receiver with a
                 // picture's worth of them, the one shown with a trickle at most.
@@ -1356,7 +1359,9 @@ export class WebRTCManager {
             try {
                 const sender = pc.addTrack(track, localStream);
                 this.cameraSenders.add(sender);
-                this.wireSender(userId, sender);
+                // A sender addTrack hands back may be one wired before (a
+                // share's, stopped before it was ever negotiated).
+                this.wireSenderAgain(userId, sender);
             } catch { /* peer gone (a closed pc refuses addTrack) */ }
             return;
         }
@@ -1730,7 +1735,7 @@ export class WebRTCManager {
                     return;
                 }
                 const sender = pc.addTrack(track, localStream);
-                this.wireSender(userId, sender); // media-E2EE encrypt transform
+                this.wireSenderAgain(userId, sender); // media-E2EE encrypt transform (a reused sender too)
             });
         }
         // LISTEN-ONLY: with no local track, nothing ever fires
@@ -1854,7 +1859,7 @@ export class WebRTCManager {
                 // - and the panel opens it from the member's own choice.
                 // (Same fail-closed rule as addLocalMediaToPeer.)
                 try {
-                    this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
+                    this.wireSenderAgain(userId, peer.connection.addTrack(newTrack, localStream));
                 } catch { /* peer gone (a closed pc refuses addTrack) */ }
             }
         }

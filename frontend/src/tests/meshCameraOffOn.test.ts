@@ -490,6 +490,22 @@ describe('the receiving side, when no new track comes for a camera', () => {
         }
     });
 
+    it('REVIEW: a shown receiver that reports no frames at all (no packet yet) does not hold the follow back for good', async () => {
+        vi.useFakeTimers();
+        try {
+            const v = await viewing(2);
+            const [dead, live] = v.cams;
+            live.receiver.getStats = async () => new Map(); // no inbound-rtp yet
+            for (let i = 0; i < 4; i++) {
+                dead.receiver.frames += 45;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            expect(v.last(), 'never handed over: the look at the shown one waited for good').toBe(dead.receiver.track);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('CONTROL: while the receiver shown has the frames, it stays shown', async () => {
         vi.useFakeTimers();
         try {
@@ -509,6 +525,46 @@ describe('the receiving side, when no new track comes for a camera', () => {
 });
 
 describe('handed over again only as ontrack would', () => {
+    it('REVIEW: the follow does not hand over a receiver nothing decrypts under "Require encryption" switched on since', async () => {
+        class Sender {}
+        (Sender.prototype as unknown as Record<string, unknown>).createEncodedStreams = () => ({});
+        vi.stubGlobal('RTCRtpSender', Sender);
+        vi.useFakeTimers();
+        try {
+            const mgr = new WebRTCManager();
+            mgr.setLocalUserId(1);
+            mgr.setRequireMediaE2ee(false);
+            const media = mgr.media as unknown as Record<string, unknown>;
+            media.getLocalStreamSync = () => new FakeStream([new FakeTrack('audio', 'mic')], 'mine');
+            media.getScreenShareStreamSync = () => null;
+            const shown: MediaStream[] = [];
+            mgr.setOnCameraStream((_uid, s) => { shown.push(s); });
+            mgr.setOnRemoteStream(() => {});
+            await mgr.callUser(2);
+            const pc = pcs.at(-1)!;
+            const voice = new FakeStream([new FakeTrack('audio', 'their mic')], 'their-voice');
+            pc.ontrack!({ track: voice.getAudioTracks()[0], receiver: { track: voice.getAudioTracks()[0] }, streams: [voice] });
+            mgr.setPeerCamera(2, true);
+            const cams = [0, 1].map(() => {
+                const t = pc.addTransceiver('video', { direction: 'recvonly' });
+                t.currentDirection = 'recvonly';
+                voice.addTrack(t.receiver.track);
+                pc.ontrack!({ track: t.receiver.track, receiver: t.receiver, streams: [voice] });
+                return t;
+            });
+            mgr.setRequireMediaE2ee(true);
+            expect(pcs.at(-1), 'precondition: nothing was rebuilt').toBe(pc);
+            for (let i = 0; i < 4; i++) {
+                cams[0].receiver.frames += 45;
+                cams[1].receiver.frames += 1;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            expect(shown, 'a receiver nothing decrypts was put back on screen under enforcement').toHaveLength(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('REVIEW: under "Require encryption" switched on since, a receiver with no decrypt transform is not handed over again', async () => {
         // An engine that can encrypt (createEncodedStreams), so turning the
         // setting on rebuilds nothing; this receiver's transform did not attach.

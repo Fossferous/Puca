@@ -1223,6 +1223,61 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         expect(camSender.track).toBe(scr);
     });
 
+    it('SECURITY: the camera turned on, handed by addTrack a sender wired before (a share stopped before it was negotiated), is held like a new one', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const local: FakeTrack[] = [mic];
+        const { mgr, media, pc } = await callWith(true, local);
+        // A share started (its sender wired, held) and stopped before it was
+        // ever negotiated: no track on its sender, and it never sent.
+        const scr = track('video', 'screen');
+        media.getScreenShareStreamSync = () => streamOf('screen', [scr]);
+        media.stopScreenShare = () => true;
+        await mgr.addScreenShareToPeers();
+        await settle();
+        const used = pc.senders.find(x => (x.track as FakeTrack | null)?.id === 'screen+stand')!;
+        expect(used, 'precondition: the share went out held').toBeTruthy();
+        mgr.stopScreenShare();
+        await settle();
+        used.track = null; // removeTrack
+        media.getScreenShareStreamSync = () => null;
+        const cam = track('video', 'cam');
+        pc.addTrack = (t: unknown) => { used.track = t; return used; };
+        media.toggleVideo = async () => { local.push(cam); return cam; };
+        mgr.publishCameraTrack((await mgr.acquireCamera())!);
+        await settle();
+        expect((used.track as FakeTrack | null)?.id, 'the camera went out on a sender that has sealed nothing, unheld').toBe('cam+stand');
+        sealedFirst(used);
+        await settle();
+        expect(used.track).toBe(cam);
+    });
+
+    it('SECURITY: ...and one that no transform wraps (its attach failed) is emptied, as a new one would be', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const local: FakeTrack[] = [mic];
+        const { mgr, media, pc } = await callWith(true, local);
+        const used = new FakeSender(null);
+        const m = mgr as unknown as { transformedSenders: WeakSet<object>; unsealedSenders: WeakSet<object> };
+        m.transformedSenders.add(used);
+        m.unsealedSenders.add(used);
+        const cam = track('video', 'cam');
+        pc.addTrack = (t: unknown) => { used.track = t; return used; };
+        media.toggleVideo = async () => { local.push(cam); return cam; };
+        mgr.publishCameraTrack((await mgr.acquireCamera())!);
+        await settle();
+        expect(used.track, 'a camera on a sender nothing encrypts, under "Require encryption"').toBeNull();
+    });
+
+    it('a stand-in that cannot be made leaves no hold sweep running', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        mic.clone = () => { throw new Error('no clone'); };
+        const { mgr } = await callWith(true, [mic]);
+        expect((mgr as unknown as { heldSenders: Map<unknown, unknown> }).heldSenders.size).toBe(0);
+        expect((mgr as unknown as { heldSweep: unknown }).heldSweep, 'a 1 s sweep left running with nothing held').toBeNull();
+    });
+
     it('stopping a share finds its held sender (by the track it waits to send) and removes it', async () => {
         scriptEngine();
         const mic = track('audio', 'mic');
