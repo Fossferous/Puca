@@ -363,7 +363,7 @@ mod db {
         let before = generation(pool.clone(), f.sid.clone()).await;
         let overwrites = |pool: sqlx::PgPool, town: i32| async move {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channel_permission_overwrites WHERE channel_id = $1")
-                .bind(town)
+                .bind(town as i64) // the BIGINT column's width, as every other site of this text
                 .fetch_one(&pool)
                 .await
                 .unwrap()
