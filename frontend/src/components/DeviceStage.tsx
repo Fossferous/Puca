@@ -14,7 +14,7 @@
  * virtual-desktop coordinates are legitimately negative — a controller that
  * sent pixels would put the cursor on the wrong screen.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
     ALL_DISPLAYS,
     deviceDiagnosticsWindow,
@@ -51,8 +51,9 @@ import {
     initialMonitorRequest, manualCompositeHoldActive,
     monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
-    type EdgeHop, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView, type Visible,
+    type EdgeHop, type HopDir, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView, type Visible,
 } from './deviceZoomFollow';
+import { hopChipShift, type PlaceRect } from './deviceStageHopPlace';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
     type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press, type SurfaceSize,
@@ -268,6 +269,17 @@ const MAX_ZOOM = 40;
 /** Stable empty list so "no edge is offering anything" — the overwhelmingly
  *  common case — never hands the render a fresh array reference. */
 const NO_EDGE_HOPS: EdgeHop[] = [];
+/** What a touch-layout hop arrow steps out from under (placeHopArrows): what
+ *  floats over the picture, takes a tap and stays until the user moves it.
+ *  The mouse pad, pinned keys and the collapsed toolbar's toggle are drawn
+ *  ABOVE the arrow (fixed, z-index 460/499); the paused banner is under it
+ *  but would lose its words and Resume to it. Not the feedback line nor the
+ *  older-agent band: both let a tap through to the arrow (the line is drawn
+ *  over it, z-index 460, the band under it) and come and go without the
+ *  user (a note expires after 6 s, a host refusal when the host changes its
+ *  mind, the band 3 s after the trackpad takes the pointer), so an arrow
+ *  that moved for them moved out from under a finger aimed at it. */
+const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, .device-stage-mobile-toolbar-toggle';
 
 /** How long to wait for the peer's first caret report before placing the view
  *  from where this end last AIMED instead.
@@ -2740,6 +2752,86 @@ export function DeviceStage() {
         return () => clearTimeout(t);
     }, [clipboardNote, diagBusy]);
 
+    // THE HOP ARROWS STEP OUT FROM UNDER THE FLOATING CONTROLS (touch layout).
+    // The mouse pad's clusters and the pinned keys are fixed to the WINDOW,
+    // above the picture, and dragged anywhere; in landscape their default
+    // places cover the middle of both side edges, exactly where an arrow sits,
+    // so it was invisible and a tap on its spot pressed the pad instead. The
+    // collapsed toolbar's toggle can cover one too, and the paused banner
+    // would lose its words to one. Each arrow slides along its edge to the
+    // nearest free spot (deviceStageHopPlace.ts; HOP_ARROW_OBSTACLES says
+    // what counts).
+    // NOT the feedback line (.device-stage-mobile-error) nor the older-agent
+    // band: both let a tap through to the arrow (the line paints over it, the
+    // band under it) and come and go without the user. An arrow that slid
+    // aside for a 6 s note and snapped back as it expired moved out from
+    // under the finger aimed at it, and that tap clicked the picture.
+    // Measured when the arrows' directions or those controls change, when the
+    // picture's box or the bars around it change, once more a frame later (a
+    // cluster re-clamps itself after a change, and that commit lands after
+    // this measurement), on a resize, and after every lift of a finger (a
+    // cluster is moved by a drag, which ends in one). Not on every pan frame: where an
+    // arrow sits depends on nothing a pan changes. Read back from the button
+    // itself, less the shift it carries (data-hop-shift), so the stylesheet
+    // stays the one place that says where an arrow's centred spot is.
+    const [hopShift, setHopShift] = useState<Partial<Record<HopDir, number>>>({});
+    const placeHopArrows = useCallback(() => {
+        const surface = surfaceRef.current;
+        if (!surface) return;
+        const bounds = surface.getBoundingClientRect();
+        const obstacles: PlaceRect[] = [...document.querySelectorAll(HOP_ARROW_OBSTACLES)]
+            .map(el => el.getBoundingClientRect())
+            .filter(r => r.width > 0 && r.height > 0);
+        const next: Partial<Record<HopDir, number>> = {};
+        for (const btn of surface.querySelectorAll<HTMLElement>('.device-stage-hop-compact')) {
+            const dir = btn.dataset.hopDir as HopDir | undefined;
+            if (!dir) continue;
+            const applied = Number(btn.dataset.hopShift) || 0;
+            const r = btn.getBoundingClientRect();
+            const sideways = dir === 'left' || dir === 'right';
+            const home: PlaceRect = sideways
+                ? { left: r.left, right: r.right, top: r.top - applied, bottom: r.bottom - applied }
+                : { left: r.left - applied, right: r.right - applied, top: r.top, bottom: r.bottom };
+            const shift = Math.round(hopChipShift(dir, home, bounds, obstacles));
+            if (shift) next[dir] = shift;
+            // A placed arrow is in the way of the next one.
+            obstacles.push(sideways
+                ? { ...home, top: home.top + shift, bottom: home.bottom + shift }
+                : { ...home, left: home.left + shift, right: home.right + shift });
+        }
+        setHopShift(prev => {
+            const keys = new Set([...Object.keys(prev), ...Object.keys(next)]) as Set<HopDir>;
+            for (const k of keys) if (prev[k] !== next[k]) return next;
+            return prev;
+        });
+    }, []);
+    const hopArrowDirs = isMobile ? edgeHops.map(h => h.dir).join(' ') : '';
+    const hopArrowsShown = hopArrowDirs !== '';
+    useLayoutEffect(() => {
+        if (!hopArrowsShown) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- a MEASUREMENT of laid-out controls (the "synchronise with an external system" case), before paint so no frame shows an arrow under a cluster; placeHopArrows keeps the old state when nothing moved, so it settles in one pass
+        placeHopArrows();
+        const raf = requestAnimationFrame(placeHopArrows);
+        return () => cancelAnimationFrame(raf);
+    }, [hopArrowsShown, hopArrowDirs, placeHopArrows, controlEnabled, isMouseMode, showVirtualMouse, showPins, pins, videoBox, keyBarH, toolbarH]);
+    useEffect(() => {
+        if (!hopArrowsShown) return;
+        let raf: number | null = null;
+        const later = () => {
+            if (raf !== null) cancelAnimationFrame(raf);
+            raf = requestAnimationFrame(() => { raf = null; placeHopArrows(); });
+        };
+        window.addEventListener('resize', later);
+        window.addEventListener('pointerup', later, true);
+        window.addEventListener('pointercancel', later, true);
+        return () => {
+            if (raf !== null) cancelAnimationFrame(raf);
+            window.removeEventListener('resize', later);
+            window.removeEventListener('pointerup', later, true);
+            window.removeEventListener('pointercancel', later, true);
+        };
+    }, [hopArrowsShown, placeHopArrows]);
+
     /** The Ctrl+Alt+Del pin: the More menu's frame and the same honest note.
      *  Declared below the note state it writes (see copyDiagnostics). */
     const pinSas = useCallback(() => {
@@ -3925,12 +4017,23 @@ export function DeviceStage() {
                 {edgeHops.map((hop: EdgeHop) => {
                     const label = session.monitors.find(m => m.id === hop.neighbourId)?.label
                         ?? `Screen ${hop.neighbourId}`;
+                    // On the touch layout the chip is the arrow alone (the
+                    // name filled 42% of a phone's width over the picture,
+                    // DeviceStage.css says more); the name stays its
+                    // accessible name, and its title for a long name the
+                    // desktop pill cuts short. It slides along its edge when
+                    // a floating control covers its spot (placeHopArrows).
+                    const shift = isMobile ? hopShift[hop.dir] ?? 0 : 0;
                     return (
                         <button
                             key={hop.dir}
                             type="button"
-                            className={`device-stage-hop device-stage-hop-${hop.dir}`}
+                            className={`device-stage-hop device-stage-hop-${hop.dir}${isMobile ? ' device-stage-hop-compact' : ''}`}
                             aria-label={`Show ${label}`}
+                            title={isMobile ? undefined : `Show ${label}`}
+                            data-hop-dir={hop.dir}
+                            data-hop-shift={shift}
+                            style={shift ? { '--hop-shift': `${shift}px` } as React.CSSProperties : undefined}
                             // THE TAP IS FOR THE CHIP, NOT THE REMOTE MACHINE.
                             // This sits inside the input surface, whose own
                             // pointer handlers turn a single contact into a
@@ -3940,7 +4043,17 @@ export function DeviceStage() {
                             // over there. Measured, not theorised: with these
                             // removed the test next door sees move/down/up go
                             // out, which is what it is there to notice.
-                            onPointerDown={e => e.stopPropagation()}
+                            // A FINGER'S PRESS TAKES NO FOCUS either: its
+                            // compatibility mousedown would focus this button
+                            // (Android does), taking it from the keyboard
+                            // bar's field and leaving the IME typing into
+                            // nothing once the hop unmounts the arrow — the
+                            // surface and the pinned keys refuse it the same
+                            // way. The click still comes.
+                            onPointerDown={e => {
+                                e.stopPropagation();
+                                if (e.pointerType !== 'mouse') e.preventDefault();
+                            }}
                             onPointerUp={e => e.stopPropagation()}
                             onPointerMove={e => e.stopPropagation()}
                             onClick={() => hopToNeighbour(hop)}

@@ -404,6 +404,84 @@
    banner is the more urgent message, so the chip steps up out of its way. */
 .device-stage-paused ~ .device-stage-hop-down { bottom: 60px; }
 
+/* A PRESS MUST NOT MOVE THE CHIP. mobile.css gives every pressed button on a
+   touch screen `transform: scale(0.98)`, and `button:active` outranks the
+   placement rules above, so it replaced the centring translate: under the
+   finger the chip slid 22px off its spot (and slid back on lift). */
+.device-stage-hop.device-stage-hop-left:active,
+.device-stage-hop.device-stage-hop-right:active { transform: translateY(-50%); }
+.device-stage-hop.device-stage-hop-up:active,
+.device-stage-hop.device-stage-hop-down:active { transform: translateX(-50%); }
+
+/* ON A TOUCH SCREEN the chip is a small round arrow (DeviceStage adds
+   `-compact` on the stage's touch layout). The owner, 2026-11-14, on a
+   390 pt iPhone: "This button is too big". The named pill grew to its 42%
+   cap there, about 164x47 of opaque black over the very picture it sits on,
+   because a monitor name like "Main display (2560x1440)" fills any width.
+   On a phone the arrow alone says enough: the screen it goes to lies the way
+   it points. The name stays the button's accessible name (aria-label).
+   The TARGET keeps the 44px floor (the coarse pointer's, docs/
+   DESIGN_PHILOSOPHY.md): a 44px square on the same edge, transparent, where
+   the pill was as wide as its name; only the 32px disc inside it is painted.
+   Square, not round: a border-radius clips hit testing, and a round button
+   would give up its corners.
+   The disc is 55% black, so the picture shows through it; the white chevron
+   on it is at least 4.7:1 even over a white picture (55% black over white is
+   #737373), above the 3:1 an icon needs.
+   `--hop-shift` slides it along its edge out from under a floating control
+   (DeviceStage's placeHopArrows). No transition: that placement reads the
+   button back, and a slide in progress would be read as its resting place. */
+.device-stage-hop.device-stage-hop-compact {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    max-width: none;
+    padding: 0;
+    justify-content: center;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    -webkit-tap-highlight-color: transparent;
+    transition: none;
+}
+
+.device-stage-hop-compact.device-stage-hop-left,
+.device-stage-hop-compact.device-stage-hop-right { top: calc(50% + var(--hop-shift, 0px)); }
+.device-stage-hop-compact.device-stage-hop-up,
+.device-stage-hop-compact.device-stage-hop-down { left: calc(50% + var(--hop-shift, 0px)); }
+
+/* Above the paused banner on a touch screen: there its Resume is a 44px
+   button, so the banner stands 16..76px off the bottom, and the desktop's
+   60px left the arrow 16px into it (or sliding far along the edge to get
+   out of the way). 84px clears it by 8. */
+.device-stage-paused ~ .device-stage-hop-down.device-stage-hop-compact { bottom: 84px; }
+
+.device-stage-hop-compact .device-stage-hop-label { display: none; }
+
+.device-stage-hop-compact .device-stage-hop-icon {
+    box-sizing: border-box;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.device-stage-hop-compact .device-stage-hop-icon svg { width: 18px; height: 18px; }
+
+/* The press shows on the disc (the tap highlight would flash the whole
+   transparent square, and mobile.css's 80% opacity would wash the darker
+   disc back out), and so does keyboard focus. */
+.device-stage-hop-compact:active { opacity: 1; }
+.device-stage-hop-compact:active .device-stage-hop-icon { background: rgba(0, 0, 0, 0.8); }
+.device-stage-hop-compact:focus-visible { outline: none; }
+.device-stage-hop-compact:focus-visible .device-stage-hop-icon {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 2px;
+}
+
 /* A game has taken the host's pointer: offer Game mode. Interactive (its
    button), unlike the click-to-capture hint, and parked above it. */
 .device-stage-capture-hint {
