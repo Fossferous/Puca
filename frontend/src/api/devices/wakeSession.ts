@@ -23,10 +23,6 @@ import { planWake, requestWake, openLanInfo } from './wake';
 import { groupIntoMachines, machineOf, type Machine } from './machines';
 import { wsClient } from '../websocket';
 
-/** What a session handed over at a lock or an unlock was, so the follow opens
- *  the same again: Files stays Files (it was followed into Control). */
-export type FollowAs = 'control' | 'files';
-
 export type WakePhase =
     /** Choosing a waker and relaying the request. */
     | 'sending'
@@ -404,7 +400,6 @@ const FOLLOW_POLL_MS = 3_000;
 export async function followToDesktop(
     signInRowId: string,
     userId: number,
-    as: FollowAs = 'control',
 ): Promise<void> {
     let all: VerifiedDevice[];
     try {
@@ -451,13 +446,12 @@ export async function followToDesktop(
         pick: m => {
             const row = m?.rows.find(r => r.id !== signInRowId && r.online && r.verified) ?? null;
             if (!row) return null;
-            return { row, connectingMessage: as === 'files' ? `${name} is signed in — opening its files again…` : `${name} is signed in — opening its desktop…` };
+            return { row, connectingMessage: `${name} is signed in — opening its desktop…` };
         },
-        as,
         timeoutMessage: () =>
             `${name} was signed in, but its desktop app did not come online within two minutes. ` +
             'If Púca is not set to start with Windows on that computer, open it there — ' +
-            `or press ${as === 'files' ? 'Files' : 'Control'} here once it is running.`,
+            'or press Control here once it is running.',
         openFailedMessage: why => `${name} is signed in, but the session could not be opened: ${why}`,
         // Poll immediately: after an unlock of an already-running desktop the
         // app row is online NOW, and waiting a full interval before looking
@@ -486,7 +480,6 @@ export async function followToDesktop(
 export async function followToSignIn(
     appRowId: string,
     userId: number,
-    as: FollowAs = 'control',
 ): Promise<void> {
     let all: VerifiedDevice[];
     try {
@@ -527,12 +520,11 @@ export async function followToSignIn(
         pick: m => {
             const row = m?.rows.find(r => r.id === signInRowId && r.online && r.verified) ?? null;
             if (!row) return null;
-            return { row, connectingMessage: as === 'files' ? `${name} is locked — opening its files again from the sign-in screen…` : `${name} is locked — opening its sign-in screen…` };
+            return { row, connectingMessage: `${name} is locked — opening its sign-in screen…` };
         },
-        as,
         timeoutMessage: () =>
             `${name} was locked, but its sign-in screen did not come online within two minutes. ` +
-            `Press ${as === 'files' ? 'Files' : 'Control'} here once its card shows the sign-in screen as online.`,
+            'Press Control here once its card shows the sign-in screen as online.',
         openFailedMessage: why => `${name} is locked, but the session could not be opened: ${why}`,
         pollNow: true,
     });
@@ -560,9 +552,6 @@ function watchForRow(opts: {
     openFailedMessage: (why: string) => string;
     /** Run the first poll immediately rather than after one interval. */
     pollNow?: boolean;
-    /** What the session followed was: a Files session opens Files again,
-     *  never Control (a wake opens Control). */
-    as?: FollowAs;
 }): void {
     const { cardId, token, userId, phase, timeoutMs, pollMs } = opts;
     const startedAt = Date.now();
@@ -621,7 +610,7 @@ function watchForRow(opts: {
             // while a connect is in flight.
             set(cardId, 'connecting', found.connectingMessage);
             try {
-                await connectToDevice(found.row.id, opts.as === 'files' ? { filesOnly: true } : undefined);
+                await connectToDevice(found.row.id);
                 if (!isCurrent(cardId, token)) return;
                 clearTimers(cardId);
                 // The session UI takes over from here; drop our status so

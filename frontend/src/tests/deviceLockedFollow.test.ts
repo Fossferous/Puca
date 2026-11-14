@@ -227,7 +227,7 @@ describe('the locked-follow fallback', () => {
         vi.advanceTimersByTime(LOCKED_FOLLOW_AFTER_MS + 500);
         await pollLockedFollow();
         await settle();
-        expect(follow).toHaveBeenCalledWith('dev-host', 1, 'control');
+        expect(follow).toHaveBeenCalledWith('dev-host', 1);
         expect(await phaseOf(id), 'the stuck session is handed over').toBe('gone');
         // The desktop app still holds its one-session slot; it must be told.
         expect(sent.some(m => m.type === 'DeviceEnd'), 'DeviceEnd must reach the host').toBe(true);
@@ -250,7 +250,7 @@ describe('the locked-follow fallback', () => {
         h.signInRow = { id: 'dev-signin', online: true, verified: true };
         await pollLockedFollow();
         await settle();
-        expect(follow).toHaveBeenCalledWith('dev-host', 1, 'control');
+        expect(follow).toHaveBeenCalledWith('dev-host', 1);
     });
 
     it('an OFFLINE sign-in row is a UAC prompt for all this poller knows — no follow', async () => {

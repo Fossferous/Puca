@@ -133,7 +133,7 @@ const seen = new Map<string, DeviceControlSession>();
 
 type ShareOpt = { inviteId: number; ownerUser: number; ownerUsername: string; capabilities: string[] };
 
-async function startController(opts: { powerOff?: boolean; filesOnly?: boolean; audioHub?: boolean; share?: ShareOpt }): Promise<string> {
+async function startController(opts: { powerOff?: boolean; filesOnly?: boolean; share?: ShareOpt }): Promise<string> {
     const { installDeviceSessions, connectToDevice, endAllSessions, subscribeSessions } = await import('../api/devices/session');
     installDeviceSessions();
     endAllSessions('test reset');
@@ -145,7 +145,7 @@ async function startController(opts: { powerOff?: boolean; filesOnly?: boolean; 
 }
 
 /** An active controller session to 'dev-host', and the key the HOST holds. */
-async function activeController(opts: { powerOff?: boolean; filesOnly?: boolean; audioHub?: boolean; share?: ShareOpt } = { powerOff: true }): Promise<{ id: string; key: Uint8Array }> {
+async function activeController(opts: { powerOff?: boolean; filesOnly?: boolean; share?: ShareOpt } = { powerOff: true }): Promise<{ id: string; key: Uint8Array }> {
     const id = await startController(opts);
     const controllerEph = sent.find(m => m.type === 'DeviceConnect')?.payload?.eph as string;
     const hostEph = generateControlEphemeral();
@@ -467,36 +467,13 @@ describe('an armed PC (the passphrase)', () => {
         expect(followToDesktop, 'a Control session nobody asked for').not.toHaveBeenCalled();
     });
 
-    it('POSITIVE CONTROL: a Files session IS followed to the desktop on the same hand-over, as Files (never Control)', async () => {
+    it('POSITIVE CONTROL: a Files session IS followed to the desktop on the same hand-over', async () => {
         const { HANDOVER_REASON } = await import('../api/devices/session');
         followToDesktop.mockClear();
         const { id } = await activeController({ filesOnly: true });
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: HANDOVER_REASON } });
         await settle();
-        expect(followToDesktop).toHaveBeenCalledWith('dev-host', expect.any(Number), 'files');
-    });
-
-    it('a Control session is followed to the desktop as Control', async () => {
-        const { HANDOVER_REASON } = await import('../api/devices/session');
-        followToDesktop.mockClear();
-        const { id } = await activeController({});
-        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: HANDOVER_REASON } });
-        await settle();
-        expect(followToDesktop).toHaveBeenCalledWith('dev-host', expect.any(Number), 'control');
-    });
-
-    it("an Audio Hub session (files-only on the wire) is not followed: it is nobody's file browser", async () => {
-        const { HANDOVER_REASON, LOCK_HANDOVER_REASON } = await import('../api/devices/session');
-        followToDesktop.mockClear();
-        followToSignIn.mockClear();
-        let { id } = await activeController({ audioHub: true });
-        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: HANDOVER_REASON } });
-        await settle();
-        ({ id } = await activeController({ audioHub: true }));
-        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: LOCK_HANDOVER_REASON } });
-        await settle();
-        expect(followToDesktop).not.toHaveBeenCalled();
-        expect(followToSignIn).not.toHaveBeenCalled();
+        expect(followToDesktop).toHaveBeenCalled();
     });
 
     it('the deadline falling due while the passphrase is being STRETCHED is no verdict: the proof still goes, and the clock starts from it', async () => {
@@ -537,13 +514,13 @@ describe('an armed PC (the passphrase)', () => {
         expect(followToSignIn, 'a Control session nobody asked for').not.toHaveBeenCalled();
     });
 
-    it('POSITIVE CONTROL: a Files session IS followed to the lock screen on the same hand-over, as Files (never Control)', async () => {
+    it('POSITIVE CONTROL: a Files session IS followed to the lock screen on the same hand-over', async () => {
         const { LOCK_HANDOVER_REASON } = await import('../api/devices/session');
         followToSignIn.mockClear();
         const { id } = await activeController({ filesOnly: true });
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: LOCK_HANDOVER_REASON } });
         await settle();
-        expect(followToSignIn).toHaveBeenCalledWith('dev-host', expect.any(Number), 'files');
+        expect(followToSignIn).toHaveBeenCalled();
     });
 
     it('a friend\'s PC locking first: not done either (the share\'s own wording for that end)', async () => {

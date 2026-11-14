@@ -1,7 +1,7 @@
 /**
  * The lists a running app read as one account (the query cache and the voice roster, App.tsx
  * forgetAccountLists) are forgotten at the ends of a session that do not run logout(): a sign-out
- * in another tab, and a sign-in here as somebody else after a soft expiry. logout()'s own path is
+ * in another tab, and a sign-in as somebody else after a soft expiry, here or in another tab. logout()'s own path is
  * signOutClearsSharedLists.test.ts. A sign-in reloads nothing, so before this the next account in
  * that tab was drawn the last one's servers, channel lists and calls (review of client-small).
  * Through the real App, with what it draws reduced to a name, as sessionEndClosesDialogs.test.tsx.
@@ -104,6 +104,25 @@ describe("the lists read as one account", () => {
         expect(listsKept(), 'kept for the same account signing back in').toBe(true);
         await signInHereAs(8);
         expect(listsGone()).toBe(true);
+    });
+
+    it('a soft expiry, then somebody else signing in in ANOTHER tab, forgets them here too', async () => {
+        store[SEED_KEY] = 'kept';
+        await mountApp();
+        seventhAccountsLists();
+        await tokenChangedElsewhere(null);
+        expect(listsKept(), 'kept for the same account signing back in').toBe(true);
+        await tokenChangedElsewhere(token(8));
+        expect(listsGone()).toBe(true);
+    });
+
+    it('CONTROL: the same account signing back in in another tab after a soft expiry keeps them', async () => {
+        store[SEED_KEY] = 'kept';
+        await mountApp();
+        seventhAccountsLists();
+        await tokenChangedElsewhere(null);
+        await tokenChangedElsewhere(token(7));
+        expect(listsKept()).toBe(true);
     });
 
     it('CONTROL: the same account signing back in after a soft expiry keeps them', async () => {

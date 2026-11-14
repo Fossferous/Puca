@@ -194,7 +194,7 @@ describe('the lock handover, controller side', () => {
         });
         expect(ended, 'the session must end').toBeTruthy();
         expect(ended!.error, 'deliberate: no red banner').toBeNull();
-        expect(follow).toHaveBeenCalledWith('dev-host', 1, 'control');
+        expect(follow).toHaveBeenCalledWith('dev-host', 1);
     });
 
     it('a SHARE grantee cannot follow, and is told WHY the picture went instead of watching it vanish', async () => {

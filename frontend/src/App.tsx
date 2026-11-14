@@ -186,6 +186,13 @@ function App() {
       expireSession();
     },
     onAccountChanged: () => window.location.reload(),
+    // Another document signed in after this one was signed out (a soft expiry keeps the lists):
+    // nothing reloads here, and the next render mounts the chat, so the lists must be that account's.
+    onSignedIn: () => {
+      const account = currentUserIdFromToken();
+      if (account !== listsAccount.current) forgetAccountLists();
+      listsAccount.current = account;
+    },
   }), [expireSession]);
 
   // The API client dispatches 'auth-expired' ONCE when an authenticated
