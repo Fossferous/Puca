@@ -23,10 +23,11 @@
 # Dependency updates.
 #
 # WHY THIS EXISTS. Púca ships end-to-end encryption and a remote-desktop agent,
-# so a vulnerable transitive dependency is not cosmetic. Nothing in this
-# repository watched for one: no scanner ran in CI and no bot opened a PR, so an
-# advisory against a crate in Cargo.lock or a package in package-lock.json could
-# sit unnoticed indefinitely.
+# so a vulnerable transitive dependency is not cosmetic. When this file was
+# added nothing in this repository watched for one: no scanner ran in CI and no
+# bot opened a PR, so an advisory against a crate in Cargo.lock or a package in
+# package-lock.json could sit unnoticed indefinitely. (CI has scanned since; see
+# docs/SECURITY_MODEL.md §8.)
 #
 # GROUPED DELIBERATELY. Ungrouped, four ecosystems across five manifests produce
 # a stream of single-dependency PRs that a one-person project stops reading —

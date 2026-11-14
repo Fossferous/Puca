@@ -1249,8 +1249,10 @@ Other things you'd find anyway:
 - **Dependency scanning covers only part of the tree.** CI's
   `supply-chain` job runs `cargo audit` over all three Rust lockfiles (the backend and
   `crates/*` in `Cargo.lock`, the desktop shell's `frontend/src-tauri/Cargo.lock`, the
-  noise-suppression wasm's `frontend/df-wasm/Cargo.lock`) and fails on any advisory that
-  `.cargo/audit.toml` has not accepted with its reasoning. The frontend job runs `npm audit`
+  noise-suppression wasm's `frontend/df-wasm/Cargo.lock`) and fails on any vulnerability
+  advisory that `.cargo/audit.toml` has not accepted with its reasoning; informational ones
+  (a crate unmaintained, unsound or yanked) are printed as warnings and do not fail it,
+  since neither the job nor that file denies warnings. The frontend job runs `npm audit`
   over `frontend/package-lock.json` through `frontend/scripts/check-npm-advisories.mjs`,
   which fails on a high or critical advisory against a package with no row in
   `docs/NPM_ADVISORIES.md`. Both run only when CI does (a push to `main` or a `work/**`
@@ -1264,9 +1266,10 @@ Other things you'd find anyway:
   requests, and its alerts and security updates arrive only while the repository has them
   switched on in its settings, which is not something this tree can show. While they are
   on, GitHub's dependency graph covers the npm lockfiles too, but still not the Gradle
-  builds or the pinned actions: it reads Gradle only through a dependency-submission job, which this repository does not
-  have, and it raises no alert for an action pinned by SHA rather than by version. There
-  is no Renovate.
+  builds or the pinned actions, as far as the tree shows: it reads Gradle only through
+  dependency submission (a workflow, of which the tree has none, or GitHub's automatic
+  submission, which is another repository setting), and it raises no alert for an action
+  pinned by SHA rather than by version. There is no Renovate.
 - **Bus factor 1.** One author, no second reviewer, and no outside audit has ever been
   performed. The source is now public, so one is at least *possible* — but
   "auditable" and "audited" are different words, and only the first one is true here.
