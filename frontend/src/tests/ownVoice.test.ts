@@ -19,16 +19,19 @@ import { wsClient } from '../api/websocket';
 import {
     callOnOtherDevice,
     carriedFromOtherDevice,
+    currentClientForm,
     getOwnVoiceSnapshot,
+    nameDevice,
     ownVoiceBannerText,
     parseOwnVoiceState,
     resetOwnVoice,
     roomLeftNotice,
     shouldTakeOver,
+    whereDevice,
 } from '../api/ownVoice';
 
 type Frame = { type: string; payload?: Record<string, unknown> };
-const [ELSEWHERE, NONE, ROOM_LEFT_MOVED, ROOM_LEFT_PLAIN] = fixture as Frame[];
+const [ELSEWHERE, NONE, ROOM_LEFT_MOVED, ROOM_LEFT_PLAIN, ON_TABLET, ROOM_LEFT_BY_TABLET] = fixture as Frame[];
 
 /** A socket stand-in that records what the client sends. */
 class FakeSocket {
@@ -92,6 +95,7 @@ describe('OwnVoiceState parsing (the pinned fixture)', () => {
             serverName: 'Friends',
             here: false,
             device: 'desktop',
+            deviceForm: null,
             selfMuted: true,
             deafened: false,
         });
@@ -100,8 +104,19 @@ describe('OwnVoiceState parsing (the pinned fixture)', () => {
     it('reads the not-in-voice frame', () => {
         expect(parseOwnVoiceState(NONE.payload)).toEqual({
             roomId: null, channelId: null, serverId: null, channelName: null, serverName: null, here: false, device: null,
-            selfMuted: null, deafened: null,
+            deviceForm: null, selfMuted: null, deafened: null,
         });
+    });
+
+    it('reads a call on a TABLET: mobile, with the form beside it', () => {
+        expect(parseOwnVoiceState(ON_TABLET.payload)).toMatchObject({ device: 'mobile', deviceForm: 'tablet' });
+        // A server from before the form sends no key: a phone, as it always was.
+        const { device_form: _f, ...older } = ON_TABLET.payload as Record<string, unknown>;
+        expect(parseOwnVoiceState(older)).toMatchObject({ device: 'mobile', deviceForm: null });
+        // Only the exact word, and only beside `mobile`.
+        expect(parseOwnVoiceState({ ...ON_TABLET.payload, device_form: 'Tablet' })?.deviceForm).toBeNull();
+        expect(parseOwnVoiceState({ ...ON_TABLET.payload, device_form: 7 })?.deviceForm).toBeNull();
+        expect(parseOwnVoiceState({ ...ELSEWHERE.payload, device_form: 'tablet' })?.deviceForm, 'a desktop is not a tablet').toBeNull();
     });
 
     it("reads the call's mute and deafen only when they are real booleans", () => {
@@ -135,6 +150,74 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
         expect(url.searchParams.get('caps')?.split(',')).toEqual(expect.arrayContaining(['own_voice', 'presence']));
         expect(['desktop', 'mobile', 'browser']).toContain(url.searchParams.get('kind'));
         expect(sock.protocols).toEqual(['bearer', 'token']);
+    });
+
+    describe('a tablet says so beside kind=mobile; a phone sends no form', () => {
+        const saved = { mm: window.matchMedia, w: window.screen.width, h: window.screen.height };
+        /** A screen of w x h with the window filling it: `(pointer: coarse)`
+         *  matches a touch screen, `(max-width: 1024px)` a window that narrow. */
+        const be = (touch: boolean, w: number, h: number) => {
+            Object.defineProperty(window, 'matchMedia', {
+                configurable: true, writable: true,
+                value: (q: string) => ({
+                    matches: touch && q.includes('coarse') && (!q.includes('max-width: 1024px') || w <= 1024),
+                    media: q, addEventListener() {}, removeEventListener() {},
+                }),
+            });
+            Object.defineProperty(window.screen, 'width', { configurable: true, get: () => w });
+            Object.defineProperty(window.screen, 'height', { configurable: true, get: () => h });
+        };
+        afterEach(() => {
+            Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: saved.mm });
+            Object.defineProperty(window.screen, 'width', { configurable: true, get: () => saved.w });
+            Object.defineProperty(window.screen, 'height', { configurable: true, get: () => saved.h });
+        });
+        const params = async () => new URL((await openSocket()).url).searchParams;
+
+        it('an iPad-sized touch screen (820x1180): kind=mobile&form=tablet, ONE of each', async () => {
+            be(true, 820, 1180);
+            const q = await params();
+            expect(q.getAll('kind')).toEqual(['mobile']);
+            expect(q.getAll('form')).toEqual(['tablet']);
+        });
+
+        it('a tablet held sideways (window 1180 px wide) is still a tablet, not "a browser"', async () => {
+            be(true, 1180, 820);
+            const q = await params();
+            expect(q.get('kind')).toBe('mobile');
+            expect(q.get('form')).toBe('tablet');
+            // CONTROL: the same screen with a mouse is a computer's browser.
+            wsClient.disconnect();
+            be(false, 1180, 820);
+            const c = await params();
+            expect(c.get('kind')).toBe('browser');
+            expect(c.has('form')).toBe(false);
+        });
+
+        it('the line is the SHORT side at 600 px, whichever way the screen is turned', () => {
+            be(true, 1180, 820);
+            expect(currentClientForm('mobile')).toBe('tablet');
+            be(true, 600, 960);
+            expect(currentClientForm('mobile')).toBe('tablet');
+            be(true, 599, 960);
+            expect(currentClientForm('mobile')).toBeNull();
+            be(true, 960, 599);
+            expect(currentClientForm('mobile')).toBeNull();
+        });
+
+        it('CONTROL: a 390x844 phone sends kind=mobile and no form; a desktop browser neither', async () => {
+            be(true, 390, 844);
+            let q = await params();
+            expect(q.get('kind')).toBe('mobile');
+            expect(q.has('form')).toBe(false);
+            wsClient.disconnect();
+            be(false, 1920, 1080);
+            q = await params();
+            expect(q.get('kind')).toBe('browser');
+            expect(q.has('form')).toBe(false);
+            expect(currentClientForm('desktop')).toBeNull();
+            expect(currentClientForm('browser')).toBeNull();
+        });
     });
 
     it('LeaveOwnVoice is withheld from a server that never said it understands it', async () => {
@@ -217,6 +300,18 @@ describe('what each device says', () => {
         expect(ownVoiceBannerText({ ...s, device: 'browser' })).toBe("You're in Lounge in a browser");
         expect(ownVoiceBannerText({ ...s, device: null })).toBe("You're in Lounge on another device");
         expect(ownVoiceBannerText({ ...s, channelName: null })).toBe("You're in a voice channel on your PC");
+        expect(ownVoiceBannerText(parseOwnVoiceState(ON_TABLET.payload)!)).toBe("You're in Lounge on your tablet");
+    });
+
+    it('a tablet is "your tablet"; a phone, or a server that sends no form, "your phone"', () => {
+        expect(roomLeftNotice(ROOM_LEFT_BY_TABLET.payload)).toBe('You moved the call to your tablet');
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'left_elsewhere', by: 'mobile', by_form: 'tablet' })).toBe('You left voice from your tablet');
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'left_elsewhere', by: 'mobile' })).toBe('You left voice from your phone');
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'moved', by: 'desktop', by_form: 'tablet' })).toBe('You moved the call to your PC');
+        expect(roomLeftNotice({ room_id: 'voice_42', reason: 'moved', by: 'mobile', by_form: 'phablet' })).toBe('You moved the call to your phone');
+        expect(nameDevice('mobile', 'tablet')).toBe('your tablet');
+        expect(whereDevice('mobile', 'tablet')).toBe('on your tablet');
+        expect(whereDevice('mobile')).toBe('on your phone');
     });
 
     it('the displaced device explains itself instead of dropping silently', () => {
@@ -245,7 +340,7 @@ describe('what each device says', () => {
 describe('carriedFromOtherDevice: how a call that comes over to this device arrives', () => {
     const elsewhere = (selfMuted: boolean | null, deafened: boolean | null, here = false) => ({
         supported: true,
-        state: { roomId: 'voice_42', channelId: 42, serverId: 's', channelName: 'Lounge', serverName: 'Friends', here, device: 'desktop' as const, selfMuted, deafened },
+        state: { roomId: 'voice_42', channelId: 42, serverId: 's', channelName: 'Lounge', serverName: 'Friends', here, device: 'desktop' as const, deviceForm: null, selfMuted, deafened },
     });
     it('as the other device left it', () => {
         expect(carriedFromOtherDevice(elsewhere(true, false))).toEqual({ muted: true, deafened: false });

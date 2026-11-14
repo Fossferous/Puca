@@ -35,6 +35,19 @@ export const REPORT_AFTER_SECS = 60;
 
 const DEFAULT_POLL_MS = 15_000;
 
+/**
+ * The poll while this device has told its server the person is gone AND an
+ * OS-wide probe is what will see them come back (the desktop's
+ * GetLastInputInfo, or an embedding host's idleSeconds). Input in the game
+ * they return from never reaches the page, so the probe is the only way back
+ * to green, and at the 15 s poll that took up to 15 s; at this it is about 3.
+ * Only then: active, or with no probe (web, Android: input in the page and
+ * showing it report back at once), the poll stays at DEFAULT_POLL_MS. The
+ * desktop app starts WebView2 with background timer throttling off
+ * (tauri.conf.json), so a minimised window keeps this cadence.
+ */
+export const IDLE_POLL_MS = 3_000;
+
 export interface ActivityInputs {
     /** OS-wide seconds since the last input, or null when there is no probe. */
     osIdleSecs: number | null;
@@ -92,6 +105,8 @@ export interface ReporterOptions {
     /** Override the OS probe (tests). */
     probe?: () => Promise<number | null>;
     pollMs?: number;
+    /** The poll while reported inactive with a probe answering (IDLE_POLL_MS). */
+    idlePollMs?: number;
 }
 
 const INPUT_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus'] as const;
@@ -113,10 +128,32 @@ export function startActivityReporter(opts: ReporterOptions): () => void {
     // What THIS socket's server was last told; null = nothing yet.
     let told: 'active' | 'inactive' | null = null;
     let stopped = false;
+    // The last poll's probe answered: an OS-wide (or host) view of input.
+    let probed = false;
+    // ONE pending poll at a time, armed only by schedule(), and its cadence.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let armedMs = 0;
 
     const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
     const noteSpeaking = () => {
         if (globalSpeakingUsers.has(opts.userId)) lastSpeaking = Date.now();
+    };
+
+    /** The cadence the current state calls for: IDLE_POLL_MS while told
+     *  inactive with a probe that will see the person come back. */
+    const pollEvery = () => (told === 'inactive' && probed
+        ? opts.idlePollMs ?? IDLE_POLL_MS
+        : opts.pollMs ?? DEFAULT_POLL_MS);
+    /** (Re)arm the next poll at that cadence. */
+    const schedule = () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        if (stopped) return;
+        armedMs = pollEvery();
+        timer = setTimeout(() => {
+            timer = null;
+            void evaluate().finally(schedule);
+        }, armedMs);
     };
 
     const tell = (secs: number | null) => {
@@ -124,6 +161,10 @@ export function startActivityReporter(opts: ReporterOptions): () => void {
         const kind = secs === null ? 'active' : 'inactive';
         if (kind === told) return; // transitions only
         if (wsClient.send({ type: 'SetActivity', payload: { inactive_secs: secs } })) told = kind;
+        // Gone idle: start the fast poll NOW, not after the slow poll's wait,
+        // or coming back inside it would still take up to 15 s. (Back: the
+        // armed fast poll runs once more and re-arms the slow one.)
+        if (timer !== null && pollEvery() < armedMs) schedule();
     };
 
     const evaluate = async () => {
@@ -135,6 +176,7 @@ export function startActivityReporter(opts: ReporterOptions): () => void {
             os = null; // a probe that fails falls back to what the page sees
         }
         if (stopped) return;
+        probed = os !== null;
         noteSpeaking();
         const local = os !== null ? lastSpeaking : Math.max(lastInApp, lastSpeaking);
         tell(decideReport({
@@ -167,14 +209,15 @@ export function startActivityReporter(opts: ReporterOptions): () => void {
         noteSpeaking();
         if (globalSpeakingUsers.has(opts.userId) && told === 'inactive') tell(null);
     });
-    const poll = setInterval(() => { void evaluate(); }, opts.pollMs ?? DEFAULT_POLL_MS);
+    schedule();
 
     // The socket may have confirmed the capability before this started.
     if (wsClient.hasServerFeature('presence')) void evaluate();
 
     return () => {
         stopped = true;
-        clearInterval(poll);
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
         for (const ev of INPUT_EVENTS) window.removeEventListener(ev, onInput, opt);
         document.removeEventListener('visibilitychange', onVisibility);
         window.removeEventListener('wsClosed', onClosed);

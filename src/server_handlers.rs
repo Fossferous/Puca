@@ -2365,8 +2365,8 @@ mod server_gone_tests {
             while let Ok(m) = self.rx.try_recv() {
                 match m {
                     ServerMessage::RemovedFromServer { server_id, reason } => out.push(format!("gone:{server_id}:{reason:?}")),
-                    ServerMessage::RoomLeft { room_id, reason, by } => {
-                        assert_eq!((reason, by), (None, None), "a plain RoomLeft, which every client handles");
+                    ServerMessage::RoomLeft { room_id, reason, by, by_form } => {
+                        assert_eq!((reason, by, by_form), (None, None, None), "a plain RoomLeft, which every client handles");
                         out.push(format!("left:{room_id}"));
                     }
                     ServerMessage::ChannelPermsChanged { server_id } => out.push(format!("perms:{server_id}")),
