@@ -51,7 +51,8 @@
 //   cd frontend && node e2e/notify-coalesce-real-browser.mjs
 //
 // No server and no build needed (esbuild bundles the modules; ~20 s).
-import { chromium, firefox, webkit } from '@playwright/test';
+import { chromium } from '@playwright/test';
+import { spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -407,30 +408,16 @@ await browser.close();
 
 // ---- browsers with no renotify -------------------------------------------------
 // The web path keeps a quiet update off the screen where a replacement would
-// pop (desktopNotify.ts, browserRenotifies; vitest models what follows). Only
-// the property is read here: nothing is constructed, so nothing is shown.
-for (const [label, type, opts, skip] of [
-    ['Firefox', firefox, { firefoxUserPrefs: { 'media.volume_scale': '0.0' } }, process.env.FIREFOX === '0'],
-    ['WebKit', webkit, {}, process.env.WEBKIT === '0'],
-]) {
-    if (skip) { console.log('SKIP', `${label}: skipped by its env switch`); continue; }
-    let other;
-    try {
-        other = await type.launch({ headless: true, ...opts });
-    } catch (e) {
-        console.log('SKIP', `${label}: cannot launch (npx playwright install ${label.toLowerCase()})`, String(e.message).split('\n')[0]);
-        continue;
-    }
-    const ctx = await other.newContext();
-    const p = await ctx.newPage();
-    await p.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><meta charset=utf-8><title>notify</title><body>rig</body>' }));
-    // Not port 9: Firefox refuses it (a blocked port) before the route can
-    // answer. Nothing listens here either; the route answers every request.
-    await p.goto('http://127.0.0.1:47110/');
-    const got = await p.evaluate(() => ({ has: typeof Notification !== 'undefined', renotify: typeof Notification !== 'undefined' && 'renotify' in Notification.prototype }));
-    if (!got.has) console.log('SKIP', `${label}: has no Notification on this platform`);
-    else ck(got.renotify === false, `${label}: no renotify on Notification.prototype, so quiet updates stay off its screen`, JSON.stringify(got));
-    await other.close();
+// pop (desktopNotify.ts, browserRenotifies; vitest models what follows). Firefox
+// and WebKit are asked only whether `renotify` is on Notification.prototype, in
+// a child process: this file grants notifications to Chromium, and
+// scripts/check-e2e-muted.mjs allows no Firefox or WebKit launch beside that.
+{
+    const probe = join(here, 'notify-renotify-probe.mjs');
+    const r = spawnSync(process.execPath, [probe], { encoding: 'utf8', env: process.env, timeout: 180_000 });
+    process.stdout.write(r.stdout || '');
+    if (r.stderr) process.stderr.write(r.stderr);
+    ck(r.status === 0, 'Firefox and WebKit: no renotify on Notification.prototype (notify-renotify-probe.mjs)', `(exit ${r.status}${r.error ? ', ' + r.error.message : ''})`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
