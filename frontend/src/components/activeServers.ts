@@ -26,11 +26,12 @@ const CHANNEL_NAMES_STALE_MS = 120_000;
  *  (middleware/rate_limit.rs), so past it the app's own requests beside them were refused too. */
 export const ACTIVE_READ_CONCURRENCY = 4;
 
-/** `fn` over `items`, at most `limit` at a time, in order; settles when every one has. */
-export async function eachLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+/** `fn` over `items`, at most `limit` at a time, in order; settles when every one has, or once
+ *  `stop` says so (what is already asked for finishes; nothing more starts). */
+export async function eachLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>, stop: () => boolean = () => false): Promise<void> {
     let next = 0;
     const lane = async () => {
-        while (next < items.length) {
+        while (next < items.length && !stop()) {
             const item = items[next++];
             await fn(item);
         }
@@ -216,7 +217,9 @@ export function useActiveInServers(opts: {
                         if (users.size > 0 || was) globalVoiceUsers.set(roomId, users);
                     }
                     seeded.current.set(server.id, nowSeeded);
-                });
+                    // A read nobody waits for any more (another server opened, the panel gone, a
+                    // sign-out) asks for nothing more: its lanes went on through every server.
+                }, () => cancelled);
             } finally {
                 running = false;
             }

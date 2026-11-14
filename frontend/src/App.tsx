@@ -44,8 +44,19 @@ import { API_BASE_URL } from './api/config';
 import { ClipApprovalPrompt } from './components/ClipApprovalPrompt';
 import './App.css';
 import { askConfirm, closeAppDialogs } from './api/appDialogs';
+import { queryClient } from './api/queryClient';
+import { clearVoiceRoster } from './components/voiceState';
 
 const MAX_AUTO_RETRIES = RETRY_DELAYS_MS.length;
+
+/** The lists this running app read as one account: the query cache (servers, every server's
+ *  channel list, members, roles) and the voice roster of every server ("Active in your servers").
+ *  logout() forgets them through its sign-out hooks; the two ends of a session that do not run
+ *  logout() call this (App, below). */
+function forgetAccountLists(): void {
+  queryClient.clear();
+  clearVoiceRoster();
+}
 
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -73,6 +84,9 @@ function App() {
   // download rather than just naming the problem.
   const [staleUpdate, setStaleUpdate] = useState<AppVersionInfo | null>(null);
   const retryCount = useRef(0);
+  // The account the lists cached in this running app were read as. A soft expiry keeps them for
+  // the same account signing back in; a sign-in as someone else must not be drawn them.
+  const listsAccount = useRef(currentUserIdFromToken());
 
   // Helper to get token from URL for reset/verify
   const urlToken = new URLSearchParams(location.search).get('token') || '';
@@ -167,6 +181,7 @@ function App() {
         clearBlockedUsers();
         clearFileCache();
         resetReconnectCatchup();
+        forgetAccountLists();
       }
       expireSession();
     },
@@ -378,6 +393,9 @@ function App() {
 
   const handleLoginSuccess = () => {
     resetAuthExpiredFlag(); // a later expiry must signal again
+    const account = currentUserIdFromToken();
+    if (account !== listsAccount.current) forgetAccountLists();
+    listsAccount.current = account;
     setLoggedIn(true);
     setWsConnected(true);
     setConnectionError(null);

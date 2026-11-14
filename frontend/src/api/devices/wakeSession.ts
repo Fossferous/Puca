@@ -457,7 +457,7 @@ export async function followToDesktop(
         timeoutMessage: () =>
             `${name} was signed in, but its desktop app did not come online within two minutes. ` +
             'If Púca is not set to start with Windows on that computer, open it there — ' +
-            'or press Control here once it is running.',
+            `or press ${as === 'files' ? 'Files' : 'Control'} here once it is running.`,
         openFailedMessage: why => `${name} is signed in, but the session could not be opened: ${why}`,
         // Poll immediately: after an unlock of an already-running desktop the
         // app row is online NOW, and waiting a full interval before looking
@@ -532,7 +532,7 @@ export async function followToSignIn(
         as,
         timeoutMessage: () =>
             `${name} was locked, but its sign-in screen did not come online within two minutes. ` +
-            'Press Control here once its card shows the sign-in screen as online.',
+            `Press ${as === 'files' ? 'Files' : 'Control'} here once its card shows the sign-in screen as online.`,
         openFailedMessage: why => `${name} is locked, but the session could not be opened: ${why}`,
         pollNow: true,
     });

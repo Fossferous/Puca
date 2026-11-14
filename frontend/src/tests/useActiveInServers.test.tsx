@@ -159,6 +159,24 @@ describe('useActiveInServers', () => {
         expect(status()).toBe('ok');
     });
 
+    it('a read nobody waits for any more asks for nothing more: what is out finishes, nothing new starts', async () => {
+        const many = Array.from({ length: 13 }, (_, i) => ({ id: `s${i}` }));
+        const waiting: Array<() => void> = [];
+        fetchVoiceUsers.mockImplementation(async () => {
+            await new Promise<void>(r => waiting.push(r));
+            return { voice_users: [] };
+        });
+        await mount(baseOpts({ servers: many, currentServerId: 's0' }));
+        expect(fetchVoiceUsers.mock.calls.length).toBe(ACTIVE_READ_CONCURRENCY);
+        // Gone (another server opened re-runs it; unmount and sign-out end it): the reads out answer.
+        await act(async () => { root?.unmount(); });
+        root = null;
+        for (let i = 0; i < 20 && waiting.length > 0; i++) {
+            await act(async () => { waiting.shift()!(); await new Promise(r => setTimeout(r, 0)); });
+        }
+        expect(fetchVoiceUsers.mock.calls.length, 'none of the other eight asked for').toBe(ACTIVE_READ_CONCURRENCY);
+    });
+
     it('lets go of a room that the next read no longer names', async () => {
         fetchVoiceUsers.mockImplementation(async (id: string) => ({
             voice_users: id === 'b' ? [{ room_id: 'voice_20', user_id: 5, username: 'dee' }] : [],

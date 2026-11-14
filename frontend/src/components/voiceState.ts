@@ -470,7 +470,8 @@ export function clearAllStreams() {
 // Who is in which voice room, in every server this account is in ("Active in your servers" reads it
 // for servers that are not open, and nothing empties a room this client was never in). A sign-out
 // reloads nothing, so the next account signed in on this running app was shown the last one's calls.
-registerLogoutCleanup(() => {
+export function clearVoiceRoster(): void {
     globalVoiceUsers.clear();
     notifyVoiceUsersChange();
-});
+}
+registerLogoutCleanup(clearVoiceRoster);
