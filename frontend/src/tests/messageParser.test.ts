@@ -1585,7 +1585,7 @@ describe('a stray [ in the words before a link, a picture or a file', () => {
         return out.join(';');
     };
 
-    /** Whether every letter and digit typed in a spoiler of `then` (0.9.857's) is in one of `read` (this parser's). */
+    /** Whether every character of a word (WORD_RE's) typed in a spoiler of `then` (0.9.857's) is in one of `read` (this parser's). */
     const hidesEveryLetterOf = (content: string, read: Node[], then: Node[]) => {
         const stretches = (nodes: Node[], of: (n: Node) => readonly [number, number] | undefined, out: Array<readonly [number, number]> = []) => {
             for (const n of nodes) {
@@ -1597,7 +1597,7 @@ describe('a stray [ in the words before a link, a picture or a file', () => {
         };
         const mine = stretches(read, spoilerSpan);
         return stretches(then, spoilerSpanAt857).every(([from, to]) => {
-            for (let at = from; at < to; at++) if (/[\p{L}\p{N}]/u.test(content[at]) && !mine.some(([a, b]) => at >= a && at < b)) return false;
+            for (let at = from; at < to; at++) if (/[^\s!-/:-@[-`{-~]/u.test(content[at]) && !mine.some(([a, b]) => at >= a && at < b)) return false;
             return true;
         });
     };
@@ -1662,18 +1662,20 @@ describe('a stray [ in the words before a link, a picture or a file', () => {
 });
 
 describe('what 0.9.855 hid stays hidden beside a quote or a fence', () => {
-    /** The marker words (`w<N>`) a parse hides, and those it prints. */
-    const seen = (nodes: Node[], under = false, out = { hidden: new Set<string>(), shown: new Set<string>() }) => {
+    /** The marker words (`w<N>`, or the emoji `markers` finds) a parse hides, and those it prints. */
+    const seen = (nodes: Node[], markers: RegExp, under = false, out = { hidden: new Set<string>(), shown: new Set<string>() }) => {
         for (const n of nodes) {
-            if ('children' in n) seen(n.children, under || n.type === 'spoiler', out);
-            else for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) (under ? out.hidden : out.shown).add(w);
+            if ('children' in n) seen(n.children, markers, under || n.type === 'spoiler', out);
+            else for (const w of JSON.stringify(n).match(markers) ?? []) (under ? out.hidden : out.shown).add(w);
         }
         return out;
     };
+    const W = /w\d+/g;
+    const EMOJI = /\p{Extended_Pictographic}/gu;
     /** The marker words `before` hid that `read` prints. */
-    const printsWhat = (read: Node[], before: Node[]) => {
-        const now = seen(read);
-        return [...seen(before).hidden].filter(w => now.shown.has(w));
+    const printsWhat = (read: Node[], before: Node[], markers: RegExp = W) => {
+        const now = seen(read, markers);
+        return [...seen(before, markers).hidden].filter(w => now.shown.has(w));
     };
     /** Whether a spoiler of `nodes` holds what was typed at `at`. */
     const hiddenAt = (nodes: Node[], of: (n: Node) => readonly [number, number] | undefined, at: number): boolean =>
@@ -1719,6 +1721,22 @@ describe('what 0.9.855 hid stays hidden beside a quote or a fence', () => {
         expect(parseMessage('**||w~~w**||___w~~||~~').filter(n => n.type === 'spoiler')).toHaveLength(2);
     });
 
+    it('an emoji is a word as much as a letter is: it stays hidden too', () => {
+        // Counting only letters and digits held the tree to 0.9.855's reading, which hid every letter
+        // 0.9.857's did and printed the fox 0.9.857 and 0.9.862 hid.
+        const fox = '*||\n> \u{1F98A}||```>https://x/a_b||\n```';
+        // CONTROL: 0.9.855 prints the fox 0.9.857 hid.
+        expect(printsWhat(parsedAt855(fox), parsedAt857(fox), EMOJI)).toEqual(['\u{1F98A}']);
+        // And the changelog's own message, with an emoji where its w8 is: 0.9.857 printed the party 0.9.855 hid.
+        const party = 'Guess ||\n> \u{1F98A}\u{1F355}||:\u{1F389}```||\n```';
+        expect(printsWhat(parsedAt857(party), parsedAt855(party), EMOJI)).toEqual(['\u{1F389}']);
+        for (const content of [fox, party]) {
+            for (const before of [parsedAt857(content), parsedAt855(content), parsedAsItWas(content)]) {
+                expect(printsWhat(parseMessage(content), before, EMOJI), content).toEqual([]);
+            }
+        }
+    });
+
     it('where no one reading hides all the others did, from the first `||` any opened to the last any closed is one spoiler', () => {
         const content = '_||__||w8Http://y` ||_B||`';
         // CONTROL: 0.9.857 prints the w8 0.9.855 hid, and 0.9.855 the B 0.9.857 hid.
@@ -1742,19 +1760,22 @@ describe('what 0.9.855 hid stays hidden beside a quote or a fence', () => {
         fences: ['||', '||\n> ', '||\n```', '```', 'W', 'W', ' ', ':', '_', '*', '`', '](x)', '>'],
         both: ['||', '||', '||\n> ', '||\n```', '```', '||```', '\n> ', 'W', 'W', 'W', ' ', ':', '_', '*', '`', '](x)', '[W](x)', 'Http://y`', 'https://x/W_W', '>', '!', ')'],
     };
-    it('as a property: nothing 0.9.855, the parser before it or 0.9.857 hid is printed', () => {
+    it('as a property: nothing 0.9.855, the parser before it or 0.9.857 hid is printed, letters or emoji', () => {
         const bad: string[] = [];
         let controls = 0;
-        for (const [parts, size] of [['quotes', 12], ['fences', 12], ['both', 16]] as const) {
+        // Each marker an emoji where asked: one a rule of letters and digits cannot see.
+        const marked = { w: (id: number) => `w${id}`, emoji: (id: number) => String.fromCodePoint(0x1f400 + id) };
+        for (const [parts, size, marker] of [['quotes', 12, 'w'], ['fences', 12, 'w'], ['both', 16, 'w'], ['both', 16, 'emoji']] as const) {
             let seed = 20261114;
             const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
+            const markers = marker === 'w' ? W : EMOJI;
             for (let k = 0; k < 30000; k++) {
                 let id = 0;
-                const content = Array.from({ length: 1 + next(size) }, () => NEAR[parts][next(NEAR[parts].length)].replace(/W/g, () => `w${id++}`)).join('');
+                const content = Array.from({ length: 1 + next(size) }, () => NEAR[parts][next(NEAR[parts].length)].replace(/W/g, () => marked[marker](id++))).join('');
                 const before = [parsedAt855(content), parsedAsItWas(content)];
-                const out = [...before, parsedAt857(content)].flatMap(was => printsWhat(parseMessage(content), was));
+                const out = [...before, parsedAt857(content)].flatMap(was => printsWhat(parseMessage(content), was, markers));
                 if (out.length) bad.push(`${JSON.stringify(content)} prints ${out.join(', ')}`);
-                if (before.some(was => printsWhat(parsedAt857(content), was).length)) controls++;
+                if (before.some(was => printsWhat(parsedAt857(content), was, markers).length)) controls++;
             }
         }
         expect(bad.slice(0, 5)).toEqual([]);
@@ -2244,13 +2265,13 @@ describe('where a spoiler was typed (spoilerSpan)', () => {
 });
 
 describe('where a node was typed (typedSpan)', () => {
-    /** Every node of the parse that has a span, as its type and what was typed there. */
-    const typedIn = (content: string): string[] => {
+    /** Every node of the parse that has a span, as its type and what was typed there; runs of words only if asked. */
+    const typedIn = (content: string, words = false): string[] => {
         const found: string[] = [];
         const walk = (nodes: Node[]) => {
             for (const n of nodes) {
                 const span = typedSpan(n);
-                if (span) found.push(`${n.type} ${content.slice(span[0], span[1])}`);
+                if (span && (words || n.type !== 'text')) found.push(`${n.type} ${content.slice(span[0], span[1])}`);
                 if ('children' in n) walk(n.children);
             }
         };
@@ -2279,10 +2300,19 @@ describe('where a node was typed (typedSpan)', () => {
         expect(typedIn('`[g](sovereign-enc:k)```')).toEqual(['link [g](sovereign-enc:k)']);
     });
 
-    it('is nothing for words, for what only holds others, and for a node not of a parse', () => {
+    it('is each run of words too, as typed, through a quote and inside markup', () => {
+        expect(typedIn('a **b** c', true)).toEqual(['text a ', 'text b', 'text  c']);
+        expect(typedIn('> x y\n> z `c`', true)).toEqual(['text x y\n> z ', 'code `c`']);
+        expect(typedIn('see sovereign-enc:k?k=A_B_C ok', true)).toEqual(['text see sovereign-enc:k?k=A', 'text B', 'text C ok']);
+        // A dangerous link is drawn as its label, which was not typed where it is drawn: no span.
+        expect(typedIn('[x](javascript:alert(1)) y', true)).toEqual(['text  y']);
+    });
+
+    it('is nothing for what only holds others, and for a node not of a parse', () => {
         const nodes = parseMessage('**a** _b_ c');
-        expect(nodes.map(n => typedSpan(n))).toEqual([undefined, undefined, undefined, undefined]);
+        expect(nodes.map(n => typedSpan(n))).toEqual([undefined, [5, 6], undefined, [9, 11]]);
         expect(typedSpan({ type: 'url', href: 'https://x' })).toBeUndefined();
+        expect(typedSpan({ type: 'text', value: 'a' })).toBeUndefined();
     });
 });
 

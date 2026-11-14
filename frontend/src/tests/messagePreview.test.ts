@@ -23,7 +23,7 @@ import {
     joinEditedContent,
     messageSearchText,
 } from '../api/messagePreview';
-import { parseMessage, type Node } from '../utils/messageParser';
+import { parseMessage, typedSpan, type Node } from '../utils/messageParser';
 import { buildOutgoingContent, type PendingAttachment } from '../api/composerAttachments';
 import { encodeClipRef } from '../api/clips/clipRef';
 
@@ -308,6 +308,42 @@ describe('Edit keeps what the message RENDERS: spoilers stay hidden, code stays 
         expect(splitEditableContent(`see sovereign-enc:abc?k=${KEY} ok`).refs).toEqual([`sovereign-enc:abc?k=${KEY}`]);
     });
 
+    it('a bare ref comes out as far as its words go, and takes nothing the list draws after it', () => {
+        // A pattern of what an address holds took the backtick after it: the code it opened was gone from
+        // the box, and the save drew the spoilered file in the clear.
+        const S = `||[secret.pdf](sovereign-enc:${ID}?k=K1&m=application%2Fpdf)||`;
+        const coded = `see sovereign-enc:abc?k=${KEY}\`||\` ${S}`;
+        const { text, refs } = splitEditableContent(coded);
+        expect(text).toBe('see `||`');
+        expect(refs).toEqual([`sovereign-enc:abc?k=${KEY}`, S]);
+        const saved = parseMessage(joinEditedContent(`${text} more`, refs));
+        expect(saved.find(n => n.type === 'code')).toEqual({ type: 'code', value: '||' });
+        expect(saved.some(n => n.type === 'spoiler' && n.children.some(c => c.type === 'link' && c.label === 'secret.pdf'))).toBe(true);
+        // Nor the `[` of a link it runs into.
+        expect(splitEditableContent(`see sovereign-enc:abc?k=${KEY}[docs](https://example.org) ok`))
+            .toEqual({ text: 'see [docs](https://example.org) ok', refs: [`sovereign-enc:abc?k=${KEY}`] });
+        // A `_` in a key the list reads as emphasis: cut there, the emphasis would pair the bars after it
+        // otherwise. It stays as the list draws it, key and all.
+        const marked = 'see sovereign-enc:abc?k=A_B_C ok';
+        expect(splitEditableContent(marked)).toEqual({ text: marked, refs: [] });
+    });
+
+    it('an address in what looks like a file and is drawn as words comes out of the box too', () => {
+        // An empty label, a space before the `)` or after the `(`: the list draws words, key and all.
+        for (const [original, text] of [
+            [`look [](sovereign-enc:abc?k=${KEY}&m=application%2Fpdf) here`, 'look []( ) here'],
+            [`look [a.pdf](sovereign-enc:abc?k=${KEY} ) here`, 'look [a.pdf]( ) here'],
+            [`[a.pdf]( sovereign-enc:abc?k=${KEY})`, '[a.pdf]( )'],
+        ]) {
+            expect(parseMessage(original).every(n => n.type === 'text'), original).toBe(true); // positive control: words
+            const split = splitEditableContent(original);
+            expect(split.text, original).toBe(text);
+            expect(split.text).not.toContain(KEY);
+            expect(split.text).not.toMatch(/sovereign-enc/i);
+            expect(split.refs, original).toHaveLength(1);
+        }
+    });
+
     it('a file the message DRAWS comes out of the box, where a pattern of its own saw code', () => {
         // A backtick, a file and a fence never closed: the list draws the file, and `` `[^`]+` `` read a
         // span of code from the backtick to the fence, so Edit left the file, key and all, in the box.
@@ -391,16 +427,18 @@ describe('property: Edit takes out the files the list draws, and puts each back 
         walk(parseMessage(content), false);
         return out;
     };
-    const PARTS = ['||', '||', '_', '*', '`', '```', '\n```\n', ' ', ' ', 'a', 'b_c', '\n> ', '[', '](', 'F', 'F', 'G', '||F||', '~~', '**', 'https://x/a_b'];
+    // Files (F, G), a bare ref someone typed (B), and what a ref can run into: code, a link, markup, bars.
+    const PARTS = ['||', '||', '_', '*', '`', '```', '\n```\n', ' ', ' ', 'a', 'b_c', '\n> ', '[', '](', 'F', 'F', 'G', 'B', '||F||', '~~', '**', 'https://x/a_b', '[w](https://x/a)'];
     const messages = () => {
         let seed = 99;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
         const out: string[] = [];
-        for (let k = 0; k < 20000; k++) {
+        for (let k = 0; k < 24000; k++) {
             let id = 0;
             const content = Array.from({ length: 1 + next(10) }, () => PARTS[next(PARTS.length)]).join('')
                 .replace(/F/g, () => `![p${id}.png](sovereign-enc:i${id}?k=K${id++}_Z&m=image%2Fpng)`)
-                .replace(/G/g, () => `[d${id}.pdf](sovereign-enc:i${id}?k=K${id++}_Z&m=application%2Fpdf)`);
+                .replace(/G/g, () => `[d${id}.pdf](sovereign-enc:i${id}?k=K${id++}_Z&m=application%2Fpdf)`)
+                .replace(/B/g, () => `sovereign-enc:b${id}?k=K${id++}_Z`);
             if (drawnFiles(content).length) out.push(content);
         }
         return out;
@@ -425,18 +463,37 @@ describe('property: Edit takes out the files the list draws, and puts each back 
         expect(MESSAGES.filter(c => drawnFiles(c).some(f => byPattern(c).includes(f.href))).length).toBeGreaterThan(100);
     });
 
-    it('saved unchanged, every file is drawn again, and each that was hidden is hidden', () => {
+    it('nothing the list draws as code, a link, an address or a name is cut out of the box', () => {
+        const cut: string[] = [];
+        for (const content of MESSAGES) {
+            const { text } = splitEditableContent(content);
+            const walk = (nodes: Node[]) => {
+                for (const n of nodes) {
+                    const span = typedSpan(n);
+                    const drawnAs = span && n.type !== 'text' && n.type !== 'spoiler' && !((n.type === 'image' || n.type === 'link') && /^sovereign-/i.test(n.href));
+                    if (drawnAs && !text.includes(content.slice(span[0], span[1])) && cut.length < 3) cut.push(JSON.stringify([content, text]));
+                    if ('children' in n) walk(n.children);
+                }
+            };
+            walk(parseMessage(content));
+        }
+        expect(cut).toEqual([]);
+    });
+
+    it('saved, its words changed or not, every file is drawn again, and each that was hidden is hidden', () => {
         const wrong: string[] = [];
         let firstWouldUnhide = 0;
         for (const content of MESSAGES) {
             const before = drawnFiles(content);
             const { text, refs } = splitEditableContent(content);
-            const after = drawnFiles(joinEditedContent(text, refs));
-            const ok = before.every(f => {
-                const same = after.filter(a => a.href === f.href);
-                return same.length > 0 && (!f.hidden || same.every(a => a.hidden));
-            });
-            if (!ok && wrong.length < 3) wrong.push(JSON.stringify(content));
+            for (const words of [text, `${text} more`]) {
+                const after = drawnFiles(joinEditedContent(words, refs));
+                const ok = before.every(f => {
+                    const same = after.filter(a => a.href === f.href);
+                    return same.length > 0 && (!f.hidden || same.every(a => a.hidden));
+                });
+                if (!ok && wrong.length < 3) wrong.push(JSON.stringify([content, words]));
+            }
             // CONTROL: the words always first.
             const plain = drawnFiles(text.trim() && refs.length ? `${text.trim()} ${refs.join(' ')}` : text.trim() || refs.join(' '));
             if (before.some(f => f.hidden && plain.some(a => a.href === f.href && !a.hidden))) firstWouldUnhide++;

@@ -391,15 +391,24 @@ interface Taken { start: number; end: number; hidden: boolean; ownBars: boolean 
 
 /**
  * The refs Edit takes out of the box, read off the parse the message list draws: every file it
- * draws, and every bare ref it draws as words. Not a pattern of its own: a ref it draws as code
+ * draws, and every ref's address it draws as words. Not a pattern of its own: a ref it draws as code
  * or as an address stays in the box as the text it is, or saving would turn it into a live file;
  * and one it draws as a file comes out, or its key is in the box. `` `[g](sovereign-enc:…)``` `` is
  * a backtick, a FILE and a fence never closed: a code range read with a regex of its own saw a
  * span of code and left the file, key and all, in the box.
+ *
+ * An address it draws as words (a bare `sovereign-enc:…` someone typed, or one in what looks like a
+ * file and is drawn as words: `[](…)`, `[a](… )`) comes out, its key is a key, as far as its run of
+ * the words goes where something the list draws starts there; where markup does, it stays whole,
+ * as it is drawn. A pattern of what an address
+ * holds took a backtick after it, and the code that backtick opened was gone from the box
+ * (`` sovereign-enc:…`||` ||[f](…)|| `` saved its file in the clear), or the `[docs` of a link; and
+ * a `_` in a key can close an emphasis, which taken out pairs the bars after it otherwise.
  */
 function refsToTake(content: string): Taken[] {
     const spoilers: Span[] = [];
     const drawn: Span[] = [];
+    const words: Span[] = [];
     const files: Array<{ span: Span; spoiler: Spoiler | null; only: boolean }> = [];
     const walk = (nodes: Node[], spoiler: Spoiler | null) => {
         for (const n of nodes) {
@@ -412,7 +421,7 @@ function refsToTake(content: string): Taken[] {
             } else {
                 const span = typedSpan(n);
                 if (!span) continue;
-                drawn.push(span);
+                (n.type === 'text' ? words : drawn).push(span);
                 if (isFile(n)) files.push({ span, spoiler, only: spoiler !== null && spoiler.children.length === 1 && spoiler.children[0] === n });
             }
         }
@@ -427,10 +436,19 @@ function refsToTake(content: string): Taken[] {
         return ownBars ? { start: span[0] - 2, end: span[1] + 2, hidden: true, ownBars } : { start: span[0], end: span[1], hidden: spoiler !== null, ownBars };
     });
     for (const m of content.matchAll(REF_RE)) {
-        if (m[6] === undefined || inside(drawn, m.index)) continue;
-        // A bare ref someone typed is whole by construction (it ends at whitespace), and comes out of
-        // the box like any other: its key is a key.
-        taken.push({ start: m.index, end: m.index + m[0].length, hidden: inside(spoilers, m.index), ownBars: false });
+        const href = m[6] ?? m[4];
+        // The address's own start: after the `](` of a ref, whose label holds no `]`.
+        const start = m[6] !== undefined ? m.index : m.index + m[0].indexOf(href, m[0].indexOf('](') + 2);
+        const run = words.find(([from, to]) => start >= from && start < to);
+        if (!run) continue;
+        // Past the words, it runs on into what the list draws next (code, a link) or into markup.
+        // Up to the next drawn thing is words, and goes; markup is not, and it all stays.
+        let end = start + href.length;
+        if (end > run[1]) {
+            if (!drawn.some(([from]) => from === run[1])) continue;
+            end = run[1];
+        }
+        taken.push({ start, end, hidden: inside(spoilers, start), ownBars: false });
     }
     return taken.sort((a, b) => a.start - b.start);
 }

@@ -42,17 +42,31 @@ const atStart: Origin = (index) => index;
 
 /**
  * Where each node of a parse was typed, from its first character to just past its last, in the
- * text `parseMessage` was handed: every spoiler (`spoilerSpan`), and every node that is drawn as
- * more than words: a link, a picture, code, a fenced block, an address, a mention, a channel, an
- * emoji (`typedSpan`). Beside the tree and not in it, so a tree reads and compares as it always
- * did. A reading that disagrees with another is another tree, and each node in it has its own.
+ * text `parseMessage` was handed: every spoiler (`spoilerSpan`), every run of words, and every
+ * node that is drawn as more than words: a link, a picture, code, a fenced block, an address, a
+ * mention, a channel, an emoji (`typedSpan`). Not what only holds others (bold, a quote), nor the
+ * label a dangerous link is drawn as. Beside the tree and not in it, so a tree reads and compares
+ * as it always did. A reading that disagrees with another is another tree, and each node in it
+ * has its own.
  */
-const typedSpans = new WeakMap<Node, [number, number]>();
+const typedSpans = new WeakMap<Node, [number, number] | Untold>();
+
+/** Where a node was typed in the text its reader had, and how that maps back: told when asked
+ *  (`spanOf`). Most of a parse's nodes are never asked, and a run of words is most of its nodes. */
+interface Untold { at: Origin; from: number; to: number }
 
 /** `node`, typed from `from` to just before `to` in the text a reader has, which `at` maps back. */
 function typed<T extends Node>(node: T, at: Origin, from: number, to: number): T {
-    typedSpans.set(node, [at(from), at(to - 1) + 1]);
+    typedSpans.set(node, { at, from, to });
     return node;
+}
+
+function spanOf(node: Node): readonly [number, number] | undefined {
+    const known = typedSpans.get(node);
+    if (!known || Array.isArray(known)) return known;
+    const span: [number, number] = [known.at(known.from), known.at(known.to - 1) + 1];
+    typedSpans.set(node, span);
+    return span;
 }
 
 /**
@@ -63,17 +77,17 @@ function typed<T extends Node>(node: T, at: Origin, from: number, to: number): T
  * stretch between two `||` is a spoiler (`everyBar`).
  */
 export function spoilerSpan(node: Node): readonly [number, number] | undefined {
-    return node.type === 'spoiler' ? typedSpans.get(node) : undefined;
+    return node.type === 'spoiler' ? spanOf(node) : undefined;
 }
 
 /**
- * The part of the message any node of a parse that is drawn as more than words was typed in (see
- * `typedSpans`), or undefined for words and for what only holds other nodes. Edit reads it to take
- * out exactly the files the message draws (api/messagePreview.ts splitEditableContent), and to
- * leave what it draws as code or as an address where it is.
+ * The part of the message a node of a parse was typed in (see `typedSpans`), or undefined for what
+ * only holds other nodes and for a node not of a parse. Edit reads it to take out exactly the files
+ * the message draws (api/messagePreview.ts splitEditableContent), and to leave what it draws as code,
+ * an address or markup where it is.
  */
 export function typedSpan(node: Node): readonly [number, number] | undefined {
-    return typedSpans.get(node);
+    return spanOf(node);
 }
 
 /**
@@ -405,22 +419,25 @@ export function parseMessageUncached(content: string): Node[] {
 }
 
 /**
- * `tree`, if every letter and digit 0.9.855 hid is in a spoiler of it (`earlier`: 0.9.855's reading,
- * and the parser's before it, which 0.9.855 fell back on). Asked of where each was typed, not of the
- * words: 0.9.855 read `w0Https://x/w1` as one word and this reads an address in it, and every letter
- * of it hidden is hidden. Counting words could not see it either where the same word is said
+ * `tree`, if every character of a word 0.9.855 hid is in a spoiler of it (`earlier`: 0.9.855's
+ * reading, and the parser's before it, which 0.9.855 fell back on). A word's character is what
+ * WORD_RE makes words of: a letter, a digit, an emoji, a symbol, anything but a space and a mark
+ * on the keyboard, which can be markup that draws nothing. Asked of where each was typed, not of
+ * the words: 0.9.855 read `w0Https://x/w1` as one word and this reads an address in it, and every
+ * letter of it hidden is hidden. Counting words could not see it either where the same word is said
  * twice: `a*b,||c d*e||f*g||` with every word `w` hid three `w` and printed the two 0.9.855 hid.
- * If not, 0.9.855's own reading, where that hides every letter `tree`, the parser before it and the
- * readings `tree` was held to (`others`) hid; or every stretch between two `||` a spoiler (`every`),
- * where that does and leaves no `||` to see. If neither does, no one reading keeps all that hidden:
- * from the first `||` any of them opened to the last any of them closed is one spoiler (`coverAll`).
+ * If not, 0.9.855's own reading, where that hides every such character `tree`, the parser before it
+ * and the readings `tree` was held to (`others`) hid; or every stretch between two `||` a spoiler
+ * (`every`), where that does and leaves no `||` to see. If neither does, no one reading keeps all
+ * that hidden: from the first `||` any of them opened to the last any of them closed is one
+ * spoiler (`coverAll`).
  */
 function heldToEarly(content: string, tree: Node[], earlier: [Node[], Node[]], others: Node[][], every: () => Node[]): Node[] {
-    if (!printsLetters(content, hiddenStretches(earlier), hiddenStretches([tree]))) return tree;
+    if (!printsWordCharacters(content, hiddenStretches(earlier), hiddenStretches([tree]))) return tree;
     const all = hiddenStretches([tree, ...earlier, ...others]);
-    if (!printsLetters(content, all, hiddenStretches([earlier[0]]))) return earlier[0];
+    if (!printsWordCharacters(content, all, hiddenStretches([earlier[0]]))) return earlier[0];
     const each = every();
-    if (!showsBars(each) && !printsLetters(content, all, hiddenStretches([each]))) return each;
+    if (!showsBars(each) && !printsWordCharacters(content, all, hiddenStretches([each]))) return each;
     return coverAll(content, all[0][0], all[all.length - 1][1]);
 }
 
@@ -445,10 +462,12 @@ function hiddenStretches(trees: Node[][]): Array<[number, number]> {
     return merged;
 }
 
-const LETTER = /[\p{L}\p{N}]/u;
+// WORD_RE's characters of a word. Letters and digits alone missed an emoji: `*||⏎> U+1F98A||```>https://x/a_b||⏎```` (a fox)
+// was held to 0.9.855's reading, which hides every letter 0.9.857's did, and printed the fox 0.9.857 hid.
+const WORD_CHARACTER = /[^\s!-/:-@[-`{-~]/u;
 
-/** Whether a letter or a digit typed in one of `wanted` is in none of `has` (both from `hiddenStretches`). */
-function printsLetters(content: string, wanted: Array<[number, number]>, has: Array<[number, number]>): boolean {
+/** Whether a character of a word typed in one of `wanted` is in none of `has` (both from `hiddenStretches`). */
+function printsWordCharacters(content: string, wanted: Array<[number, number]>, has: Array<[number, number]>): boolean {
     let first = 0;
     for (const [from, to] of wanted) {
         while (first < has.length && has[first][1] <= from) first++;
@@ -460,7 +479,7 @@ function printsLetters(content: string, wanted: Array<[number, number]>, has: Ar
                 continue;
             }
             const gap = k < has.length ? Math.min(to, has[k][0]) : to;
-            if (LETTER.test(content.slice(at, gap))) return true;
+            if (WORD_CHARACTER.test(content.slice(at, gap))) return true;
             at = gap;
         }
     }
@@ -735,11 +754,17 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
     const linkIsInReach = linkInReach(input);
     const nodes: Node[] = [];
     let buf = '';
+    // Where the words in `buf` begin: they are typed in one run, up to `i`.
+    let from = 0;
     let i = 0;
 
+    const say = (words: string) => {
+        if (!buf) from = i;
+        buf += words;
+    };
     const flush = () => {
         if (buf) {
-            nodes.push({ type: 'text', value: buf });
+            nodes.push(typed({ type: 'text', value: buf }, at, from, from + buf.length));
             buf = '';
         }
     };
@@ -837,12 +862,12 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             if (m && !asItWas && rest.startsWith('//', m[0].length)) {
                 const href = reading.at855 ? urlAt(rest.slice(1)) : addressAt(rest.slice(1), reading);
                 if (href) {
-                    buf += ':';
+                    say(':');
                     flush();
                     nodes.push(typed({ type: 'url', href }, at, i + 1, i + 1 + href.length));
                     i += 1 + href.length;
                 } else {
-                    buf += m[0];
+                    say(m[0]);
                     i += m[0].length;
                 }
                 continue;
@@ -880,7 +905,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             }
         }
 
-        buf += ch;
+        say(ch);
         i += 1;
     }
 
