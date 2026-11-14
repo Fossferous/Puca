@@ -15,8 +15,12 @@
  * The load-bearing behaviour is the SECOND load: a value set after the
  * migration is a real choice and must survive, or the toggle becomes
  * impossible to turn off — trading one silent override for another.
+ *
+ * Run as the DESKTOP app: the migration resets to the default, and Auto Gain
+ * Control's default is on there and off in a browser (autoGainDefault.test.ts
+ * covers the browser, this migration included).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const SETTINGS_KEY = 'sovereign_settings';
 const MIGRATION_KEY = 'micProcessingTogglesReset_v1';
@@ -45,7 +49,12 @@ async function freshLoad() {
 }
 
 let store: Map<string, string>;
-beforeEach(() => { store = installStorage(); });
+type Win = Window & { __TAURI_INTERNALS__?: unknown };
+beforeEach(() => {
+    store = installStorage();
+    (window as Win).__TAURI_INTERNALS__ = {};
+});
+afterEach(() => { delete (window as Win).__TAURI_INTERNALS__; });
 
 describe('mic processing toggle migration', () => {
     it('resets a stored autoGainControl:false — the confirmed real case', async () => {
