@@ -352,6 +352,8 @@ export function peerMayActOnHost(share: { capabilities: string[] } | null): bool
 }
 import { currentUserId } from './index';
 import { thisDeviceId } from '../thisDevice';
+// Types only: wakeSession imports this file, and a value import back would be a cycle.
+import type { FollowAs } from './wakeSession';
 
 export type SessionRole = 'controller' | 'host';
 export type SessionPhase = 'connecting' | 'active' | 'ended';
@@ -2470,7 +2472,7 @@ export async function pollLockedFollow(): Promise<void> {
             // would refuse the very follow this enables with "already in a
             // session". followToSignIn re-lists and re-checks for itself.
             teardown(s, 'that machine is locked — moving to its sign-in screen', true, true);
-            followMachineToSignIn(s.peerDevice);
+            followMachineToSignIn(s.peerDevice, 'control'); // screen sessions only (eligible)
         }
     } catch {
         // A failed device-list read must not disturb the session; the next
@@ -3981,21 +3983,36 @@ async function applyPendingIce(s: Internal): Promise<void> {
  * imports `connectToDevice` from this file, and a static import back would
  * make the two modules a cycle.
  */
-function followMachineToDesktop(signInRowId: string): void {
+function followMachineToDesktop(signInRowId: string, as: FollowAs): void {
     const userId = currentUserId();
     if (userId == null) return;
     void import('./wakeSession')
-        .then(m => m.followToDesktop(signInRowId, userId))
+        .then(m => m.followToDesktop(signInRowId, userId, as))
         .catch(() => { /* the user is back at the list and can reconnect */ });
+}
+
+/**
+ * What a session handed over at a lock or an unlock is followed as, or null
+ * for none. It used to be Control for everything but a power-off, so a Files
+ * session (browsing that PC with no screen open) came back on the other row as
+ * a Control session nobody asked for, with the screen on. Files is followed as
+ * Files. Audio Hub's session is files-only on the wire but is nobody's file
+ * browser: following it as Files would open one nobody asked for either, and
+ * the panel asks for its own session when it is next used. A power-off is not
+ * followed (POWER_OFF_UNLOCKED_REASON).
+ */
+function followAs(s: Internal): FollowAs | null {
+    if (s.powerOffOnly || s.audioHub) return null;
+    return s.filesOnly ? 'files' : 'control';
 }
 
 /** The mirror: after a Lock we asked for, follow the machine to its sign-in
  *  screen row (see `LOCK_HANDOVER_REASON` and wakeSession.followToSignIn). */
-function followMachineToSignIn(appRowId: string): void {
+function followMachineToSignIn(appRowId: string, as: FollowAs): void {
     const userId = currentUserId();
     if (userId == null) return;
     void import('./wakeSession')
-        .then(m => m.followToSignIn(appRowId, userId))
+        .then(m => m.followToSignIn(appRowId, userId, as))
         .catch(() => { /* the user is back at the list and can reconnect */ });
 }
 
@@ -5512,10 +5529,11 @@ export function installDeviceSessions(): void {
         if (p?.reason === HANDOVER_REASON && s.role === 'controller') {
             const host = s.peerDevice;
             teardown(s, POWER_OFF_UNLOCKED_REASON, false, true);
-            // NOT for a session opened only to power off: following it would
-            // open a Control session nobody asked for, on a PC somebody has
-            // just signed in to. The card says what happened instead.
-            if (!s.powerOffOnly) followMachineToDesktop(host);
+            // As what it was (followAs): a Files session opens Files again, and
+            // one opened only to power off is not followed at all (the card
+            // says what happened instead).
+            const as = followAs(s);
+            if (as) followMachineToDesktop(host, as);
             return;
         }
         // WE ASKED THAT MACHINE TO LOCK, AND IT DID — the mirror handover: the
@@ -5534,11 +5552,11 @@ export function installDeviceSessions(): void {
             }
             const host = s.peerDevice;
             teardown(s, POWER_OFF_LOCKED_REASON, false, true);
-            // NOT for a session opened only to power off: the host knows no
-            // offer, so it takes it for a screen session and hands it over at
-            // a lock — and following would open a Control session nobody
-            // asked for. The card says what happened instead.
-            if (!s.powerOffOnly) followMachineToSignIn(host);
+            // As what it was (followAs). Not one opened only to power off: the
+            // host knows no offer, so it takes it for a screen session and
+            // hands it over at a lock. The card says what happened instead.
+            const as = followAs(s);
+            if (as) followMachineToSignIn(host, as);
             return;
         }
         // NO SCREEN ON THAT PC — a code (noScreen.ts), shown as a sentence

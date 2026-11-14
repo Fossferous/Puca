@@ -44,17 +44,20 @@ vi.mock('../api/devices/index', () => ({
 }));
 
 const connected: string[] = [];
+/** What each connect beside `connected` asked for (the follow's mode). */
+const connectedOpts: unknown[] = [];
 /** How many of the NEXT connect attempts should reject (the unlock-transition
  *  race: the target's first capture-open lands on the still-secure desktop). */
 let connectFails = 0;
 vi.mock('../api/devices/session', () => ({
-    connectToDevice: (id: string) => {
+    connectToDevice: (id: string, opts?: unknown) => {
         if (connectFails > 0) {
             connectFails--;
             return Promise.reject(new Error(
                 'capture: Access is denied (that computer is showing a Windows security screen)'));
         }
         connected.push(id);
+        connectedOpts.push(opts);
         return Promise.resolve();
     },
 }));
@@ -103,6 +106,7 @@ beforeEach(() => {
     devices = [];
     listCalls = 0;
     connected.length = 0;
+    connectedOpts.length = 0;
     connectFails = 0;
     latest = new Map();
     subscribeWakes(s => { latest = s; });
@@ -147,8 +151,23 @@ describe('following a machine from its sign-in screen to its desktop', () => {
         await vi.advanceTimersByTimeAsync(3_000);
 
         expect(connected).toEqual(['pc']);
+        expect(connectedOpts, 'a Control session is followed as Control').toEqual([undefined]);
         // The stage owns the screen now; the card's status is gone.
         expect(latest.has('pc')).toBe(false);
+    });
+
+    it('a FILES session handed over at the unlock opens Files again on the desktop row, never Control', async () => {
+        devices = [appRow(false), signInRow(true)];
+        await followToDesktop('pc-signin', 1, 'files');
+        await vi.advanceTimersByTimeAsync(3_000);
+        devices = [appRow(true), signInRow(false)];
+        let opening: string | undefined;
+        const off = subscribeWakes(m => { opening = m.get('pc')?.message ?? opening; });
+        await vi.advanceTimersByTimeAsync(3_000);
+        off();
+        expect(connected).toEqual(['pc']);
+        expect(connectedOpts).toEqual([{ filesOnly: true }]);
+        expect(opening, 'and says it is opening the files').toMatch(/opening its files again/);
     });
 
     it('a transient connect failure RETRIES within the window instead of failing (the unlock-transition race)', async () => {
@@ -320,7 +339,18 @@ describe('following a machine from its desktop to its sign-in screen (after Lock
         await vi.advanceTimersByTimeAsync(3_000);
 
         expect(connected).toEqual(['pc-signin']);
+        expect(connectedOpts, 'a Control session is followed as Control').toEqual([undefined]);
         expect(latest.has('pc')).toBe(false);
+    });
+
+    it('a FILES session locked under it opens Files again on the sign-in row, never Control', async () => {
+        devices = [appRow(true), signInRow(false)];
+        await followToSignIn('pc', 1, 'files');
+        await vi.advanceTimersByTimeAsync(3_000);
+        devices = [appRow(false), signInRow(true)];
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(connected).toEqual(['pc-signin']);
+        expect(connectedOpts).toEqual([{ filesOnly: true }]);
     });
 
     it('a machine with NO sign-in row ends honestly instead of waiting two minutes', async () => {

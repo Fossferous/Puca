@@ -429,6 +429,24 @@
     color: #fff;
 }
 
+/* A tapped button keeps a sticky :hover on touch, and mobile.css's (hover: none)
+   block gives every hovered button `background-color: inherit`: the card's
+   colour, so a button just pressed lost its fill, Power off's red with it. Each
+   keeps its own here, as .mobile-nav-btn:hover does for the bottom bar. */
+@media (hover: none) {
+    .device-btn:hover {
+        background-color: var(--background-modifier-accent, rgba(255, 255, 255, 0.1));
+    }
+
+    .device-btn-danger:hover {
+        background-color: var(--danger, #f04747);
+    }
+
+    .device-btn-primary:hover {
+        background-color: var(--brand, #5865f2);
+    }
+}
+
 .device-name-input {
     width: 100%;
     padding: 6px 8px;
