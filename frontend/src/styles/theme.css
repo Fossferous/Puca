@@ -6,7 +6,7 @@
 /* These same tokens also apply inside the surfaces drawn dark on every theme, Light included.
    Their own colours are fixed, so the words on them need the palette they were made for, which
    Light would otherwise reach through and turn dark on dark. */
-:where([data-theme="light"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
+:where([data-theme="light"]) :is(.role-modal, .role-editor-embedded, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
 :root {
     /* ==================== Familiar Dark Chat-App Theme Colors ==================== */
 
@@ -298,6 +298,15 @@
     --text-warning: #8a5a00;
     --text-danger: #b42318;
     --text-positive: #1a6f2f;
+    /* The same as fills, behind white words, and as words where a rule names the fill: the dark
+       palette's #f23f43 and #23a55a are 3.8 and 3.2:1 under white, and 3.3 and 2.6:1 as words on
+       Light's surfaces (an unread badge, Add Friend, Settings' Log Out). */
+    --color-danger: var(--text-danger);
+    --color-success: var(--text-positive);
+    /* The avatars' gradient runs from the brand to this, under white initials: #a78bfa was 2.72:1. */
+    --accent-lavender: #7a5cd6;
+    /* "Offline" in a profile is words in this colour: #80848e was 2.97:1 on --bg-tertiary. */
+    --status-offline: #62656e;
 
     --header-primary: #060607;
     --header-secondary: #4e5058;
@@ -429,7 +438,7 @@
 /* ==================== High Contrast (Accessibility) ==================== */
 /* Boosts text and border contrast ON TOP of whichever theme is active —
    the lightness ladder of the surfaces stays, text stops being grey. */
-:where([data-theme="light"][data-contrast="high"]) :is(.role-modal, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
+:where([data-theme="light"][data-contrast="high"]) :is(.role-modal, .role-editor-embedded, .safety-modal, .join-modal, .wizard-modal, .stream-modal, .welcome-popup, .device-stage, .device-stage-typetext, .device-stage-bar, .dsb-menu, .device-file-manager, .dfb-panel, .dd-strip, .host-files-indicator, .voice-stage-tile, .stream-pip, .stream-tile, .stream-grid, .stream-stage-header, .stream-context-menu, .quality-menu, .stream-volume-panel, .camera-rail, .os-pop-body, .login-container, .update-gate),
 [data-contrast="high"] {
     --text-normal: #ffffff;
     --text-muted: #d7dbe2;

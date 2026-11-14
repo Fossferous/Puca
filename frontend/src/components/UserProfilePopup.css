@@ -451,3 +451,6 @@
 .user-profile-popup:is([data-theme="light"] *) .profile-info h3 { color: var(--header-primary); }
 .user-profile-popup:is([data-theme="light"] *) .owner-notice p { color: var(--text-warning); }
 .user-profile-popup:is([data-theme="light"] *) .kick-btn { color: #11111b; }
+/* "Idle" and "Away" are words in the presence dot's orange, 3.29:1 as words here. */
+.user-profile-popup:is([data-theme="light"] *) .upp-status.idle,
+.user-profile-popup:is([data-theme="light"] *) .upp-status.away { color: #8f4500; }

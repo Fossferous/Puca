@@ -270,6 +270,21 @@
     color: var(--text-faint);
 }
 
+/* The microphone test's live line. A class, not an inline colour, so Light has its own
+   (styles/lightTheme.css): this pale green was 1.31:1 on Light's Settings. */
+.settings-hint.settings-hint-live {
+    color: #a6e3a1;
+}
+
+/* Language's placeholder (lightTheme.css has Light's). */
+.settings-coming-soon {
+    color: #a6adc8;
+}
+
+.settings-coming-soon h4 {
+    color: #cdd6f4;
+}
+
 /* Android notification-health warning row: an ordinary option row with a
    warning accent, so it reads as part of the section rather than an alert
    stealing the modal. The icon inherits the label's colour. */

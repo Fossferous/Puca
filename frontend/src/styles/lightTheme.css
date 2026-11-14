@@ -82,3 +82,44 @@
 [data-theme="light"] .search-bar input,
 [data-theme="light"] .add-friend-form { background: var(--input-bg); }
 [data-theme="light"] .emoji-categories { background: var(--bg-secondary); }
+
+/* Server Settings' tabs: white words on a grey wash made for the dark pane, 3.06:1 here. */
+[data-theme="light"] .server-settings-nav .nav-item:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+[data-theme="light"] .server-settings-nav .nav-item.active { background: var(--bg-modifier-selected); color: var(--text-normal); }
+
+/* The voice panel's strips are a black wash, which over --bg-tertiary is mid grey: the clip
+   controls' words and marks were 1.97 to 3.2:1 on it. A lighter band here, as it is a darker
+   one on the dark themes. */
+[data-theme="light"] .voice-controls-compact,
+[data-theme="light"] .voice-clip-status { background: var(--bg-secondary); }
+[data-theme="light"] .voice-error-mini,
+[data-theme="light"] .voice-e2ee-blocked { background: var(--color-danger-bg); color: var(--text-danger); }
+[data-theme="light"] .voice-e2ee-warning { background: var(--color-warning-bg); }
+
+/* The brand colour as words: --brand-primary is 3.2 to 4.3:1 on Light's surfaces. */
+[data-theme="light"] .reply-preview-banner .replying-to strong,
+[data-theme="light"] .channel-perms-role-flag,
+[data-theme="light"] .typing-dots,
+[data-theme="light"] .note-link,
+[data-theme="light"] .nb-conflict-actions button,
+[data-theme="light"] .nb-retry,
+[data-theme="light"] .app-version { color: var(--brand-text); }
+[data-theme="light"] .message-author,
+[data-theme="light"] .message-reply-ref .reply-author { color: var(--mode-brand-text, var(--brand-text)); }
+
+/* A calendar chip's time and length on the chip's grey: --text-muted was 4.42:1 there. */
+[data-theme="light"] .cal-chip-time,
+[data-theme="light"] .cal-chip-span { color: var(--header-secondary); }
+
+/* Faint words on --bg-quaternary, which they hold 4.5:1 only on lighter surfaces than. */
+[data-theme="light"] .settings-close-hint { color: var(--text-muted); }
+
+/* The dark palette's success and failure as words on white. */
+[data-theme="light"] .xfer-ok,
+[data-theme="light"] .settings-hint.settings-hint-live { color: var(--text-positive); }
+[data-theme="light"] .xfer-bad { color: var(--text-danger); }
+[data-theme="light"] .settings-coming-soon { color: var(--text-muted); }
+[data-theme="light"] .settings-coming-soon h4 { color: var(--text-normal); }
+
+/* White words on a red that is 90% opaque: over Light's pale surface that is 3.55:1. */
+[data-theme="light"] .own-voice-banner-btn.leave { background: var(--color-danger); }

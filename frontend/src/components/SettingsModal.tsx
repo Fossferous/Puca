@@ -2754,7 +2754,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         </p>
                                     )}
                                     {micTestPhase === 'recording' && (
-                                        <p className="settings-hint" style={{ marginTop: '8px', color: '#a6e3a1' }} role="status">
+                                        <p className="settings-hint settings-hint-live" style={{ marginTop: '8px' }} role="status">
                                             <MicIcon /> Recording — speak normally. It stops by itself.
                                         </p>
                                     )}
@@ -2793,7 +2793,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 </p>
                                             )}
                                             {micTestPhase === 'playing' && micPlayMode && (
-                                                <p className="settings-hint" style={{ marginTop: '8px', color: '#a6e3a1' }}>
+                                                <p className="settings-hint settings-hint-live" style={{ marginTop: '8px' }}>
                                                     <HeadphonesIcon /> Looping through <strong>{labelForMode(micPlayMode)}</strong> at
                                                     your input volume
                                                     {(micPlayMode === 'standard' || micPlayMode === 'off') && (
@@ -3133,13 +3133,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     Choose your preferred language.
                                 </p>
                                 <div className="settings-card">
-                                    <div className="coming-soon-notice" style={{
+                                    <div className="coming-soon-notice settings-coming-soon" style={{
                                         textAlign: 'center',
                                         padding: '2rem',
-                                        color: '#a6adc8',
                                     }}>
                                         <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}><GlobeIcon size={32} /></div>
-                                        <h4 style={{ color: '#cdd6f4', marginBottom: '0.5rem' }}>Coming Soon</h4>
+                                        <h4 style={{ marginBottom: '0.5rem' }}>Coming Soon</h4>
                                         <p style={{ fontSize: '0.9rem' }}>
                                             Language customization is on the way! For now, the app is in English.
                                         </p>
