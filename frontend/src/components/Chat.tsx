@@ -737,6 +737,9 @@ export function Chat({ onLogout }: ChatProps) {
     const [loadingOlder, setLoadingOlder] = useState(false);
     const [showPins, setShowPins] = useState(false);
     const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
+    /** Goes up on each press of the pin button, each switch of conversation and each
+     *  view taking the channel's place: a pins answer from before is for nobody. */
+    const pinsRequestRef = useRef(0);
     // allMembers state replaced by hook
     const [input, setInput] = useState('');
     // Composer autocomplete (@members / #channels) — token being typed before the cursor.
@@ -1206,8 +1209,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Android's BACK closes what is open here first (hooks/useBackClose.ts).
     useBackClose(() => setShowCreateModal(false), showCreateModal);
     useBackClose(() => setNickEditServer(null), nickEditServer !== null);
-    // Pins are drawn only in a channel's header: a DM keeps showPins set. What covers the
-    // channel closes them (pinsCovers, below).
+    // Pins are drawn only in a channel's header. What covers the channel closes them
+    // (pinsCovers, below), and so does a switch of conversation.
     useBackClose(() => setShowPins(false), showPins && !currentDM && currentChannel !== null);
     useBackClose(() => setFormatMenu(null), formatMenu !== null);
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
@@ -1387,6 +1390,13 @@ export function Chat({ onLogout }: ChatProps) {
         setPinsCoversBefore(pinsCovers);
         if ((pinsCovers & ~pinsCoversBefore) !== 0 && showPins) setShowPins(false);
     }
+    // ...and pins still loading when one of them turns on never open: not over it, and
+    // not when it closes again either (the person left before they came).
+    const pinsCoversSeenRef = useRef(pinsCovers);
+    useLayoutEffect(() => {
+        if ((pinsCovers & ~pinsCoversSeenRef.current) !== 0) pinsRequestRef.current++;
+        pinsCoversSeenRef.current = pinsCovers;
+    }, [pinsCovers]);
     // A mode's look belongs to its server's own screen. These paint over that slot with
     // currentServer still set, and the accent is on the document.
     const modeLook = useModeLook(showFriendsPanel || showDevicesView || notesOnScreen ? null : activeMode);
@@ -3601,6 +3611,11 @@ export function Chat({ onLogout }: ChatProps) {
         conversationVisitRef.current++;
         setShowJumpLatest(false);
         setMissedCount(0);
+        // The pins on screen, or on their way, are the previous channel's: left open,
+        // they listed it under this one, and an Unpin there asked this channel to unpin
+        // a message of the other's.
+        pinsRequestRef.current++;
+        setShowPins(false);
     }, [currentChannel?.id, currentDM?.id, currentCollection?.id]);
 
     // Sticky auto-scroll. Reacts ONLY to a genuinely new tail message:
@@ -3714,18 +3729,29 @@ export function Chat({ onLogout }: ChatProps) {
     }, [isLoading, showingMessageList]);
 
     // Open/close the pinned-messages panel, decrypting each pin's content.
+    // The answer can land after the person has moved on: another channel, or
+    // Friends, Devices or Notes over this one. It opened the panel there anyway
+    // (over those views, or on a phone holding Back for a panel nobody could
+    // see), so an answer is used only while it is still the newest request
+    // (pinsRequestRef goes up on every press, switch and cover) for the channel
+    // still open.
     const togglePins = async () => {
+        const request = ++pinsRequestRef.current;
         if (showPins) { setShowPins(false); return; }
         if (!currentChannel) return;
+        const chanId = currentChannel.id;
+        const stillWanted = () => request === pinsRequestRef.current && currentChannelIdRef.current === chanId;
         try {
-            const pins = await listPinnedMessages(currentChannel.id);
+            const pins = await listPinnedMessages(chanId);
             const decrypted = await Promise.all(
-                pins.map(async (p) => ({ ...p, content: await decryptChannelContent(currentChannel.id, p.content, p.user_id) }))
+                pins.map(async (p) => ({ ...p, content: await decryptChannelContent(chanId, p.content, p.user_id) }))
             );
+            if (!stillWanted()) return;
             setPinnedMessages(decrypted);
             setShowPins(true);
         } catch (err) {
             console.error('Failed to load pinned messages:', err);
+            if (!stillWanted()) return;
             tellUser('Could not load pinned messages. Check your connection and try again.');
         }
     };
