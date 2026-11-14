@@ -4,6 +4,109 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.863 — 2026-11-14
+
+Turning your camera off and on works again on mesh calls, a phone's screen share stays right after the phone turns, desktop task reminders play a sound and open Reminders, and hidden channels stay hidden on the server
+### Changed
+
+- **A message is read once, not on every redraw of the chat.** The message
+  list, mentions, link cards, previews and Edit share one reading of each
+  recent message.
+
+### Fixed
+
+- **Pinned messages no longer open over the page you went to.** The pin button loads and decrypts the pins before showing them, and if you moved on meanwhile (Friends, Tasks, Devices, Notes, or another channel) they opened anyway, over that page, and on an Android phone Back then closed a panel nobody could see. Pins that arrive late are now dropped, and opening another channel closes the pins of the one before (they used to stay up listing the old channel's pins, and Unpin there asked the new channel to unpin a message of the old one). Arrives as an ordinary update.
+- **The small stream player opens clear of the message box.** On a desktop window of 1280x800 the small player you get by leaving a stream for a channel opened over the right end of the message box and its Send button. It now opens just above the message box, at the right of the chat; you can still drag it anywhere. Arrives as an ordinary update.
+- **A screen share that fails to start is taken back.** When a share failed at the last step (the call's connection closing just then), everyone in the call was still told you were sharing, with nothing on the tile, and the dialog's Cancel could stop the wrong capture. Now the share is taken back, the panel says why, and Share works again at once. Arrives as an ordinary update.
+- **A device card's buttons keep their colour after a tap on a phone.** Tapping Power off, Control or Revoke on a phone left that button without its fill, the colour of the card behind it, until you tapped elsewhere. They now keep their own colours. Arrives as an ordinary update.
+- **The Friends page's search boxes use the whole width on the desktop.** On the All and Pending tabs the search box was a narrow 200 px box at the left (it grew a little when you clicked in it), borrowed from the channel header's; it now spans the list, as it does on phones. Arrives as an ordinary update.
+- **A folded Voice Channels list keeps the voice channel you have open.** In a server with no text channel, folding Voice Channels hid the channel whose page was open when nobody was in it. It stays now, like the one you are in. Arrives as an ordinary update.
+- **Signing out forgets the previous account's channel lists and calls.** After a sign-out (which does not reload the app), the next account signed in on the same running app could be shown the last one's servers, channel lists and "Active in your servers" calls for a few minutes; so could a tab left open when you signed out in another, or when a session ran out and somebody else signed in. They are now emptied in every one of those cases. "Active in your servers" also asks a few servers at a time instead of all at once, which in many servers could trip the server's request limit. Arrives as an ordinary update.
+- **A task reminder in the desktop app makes a sound, and clicking it opens Reminders.** It used to
+  come up silent, and a click on it did nothing. Now it plays Windows' notification sound, and a
+  click on it while it is on screen opens the Tasks view on its **Reminders** tab (from the
+  notification centre afterwards, a click may only bring Púca's window up). Needs the new desktop
+  app (full and Lite). In the web app, a reminder that comes while the last one is still listed now
+  pops up and sounds again in Chrome and Edge, where it used to replace the old one in silence.
+- **With Púca's notifications turned off in Windows, you still hear every message.** While a
+  conversation went on, Púca played its message sound only for the first message, as if the
+  notification was showing, when Windows was showing nothing at all. Now every message plays it
+  then, and, while **Group notifications by conversation** is on (the default), **Settings →
+  Notifications → Send test** says Windows has Púca's notifications turned off, or refused the
+  test, instead of reporting success. Needs the new desktop app.
+- **In Firefox and Safari a busy conversation no longer pops a notification for every message.**
+  Those browsers show a replaced notification as a new one, popping it up again, so the web app's
+  quiet updates were not quiet there. Now the notification keeps its words until the conversation
+  pops it again.
+- **A conversation with more than 50 people writing says "more than 49 others".** It used to stop
+  at "49 others" however many more wrote.
+- **Edit no longer shows a file's key, or uncovers a spoilered file when saved.**
+  Edit takes out exactly the files the message draws. A file after a stray
+  backtick (`` `[file](sovereign-enc:…)``` ``) was left in the edit box, key and
+  all, because Edit took that for code; and a spoilered file came back in the
+  clear after a save when the words kept a `||` that nothing closed, or when a
+  typed file address ran into the code after it, or when the spoilers of the
+  message shared their bars. Each file is now drawn again where it was, and
+  hidden if it was, and so are the words of each spoiler; nothing drawn as code
+  or a link loses a character to Edit. Client only: the web app and a mobile
+  update.
+- **Previews, search and Quote no longer name a file the message hides.** Where
+  a message's spoilers pair up other than the bars count
+  (`_||[_](sovereign-enc:…)||[file](sovereign-enc:…)||`), the reply bar, the
+  pinned list, search and Quote printed the name of a file the message keeps
+  hidden. They now take which files are hidden from the message as it is drawn,
+  and Quote no longer leaves a spoiler's words open in the composer when a file
+  sits right against its bars (`||![a](sovereign-enc:…) the butler did it||`).
+- **Words and emoji at a spoiler's edge beside a quote or code stay hidden.**
+  A message whose spoiler ends right before a quote or a code block
+  (`||⏎> l||:w8```||⏎````) printed words that 0.9.855 hid, as every version
+  since had. Nothing 0.9.857, 0.9.855 or the version before them hid is printed
+  now, emoji and symbols included; where no one reading hides all they did,
+  everything from the first `||` to the last is one spoiler.
+- **A channel delete that fails now says so.** When the server could not delete a channel, it answered as if it had: the channel left the list of whoever pressed Delete while it stayed in everyone else's, every member's list was refreshed for nothing, and clips were turned off if it was the clips channel. Now the app says the channel could not be deleted, and nothing changes. Needs the new server.
+- **When a mode turns off, the people in its calls no longer hear each other leave.** Everyone in a voice channel the mode hides was taken out one at a time, so each app still in the call played a leave sound (and read the name aloud, with Read Joins and Leaves Aloud on) for every other person before its own call ended. They now leave together, as when a channel is deleted: each is told their call ended, and nobody hears a run of leave sounds first. Needs the new server.
+- **Turning a phone that shares its screen no longer leaves viewers on a black picture.** When you turned the phone sideways (or back upright) while sharing its screen from the Android app, the people watching could get a mostly black picture with your screen as a small strip in one corner, and it stayed like that until you turned the phone again. It happened on some turns and not others. Android fits your screen into the share using the size of the picture it is handed, and Púca resized the share a moment before handing over the picture of the new size, so Android could fit your turned screen to the old shape. Púca now hands over the new picture first. Needs the new Android app (APK), in Púca Lite too; nothing changes for the people watching or on the server.
+- **The FAQ and the security model now match what Púca does about iPhone alerts, call encryption in Firefox and Safari, and dependency scanning.** The FAQ said the iPhone's Home Screen app gets no message alerts. Since Web Push it can, on iOS 16.4 or newer, once **Settings → Notifications → Notifications while Púca is closed** is on and your server has a VAPID key; it has not yet been tried on a real iPhone. `docs/SECURITY_MODEL.md` said only Chromium-based clients encrypt call media end to end, when Firefox 117+ and Safari 15.4+ do too. It also said nothing scans this project's dependencies. It now says which lockfiles CI checks for known vulnerabilities, which it does not, and what Dependabot is set up to do. Documentation only: nothing to update.
+- **Turning your camera off and on no longer freezes it for the others.** In
+  a call without the media server, everyone else's tile of you stayed on your
+  last picture, or went black, once you had turned your camera off and on.
+  Your camera now goes back out the way it went before, and the camera of
+  somebody still on an older version is shown live too, also after they flip
+  it.
+- **"Voice Connected" waits until you are connected.** On a channel whose
+  calls go through the media server, the voice panel said "Voice Connected"
+  while it was still connecting, with no sound in or out yet. It now says
+  "Connecting…" until the call's sound and pictures can flow.
+- **Your speaking ring goes out when you switch voice channel.** Switching
+  while you were talking left your green ring lit in the next channel (for
+  good if you were muted or in an AFK channel) and kept every stream you
+  were watching turned down under it.
+- **The camera menu and Full screen are easier to use.** While a camera is
+  being switched, the menu's cameras and Flip are greyed out instead of
+  doing nothing when pressed; a webcam plugged in during a call appears with
+  its Flip and camera menu at once; the keyboard's place is kept when your
+  picture goes full screen and back, or the camera is turned off; and in
+  Settings > Voice & Video > Camera, a camera chosen before that is not
+  listed today can be chosen again instead of falling back to Default.
+- **A camera switch that cannot reach a media-server call says so.** If your
+  new camera could not be sent to the call, your camera stayed "on" with
+  nothing reaching anyone. It is now turned off, with a line saying why;
+  turn it on again to send it.
+- **Settings no longer opens a microphone you joined without.** In a call
+  you joined with no working microphone, saving any setting (choosing a
+  camera, a checkbox) tried to open a microphone again whenever Input Volume
+  was not at 100%, which could bring back the permission question each
+  time. Only picking a microphone does that now.
+- **Switching cameras right after turning one on works in Firefox.** Under
+  "Require encryption", a switch in the first moments of a camera could fail
+  because the old camera was still held open.
+
+### Security
+
+- **Someone with Manage Channels who cannot see a channel can no longer change it.** A member denied View Channel on a channel, or on the collection it is in, could still rename it, move it, read and rewrite its permissions or delete it with everything in it, by its number, and the answers told them which numbers were channels hidden from them. The server now answers them as if the channel did not exist, and changes nothing. Nor can they make a channel in a collection they cannot see, move one into it, or reorder a channel they cannot see. Undoing a deny that hides a channel from you takes the owner, an administrator or someone who can still see it; a permissions save of your own that hides the channel from you partway through still finishes. A collection's own permissions, edited by someone who can see the collection, still reach every channel inside it. Needs the new server.
+- **A web app notification names only what you can still see.** When the web app (the iPhone and iPad Home Screen app above all) was closed, its notification said who had written and in which server from what the server noted when the message arrived. If you lost the channel in the meantime (a permission change, or being removed from the server), it still named it. The server now checks again when the notification is shown, as it already did for the Android app, and the same goes for a direct message from someone who has blocked you since. Needs the new server.
+- **A channel let back inside a collection you cannot see no longer gives that collection away.** Its row in your channel list carried the collection's number and which modes it belongs to. It now carries neither. The channel is still listed at the top of your list, and shows and hides with the modes exactly as before. Needs the new server; no app update.
+
 ## 0.9.862 — 2026-11-13
 
 One notification per conversation, a Discord window, the phone's rear cameras, letting someone control your phone's shared screen, and a sweep of the phone layout
