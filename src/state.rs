@@ -3291,6 +3291,12 @@ impl AppState {
         self.web_push_away.get(sid).map(|a| a.0).unwrap_or(0)
     }
 
+    /// How long ago session `sid`'s browser last went away from present, if
+    /// that is known (`wake::sender::back_since_push`).
+    pub fn web_push_away_age(&self, sid: &str) -> Option<std::time::Duration> {
+        self.web_push_away.get(sid).map(|a| a.1.elapsed())
+    }
+
     /// Session `sid`'s browser was present and a connection of it just
     /// stopped being (it closed, or its page said it cannot notify): if no
     /// other one is, note `mark`, where the log stood just before. Everything

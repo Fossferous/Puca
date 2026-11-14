@@ -666,6 +666,55 @@ async fn a_phone_in_the_background_is_rung_although_its_socket_is_still_up() {
     drop_user(&pool, &alice).await;
 }
 
+/// The reply in a back-and-forth. The phone is woken for a DM, opens Púca,
+/// replies, switches away, and the answer comes a few seconds later: that is
+/// a NEW burst (it answered the last ring), so the 30 s coalescing must not
+/// swallow it — the frozen page could not show it either. CONTROL: a phone
+/// that never came back is still one push per burst.
+#[tokio::test]
+async fn the_answer_after_you_reply_and_switch_away_is_pushed() {
+    let Some((pool, state, rec)) = setup().await else { return };
+    let me = signed_in(&pool, "reply").await;
+    let alice = signed_in(&pool, "alice5").await;
+    may_dm(&pool, &me, &alice).await;
+    let phone_ep = endpoint();
+    let (id, secret) = subscribe(&state, &me, &phone_ep, GatesBody::default()).await;
+    let phone = connect(&state, &me, &me.sid);
+    // A second browser of the same account that stays in the background: the control.
+    let tablet = Claims { sid: new_session(&pool, me.sub).await, ..me.clone() };
+    let tablet_ep = endpoint();
+    subscribe(&state, &tablet, &tablet_ep, GatesBody::default()).await;
+    let tablet_conn = connect(&state, &tablet, &tablet.sid);
+    state.set_conn_push_away(me.sub, phone, true);
+    state.set_conn_push_away(me.sub, tablet_conn, true);
+
+    let first = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &first, true);
+    assert_eq!(settle(&rec, 2).await, 2, "both woken for the first message");
+    let _ = pending(&state, id, &secret).await;
+
+    // The phone opens Púca from it, replies, and switches away again (the
+    // database counts seconds since the push, rounded, so they go by).
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    state.set_conn_push_away(me.sub, phone, false);
+    state.set_conn_push_away(me.sub, phone, true);
+    let answer = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &answer, true);
+    assert_eq!(settle(&rec, 3).await, 3, "a new burst for the phone");
+    assert_eq!(rec.pushed_to(&phone_ep), 2, "the answer woke the phone, well inside 30 s");
+    assert_eq!(rec.pushed_to(&tablet_ep), 1, "CONTROL: the tablet never came back: still one push per burst");
+    let (_, v) = pending(&state, id, &secret).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "and its worker names it: {v}");
+
+    // And the phone, still away, is one push per burst again.
+    let more = dm_from(&alice, "conv-1");
+    sender::wake_user_scoped(&state, me.sub, WakeKind::DirectMessage, WakeScope::dm(alice.sub), &more, true);
+    assert_eq!(settle(&rec, 4).await, 3, "no second push inside the new burst");
+
+    drop_user(&pool, &me).await;
+    drop_user(&pool, &alice).await;
+}
+
 /// A message that reached the page while it was on screen does not wake it
 /// once it has left: the ring task waits a random moment (the privacy
 /// jitter, up to 3 s) before it looks, and a person who reads a message and

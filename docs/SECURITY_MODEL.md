@@ -646,11 +646,13 @@ freezes it within seconds, though its connection can stay up for about 75 second
 and Android's Chrome cannot show a notification from a page at all), and any page says
 so as it is closed; back on screen it says so again (`SetPushAway`,
 `frontend/src/api/webPushAway.ts`). While it has said so, the page shows none of its own,
-so a message is one notification, not two. Your server learns nothing new from this: the
-same page already reports that it is hidden, for idle and away (`SetActivity`). It is held
-in memory per connection, sent only by a browser where the setting is on, and read by
-nothing but the decision to push. A hidden tab of a desktop browser does not say so: that
-page keeps running and notifies by itself.
+so a message is one notification, not two. What your server learns is when that page went
+to the background and came back, which the same page mostly reports already for idle and
+away (`SetActivity`) — but not while you are talking in a call, when it reports you active
+and this still says the app is in the background. It is held in memory per connection,
+sent only by a browser where the setting is on, and read by nothing but the decision to
+push. A hidden tab of a desktop browser does not say so: that page keeps running and
+notifies by itself.
 
 ## 4. Is voice (and screen share) encrypted?
 

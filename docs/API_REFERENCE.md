@@ -602,10 +602,11 @@ by itself, and when it can again:
 {"type":"SetPushAway","payload":{"away":false}}
 ```
 
-The web app sends `true` when it goes to the background on an iPhone, iPad or
-Android device, and as any page is closed (`pagehide`), and `false` back on
-screen; never from a desktop browser's hidden tab, which keeps running and
-notifies by itself, nor from the desktop or Android apps. From `true` that
+The web app sends them only where this account has turned Web Push on in that
+browser: `true` when it goes to the background on an iPhone, iPad or Android
+device, and as any page is closed (`pagehide`), and `false` back on screen;
+never from a desktop browser's hidden tab, which keeps running and notifies by
+itself, nor from the desktop or Android apps. From `true` that
 connection no longer keeps its browser present, so a message wakes it although
 the socket is still up (iOS freezes the page within seconds; the socket stays
 until the 75 s idle reaper takes it), and only what arrives after it is named

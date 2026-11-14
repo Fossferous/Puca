@@ -11264,11 +11264,14 @@ mod push_away_ws_tests {
         assert!(state.sid_is_present(7, "phone"), "on screen again: present");
         assert!(rx.try_recv().is_err(), "nothing is answered");
 
-        // From a delivery socket (never a page): taken, changes nothing, no Error.
+        // From a delivery socket (never a page): taken, changes nothing, no
+        // Error. Beside the phone's own page, so a delivery socket marked
+        // away would show: the page keeps its browser present.
         let (tx2, mut rx2) = mpsc::channel::<ServerMessage>(8);
-        let (pocket, _, _) = state.register_session(7, "me".into(), tx2, true, None, "android".into());
-        assert_eq!(handle_message(&state, 7, pocket, "me", &back, &mut joined, "").await, Ok(()));
-        assert!(!state.sid_is_present(7, "android"));
+        let (pocket, _, _) = state.register_session(7, "me".into(), tx2, true, None, "phone".into());
+        assert_eq!(handle_message(&state, 7, pocket, "me", &away, &mut joined, "").await, Ok(()));
+        assert!(state.sid_is_present(7, "phone"), "the page is still on screen");
+        assert!(state.sessions.get(&7).unwrap().iter().all(|s| !s.push_away), "nothing was marked");
         assert!(rx2.try_recv().is_err());
     }
 }

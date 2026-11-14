@@ -578,7 +578,10 @@ ck(awayFrames(oldServer.conn).length === 0, 'an older server is never sent the f
 sendDm(oldServer.conn, 'conv-old');
 await until(async () => (await madeFor(oldServer.p, 'dm:conv-old')).some((n) => n.shown));
 const oldOwn = await madeFor(oldServer.p, 'dm:conv-old');
-ck(oldOwn.length === 1 && oldOwn[0].shown, 'and the page shows its own notification, exactly as before', JSON.stringify(oldOwn));
+// (Desktop Chromium playing Android: a real Android Chrome has no page
+// notifications at all. What this shows is that nothing holds the page's own
+// path back when no push will carry the message.)
+ck(oldOwn.length === 1 && oldOwn[0].shown, 'and the page takes its own notification path, as before (nothing will push it)', JSON.stringify(oldOwn));
 await oldServer.p.close();
 
 await browser.close();

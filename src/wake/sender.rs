@@ -415,6 +415,23 @@ pub fn push_due(since_push_secs: Option<i64>, failures: i32, since_failure_secs:
     true
 }
 
+/// Did this browser come back on screen after its last push, and then go away
+/// again? Then it answered that ring and the burst is over: what arrives now
+/// is a new one, and the 30 s coalescing must not swallow it (a phone that
+/// opened Púca from a notification, replied and switched away would otherwise
+/// miss the answer that comes ten seconds later). `away_for` is how long ago
+/// it last went away (`AppState::web_push_away_age`; a browser only goes away
+/// from present), `since_push_secs` the seconds since its last push as the
+/// query gives them: ROUNDED to the nearest (Postgres casts numeric to bigint
+/// by rounding), so the push may be up to half a second more recent. Within
+/// that it cannot tell, and keeps coalescing, as before.
+pub fn back_since_push(away_for: Option<Duration>, since_push_secs: Option<i64>) -> bool {
+    match (away_for, since_push_secs) {
+        (Some(away), Some(push)) => away + Duration::from_millis(500) < Duration::from_secs(push.max(0) as u64),
+        _ => false,
+    }
+}
+
 /// Push one wake to one subscription, now, and record the outcome: a success
 /// clears its failures, a 404/410 deletes it, anything else counts towards
 /// the backoff and, after a day of nothing but failures, giving up.
@@ -468,8 +485,9 @@ pub struct WebPushQueue {
     events: Vec<WebPushEvent>,
 }
 
-/// At most this many distinct events wait per user; a burst beyond it is
-/// already a reason to ring.
+/// At most this many distinct events wait per user. Past it the OLDEST gives
+/// way: an event a browser may ring for must be after the moment it went
+/// away, so the newest ones are the ones that can still wake somebody.
 const MAX_QUEUED_EVENTS: usize = 64;
 
 impl WebPushQueue {
@@ -481,6 +499,10 @@ impl WebPushQueue {
             e.seq = e.seq.max(ev.seq);
         } else if self.events.len() < MAX_QUEUED_EVENTS {
             self.events.push(ev);
+        } else if let Some(oldest) = self.events.iter_mut().min_by_key(|e| e.seq) {
+            if oldest.seq < ev.seq {
+                *oldest = ev;
+            }
         }
     }
 }
@@ -580,7 +602,12 @@ pub async fn ring_web_events(state: &Arc<AppState>, user_id: i64, events: &[WebP
         if !events.iter().any(|ev| ev.seq > mark && allowed(&ev.kind) && web_gates_permit(&ev.scope, &sub.gates)) {
             continue;
         }
-        if !push_due(sub.since_push_secs, sub.failures, sub.since_failure_secs) {
+        let since_push = if back_since_push(state.web_push_away_age(&sub.sid), sub.since_push_secs) {
+            None // it answered the last ring: a new burst
+        } else {
+            sub.since_push_secs
+        };
+        if !push_due(since_push, sub.failures, sub.since_failure_secs) {
             continue;
         }
         match push_one(state, &sub).await {
@@ -780,6 +807,46 @@ mod tests {
         ] {
             assert!(sql.contains(WEB_PUSH_LIVE_SQL), "{name} must contain WEB_PUSH_LIVE_SQL verbatim");
         }
+    }
+
+    /// A full queue keeps the NEWEST events: a browser is rung only for what
+    /// came after it went away, so the DM that follows 64 events queued while
+    /// the phone was on screen must not be the one turned away.
+    #[test]
+    fn a_full_queue_gives_way_to_the_newest_event() {
+        let mut q = WebPushQueue::default();
+        for i in 0..MAX_QUEUED_EVENTS as i64 {
+            q.add(WebPushEvent { kind: WakeKind::ChannelMessage, scope: WakeScope::channel("s", i, 2), seq: i as u64 + 1 });
+        }
+        assert_eq!(q.events.len(), MAX_QUEUED_EVENTS);
+        let dm = WebPushEvent { kind: WakeKind::DirectMessage, scope: WakeScope::dm(9), seq: 1_000 };
+        q.add(dm.clone());
+        assert_eq!(q.events.len(), MAX_QUEUED_EVENTS, "still bounded");
+        assert!(q.events.contains(&dm), "the newest event is kept");
+        assert!(!q.events.iter().any(|e| e.seq == 1), "the oldest gave way");
+        // An event older than everything queued changes nothing.
+        let stale = WebPushEvent { kind: WakeKind::DirectMessage, scope: WakeScope::dm(10), seq: 0 };
+        q.add(stale.clone());
+        assert!(!q.events.contains(&stale));
+        // The same kind and scope again: one entry, the newest position.
+        q.add(WebPushEvent { kind: WakeKind::DirectMessage, scope: WakeScope::dm(9), seq: 2_000 });
+        assert_eq!(q.events.iter().filter(|e| e.scope == WakeScope::dm(9)).map(|e| e.seq).collect::<Vec<_>>(), vec![2_000]);
+    }
+
+    /// Back on screen since the last push means the burst is over; anything
+    /// it cannot tell apart (within the second the DB rounds to) is not.
+    #[test]
+    fn a_browser_that_came_back_since_its_last_push_starts_a_new_burst() {
+        let s = Duration::from_secs;
+        assert!(back_since_push(Some(s(2)), Some(15)), "pushed 15 s ago, left again 2 s ago: it came back");
+        assert!(!back_since_push(Some(s(20)), Some(15)), "left 20 s ago, pushed 15 s ago while away: same burst");
+        assert!(!back_since_push(Some(Duration::from_millis(400)), Some(0)), "within the second: cannot tell, keep coalescing");
+        // "1" may be a push 0.5 s ago (the query rounds): a browser that left
+        // 0.6 s ago may never have been back since.
+        assert!(!back_since_push(Some(Duration::from_millis(600)), Some(1)));
+        assert!(back_since_push(Some(Duration::from_millis(100)), Some(1)), "left 0.1 s ago, pushed at least 0.5 s ago");
+        assert!(!back_since_push(None, Some(15)), "never known present");
+        assert!(!back_since_push(Some(s(2)), None), "never pushed: nothing to undo");
     }
 
     #[test]
