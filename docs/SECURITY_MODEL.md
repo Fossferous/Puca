@@ -1246,7 +1246,7 @@ Other things you'd find anyway:
   neither Noise nor X3DH. **Only 2 of roughly 8 such constructions have known-answer tests.**
   This subsystem has already produced one full authentication bypass — found, fixed, and
   written up, but produced.
-- **Dependency scanning covers only part of the tree, and Dependabot is off.** CI's
+- **Dependency scanning covers only part of the tree.** CI's
   `supply-chain` job runs `cargo audit` over all three Rust lockfiles (the backend and
   `crates/*` in `Cargo.lock`, the desktop shell's `frontend/src-tauri/Cargo.lock`, the
   noise-suppression wasm's `frontend/df-wasm/Cargo.lock`) and fails on any advisory that
@@ -1255,13 +1255,18 @@ Other things you'd find anyway:
   which fails on a high or critical advisory against a package with no row in
   `docs/NPM_ADVISORIES.md`. Both run only when CI does (a push to `main` or a `work/**`
   branch, a pull request, a manual run), never on a schedule, so an advisory published
-  after the last push waits for the next one. Nothing scans the rest: the Steam Deck
+  after the last push waits for the next one. Nothing in CI scans the rest: the Steam Deck
   plugin's `integrations/decky/package-lock.json`, Púca Notes'
   `frontend/notes-app/package-lock.json`, the Android apps' Gradle dependencies (no
-  lockfile), or the GitHub Actions pinned by SHA in `.github/workflows`. Dependabot opens
-  nothing: its alerts and security updates are switched off in the repository's settings
-  (checked 2026-11-14), and `.github/dependabot.yml` sets `open-pull-requests-limit: 0` for
-  every ecosystem, which turns off its version updates. No renovate either.
+  lockfile), or the GitHub Actions pinned by SHA in `.github/workflows`.
+  `.github/dependabot.yml` asks Dependabot for security updates only:
+  `open-pull-requests-limit: 0` on every ecosystem stops its routine version-update pull
+  requests, and its alerts and security updates arrive only while the repository has them
+  switched on in its settings, which is not something this tree can show. While they are
+  on, GitHub's dependency graph covers the npm lockfiles too, but still not the Gradle
+  builds or the pinned actions: it reads Gradle only through a dependency-submission job, which this repository does not
+  have, and it raises no alert for an action pinned by SHA rather than by version. There
+  is no Renovate.
 - **Bus factor 1.** One author, no second reviewer, and no outside audit has ever been
   performed. The source is now public, so one is at least *possible* — but
   "auditable" and "audited" are different words, and only the first one is true here.
