@@ -45,6 +45,7 @@
 //   cd frontend && node e2e/stream-volume-button-real-browser.mjs
 // No server. WebKit needs `npx playwright install webkit` once; WEBKIT=0 skips it.
 import { chromium, webkit, devices } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -509,7 +510,7 @@ try {
 if (process.env.WEBKIT !== '0') {
     let wk;
     try {
-        wk = await webkit.launch();
+        wk = muteWebkit(await webkit.launch());
     } catch (e) {
         console.error(String(e.message || e).split('\n')[0]);
         ck('WebKit is installed (npx playwright install webkit)', false);

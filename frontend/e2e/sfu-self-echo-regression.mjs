@@ -45,8 +45,11 @@ async function register(ctx, user) {
     await page.goto(APP + '/login');
     await page.waitForSelector('#username', { timeout: 20000 });
     await page.click('.toggle-mode');
-    await page.waitForSelector('#inviteCode', { timeout: 5000 });
-    await page.fill('#inviteCode', INVITE);
+    // The sign-up form, by its password field: #inviteCode is shown only when
+    // the server requires an invite code, so waiting for it stalled on one that
+    // does not. INVITE= gives the code to a server that does.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]', { timeout: 5000 });
+    if (INVITE) await page.fill('#inviteCode', INVITE);
     await page.fill('#username', user);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');
@@ -94,7 +97,7 @@ async function joinVoice(page, chName) {
     }, chName);
 }
 
-const browser = await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
+const browser = await chromium.launch({ args: ['--mute-audio', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 try {
     if (!INVITE) { console.log('FATAL: INVITE not set'); process.exit(1); }
     const ctxA = await browser.newContext();

@@ -110,6 +110,7 @@ const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
     args: [
+        '--mute-audio',
         '--autoplay-policy=no-user-gesture-required',
         // Forced software, because that is what the app actually gets. Proven
         // per run below rather than assumed from the flag.

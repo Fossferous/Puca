@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process';
 
 const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const PASS = 'Password123!';
+const INVITE = process.env.INVITE || ''; // the server's sign-up code, if it requires one
 const stamp = Date.now().toString(36);
 const AUSER = 'nsswap_a_' + stamp;
 const BUSER = 'nsswap_b_' + stamp;
@@ -24,7 +25,7 @@ const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
 const browser = await chromium.launch({
-    args: ['--use-fake-ui-for-media-stream',
+    args: ['--mute-audio', '--use-fake-ui-for-media-stream',
         // Real-address host candidates: same-machine ICE must not coin-flip
         // on headless mDNS resolution (see voice-camera-2peer.mjs).
         '--disable-features=WebRtcHideLocalIpsWithMdns', '--use-fake-device-for-media-stream'],
@@ -41,7 +42,11 @@ async function register(ctx, user, errBucket) {
     await page.waitForURL('**/login');
     await page.waitForSelector('#username', { timeout: 10000 });
     await page.click('.toggle-mode', { timeout: 5000 });
-    await page.waitForSelector('#inviteCode', { timeout: 5000 });
+    // The sign-up form, by its password field: #inviteCode is shown only when
+    // the server requires an invite code, so waiting for it stalled on one that
+    // does not. INVITE= gives the code to a server that does.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]', { timeout: 5000 });
+    if (INVITE) await page.fill('#inviteCode', INVITE);
     await page.fill('#username', user);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');

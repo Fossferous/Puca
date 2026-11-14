@@ -27,7 +27,7 @@
 import { chromium } from '@playwright/test';
 
 const APP = process.env.APP || 'https://app.svrn.lol';
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, args: ['--mute-audio'] });
 const page = await browser.newPage();
 
 const consoleErrors = [];

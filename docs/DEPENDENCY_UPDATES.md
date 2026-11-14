@@ -1,6 +1,8 @@
 # Dependency updates: what is held back, and why
 
-Dependabot opens a pull request per group. Several of them cannot be taken as a
+Dependabot opened a pull request per group while its version updates were on
+(`.github/dependabot.yml` now turns them off with `open-pull-requests-limit: 0`,
+so a bump is a deliberate batch). Several of them cannot be taken as a
 bump, and the reason is not "risky" in the abstract — each was tried on
 2026-09-08 and the failure recorded here. Re-check before dismissing one again;
 a blocker that has been fixed upstream should be taken.

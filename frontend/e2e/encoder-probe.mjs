@@ -50,6 +50,7 @@ const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
     args: [
+        '--mute-audio',
         '--autoplay-policy=no-user-gesture-required',
         '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
         ...EXTRA,

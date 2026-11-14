@@ -61,6 +61,10 @@ const STALE = [
     ['makes the list named after the heading', 'the new list is named after what is typed there, else the heading, else the first step'],
     ['heading, or what you had typed there', 'what is typed there comes FIRST, then the heading, then the first step'],
     ['paste as its one item', '"Add as one item" from a name field (the New list name, an open note\'s title) is the clean steps on one line (usePasteItems checklistOnly), not the raw paste'],
+    // Three that outlived what they described (2026-11-14).
+    ['Púca does not use that yet', 'the Home Screen app gets Web Push on iOS 16.4+ once it is turned on and the server has a VAPID key (docs/USER_GUIDE.md, Notifications while Púca is closed)'],
+    ['clients seal media frames; other engines', 'Firefox 117+ and Safari 15.4+ seal frames too, through RTCRtpScriptTransform (docs/SECURITY_MODEL.md §4)'],
+    ['Nothing scans dependencies', 'CI runs cargo audit over the three Rust lockfiles and the npm advisory gate; docs/SECURITY_MODEL.md §8 says what is and is not scanned'],
 ];
 const docFiles = tracked(['docs/*.md', 'deploy/**', 'README.md', 'CHANGELOG.md', 'changelog.d/*.md', 'SECURITY.md', 'CONTRIBUTING.md', '.env.example'])
     .filter((f) => /\.(md|html|conf|snippet|example|service|cron|py|sh|json)$|Caddyfile/.test(f));

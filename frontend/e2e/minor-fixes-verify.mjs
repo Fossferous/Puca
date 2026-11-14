@@ -21,7 +21,7 @@ const check = (name, ok, detail = '') => {
 };
 
 const browser = await chromium.launch({
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+    args: ['--mute-audio', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
 });
 const ctx = await browser.newContext({
     viewport: { width: 1440, height: 900 },

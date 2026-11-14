@@ -1,0 +1,3 @@
+### Fixed
+
+- **The FAQ and the security model now match what Púca does about iPhone alerts, call encryption in Firefox and Safari, and dependency scanning.** The FAQ said the iPhone's Home Screen app gets no message alerts. Since Web Push it can, on iOS 16.4 or newer, once **Settings → Notifications → Notifications while Púca is closed** is on and your server has a VAPID key; it has not yet been tried on a real iPhone. `docs/SECURITY_MODEL.md` said only Chromium-based clients encrypt call media end to end, when Firefox 117+ and Safari 15.4+ do too. It also said nothing scans this project's dependencies. It now says which lockfiles CI checks for known vulnerabilities, which it does not, and what Dependabot is set up to do. Documentation only: nothing to update.

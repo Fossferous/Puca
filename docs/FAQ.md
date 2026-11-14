@@ -300,9 +300,12 @@ No, and there is unlikely to be one soon. Publishing to iPhones requires a paid
 Apple Developer account; without one, nothing built can be installed on anyone
 else's device. The browser works well: add it to your Home Screen from Safari
 (Share, then **Add to Home Screen**; the steps are in the User Guide under
-*iPhone and iPad*, and on your server's download page). iPhone can send
-notifications to a web app that is closed, but Púca does not use that yet, so
-you will not get message alerts.
+*iPhone and iPad*, and on your server's download page). The Home Screen app can
+alert you to messages while it is closed, on iOS 16.4 or newer: open Púca from
+its icon and turn on **Settings → Notifications → Notifications while Púca is
+closed** (a Safari tab cannot have them), and your server has to have a VAPID key
+set up. It has been run in Chromium against a stand-in push service, but not yet
+on a real iPhone.
 
 ## Why does Windows warn me when I install it?
 

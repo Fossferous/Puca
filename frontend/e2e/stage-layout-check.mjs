@@ -22,7 +22,7 @@ const ck = (n, ok, extra = '') => {
     if (!ok) fail++;
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 
 /** Measure one .stream-grid: container, stage, thumbs, overflow. */
 const measure = (page, id) => page.evaluate((gid) => {

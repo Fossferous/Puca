@@ -1,7 +1,7 @@
 import { chromium, devices } from '@playwright/test';
 const username = process.argv[2], password = process.argv[3] || 'Password123!';
 const iphone = devices['iPhone 13'];
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL: 'http://localhost:5173' });
 const page = await ctx.newPage();
 await page.goto('/');

@@ -86,6 +86,7 @@
 // --mute-audio, media.volume_scale 0, every element muted, the tones go to
 // MediaStream destinations only. Headless: no window, no focus.
 import { chromium, firefox, webkit } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
@@ -949,7 +950,7 @@ await run('worker-csp', async () => {
     }
     let wk = null;
     try {
-        wk = await webkit.launch({ headless: true });
+        wk = muteWebkit(await webkit.launch({ headless: true }));
     } catch (e) {
         sk('[worker CSP WebKit]', `WebKit did not launch: ${e.message.split('\n')[0]}`);
     }
@@ -981,7 +982,7 @@ await run('worker-csp', async () => {
 await run('webkit', async () => {
     const tag = '[WebKit]';
     try {
-        const b = await webkit.launch({ headless: true });
+        const b = muteWebkit(await webkit.launch({ headless: true }));
         const page = await b.newPage();
         await page.goto(await serve(POLICIES.caddy));
         const probe = await page.evaluate(() => ({
