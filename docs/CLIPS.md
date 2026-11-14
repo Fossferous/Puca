@@ -143,62 +143,85 @@ capture inside the browser engine; the auto arm is a capture of its own
 
 "Can we integrate clipping and streaming so it doesn't use double the CPU"
 (the owner, 2026-11-14). Measured first, with
-`frontend/e2e/clip-share-cpu-measure.mjs` (headless Edge 157, the WebView2
-engine, on the owner's desktop: Ryzen 7 7800X3D, RTX 4080 SUPER; % of ONE
-core, each pipeline's own process tree; the clip buffer's figures include its
-worker and, for the auto arm, the agent; the header of the script says how
-to run every case):
+`frontend/e2e/clip-share-cpu-measure.mjs` (its header explains every case
+and what it leaves out). Headless Edge 157, the WebView2 engine, on the
+owner's desktop (Ryzen 7 7800X3D, RTX 4080 SUPER; the browser on the RTX,
+the default adapter, where the app's WebView2 may be pinned to an integrated
+GPU), each figure the % of ONE core a case spent above that round's `idle`,
+two interleaved rounds, a machine also running other work:
 
-| what runs | costs | beside a share |
+```
+AGENT=<puca-agent.exe> SOURCE=pan WINDOW_S=20 WARM_S=6 \
+  CASES=idle,sfu,sfu1,mesh1,manual,agentonly,native,sfu+native,sfu1+native,mesh1+native,<the same again> \
+  node e2e/clip-share-cpu-measure.mjs
+SOURCE=screen WINDOW_S=20 WARM_S=6 \
+  CASES=idle,capture,capture+capture2,capture+captureclone,<the same again> \
+  node e2e/clip-share-cpu-measure.mjs
+```
+
+| case (SOURCE) | what it is | above idle |
 |---|---|---|
-| SFU share, 1080p30 H.264 simulcast, hardware | ~32% (fast motion) | |
-| mesh share, 1080p30 VP8, software | ~55% **per viewer** (fast motion) | |
-| clip buffer, Arm automatically (agent, 2560x1440 at 30 fps) | ~20% (agent ~15%, page ~5%) | the same: +21% on SFU, +24% on mesh |
-| clip buffer, armed by hand (getDisplayMedia + WebCodecs) | ~14-18% (its encoder ~4-5%) | +16-22% |
+| `capture` (screen) | one desktop capture at 30 fps, drained | 14.4, 15.4 |
+| `capture+capture2` (screen) | and a SECOND getDisplayMedia of the same screen | 15.0, 14.9 |
+| `capture+captureclone` (screen) | and a clone of the first instead | 14.4, 13.6 |
+| `sfu1` (pan) | one H.264 layer, hardware, AES-GCM sealing | 6.8, 13.7 |
+| `sfu` (pan) | H.264 simulcast f/h/q (an overestimate: see the script) | 24.9, 28.0 |
+| `mesh1` (pan) | VP8 to one viewer, software | 44.2, 50.0 |
+| `native` (pan) | Arm automatically: the agent (2560x1440, 30 fps) and the ring | 14.7, 20.8 (the agent 17.3, 18.6) |
+| `sfu1+native` / `sfu+native` / `mesh1+native` (pan) | both at once | 26.0, 34.0 / 46.1, 50.0 / 65.3, 76.3 |
+| `manual` (pan) | armed by hand: WebCodecs H.264 and the ring, on a canvas capture | 9.7, 16.9 |
 
-Nothing contends: the agent's own threads stayed at 12-18% with or without a
-share, and GPU load, CPU and memory load, a second screen capture and a
-second hardware encode beside it did not move it. So "double" is about right
-on an SFU call (~1.6-1.7x the share alone), and the clip's cost is its own
-CAPTURE (the readback and colour conversion of every frame) plus its ENCODE
-(hardware, small). On a mesh call the share's software VP8 dominates and
-Clips cannot remove it (it is the share's encoder, once per viewer).
+`pan` shares a canvas (e2e/encode-cost.mjs's fast-motion picture), so its
+share and hand-arm figures carry no desktop capture; in the app each adds the
+`capture` row's ~15%. The clip buffer's figures are lower bounds: no audio
+path, and the agent's frames reach the page here as one stream, where the app
+sends a Tauri Channel message per frame (about 1 ms of the page's main thread
+per message, measured under "The desktop-audio wire" above: ~3% of a core at
+30 frames a second). The 30 fps / 8 Mbit/s rate is the 1080p60
+preset's on a 1440p monitor (the owner's); the default 1080p30 records 24 fps.
 
-**A hand-armed buffer and a share of the same screen are already one
-capture.** Chromium runs one capturer for every capture of one screen (its
-video capture manager shares the device), so the second getDisplayMedia only
-adds a track: one desktop capture ~15% of a core over idle, a second capture
-of the same screen +2-3%, a clone of the first +0 (`capture`,
-`capture+capture2`, `capture+captureclone`, twice each). A branch that moved
-the buffer onto a clone of the share's track (2026-11-14) measured the same
-~1-2% and was reverted: it bought nothing, and it tied the buffer to the
-share's capture, so Chromium's own "Stop sharing" on the share's bar (shown
-by default, `hideOsCaptureBar`) would also have wiped the buffer.
+What that says:
+
+- **The costs add; nothing contends.** The agent's own CPU was 16.5-18.8% of
+  a core in every native case, beside a share or not (its threads by start
+  time: the first, its capture loop, 13-15%; the next 3-4%).
+- **"Double" is about right on an SFU call.** A share there is its desktop
+  capture (~15%) plus its encode (one hardware layer ~7-14%, simulcast
+  more); Arm automatically adds its own ~15-21%. On a mesh call the share's
+  software VP8 dominates (~44-50% per viewer at 720p, once per viewer) and
+  Clips cannot remove it: it is the share's encoder.
+- **A buffer armed by hand and a share of the same screen are already one
+  capture.** Chromium runs one capturer for every capture of one screen (its
+  video capture manager shares the device): a second getDisplayMedia of the
+  screen cost nothing measurable above the first, the same as a clone. A
+  branch that moved the buffer onto a clone of the share's track
+  (2026-11-14) therefore bought nothing and was reverted; it also tied the
+  buffer to the share's capture, so Chromium's own "Stop sharing" on the
+  share's bar (shown by default: `hideOsCaptureBar`) would have wiped it.
+- **Arm automatically is the second capture**, in the agent with DXGI and the
+  hardware MFT. Moving it onto the share's capture while sharing would save
+  less than it sounds, because the buffer would still encode and seal (an
+  estimate from `native` minus `manual`, not a measured switch: ~5-10% of a
+  core), and it changes what is recorded (the shared
+  surface at the share's size, not always the whole monitor at its own), and
+  the ring cannot carry a clip across a change of encoder (`selectWindow`
+  keeps one decoder configuration), so for up to the buffer's length after
+  the share starts a clip would reach back only to that moment. That is the
+  owner's call and nothing about it is built. The change with no trade-off is
+  converting on the GPU in the agent ("Per-frame cost, profiled" above: the
+  readback, the CPU BGRA->NV12 convert and the system-memory sample are its
+  capture loop's cost), for every auto-armed buffer, sharing or not.
 
 **Known: the first capture of a screen sets its size and frame rate for
-both.** Measured with the same engine: a capture at 1280x720 15 fps started
-first, then one asked for 1920x1080 30 fps, gets 720p at 15 fps (the other
-order is fine: the second is scaled down). So a buffer armed by hand at a
-low preset caps a share of the same screen started after it, and a share
-started first caps a buffer armed after it. Not fixed yet (to see it: two
-getDisplayMedia calls for one screen in Edge, the first with
+both.** Because the device is shared: in Edge 157, a capture asking
+1280x720 at 15 fps started first, then one asking 1920x1080 at 30 fps, got
+720p at 15 fps (the other order is fine: the second is scaled down). So a
+buffer armed by hand at a low preset caps a share of the same screen started
+after it, and a share started first caps a buffer armed after it. To see it:
+two getDisplayMedia calls for one screen in Edge, the first with
 `{ width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }`,
-and read the second's VideoFrames); the auto arm is not affected (its capture
-is the agent's, not the browser's).
-
-**Arm automatically is a capture of its own**, in the agent with DXGI and the
-hardware MFT, so while sharing the screen is captured twice: the share's
-~15% of a core of capture and the agent's ~15%. Moving the buffer onto the
-share's capture while sharing would save about 13% of a core here, but it
-changes what is recorded (the shared surface at the share's size, not always
-the whole monitor at its own), and the ring cannot carry a clip across a
-change of encoder (`selectWindow` keeps one decoder configuration), so for
-up to the buffer's length after the share starts a clip reaches back only to
-that moment. That is the owner's call and nothing about it is built. The
-change with no trade-off is converting on the GPU in the agent (see
-"Per-frame cost, profiled": the readback, the CPU BGRA->NV12 convert and the
-system-memory sample are most of its ~15%), for every auto-armed buffer,
-sharing or not.
+then read the second's VideoFrames. Not fixed yet; Arm automatically is not
+affected (its capture is the agent's).
 
 ## What is guaranteed (mechanically checked)
 

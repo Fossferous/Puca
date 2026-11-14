@@ -26,7 +26,11 @@
 //                   gives every viewer their own encoder), each frame through
 //                   an AES-GCM sender transform like frameCrypto.ts's
 //   sfu             that capture as H.264 High simulcast f/h/q (the owner's
-//                   1080p share: 1920x1080, 1280x720, 640x360), AES-GCM too
+//                   1080p share: 1920x1080, 1280x720, 640x360), AES-GCM too.
+//                   A browser cannot RECEIVE simulcast, so the sink keeps
+//                   rebinding the layers and asks for keyframes (pli+fir=
+//                   shows how often): an overestimate, bounded below by
+//   sfu1            the same as ONE H.264 layer, which the sink decodes cleanly
 //   manual          the manual arm: its own getDisplayMedia at the clip preset,
 //                   the real replayWorker (WebCodecs H.264, sealed GOPs)
 //   native          the auto arm: the agent's --clip-capture host (DXGI + MFT
@@ -45,8 +49,25 @@
 //                   screen were never two captures (docs/CLIPS.md, "Sharing
 //                   while armed")
 //
-// Every receiving end DROPS its frames in a receiver transform, so no decode
-// lands in the measured tree: only what the sharer's machine pays.
+// Every receiving end is in a SECOND headless browser that this script
+// launches and does not measure: the receivers decode normally, so their
+// cost is not in the tree, and they never ask for keyframes (a receiver
+// that drops its frames sends a PLI every ~0.4 s whatever the SDP says,
+// measured, and the sender then encodes keyframe after keyframe). Each
+// encoder line prints keyframes= and pli+fir= so a run shows it held. Each
+// sender seals every frame with AES-GCM in frameCrypto.ts's shape and then
+// sends the frame as encoded: the cost of sealing, not the format (the SFU
+// path's own, LiveKit's e2ee worker, keeps H.264's NAL headers in the clear).
+//
+// WHAT THE FIGURES LEAVE OUT, so the clip buffer's are lower bounds: the
+// agent's frames reach the page here as one fetch stream (relayed by this
+// script, uncounted), where the app sends a Tauri Channel message per access
+// unit (docs/CLIPS.md measures ~1 ms of the page's main thread each, ~3% of
+// a core at 30 fps) through the shell; and no arm here mixes audio (no
+// WASAPI loopback, no Web Audio, no AAC). The browser runs on the default
+// GPU unless ADAPTER_LUID says otherwise (the app's WebView2 may be pinned to
+// another). Figures from different runs, sources or load are not comparable:
+// compare cases of ONE run, interleaved (CASES=a,b,a,b).
 //
 // Usage (from frontend/, after `npx vite build` for dist/assets/replayWorker-*.js):
 //   node e2e/clip-share-cpu-measure.mjs
@@ -88,7 +109,7 @@ const SHARES = { '1080p30': { w: 1920, h: 1080, fps: 30, kbps: 6000 }, '1440p30'
 const SHARE = SHARES[process.env.SHARE || '1080p30'];
 // The clip preset (manual arm): Settings' default, 1080p30 at 6 Mbps.
 const CLIP = { id: '1080p30', label: '1080p30', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 };
-const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'manual', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
+const ALL = ['idle', 'capture', 'capture+capture2', 'capture+captureclone', 'mesh1', 'mesh2', 'sfu', 'sfu1', 'manual', 'agentonly', 'native', 'mesh1+native', 'sfu+native', 'mesh1+manual', 'sfu+manual', 'mesh1+follow', 'sfu+follow'];
 const CASES = process.env.CASES ? process.env.CASES.split(',') : ALL;
 
 const workerFile = fs.existsSync(path.join(dist, 'assets')) && fs.readdirSync(path.join(dist, 'assets')).find((f) => /^replayWorker-.*\.js$/.test(f));
@@ -125,15 +146,20 @@ await new Promise((r) => srv.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${srv.address().port}/`;
 
 // ---- Windows' own accounting -------------------------------------------------
-const ps = (script) => new Promise((resolve, reject) => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, out) => {
+const ps = (script, env = {}) => new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: { ...process.env, ...env } }, (err, out) => {
         if (err) reject(err); else resolve(out);
     });
 });
 /** Every process: pid, parent, name, CPU time (100 ns), creation time
- *  (ticks), and whether its command line carries `marker`. One snapshot. */
+ *  (ticks), and whether its command line carries `marker`. One snapshot.
+ *  The marker reaches PowerShell in its ENVIRONMENT, not its command line,
+ *  and its own process is excluded: a first version embedded it in the
+ *  command, so the snapshot's own powershell.exe matched, joined the
+ *  browser's tree, and added ~0.5 s of its CPU (~2.5% of a core over 20 s)
+ *  to some cases and not others. */
 async function snapshot(marker) {
-    const out = await ps(`$m='${marker}'; $t=[DateTime]::UtcNow.Ticks; $p=Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{p=$_.ProcessId;q=$_.ParentProcessId;n=$_.Name;t=[double]$_.KernelModeTime+[double]$_.UserModeTime;c=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().Ticks } else { 0 });m=[bool]($_.CommandLine -and $_.CommandLine.Contains($m))} }; [pscustomobject]@{at=$t;procs=$p} | ConvertTo-Json -Compress -Depth 3`);
+    const out = await ps(`$m=$env:PUCA_MEASURE_MARKER; $t=[DateTime]::UtcNow.Ticks; $p=Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{p=$_.ProcessId;q=$_.ParentProcessId;n=$_.Name;t=[double]$_.KernelModeTime+[double]$_.UserModeTime;c=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().Ticks } else { 0 });m=[bool]($_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains($m))} }; [pscustomobject]@{at=$t;procs=$p} | ConvertTo-Json -Compress -Depth 3`, { PUCA_MEASURE_MARKER: marker });
     const j = JSON.parse(out);
     return { at: j.at / 1e4, procs: j.procs };
 }
@@ -167,7 +193,13 @@ async function agentThreads(pid) {
     for (const l of out.trim().split(/\r?\n/)) { const p = l.trim().split(/\s+/); if (p.length === 3) m.set(p[0], { ms: Number(p[1]), start: Number(p[2]) }); }
     return { m, at: Date.now() };
 }
-const cpuMs = (snap, pids) => snap.procs.filter((p) => pids.has(p.p)).reduce((s, p) => s + p.t / 1e4, 0);
+/** CPU ms the processes `pids` (of snapshot b) spent between a and b. A
+ *  process is the same one in both only with the same pid AND creation time
+ *  (pids are reused); one created in between counts in full. */
+function deltaMs(a, b, pids) {
+    const before = new Map(a.procs.map((p) => [`${p.p}|${p.c}`, p.t]));
+    return b.procs.filter((p) => pids.has(p.p)).reduce((s, p) => s + (p.t - (before.get(`${p.p}|${p.c}`) ?? 0)) / 1e4, 0);
+}
 const byName = (snap, name) => new Set(snap.procs.filter((p) => p.n.toLowerCase() === name).map((p) => p.p));
 
 /** GPU engine utilisation per pid and engine type over the window: the mean
@@ -176,7 +208,7 @@ async function gpuSample(samples, every) {
     const out = await ps(`Get-Counter -Counter '\\GPU Engine(*)\\Utilization Percentage' -SampleInterval ${every} -MaxSamples ${samples} -ErrorAction SilentlyContinue | ForEach-Object { $_.CounterSamples | Where-Object { $_.CookedValue -gt 0 } | ForEach-Object { $_.InstanceName + '=' + $_.CookedValue } }`).catch(() => '');
     const acc = new Map(); // `${pid}|${luidLow}|${engtype}` -> sum
     for (const line of out.split(/\r?\n/)) {
-        const m = /^pid_(\d+)_luid_0x[0-9a-f]+_0x([0-9a-f]+)_phys_\d+_eng_\d+_engtype_([^=]+)=([\d.]+)/i.exec(line.trim());
+        const m = /^pid_(\d+)_luid_0x[0-9a-f]+_0x([0-9a-f]+)_phys_\d+_eng_\d+_engtype_([^=]+)=([\d.]+(?:E[-+]?\d+)?)/i.exec(line.trim());
         if (!m) continue;
         const k = `${m[1]}|${m[2].toLowerCase()}|${m[3]}`;
         acc.set(k, (acc.get(k) ?? 0) + Number(m[4]) / samples);
@@ -197,6 +229,34 @@ function gpuFor(acc, pids, names) {
  *  those as they are. */
 const gpuNames = {};
 
+// ---- the receivers' browser (unmeasured) ---------------------------------------
+// Headless, muted, no marker: not part of any measured tree. Host candidates
+// in the clear (no mDNS names) so the two local browsers find each other.
+const RTC_ARGS = ['--disable-features=WebRtcHideLocalIpsWithMdns'];
+const sinkBrowser = await chromium.launch({ headless: true, channel: process.env.CHANNEL || 'msedge', args: ['--mute-audio', ...RTC_ARGS] });
+const sinkPage = await sinkBrowser.newPage();
+await sinkPage.goto(origin);
+await sinkPage.evaluate(() => {
+    const pcs = [];
+    const gathered = (pc) => new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
+    window.sink = {
+        async answer(offer) {
+            const pc = new RTCPeerConnection();
+            pcs.push(pc);
+            // Decode and drop: the frames are read, so they are decoded.
+            pc.ontrack = (e) => {
+                const r = new MediaStreamTrackProcessor({ track: e.track }).readable.getReader();
+                (async () => { for (;;) { const { value, done } = await r.read(); if (done) return; value.close(); } })();
+            };
+            await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+            await pc.setLocalDescription(await pc.createAnswer());
+            await gathered(pc);
+            return pc.localDescription.sdp;
+        },
+        reset() { for (const pc of pcs.splice(0)) pc.close(); },
+    };
+});
+
 // ---- the browser side --------------------------------------------------------
 async function launch(id) {
     const args = [
@@ -207,10 +267,12 @@ async function launch(id) {
         '--auto-accept-this-tab-capture',
         '--ignore-gpu-blocklist', '--use-angle=d3d11',
         `--puca-measure=${id}`, // the marker the process walk finds the tree by
+        ...RTC_ARGS,
     ];
     if (process.env.ADAPTER_LUID) args.push(`--use-adapter-luid=${process.env.ADAPTER_LUID}`);
     const browser = await chromium.launch({ headless: true, channel: process.env.CHANNEL || 'msedge', args });
     const page = await browser.newPage({ viewport: { width: SHARE.w, height: SHARE.h } });
+    await page.exposeFunction('sinkAnswer', (offer) => sinkPage.evaluate((o) => window.sink.answer(o), offer));
     page.on('pageerror', (e) => console.log('  X>', String(e).slice(0, 300)));
     page.on('console', (m) => { const t = m.text(); if (/^\[measure\]/.test(t)) console.log('  ', t); });
     await page.goto(origin);
@@ -249,6 +311,10 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         }
         t.font = `${Math.round(h / 40)}px sans-serif`;
         for (let i = 0; i < 400; i++) { t.fillStyle = `hsl(${rnd() * 360} 80% ${50 + rnd() * 40}%)`; t.fillText('PUCA 0123456789 encode', rnd() * tex.width, rnd() * tex.height); }
+        // encode-cost.mjs's slight blur: without it the picture is closer to noise.
+        t.filter = `blur(${(h / 1080).toFixed(2)}px)`;
+        t.drawImage(tex, 0, 0);
+        t.filter = 'none';
         const movers = Array.from({ length: 24 }, (_, i) => ({ x: (i * 211) % w, y: (i * 97) % h, vx: (i % 2 ? 1 : -1) * w * (0.3 + (i % 5) / 6), vy: h * ((i % 3) - 1) * 0.2, r: h / 30 + (i % 4) * h / 60 }));
         let frame = 0;
         const timer = setInterval(() => {
@@ -291,12 +357,14 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
     rig.drain = (track) => {
         const r = new MediaStreamTrackProcessor({ track }).readable.getReader();
         let n = 0; rig.stats.drained = () => n;
-        (async () => { for (;;) { const { value, done } = await r.read(); if (done) return; n++; value.close(); } })();
+        (async () => { for (;;) { const { value, done } = await r.read(); if (done) return; n++; rig.stats.drainedSize ??= `${value.codedWidth}x${value.codedHeight}`; value.close(); } })();
     };
 
     // An AES-GCM sender transform with frameCrypto.ts's shape: the codec's
-    // clear header, the rest sealed, iv + magic appended. Cost, not format:
-    // nothing here has to be opened again.
+    // clear header, the rest sealed, iv + magic appended, built and then
+    // DROPPED: the frame goes out as the encoder made it, so the receivers
+    // (another browser, below) decode it and never ask for keyframes. The
+    // sender pays the sealing; the format is not the point.
     const keyP = crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt']);
     const sealTransform = (onFrame) => new TransformStream({
         async transform(frame, ctl) {
@@ -308,11 +376,18 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
             const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data.subarray(clear)));
             const out = new Uint8Array(clear + ct.length + 16);
             out.set(data.subarray(0, clear)); out.set(ct, clear); out.set(iv, clear + ct.length); out.set([0x53, 0x56, 0x52, 0x4e], clear + ct.length + 12);
-            frame.data = out.buffer;
             ctl.enqueue(frame);
         },
     });
-    const dropAll = new TransformStream({ transform() { /* the receiver decodes nothing */ } });
+    // THE RECEIVERS ARE IN ANOTHER BROWSER (the `sink`, launched by this
+    // script, not under the marked one, so none of it is measured). They
+    // decode normally. A receiver that DROPS its frames instead keeps asking
+    // for keyframes (PLI every ~0.4 s, whether or not the SDP negotiates
+    // PLI: measured), and the sender would encode a keyframe each time,
+    // which no real call does. Every encoder line prints keyframes= and
+    // pli+fir= so a run shows it held. Signalling is one offer, one answer,
+    // through the node side (window.sinkAnswer), ICE gathered in full first.
+    const gathered = (pc) => new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
 
     const munge = (sdp, kbps) => {
         let out = sdp;
@@ -334,10 +409,6 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
     /** One viewer of a mesh share: its own pc, so its own VP8 encoder. */
     rig.meshViewer = async (track, onFrame) => {
         const pc1 = new RTCPeerConnection({ encodedInsertableStreams: true });
-        const pc2 = new RTCPeerConnection({ encodedInsertableStreams: true });
-        pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
-        pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
-        pc2.ontrack = (e) => { const s = e.receiver.createEncodedStreams(); s.readable.pipeThrough(new TransformStream({ transform() {} })).pipeTo(s.writable); };
         const tr = pc1.addTransceiver(track, { direction: 'sendonly' });
         const caps = RTCRtpSender.getCapabilities('video').codecs;
         tr.setCodecPreferences([...caps.filter((c) => c.mimeType === 'video/VP8'), ...caps.filter((c) => c.mimeType !== 'video/VP8')]);
@@ -345,30 +416,25 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         s.readable.pipeThrough(sealTransform(onFrame)).pipeTo(s.writable);
         const offer = await pc1.createOffer();
         await pc1.setLocalDescription({ type: 'offer', sdp: munge(offer.sdp, 8000) });
-        await pc2.setRemoteDescription(pc1.localDescription);
-        const ans = await pc2.createAnswer();
-        await pc2.setLocalDescription(ans);
-        await pc1.setRemoteDescription({ type: 'answer', sdp: munge(ans.sdp, 8000) });
+        await gathered(pc1);
+        const ans = await window.sinkAnswer(pc1.localDescription.sdp);
+        await pc1.setRemoteDescription({ type: 'answer', sdp: munge(ans, 8000) });
         // The app's mesh tuning (manager.ts tuneScreenShareSender).
         const p = tr.sender.getParameters();
         p.encodings[0].maxBitrate = 8_000_000; p.degradationPreference = 'maintain-framerate';
         await tr.sender.setParameters(p);
-        rig.closers.push(() => { pc1.close(); pc2.close(); });
+        rig.closers.push(() => { pc1.close(); });
         (rig.senders ??= []).push(pc1);
         return { pc: pc1, sender: tr.sender };
     };
 
     /** The SFU share: H.264 High first, simulcast f/h/q, the owner's ladder. */
-    rig.sfuShare = async (track, onFrame) => {
+    rig.sfuShare = async (track, onFrame, layers = 3) => {
         const pc1 = new RTCPeerConnection({ encodedInsertableStreams: true });
-        const pc2 = new RTCPeerConnection({ encodedInsertableStreams: true });
-        pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
-        pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
-        pc2.ontrack = (e) => { const s = e.receiver.createEncodedStreams(); s.readable.pipeThrough(new TransformStream({ transform() {} })).pipeTo(s.writable); };
         const sh = track.getSettings().height || SHARE.h;
         const tr = pc1.addTransceiver(track, {
             direction: 'sendonly',
-            sendEncodings: [
+            sendEncodings: layers === 1 ? [{ maxBitrate: SHARE.kbps * 1000 }] : [
                 { rid: 'q', scaleResolutionDownBy: sh / 360, maxBitrate: 500_000 },
                 { rid: 'h', scaleResolutionDownBy: sh / 720, maxBitrate: 2_500_000 },
                 { rid: 'f', scaleResolutionDownBy: 1, maxBitrate: SHARE.kbps * 1000 },
@@ -379,14 +445,16 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         s.readable.pipeThrough(sealTransform(onFrame)).pipeTo(s.writable);
         const offer = await pc1.createOffer();
         await pc1.setLocalDescription({ type: 'offer', sdp: munge(offer.sdp, 9000) });
-        await pc2.setRemoteDescription(pc1.localDescription);
-        const ans = await pc2.createAnswer();
-        await pc2.setLocalDescription(ans);
-        let a = munge(ans.sdp, 9000);
+        await gathered(pc1);
+        // The sink answers like a plain browser (one layer); the sender is
+        // told the far end takes all three, as an SFU would say. The sink
+        // decodes the layer it binds and ignores the others' packets.
+        const ans = await window.sinkAnswer(pc1.localDescription.sdp);
+        let a = munge(ans, 9000);
         const rids = [...offer.sdp.matchAll(/^a=rid:(\w+) send/gm)].map((m) => m[1]);
         if (rids.length > 1 && !/a=simulcast:/.test(a)) a = a.replace(/(a=mid:\d+\r\n)/, `$1${rids.map((r) => `a=rid:${r} recv`).join('\r\n')}\r\na=simulcast:recv ${rids.join(';')}\r\n`);
         await pc1.setRemoteDescription({ type: 'answer', sdp: a });
-        rig.closers.push(() => { pc1.close(); pc2.close(); });
+        rig.closers.push(() => { pc1.close(); });
         (rig.senders ??= []).push(pc1);
         return { pc: pc1, sender: tr.sender };
     };
@@ -395,10 +463,10 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         const out = [];
         for (const pc of rig.senders ?? []) {
             (await pc.getStats()).forEach((r) => {
-                if (r.type === 'outbound-rtp' && r.kind === 'video') out.push({ rid: r.rid, enc: r.encoderImplementation, size: `${r.frameWidth}x${r.frameHeight}`, frames: r.framesEncoded, limit: r.qualityLimitationReason, bytes: r.bytesSent });
+                if (r.type === 'outbound-rtp' && r.kind === 'video') out.push({ rid: r.rid, enc: r.encoderImplementation, size: `${r.frameWidth}x${r.frameHeight}`, frames: r.framesEncoded, keyframes: r.keyFramesEncoded, plis: (r.pliCount ?? 0) + (r.firCount ?? 0), limit: r.qualityLimitationReason, bytes: r.bytesSent });
             });
         }
-        return out;
+        return { at: performance.now(), list: out };
     };
 
     // ---- the real replay worker ----
@@ -487,10 +555,13 @@ async function primaryMonitor() {
     const [h, w, ht] = out.trim().split(/\s+/).map(Number);
     return { hmonitor: h, width: w, height: ht };
 }
-/** The app's own effective_encode_settings for the default 1080p30 preset on
- *  this monitor would decide fps/bitrate; on a 2560x1440 monitor that is the
- *  30 fps / 8 Mbps the owner's log shows ("2560x1440 @ 30 fps, 8000 kbps").
- *  NATIVE_FPS / NATIVE_KBPS override it for other monitors. */
+/** The agent's rate. The app derives it from the Quality preset and the
+ *  monitor (clip_capture.rs effective_encode_settings; the table in
+ *  src/tests/fixtures/clip-native-encode-table.json): on a 2560x1440 monitor
+ *  the DEFAULT 1080p30 preset is 24 fps at ~8.5 Mbit/s, and 30 fps at
+ *  8 Mbit/s is the 1080p60 preset's, which is what the owner's own log shows
+ *  ("2560x1440 @ 30 fps, 8000 kbps") and what this defaults to.
+ *  NATIVE_FPS / NATIVE_KBPS set another. */
 function startAgent(mon) {
     const fps = Number(process.env.NATIVE_FPS || 30), kbps = Number(process.env.NATIVE_KBPS || 8000);
     const child = spawn(AGENT, ['--clip-capture', '--hmonitor', String(mon.hmonitor), '--width', String(mon.width), '--height', String(mon.height), '--fps', String(fps), '--bitrate', String(kbps * 1000), '--gop-ms', '2000'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -518,18 +589,23 @@ function startAgent(mon) {
         });
         child.on('exit', (c) => { if (!magicSeen) reject(new Error(`agent exited ${c}: ${err.trim()}`)); });
     });
-    return { child, ready, fps, kbps, stats: () => ({ frames, bytes, keyframes }), stop: () => { try { child.kill(); } catch { /* gone */ } } };
+    // An agent that never says it is ready must not hang the run.
+    const timed = Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error(`the agent did not start within 15 s: ${err.trim()}`)), 15_000))]);
+    return { child, ready: timed, fps, kbps, stderr: () => err.trim(), stats: () => ({ frames, bytes, keyframes }), stop: () => { try { child.kill(); } catch { /* gone */ } } };
 }
 
 // ---- one case ----------------------------------------------------------------------
 async function runCase(name) {
     const id = `${name.replace(/\W/g, '_')}-${Date.now()}`;
     const parts = name.split('+');
-    const { browser, page } = await launch(id);
-    let agent = null;
+    const known = /^(capture|capture2|captureclone|mesh\d|sfu|sfu1|manual|follow|native|agentonly|idle)$/;
+    const unknown = parts.filter((p) => !known.test(p));
+    if (unknown.length) throw new Error(`unknown case part(s): ${unknown.join(', ')}`);
+    let browser = null, page = null, agent = null;
     try {
+        ({ browser, page } = await launch(id));
         if (SOURCE === 'pan' || SOURCE === 'tab') await page.evaluate(() => window.rig.startPan());
-        const needsShare = parts.some((p) => /^(capture|mesh\d|sfu|follow)$/.test(p));
+        const needsShare = parts.some((p) => /^(capture|mesh\d|sfu|sfu1|follow)$/.test(p));
         if (needsShare) await page.evaluate(async (S) => { window.rig.shareTrack = await window.rig.capture(S); }, SHARE);
         for (const p of parts) {
             if (p === 'capture') await page.evaluate(() => window.rig.drain(window.rig.shareTrack));
@@ -539,6 +615,7 @@ async function runCase(name) {
                 const k = Number(/^mesh(\d)$/.exec(p)[1]);
                 await page.evaluate(async (k) => { for (let i = 0; i < k; i++) await window.rig.meshViewer(window.rig.shareTrack); }, k);
             } else if (p === 'sfu') await page.evaluate(() => window.rig.sfuShare(window.rig.shareTrack));
+            else if (p === 'sfu1') await page.evaluate(() => window.rig.sfuShare(window.rig.shareTrack, null, 1));
             else if (p === 'manual') await page.evaluate(() => window.rig.manualArm());
             else if (p === 'follow') await page.evaluate(() => window.rig.followArm());
             else if (p === 'native' || p === 'agentonly') {
@@ -554,6 +631,7 @@ async function runCase(name) {
         await new Promise((r) => setTimeout(r, WARM_S * 1000));
         const agentPid = agent?.child.pid;
         const a = await snapshot(id);
+        const agentA = agent?.stats();
         const ta = agentPid ? await agentThreads(agentPid) : null;
         const gpuP = gpuSample(Math.max(2, Math.floor(WINDOW_S / 2) - 1), 2);
         const encA = await page.evaluate(() => window.rig.encoders());
@@ -561,39 +639,49 @@ async function runCase(name) {
         const encB = await page.evaluate(() => window.rig.encoders());
         const tb = agentPid ? await agentThreads(agentPid) : null;
         const b = await snapshot(id);
+        const agentB = agent?.stats();
+        // A host that died during the window is a failed case, not a low one.
+        if (agentPid && !b.procs.some((p) => p.p === agentPid)) throw new Error(`the agent exited during the window: ${agent.stderr()}`);
         const gpu = await gpuP;
         const ring = await page.evaluate(() => window.rig.stats.ring ?? null);
         const wall = b.at - a.at;
         const tree = treeOf(b, true);
         const agentTree = agentPid ? treeOf(b, false, [agentPid]) : new Set();
         const dwm = byName(b, 'dwm.exe');
-        const pct = (pids) => ((cpuMs(b, pids) - cpuMs(a, pids)) / wall) * 100;
+        const pct = (pids) => (deltaMs(a, b, pids) / wall) * 100;
         if (process.env.TREE_DEBUG) {
             for (const [label, pids] of [['agent', agentTree], ['browser', tree]]) {
-                const rows = b.procs.filter((p) => pids.has(p.p)).map((p) => ({ p: p.p, q: p.q, n: p.n, d: (p.t - (a.procs.find((x) => x.p === p.p)?.t ?? 0)) / 1e4 / wall * 100 }));
+                const rows = b.procs.filter((p) => pids.has(p.p)).map((p) => ({ p: p.p, q: p.q, n: p.n, d: (p.t - (a.procs.find((x) => x.p === p.p && x.c === p.c)?.t ?? 0)) / 1e4 / wall * 100 }));
                 console.log(`   ${label} tree:`, rows.map((r) => `${r.n}#${r.p}<${r.q} ${r.d.toFixed(1)}%`).join(', '));
             }
         }
-        const encoders = encB.map((e) => {
-            const before = encA.find((x) => x.rid === e.rid && x.enc === e.enc);
-            const fps = before ? (e.frames - before.frames) / (wall / 1000) : 0;
-            const kbps = before ? ((e.bytes - before.bytes) * 8) / wall : 0;
-            return `${e.rid ? e.rid + ':' : ''}${e.enc} ${e.size} ${fps.toFixed(0)}fps ${kbps.toFixed(0)}kbps${e.limit && e.limit !== 'none' ? ' limit=' + e.limit : ''}`;
+        // Over the window the stats themselves span (the page's clock), and
+        // matched by position: two mesh viewers share rid and encoder name.
+        const encWin = (encB.at - encA.at) / 1000;
+        const encoders = encB.list.map((e, i) => {
+            const before = encA.list[i];
+            const fps = before ? (e.frames - before.frames) / encWin : 0;
+            const kbps = before ? ((e.bytes - before.bytes) * 8) / encWin / 1000 : 0;
+            const keys = before ? (e.keyframes ?? 0) - (before.keyframes ?? 0) : 0;
+            const plis = before ? e.plis - before.plis : 0;
+            return `${e.rid ? e.rid + ':' : ''}${e.enc} ${e.size} ${fps.toFixed(0)}fps ${kbps.toFixed(0)}kbps keyframes=${keys} pli+fir=${plis}${e.limit && e.limit !== 'none' ? ' limit=' + e.limit : ''}`;
         });
         return {
             name,
             browser: pct(tree), agent: agentPid ? pct(agentTree) : 0, dwm: pct(dwm),
             gpuBrowser: gpuFor(gpu, tree, gpuNames), gpuAgent: agentPid ? gpuFor(gpu, agentTree, gpuNames) : '',
             encoders, ring: ring ? `ring ${ring.fps}fps ${ring.kbps}kbps ${ring.width}x${ring.height}` : '',
-            agentStats: agent?.stats(),
+            agentStats: agentA && agentB ? { frames: agentB.frames - agentA.frames, keyframes: agentB.keyframes - agentA.keyframes, mbps: ((agentB.bytes - agentA.bytes) * 8) / wall / 1000 } : null,
+            captured: await page.evaluate(() => window.rig.stats.drainedSize ?? null),
             // The agent's threads by start time: its capture loop is the first.
             agentThreads: ta && tb ? [...tb.m].map(([tid, t]) => ({ start: t.start, pct: ((t.ms - (ta.m.get(tid)?.ms ?? 0)) / (tb.at - ta.at)) * 100 }))
                 .filter((x) => x.pct >= 0.5).sort((x, y) => x.start - y.start).map((x) => x.pct.toFixed(1)).join(' ') : '',
         };
     } finally {
         agent?.stop();
-        await page.evaluate(() => window.rig?.close()).catch(() => {});
-        await browser.close().catch(() => {});
+        if (page) await page.evaluate(() => window.rig?.close()).catch(() => {});
+        await sinkPage.evaluate(() => window.sink.reset()).catch(() => {});
+        if (browser) await browser.close().catch(() => {});
     }
 }
 
@@ -607,10 +695,12 @@ for (const c of CASES) {
         console.log(`${c.padEnd(14)} browser ${r.browser.toFixed(1).padStart(6)}%  agent ${r.agent.toFixed(1).padStart(5)}%  dwm ${r.dwm.toFixed(1).padStart(5)}%  total ${(r.browser + r.agent).toFixed(1).padStart(6)}%`);
         if (r.encoders.length) console.log(`               encoders: ${r.encoders.join(' | ')}`);
         if (r.ring) console.log(`               ${r.ring}`);
-        if (r.agentStats) console.log(`               agent: ${r.agentStats.frames} frames, ${r.agentStats.keyframes} keyframes, ${(r.agentStats.bytes * 8 / 1e6 / (WINDOW_S + WARM_S)).toFixed(1)} Mbit/s; threads (by start, % of a core): ${r.agentThreads}`);
+        if (r.captured) console.log(`               captured: ${r.captured}`);
+        if (r.agentStats) console.log(`               agent: ${r.agentStats.frames} frames, ${r.agentStats.keyframes} keyframes, ${r.agentStats.mbps.toFixed(1)} Mbit/s over the window; threads (by start, % of a core): ${r.agentThreads}`);
         console.log(`               gpu browser: ${r.gpuBrowser}${r.gpuAgent ? `   gpu agent: ${r.gpuAgent}` : ''}`);
     } catch (e) {
         console.log(`${c.padEnd(14)} FAILED: ${String(e?.message ?? e).slice(0, 400)}`);
     }
 }
+await sinkBrowser.close();
 srv.close();
