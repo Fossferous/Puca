@@ -419,8 +419,7 @@
    cap there, about 164x47 of opaque black over the very picture it sits on,
    because a monitor name like "Main display (2560x1440)" fills any width.
    On a phone the arrow alone says enough: the screen it goes to lies the way
-   it points. The name stays the button's accessible name (aria-label) and
-   its title.
+   it points. The name stays the button's accessible name (aria-label).
    The TARGET keeps the 44px floor (the coarse pointer's, docs/
    DESIGN_PHILOSOPHY.md): a 44px square on the same edge, transparent, where
    the pill was as wide as its name; only the 32px disc inside it is painted.
@@ -450,6 +449,12 @@
 .device-stage-hop-compact.device-stage-hop-right { top: calc(50% + var(--hop-shift, 0px)); }
 .device-stage-hop-compact.device-stage-hop-up,
 .device-stage-hop-compact.device-stage-hop-down { left: calc(50% + var(--hop-shift, 0px)); }
+
+/* Above the paused banner on a touch screen: there its Resume is a 44px
+   button, so the banner stands 16..76px off the bottom, and the desktop's
+   60px left the arrow 16px into it (or sliding far along the edge to get
+   out of the way). 84px clears it by 8. */
+.device-stage-paused ~ .device-stage-hop-down.device-stage-hop-compact { bottom: 84px; }
 
 .device-stage-hop-compact .device-stage-hop-label { display: none; }
 

@@ -269,6 +269,9 @@ const MAX_ZOOM = 40;
 /** Stable empty list so "no edge is offering anything" — the overwhelmingly
  *  common case — never hands the render a fresh array reference. */
 const NO_EDGE_HOPS: EdgeHop[] = [];
+/** What a touch-layout hop arrow steps out from under (placeHopArrows):
+ *  everything that floats over the picture and takes a tap. */
+const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, .device-stage-mobile-toolbar-toggle, .device-stage-older-host';
 
 /** How long to wait for the peer's first caret report before placing the view
  *  from where this end last AIMED instead.
@@ -2746,20 +2749,28 @@ export function DeviceStage() {
     // above the picture, and dragged anywhere; in landscape their default
     // places cover the middle of both side edges, exactly where an arrow sits,
     // so it was invisible and a tap on its spot pressed the pad instead. The
-    // feedback line and the paused banner can cover the bottom one. Each
-    // arrow slides along its edge to the nearest free spot
-    // (deviceStageHopPlace.ts). Measured when the arrows or those controls
-    // change, on a resize, and after every lift of a finger (a cluster is
-    // moved by a drag, which ends in one). Read back from the button itself,
-    // less the shift it carries (data-hop-shift), so the stylesheet stays the
-    // one place that says where an arrow's centred spot is.
+    // paused banner, the collapsed toolbar's toggle and the older-agent band
+    // can cover one too. Each arrow slides along its edge to the nearest free
+    // spot (deviceStageHopPlace.ts).
+    // NOT the feedback line (.device-stage-mobile-error): it lets touches
+    // through, so an arrow under it is still pressed, and it comes and goes
+    // on its own. An arrow that slid aside for a 6 s note and snapped back as
+    // it expired moved out from under the finger aimed at it, and that tap
+    // clicked the picture.
+    // Measured when the arrows' directions or those controls change, when the
+    // picture's box or the bars around it change, once more a frame later (a
+    // cluster re-clamps itself in its own layout effect, which runs after
+    // this one), on a resize, and after every lift of a finger (a cluster is
+    // moved by a drag, which ends in one). Not on every pan frame: where an
+    // arrow sits depends on nothing a pan changes. Read back from the button
+    // itself, less the shift it carries (data-hop-shift), so the stylesheet
+    // stays the one place that says where an arrow's centred spot is.
     const [hopShift, setHopShift] = useState<Partial<Record<HopDir, number>>>({});
-    const mobileFeedbackShown = isMobile && !!(session?.error || qualityError || clipboardNote || session?.powerNotice);
     const placeHopArrows = useCallback(() => {
         const surface = surfaceRef.current;
         if (!surface) return;
         const bounds = surface.getBoundingClientRect();
-        const obstacles: PlaceRect[] = [...document.querySelectorAll('.device-stage-virtual-mouse, .device-stage-mobile-error, .device-stage-paused')]
+        const obstacles: PlaceRect[] = [...document.querySelectorAll(HOP_ARROW_OBSTACLES)]
             .map(el => el.getBoundingClientRect())
             .filter(r => r.width > 0 && r.height > 0);
         const next: Partial<Record<HopDir, number>> = {};
@@ -2785,12 +2796,15 @@ export function DeviceStage() {
             return prev;
         });
     }, []);
-    const hopArrowsShown = isMobile && edgeHops.length > 0;
+    const hopArrowDirs = isMobile ? edgeHops.map(h => h.dir).join(' ') : '';
+    const hopArrowsShown = hopArrowDirs !== '';
     useLayoutEffect(() => {
         if (!hopArrowsShown) return;
         // eslint-disable-next-line react-hooks/set-state-in-effect -- a MEASUREMENT of laid-out controls (the "synchronise with an external system" case), before paint so no frame shows an arrow under a cluster; placeHopArrows keeps the old state when nothing moved, so it settles in one pass
         placeHopArrows();
-    }, [hopArrowsShown, edgeHops, placeHopArrows, controlEnabled, showVirtualMouse, showPins, pins, mobileFeedbackShown]);
+        const raf = requestAnimationFrame(placeHopArrows);
+        return () => cancelAnimationFrame(raf);
+    }, [hopArrowsShown, hopArrowDirs, placeHopArrows, controlEnabled, isMouseMode, showVirtualMouse, showPins, pins, videoBox, keyBarH, toolbarH]);
     useEffect(() => {
         if (!hopArrowsShown) return;
         let raf: number | null = null;
@@ -4007,7 +4021,7 @@ export function DeviceStage() {
                             type="button"
                             className={`device-stage-hop device-stage-hop-${hop.dir}${isMobile ? ' device-stage-hop-compact' : ''}`}
                             aria-label={`Show ${label}`}
-                            title={`Show ${label}`}
+                            title={isMobile ? undefined : `Show ${label}`}
                             data-hop-dir={hop.dir}
                             data-hop-shift={shift}
                             style={shift ? { '--hop-shift': `${shift}px` } as React.CSSProperties : undefined}

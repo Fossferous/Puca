@@ -191,8 +191,9 @@ describe('the monitor-hop offer', () => {
      * 390 pt phone's width over the picture). The size is the stylesheet's,
      * measured in a real browser by e2e/device-stage-real-browser.mjs; what is
      * pinned here is the markup it hangs on: the touch layout's class, and
-     * the screen's name kept as the button's accessible name and title now
-     * that no words are drawn.
+     * the screen's name kept as the button's accessible name now that no
+     * words are drawn. No title there: nothing hovers on a touch screen, and
+     * a title equal to the name can be read out a second time as a hint.
      */
     it('on a touch screen the offer is the compact arrow, still naming the screen, and a tap still only switches', async () => {
         window.matchMedia = ((q: string) => ({
@@ -207,7 +208,7 @@ describe('the monitor-hop offer', () => {
         expect(chip.classList.contains('device-stage-hop-compact'), 'the touch layout draws the arrow alone').toBe(true);
         expect(chip.classList.contains('device-stage-hop-left')).toBe(true);
         expect(chip.getAttribute('aria-label')).toBe('Show Main display');
-        expect(chip.getAttribute('title')).toBe('Show Main display');
+        expect(chip.getAttribute('title'), 'no hover on a touch screen; the name is the accessible name').toBeNull();
         expect(chip.querySelector('.device-stage-hop-icon svg'), 'the arrow is drawn').not.toBeNull();
 
         h.sendInput.mockClear();

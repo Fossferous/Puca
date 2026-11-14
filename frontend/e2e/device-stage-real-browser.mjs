@@ -445,7 +445,7 @@ const hopChip = (page, dir) => page.evaluate(dir => {
     const r = b.getBoundingClientRect();
     const s = document.querySelector('.device-stage-surface').getBoundingClientRect();
     const mine = el => !!el && (el === b || b.contains(el));
-    const overlaps = [...document.querySelectorAll('.device-stage-virtual-mouse, .device-stage-mobile-toolbar, .mobile-toolbar')]
+    const overlaps = [...document.querySelectorAll('.device-stage-virtual-mouse, .device-stage-mobile-toolbar, .mobile-toolbar, .device-stage-mobile-toolbar-toggle, .device-stage-paused')]
         .map(el => ({ cls: String(el.className), q: el.getBoundingClientRect() }))
         .filter(o => o.q.width > 0 && o.q.left < r.right && o.q.right > r.left && o.q.top < r.bottom && o.q.bottom > r.top)
         .map(o => o.cls);
@@ -569,8 +569,8 @@ async function checkHopChip(page, dir, label, slid = false) {
         left: c.path?.startsWith('m9.25 5.75') && /^matrix\(-1, [-\d.e]+, [-\d.e]+, -1, 0, 0\)$/.test(c.turn ?? ''),
     }[dir];
     ck(`hop ${dir}: …its arrow points ${dir}`, arrow, `${c.path} turned ${c.turn}`);
-    ck(`hop ${dir}: …and it still names the screen (accessible name and title)`,
-        c.aria === `Show ${label}` && c.title === `Show ${label}`, `${c.aria} / ${c.title}`);
+    ck(`hop ${dir}: …and it still names the screen (its accessible name; no title to read twice)`,
+        c.aria === `Show ${label}` && c.title === null, `${c.aria} / title ${c.title}`);
     return c;
 }
 
@@ -734,13 +734,64 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
 {
     // Toward the bottom-right: the pointer walked there, the camera after it.
     const o = await hopStage('pointer');
-    const { ctx, page } = o;
+    const { ctx, page, tap } = o;
     const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.className));
     ck('precondition: following the pointer into the bottom-right corner, the right and down hops are offered', dirs.length === 2, dirs.join(' | '));
     await checkHopChip(page, 'right', 'Right display (2560x1440)');
     const down = await checkHopChip(page, 'down', 'Bottom display (2560x1440)');
     await page.screenshot({ path: join(outdir, 'phone-hop-right-down.png') });
-    if (down) await hopPress(o, 'down', 4, 'bottom screen (beside the toolbar)');
+    if (down) {
+        // THE FEEDBACK LINE DOES NOT MOVE IT. The line lets touches through
+        // and comes and goes on its own (6 s); an arrow that stepped aside for
+        // it snapped back as it went, out from under a finger aimed at it.
+        // Here the line's band touches the arrow's target, the case that
+        // moved it.
+        await page.evaluate(() => { window.__stage.state.powerNotice = 'Turned off 2 of 2 other displays'; window.__stage.emit(); });
+        await page.waitForTimeout(400);
+        // Whatever triggers a placement (a finger lifted anywhere does), the
+        // line must not count: make one happen while it is up.
+        await page.evaluate(() => { window.dispatchEvent(new PointerEvent('pointerup')); });
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const line = await page.evaluate(() => { const r = document.querySelector('.device-stage-mobile-error')?.getBoundingClientRect(); return r ? { top: r.top, bottom: r.bottom } : null; });
+        const withNote = await hopChip(page, 'down');
+        ck('hop down: precondition: the feedback line is up, its band within 4 px of the arrow',
+            !!line && !!withNote && line.bottom >= withNote.top - 4, line && withNote ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}, arrow from ${Math.round(withNote.top)}` : 'no line');
+        ck('hop down: …the arrow stays where it was, and a tap on it still reaches it',
+            !!withNote && withNote.shift === 0 && Math.abs(withNote.x - down.x) < 0.5 && withNote.hitCentre,
+            withNote ? `shift ${withNote.shift}, x ${Math.round(withNote.x)} (was ${Math.round(down.x)}), hit ${withNote.hitCentre}` : 'gone');
+        await page.evaluate(() => { window.__stage.state.powerNotice = null; window.__stage.emit(); });
+        await page.waitForTimeout(200);
+
+        // ABOVE THE PAUSED BANNER: paused by a hardware keyboard's chord, the
+        // arrow is clear of the banner (whose Resume is 44 px on a touch
+        // screen) and still on the bottom edge's centre line.
+        await page.keyboard.down('Control'); await page.keyboard.down('Alt');
+        await page.keyboard.press('Home');
+        await page.keyboard.up('Alt'); await page.keyboard.up('Control');
+        await page.waitForTimeout(300);
+        const paused = await page.evaluate(() => {
+            const banner = document.querySelector('.device-stage-paused')?.getBoundingClientRect();
+            const b = document.querySelector('.device-stage-hop-down');
+            if (!banner || !b) return null;
+            const r = b.getBoundingClientRect();
+            const s = document.querySelector('.device-stage-surface').getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return {
+                clear: r.bottom <= banner.top || r.top >= banner.bottom || r.right <= banner.left || r.left >= banner.right,
+                centred: Math.abs(r.left + r.width / 2 - (s.left + s.right) / 2) <= 1,
+                hit: !!hit && (hit === b || b.contains(hit)),
+                gap: Math.round(banner.top - r.bottom),
+            };
+        });
+        ck('hop down: paused, the arrow is clear of the paused banner, centred, and what a tap hits',
+            !!paused && paused.clear && paused.centred && paused.hit, paused ? `gap ${paused.gap} px, centred ${paused.centred}, hit ${paused.hit}` : 'no banner or no arrow');
+        const resume = await page.locator('.device-stage-paused button').boundingBox();
+        if (resume) await tap({ x: resume.x + resume.width / 2, y: resume.y + resume.height / 2 });
+        await page.waitForTimeout(300);
+        ck('…(resumed for what follows)', (await page.locator('.device-stage-paused').count()) === 0);
+
+        await hopPress(o, 'down', 4, 'bottom screen (beside the toolbar)');
+    }
     await ctx.close();
 }
 // SIDEWAYS (844x390), the pad at its default places and a pinned key: the
@@ -756,6 +807,16 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
     await checkHopChip(page, 'left', 'Left display (2560x1440)', true);
     await checkHopChip(page, 'up', 'Top display (2560x1440)');
     await page.screenshot({ path: join(outdir, 'phone-sideways-hop-left-up.png') });
+    // Measured again (a resize, a finger lifted elsewhere), a slid arrow stays
+    // where it is: the read-back of its own shift is exact, so it does not
+    // alternate between slid and centred.
+    const shifts = () => page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => `${b.dataset.hopDir}:${b.dataset.hopShift}`).join(' '));
+    const first = await shifts();
+    for (let i = 0; i < 3; i++) {
+        await page.evaluate(() => { window.dispatchEvent(new Event('resize')); window.dispatchEvent(new PointerEvent('pointerup')); });
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    }
+    ck('sideways: measured again three times, the arrows stay where they are', (await shifts()) === first, `${first} -> ${await shifts()}`);
     await hopPress(o, 'left', 1, 'left screen');
     await ctx.close();
 }
@@ -769,6 +830,29 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
     await checkHopChip(page, 'right', 'Right display (2560x1440)', true);
     await checkHopChip(page, 'down', 'Bottom display (2560x1440)');
     await page.screenshot({ path: join(outdir, 'phone-sideways-hop-right-down.png') });
+    // A CLUSTER DRAGGED OVER A SHOWING ARROW: the L/M/R row, by its grip and
+    // a real finger, dropped on the bottom arrow. The arrow steps aside when
+    // the finger lifts.
+    const grip = await page.evaluate(() => {
+        const g = document.querySelector('.vm-cluster-buttons .vm-grip')?.getBoundingClientRect();
+        const c = document.querySelector('.vm-cluster-buttons')?.getBoundingClientRect();
+        const d = document.querySelector('.device-stage-hop-down')?.getBoundingClientRect();
+        return g && c && d ? { gx: g.left + g.width / 2, gy: g.top + g.height / 2, dx: (d.left + d.right) / 2 - (c.left + c.right) / 2, dy: (d.top + d.bottom) / 2 - (c.top + c.bottom) / 2 } : null;
+    });
+    if (grip) {
+        await page.evaluate(() => { window.__stage.inputs.length = 0; });
+        await o.drag({ x: grip.gx, y: grip.gy }, { x: grip.gx + grip.dx, y: grip.gy + grip.dy }, 12);
+        await page.waitForTimeout(300);
+        const under = await coveredAtCentre(page, 'down');
+        ck('sideways: precondition: the L/M/R row now covers the bottom arrow\'s centred spot', !!under, under ?? 'not covered (or the arrow did not move)');
+        const after = await hopChip(page, 'down');
+        ck('sideways: …the arrow stepped aside, clear of it, and is what a tap hits',
+            !!after && after.shift !== 0 && after.overlaps.length === 0 && after.hitCentre && after.hitCorners,
+            after ? `shift ${after.shift}, overlaps ${after.overlaps.join(', ') || 'none'}, hit ${after.hitCentre}/${after.hitCorners}` : 'gone');
+        const sent = await page.evaluate(() => window.__stage.inputs.map(e => e.t));
+        ck('…(dragging the row by its grip sent nothing over there)', sent.length === 0, sent.join(',') || 'nothing sent');
+        await page.screenshot({ path: join(outdir, 'phone-sideways-hop-row-dragged.png') });
+    } else ck('sideways: precondition: the L/M/R row and the bottom arrow are on the page', false);
     await hopPress(o, 'right', 2, 'right screen');
     await ctx.close();
 }

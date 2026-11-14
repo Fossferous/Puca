@@ -128,6 +128,9 @@ const state = {
     // pointer shape while this end draws the pointer, and an elevated window.
     remoteCursor: null as string | null,
     inputBlocked: null as string | null,
+    // The host's one-line notice (a display turned off, say), which a phone
+    // shows in its feedback line (the monitor-hop walk).
+    powerNotice: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -153,7 +156,7 @@ function session(): DeviceControlSession {
         // The stand-in's caret channel is open from the start: the shape it
         // says (or, with `sendsShapes` off, does not) rides that.
         remoteCursor: state.remoteCursor, caretOpen: true, inputBlocked: state.inputBlocked, pointerCaptured: false,
-        shareUser: null, viewOnly: false, powerNotice: null,
+        shareUser: null, viewOnly: false, powerNotice: state.powerNotice,
     } as unknown as DeviceControlSession;
 }
 function emit(): void {
