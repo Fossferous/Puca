@@ -152,13 +152,20 @@ function findRefs(content: string, spoilers: readonly Span[] = []): RefMatch[] {
     const out: RefMatch[] = [];
     const strays = strayBars(content, spoilers);
     for (const m of content.matchAll(REF_RE)) {
-        const start = m.index;
+        let start = m.index;
         let raw = m[0];
         if (m[6] !== undefined) {
             out.push({ start, end: start + raw.length, raw, segment: segmentFor(hiddenAt(start, -1, spoilers, strays), false, undefined, m[6]) });
             continue;
         }
-        const opened = m[1] !== undefined;
+        let opened = m[1] !== undefined;
+        // Bars that close a spoiler of the list's are that spoiler's, not a file's glued to them: taken
+        // as the file's, Quote copied `||the twist||![a](…)` as `||the twist` and a chip, the words open.
+        if (opened && spoilers.some(([, to]) => to === start + 2)) {
+            opened = false;
+            start += 2;
+            raw = raw.slice(2);
+        }
         // A closing `||` with no opening one belongs to a wider spoiler span
         // that started in the text before: leave it to that text.
         if (m[5] !== undefined && !opened) raw = raw.slice(0, -2);
@@ -286,15 +293,15 @@ interface Covered {
  * out instead gave every other part the parse's words for it, not the sender's: the `_` that made
  * `my_file_name` an emphasis came back as `*`, and search then could not find the message by its
  * own words. Writing a file back out inside bars of its own for the ref matcher to find again let
- * that matcher pair the bars: `_||[_](\u2026)||[w4](\u2026)||` gave the bars of the spoiler around w4 to the
+ * that matcher pair the bars: `_||[_](…)||[w4](…)||` gave the bars of the spoiler around w4 to the
  * words before it, and the preview printed w4. Unchanged where the message draws no spoiler (`||`
  * in code, or one with no closer), as it is drawn.
  */
-function coverSpoilers(content: string): Covered {
+function coverSpoilers(content: string, typed: string): Covered {
     const files: PreviewSegment[] = [];
-    if (!mayHoldSpoiler(content)) return { text: content, files };
+    if (!mayHoldSpoiler(content)) return { text: typed, files };
     const spoilers = spoilersIn(parseMessage(content));
-    if (spoilers.length === 0) return { text: content, files };
+    if (spoilers.length === 0) return { text: typed, files };
     let covered = '';
     let at = 0;
     for (const spoiler of spoilers) {
@@ -303,12 +310,12 @@ function coverSpoilers(content: string): Covered {
         if (!span) return { text: COVER, files: [] };
         // One in another is covered with the one it is in.
         if (span[1] <= at) continue;
-        if (span[0] > at) covered += content.slice(at, span[0]);
+        if (span[0] > at) covered += typed.slice(at, span[0]);
         covered += coverOf(spoiler.children, files);
         // Where every stretch between two `||` is a spoiler, one's closing bars open the next.
         at = Math.max(at, span[1]);
     }
-    return { text: covered + content.slice(at), files };
+    return { text: covered + typed.slice(at), files };
 }
 
 /**
@@ -320,13 +327,16 @@ function coverSpoilers(content: string): Covered {
  * land inside one.
  */
 export function messagePreviewSegments(content: string, max?: number, options: PreviewOptions = {}): PreviewSegment[] {
+    // What stands for a spoiler cannot be typed: one typed is another character, one for one, so where
+    // each spoiler is stays where it is. Which they are is read off the message as the list reads it:
+    // read off the copy, two words joined by what replaced them read otherwise.
     const typed = /[\uE000\uE001]/.test(content) ? content.replace(/[\uE000\uE001]/g, '\uFFFD') : content;
     // Quote keeps the bars and the words in them, so it reads the refs in the message as typed, each
     // hidden where the list hides it. Everywhere else a spoiler is covered first, the files in it with it.
     const keep = options.spoilers === 'keep';
-    const covered: Covered = keep ? { text: typed, files: [] } : coverSpoilers(typed);
+    const covered: Covered = keep ? { text: typed, files: [] } : coverSpoilers(content, typed);
     const source = covered.text;
-    const refs = findRefs(source, keep ? spoilerSpansOf(typed) : []);
+    const refs = findRefs(source, keep ? spoilerSpansOf(content) : []);
     const all: PreviewSegment[] = [];
     let hiddenFiles = 0;
     const pushText = (text: string) => {
@@ -512,8 +522,9 @@ export function splitEditableContent(content: string): { text: string; refs: str
     for (const [from, to] of outer) {
         if (from > at) piecesOf(text, at, from);
         const start = Math.max(from + 2, at);
-        // One nothing leaves, with bars no other spoiler shares, is as it was typed.
-        if (start === from + 2 && !taken.some(r => r.start >= from && r.start < to)) {
+        // One nothing leaves is as it was typed, bars and all: where it shares its first with the one
+        // before, as every stretch between two `||` does, each has bars of its own now.
+        if (!taken.some(r => r.start >= from && r.start < to)) {
             text.add(content.slice(from, to));
             at = to;
             continue;
@@ -535,8 +546,8 @@ export function splitEditableContent(content: string): { text: string; refs: str
     return { text: text.text.trim(), refs };
 }
 
-/** The files the message list draws in `content`, each with whether a spoiler hides it. */
-function drawnFiles(content: string): Array<{ href: string; hidden: boolean }> {
+/** The files the message list draws in `tree`, each with whether a spoiler hides it. */
+function drawnFiles(tree: Node[]): Array<{ href: string; hidden: boolean }> {
     const out: Array<{ href: string; hidden: boolean }> = [];
     const walk = (nodes: Node[], hidden: boolean) => {
         for (const n of nodes) {
@@ -544,7 +555,7 @@ function drawnFiles(content: string): Array<{ href: string; hidden: boolean }> {
             else if ('children' in n) walk(n.children, hidden || n.type === 'spoiler');
         }
     };
-    walk(parseMessage(content), false);
+    walk(tree, false);
     return out;
 }
 
@@ -552,25 +563,26 @@ function drawnFiles(content: string): Array<{ href: string; hidden: boolean }> {
  * Put an edited text back together with its refs, in the shape the composer
  * sends (`text ref ref`, see buildOutgoingContent), where that draws every file
  * again, and each that was hidden hidden. A `||` the words leave open takes the
- * first bars after it as its pair: `b_c`||![p0](…)||[d2](…)**![p1](…)||*[**`
- * keeps the words `` b_c`|| || ** ||*[** ``, and with the three spoilered files
- * after them p0 was drawn in the clear (6% of 23,000 random messages with a file,
- * tests/messagePreview.test.ts). There the files go first, where their own bars
- * pair before any in the words can, or on a line of their own.
+ * first bars after it as its pair: `||![p0](…)||||` keeps the words `||`, and
+ * with the file's bars after them p0 was drawn in the clear (6% of 23,000 random
+ * messages with a file, tests/messagePreview.test.ts). There the files go first,
+ * on a line of their own before they go on the same line: a quote begins at the
+ * start of a line, and the files before it on that line made
+ * `> recap||⏎> Snape dies|| ||` no quote, and printed the words its spoiler hid.
  */
 export function joinEditedContent(text: string, refs: string[]): string {
     const t = text.trim();
     const atts = refs.join(' ');
     if (!atts) return t;
     if (!t) return atts;
-    const wanted = refs.flatMap(drawnFiles);
+    const files = refs.flatMap(ref => drawnFiles(parseMessage(ref)));
     const keeps = (joined: string) => {
-        const drawn = drawnFiles(joined);
-        return wanted.every(f => {
+        const drawn = drawnFiles(parseMessage(joined));
+        return files.every(f => {
             const same = drawn.filter(d => d.href === f.href);
             return same.length > 0 && (!f.hidden || same.every(d => d.hidden));
         });
     };
-    const shapes = [`${t} ${atts}`, `${atts} ${t}`, `${atts}\n${t}`, `${t}\n${atts}`];
+    const shapes = [`${t} ${atts}`, `${atts}\n${t}`, `${atts} ${t}`, `${t}\n${atts}`];
     return shapes.find(keeps) ?? shapes[0];
 }

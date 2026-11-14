@@ -229,6 +229,54 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(messagePreviewText(`||a||${file('open.pdf')}||`, undefined, { spoilers: 'keep' })).toContain('open.pdf');
     });
 
+    it('Quote keeps a spoiler\'s closing bars when a file is glued to them', () => {
+        // The ref matcher took the bars before the file as the file's own: `||the twist` and a chip.
+        const message = `||the twist||${ENC('a.png')}`;
+        expect(parseMessage(message).map(n => n.type)).toEqual(['spoiler', 'image']); // positive control
+        expect(messagePreviewText(message, undefined, { spoilers: 'keep' })).toBe('||the twist||Image: a.png');
+        // CONTROL: a file with bars of its own keeps its chip, and its bars are its own.
+        expect(messagePreviewText(`||the twist|| ||${ENC('a.png')}||`, undefined, { spoilers: 'keep' })).toBe('||the twist|| Spoiler image');
+        expect(text(message)).toBe('SpoilerImage: a.png');
+    });
+
+    it('a private-use character typed in does not change which bars pair up', () => {
+        // The preview read a copy with both characters it uses replaced by one other: two different
+        // words became the same word, and the readings that count words chose another reading.
+        const base = '__** a||||_|| a||';
+        /** The message as the list covers it, from where the list says each spoiler was typed. */
+        const covered = (content: string, readOf = content) => {
+            const typed = content.replace(/[\uE000\uE001]/g, '\uFFFD');
+            const spans: Array<readonly [number, number]> = [];
+            const walk = (nodes: Node[]) => {
+                for (const n of nodes) {
+                    const span = spoilerSpan(n);
+                    if (span) spans.push(span);
+                    else if ('children' in n) walk(n.children);
+                }
+            };
+            walk(parseMessage(readOf));
+            let out = '';
+            let at = 0;
+            for (const [from, to] of spans) {
+                if (to <= at) continue;
+                if (from > at) out += typed.slice(at, from);
+                out += 'Spoiler';
+                at = Math.max(at, to);
+            }
+            return out + typed.slice(at);
+        };
+        let otherwise = 0;
+        for (let i = 0; i <= base.length; i++) {
+            for (let j = i; j <= base.length; j++) {
+                const content = `${base.slice(0, i)}\uE000${base.slice(i, j)}\uE001${base.slice(j)}`;
+                expect(text(content), JSON.stringify(content)).toBe(covered(content));
+                if (covered(content, content.replace(/[\uE000\uE001]/g, '\uFFFD')) !== covered(content)) otherwise++;
+            }
+        }
+        // CONTROL: read off the copy, some of these pair otherwise.
+        expect(otherwise).toBeGreaterThan(0);
+    });
+
     it('a cut never lands inside a spoiler: the words are covered before the count', () => {
         const printed = text(`aaaaaaaaaa ||${SECRET}||`, 12);
         expect(printed).not.toContain('thedemon');

@@ -478,6 +478,35 @@ describe('Edit keeps what the message RENDERS: spoilers stay hidden, code stays 
         }
     });
 
+    it('an edited quote keeps the words its spoiler hid: the files go on a line of their own first', () => {
+        // Words first, the stray `||` paired with the first file's bars; files first on the same line,
+        // `> ` was no longer at the start of a line, the quote was gone, and its spoiler with it.
+        const A = `![a.png](sovereign-enc:i0?k=ab0&m=image%2Fpng)`;
+        const B = `![b.png](sovereign-enc:i1?k=ab1&m=image%2Fpng)`;
+        const original = `> recap||\n> Snape dies ${A} ||${B}||`;
+        const shown = (content: string) => {
+            const out: string[] = [];
+            const walk = (nodes: Node[], under: boolean) => {
+                for (const n of nodes) {
+                    if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+                    else if (!under && n.type === 'text') out.push(n.value);
+                }
+            };
+            walk(parseMessage(content), false);
+            return out.join('');
+        };
+        expect(shown(original)).not.toContain('Snape'); // positive control: the list hides it
+        const { text, refs } = splitEditableContent(original);
+        expect(shown(text)).not.toContain('Snape');
+        // CONTROL: the files first on the same line print it.
+        expect(shown(`${refs.join(' ')} ${text}!`)).toContain('Snape');
+        for (const words of [`${text}!`, `${text} more`]) {
+            const saved = joinEditedContent(words, refs);
+            expect(shown(saved), saved).not.toContain('Snape');
+            expect(saved).toContain(`||${A}||`);
+        }
+    });
+
     it('an address in a label the list draws as words comes out of the box too', () => {
         expect(splitEditableContent('look [sovereign-enc:x?k=KEYX](sovereign-enc:y?k=KEYY ) here'))
             .toEqual({ text: 'look [ ]( ) here', refs: ['sovereign-enc:x?k=KEYX', 'sovereign-enc:y?k=KEYY'] });
