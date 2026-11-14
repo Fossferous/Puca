@@ -194,9 +194,9 @@ The agent's own figure here (16.0-18.8%, in the quoted run and the later
 one below) is above the 13.5-13.7% for the whole host process that "Per-frame
 cost, profiled" (below) gives, which was measured with every slot a new
 picture, the costliest content, so what the screen showed does not explain
-it. Why is not known (the two were measured differently, on a differently
-loaded machine, by different builds); worth settling before the
-GPU-conversion work below. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
+it. Why is not known (the profile's method is not recorded in full, this
+machine was loaded differently, and the agent's capture code has changed
+since); worth settling before the GPU-conversion work below. The 30 fps / 8 Mbit/s rate is the 1080p60 preset's on a
 1440p monitor (the owner's setting); the default 1080p30 records 24 fps there
 (0.8 of the frames; not measured).
 
