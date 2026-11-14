@@ -239,6 +239,22 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(text(message)).toBe('SpoilerImage: a.png');
     });
 
+    it('Quote keeps a spoiler\'s opening bars when the file right after them is not all it holds', () => {
+        // Taken as the file's own, they left `Spoiler image the butler did it||`: the words open in the composer.
+        const butler = `||${ENC('a.png')} the butler did it||`;
+        expect(messagePreviewText(butler, undefined, { spoilers: 'keep' })).toBe('||Spoiler image the butler did it||');
+        // Quoted and sent, the words are hidden again.
+        const requoted = parseMessage(messagePreviewText(butler, undefined, { spoilers: 'keep' }));
+        expect(requoted.map(n => n.type)).toEqual(['spoiler']);
+        // And the bars a spoiler closes before a file on the next line: w1 stayed hidden only by luck.
+        const lines = `||${ENC('p0.png')}\n||[d1.pdf](sovereign-enc:abc?k=${KEY}&m=application%2Fpdf) ||w1||`;
+        const quoted = messagePreviewText(lines, undefined, { spoilers: 'keep' });
+        expect(quoted).toBe('||Spoiler image\n||File: d1.pdf ||w1||');
+        expect(JSON.stringify(parseMessage(quoted).filter(n => n.type !== 'spoiler'))).not.toContain('w1');
+        // CONTROL: a file with a spoiler of its own is a chip, its bars with it.
+        expect(messagePreviewText(`||${ENC('a.png')}|| the butler`, undefined, { spoilers: 'keep' })).toBe('Spoiler image the butler');
+    });
+
     it('a private-use character typed in does not change which bars pair up', () => {
         // The preview read a copy with both characters it uses replaced by one other: two different
         // words became the same word, and the readings that count words chose another reading.

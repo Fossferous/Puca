@@ -159,9 +159,11 @@ function findRefs(content: string, spoilers: readonly Span[] = []): RefMatch[] {
             continue;
         }
         let opened = m[1] !== undefined;
-        // Bars that close a spoiler of the list's are that spoiler's, not a file's glued to them: taken
-        // as the file's, Quote copied `||the twist||![a](…)` as `||the twist` and a chip, the words open.
-        if (opened && spoilers.some(([, to]) => to === start + 2)) {
+        // Bars of a spoiler of the list's are that spoiler's, not those of a file glued to them, unless
+        // the spoiler is the file's alone. Taken as the file's, Quote copied `||the twist||![a](…)` as
+        // `||the twist` and a chip, and `||![a](…) the butler did it||` as a chip and the words, open.
+        const own = start + m[0].length;
+        if (opened && spoilers.some(([from, to]) => to === start + 2 || (from === start && to !== own))) {
             opened = false;
             start += 2;
             raw = raw.slice(2);
@@ -464,9 +466,10 @@ function refsToTake(content: string): { taken: Taken[]; outer: Span[] } {
 /**
  * Text put together from pieces of the message, where some pieces had a ref cut out from between
  * them: across a cut the spaces either side become one, as the composer has them (`text ref ref`),
- * and a line break stays. Where two pieces meet that were not beside each other (a cut, or a
- * spoiler given bars of its own: `made`), a `|` against another would be a `||`, and pair, so a space
- * keeps them apart. Pieces that were beside each other are put back as they were typed.
+ * and a line break stays, and so does the space of a quote's `> `. Where two pieces meet that were
+ * not beside each other (a cut, or a spoiler given bars of its own: `made`), a `|` against another
+ * would make bars that pair otherwise, so a space keeps them apart. Pieces that were beside each
+ * other are put back as typed.
  */
 function joiner() {
     let text = '';
@@ -477,9 +480,11 @@ function joiner() {
             if (!piece) return;
             if ((seam || made) && text.endsWith('|') && piece.startsWith('|')) piece = ` ${piece}`;
             if (cut && text) {
-                const left = text.replace(/[ \t]+$/, '');
+                const trimmed = text.replace(/[ \t]+$/, '');
+                // The space after a quote's `>` is the quote's: `>||` begins no quote.
+                const left = trimmed !== text && /(^|\n)>$/.test(trimmed) ? `${trimmed} ` : trimmed;
                 const right = piece.replace(/^[ \t]+/, '');
-                text = left + (left.endsWith('\n') || right.startsWith('\n') || !left || !right ? '' : ' ') + right;
+                text = left + (left.endsWith('\n') || left.endsWith(' ') || right.startsWith('\n') || !left || !right ? '' : ' ') + right;
             } else {
                 text += piece;
             }
@@ -531,8 +536,12 @@ export function splitEditableContent(content: string): { text: string; refs: str
         }
         const words = joiner();
         piecesOf(words, start, to - 2);
-        const said = words.text;
-        if (said.trim()) text.add(`||${said.startsWith('|') ? ' ' : ''}${said}${said.endsWith('|') ? ' ' : ''}||`, true);
+        // Its words begin at its bars: a `||` with a space either side never holds a quote or a fence
+        // after it (utils/messageParser chunkEnd), and the space the bars it shared left would be one.
+        // A `|` they begin with is read as theirs (`|||x||` holds `|x`); one they end with would be
+        // read as the bars', so a space keeps it off them, where no rule asks about a space.
+        const said = words.text.replace(/^[ \t]+/, '');
+        if (said.trim()) text.add(`||${said}${said.endsWith('|') ? ' ' : ''}||`, true);
         else text.cut();
         at = Math.max(at, to);
     }

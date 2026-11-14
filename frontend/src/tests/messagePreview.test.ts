@@ -507,6 +507,57 @@ describe('Edit keeps what the message RENDERS: spoilers stay hidden, code stays 
         }
     });
 
+    it('a spoiler given bars of its own begins at its words, so it still holds the quote in it', () => {
+        // `|| ` with a space either side opens nothing over a quote or a fence (utils/messageParser
+        // chunkEnd), and the space the shared bars left, or the one a cut leaves before them, made one.
+        const P = (n: number) => `![p${n}.png](sovereign-enc:i${n}?k=K${n}&m=image%2Fpng)`;
+        const D = (n: number) => `[d${n}.pdf](sovereign-enc:i${n}?k=K${n}&m=application%2Fpdf)`;
+        const marked = (content: string) => {
+            const out = { hidden: new Set<string>(), shown: new Set<string>() };
+            const walk = (nodes: Node[], under: boolean) => {
+                for (const n of nodes) {
+                    if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+                    else for (const w of JSON.stringify(n).match(/w\d+/g) ?? []) (under ? out.hidden : out.shown).add(w);
+                }
+            };
+            walk(parseMessage(content), false);
+            return out;
+        };
+        for (const [content, box] of [
+            [`||w0\n> w1|| w2\n> w3 ${D(0)} ||${P(1)}||`, '||w0\n> w1|| ||w2\n> w3||'],
+            [`||w0||||\`\`\`_w3_${P(0)} ||${P(1)}||`, '||w0|| |||```_w3_||'],
+            [`k ||${D(0)} w1\n> w2||`, 'k ||w1\n> w2||'],
+        ]) {
+            const before = marked(content);
+            expect(before.shown.size, content).toBe(0); // positive control: the list hides every word
+            const { text, refs } = splitEditableContent(content);
+            expect(text, content).toBe(box);
+            for (const words of [`${text} more`, `more ${text}`]) {
+                expect([...marked(joinEditedContent(words, refs)).shown], words).toEqual([]);
+            }
+        }
+    });
+
+    it('the space of a quote\'s `> ` stays where a file is taken out after it', () => {
+        // `>||` begins no quote: the words of the spoiler in it printed on a save.
+        const content = '> ||w1 w2\n> ![p0.png](sovereign-enc:i0?k=K0&m=image%2Fpng) ||';
+        const { text, refs } = splitEditableContent(content);
+        expect(text).toBe('> ||w1 w2\n> ||');
+        const shown = (c: string) => {
+            const out: string[] = [];
+            const walk = (nodes: Node[], under: boolean) => {
+                for (const n of nodes) {
+                    if ('children' in n) walk(n.children, under || n.type === 'spoiler');
+                    else if (!under) out.push(JSON.stringify(n));
+                }
+            };
+            walk(parseMessage(c), false);
+            return out.join(' ');
+        };
+        expect(shown(content)).not.toMatch(/w1|w2/); // positive control
+        for (const words of [`${text} more`, `more ${text}`]) expect(shown(joinEditedContent(words, refs)), words).not.toMatch(/w1|w2/);
+    });
+
     it('an address in a label the list draws as words comes out of the box too', () => {
         expect(splitEditableContent('look [sovereign-enc:x?k=KEYX](sovereign-enc:y?k=KEYY ) here'))
             .toEqual({ text: 'look [ ]( ) here', refs: ['sovereign-enc:x?k=KEYX', 'sovereign-enc:y?k=KEYY'] });
@@ -605,7 +656,7 @@ describe('property: Edit takes out the files the list draws, and puts each back 
 
     // Composer-shaped: words (some in a spoiler, some with `_` that the keys' `_` can pair against) and
     // files after them, spoilered or not, the way buildOutgoingContent writes them.
-    const CAPTION = ['W', 'W_W', 'my_file', '||W||', '||W W||', 'W*W', '`W`', '_W_', '@W', 'https://x/W_W', '\n', ' ', ' '];
+    const CAPTION = ['W', 'W_W', 'my_file', '||W||', '||W W||', 'W*W', '`W`', '_W_', '@W', 'https://x/W_W', '\n', ' ', ' ', '\n> W', '\n```\nW\n```\n'];
     const composed = () => {
         let seed = 4242;
         const next = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed >>> 8) % n; };
@@ -645,8 +696,10 @@ describe('property: Edit takes out the files the list draws, and puts each back 
             if (!before.hidden.size) continue;
             withHidden++;
             const { text, refs } = splitEditableContent(content);
-            const after = marked(joinEditedContent(`${text} more`, refs));
-            if ([...before.hidden].some(w => after.shown.has(w)) && printed.length < 3) printed.push(JSON.stringify([content, text]));
+            for (const words of [`${text} more`, `more ${text}`]) {
+                const after = marked(joinEditedContent(words, refs));
+                if ([...before.hidden].some(w => after.shown.has(w)) && printed.length < 3) printed.push(JSON.stringify([content, words]));
+            }
             if (empty(text) > empty(content) && emptied.length < 3) emptied.push(JSON.stringify([content, text]));
             // CONTROL: each file taken out by itself, every bar left where it was.
             let bare = content;
