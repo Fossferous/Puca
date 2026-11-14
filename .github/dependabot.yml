@@ -1,8 +1,11 @@
 # Dependency updates — SECURITY ONLY.
 #
 # `open-pull-requests-limit: 0` switches OFF routine version updates while
-# leaving SECURITY updates untouched: Dependabot still opens a PR the day an
+# leaving SECURITY updates to the repository's own settings: with Dependabot
+# alerts and security updates switched on there, it opens a PR the day an
 # advisory lands against something in a lockfile, which is the part worth having.
+# They were switched OFF when this was last checked (2026-11-14), so Dependabot
+# opens nothing at all; docs/SECURITY_MODEL.md §8 says what does scan.
 #
 # MEASURED, which is why this setting changed within a day of the file being
 # added. Turning version updates on produced ELEVEN pull requests at once and

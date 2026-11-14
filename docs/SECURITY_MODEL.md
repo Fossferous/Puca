@@ -63,8 +63,11 @@ whether the tool fits your threat model.
   desktop and Android apps update only over signed channels whose keys never touch the
   server; use those if this matters to you (§1, trust #1).
 - **Calls are end-to-end encrypted only where the engine allows it.** Chromium-based
-  clients seal media frames; other engines fall back to transport encryption with a notice,
-  and "Require encryption for calls" (on by default) refuses rather than falls back (§4).
+  clients seal media frames through `createEncodedStreams`, and Firefox 117+ and Safari
+  15.4+ (iPhone and iPad included) through the standard `RTCRtpScriptTransform`; Safari
+  runs the same code but has not yet been tried on a device. An engine with neither falls
+  back to transport encryption with a notice, and "Require encryption for calls" (on by
+  default) refuses rather than falls back (§4).
 - **Nothing here is post-quantum.** Every key agreement is X25519. A future quantum
   computer could recover those keys from the public halves, and the ciphertext it would
   need is exactly what the database stores indefinitely — the "harvest now, decrypt
@@ -1243,8 +1246,22 @@ Other things you'd find anyway:
   neither Noise nor X3DH. **Only 2 of roughly 8 such constructions have known-answer tests.**
   This subsystem has already produced one full authentication bypass — found, fixed, and
   written up, but produced.
-- **Nothing scans dependencies.** A `cargo-audit` config exists; no CI step, npm audit,
-  dependabot or renovate ever runs it.
+- **Dependency scanning covers only part of the tree, and Dependabot is off.** CI's
+  `supply-chain` job runs `cargo audit` over all three Rust lockfiles (the backend and
+  `crates/*` in `Cargo.lock`, the desktop shell's `frontend/src-tauri/Cargo.lock`, the
+  noise-suppression wasm's `frontend/df-wasm/Cargo.lock`) and fails on any advisory that
+  `.cargo/audit.toml` has not accepted with its reasoning. The frontend job runs `npm audit`
+  over `frontend/package-lock.json` through `frontend/scripts/check-npm-advisories.mjs`,
+  which fails on a high or critical advisory against a package with no row in
+  `docs/NPM_ADVISORIES.md`. Both run only when CI does (a push to `main` or a `work/**`
+  branch, a pull request, a manual run), never on a schedule, so an advisory published
+  after the last push waits for the next one. Nothing scans the rest: the Steam Deck
+  plugin's `integrations/decky/package-lock.json`, Púca Notes'
+  `frontend/notes-app/package-lock.json`, the Android apps' Gradle dependencies (no
+  lockfile), or the GitHub Actions pinned by SHA in `.github/workflows`. Dependabot opens
+  nothing: its alerts and security updates are switched off in the repository's settings
+  (checked 2026-11-14), and `.github/dependabot.yml` sets `open-pull-requests-limit: 0` for
+  every ecosystem, which turns off its version updates. No renovate either.
 - **Bus factor 1.** One author, no second reviewer, and no outside audit has ever been
   performed. The source is now public, so one is at least *possible* — but
   "auditable" and "audited" are different words, and only the first one is true here.
