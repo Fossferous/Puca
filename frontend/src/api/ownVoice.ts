@@ -19,6 +19,7 @@
  * `own_voice_wire_tests` serializes against the same file).
  */
 import { useSyncExternalStore } from 'react';
+import { embedHost } from './embedHost';
 
 export type DeviceKind = 'desktop' | 'mobile' | 'browser';
 
@@ -220,7 +221,11 @@ export function currentClientKind(isTauri: boolean, isNativeMobile: boolean): De
     try {
         if (typeof window !== 'undefined') {
             if (window.matchMedia?.('(pointer: coarse) and (max-width: 1024px)').matches) return 'mobile';
-            if (window.matchMedia?.('(pointer: coarse)').matches && screenShortSide() >= TABLET_MIN_SHORT_SIDE) return 'mobile';
+            // Not inside an embedding host: Púca for Steam Deck's 1280x800
+            // screen would pass for a tablet held sideways if Steam's browser
+            // reports a coarse pointer, and a Deck is not a tablet. A host
+            // keeps the rule it always had.
+            if (!embedHost() && window.matchMedia?.('(pointer: coarse)').matches && screenShortSide() >= TABLET_MIN_SHORT_SIDE) return 'mobile';
         }
     } catch { /* no matchMedia: a browser */ }
     return 'browser';
@@ -241,9 +246,10 @@ function screenShortSide(): number {
  * screen's short side is TABLET_MIN_SHORT_SIDE CSS px or more, else null (a
  * phone, which sends no form). The SCREEN, not the window, so turning a
  * tablet, the soft keyboard or a split screen does not change what it is.
- * Null for every other kind.
+ * Null for every other kind, and inside an embedding host (a Steam Deck is
+ * not a tablet).
  */
 export function currentClientForm(kind: DeviceKind): DeviceForm | null {
-    if (kind !== 'mobile') return null;
+    if (kind !== 'mobile' || embedHost()) return null;
     return screenShortSide() >= TABLET_MIN_SHORT_SIDE ? 'tablet' : null;
 }

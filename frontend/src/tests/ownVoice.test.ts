@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fixture from './fixtures/ownVoiceState.json';
 import { wsClient } from '../api/websocket';
+import { resetEmbedHostForTest } from '../api/embedHost';
 import {
     callOnOtherDevice,
     carriedFromOtherDevice,
@@ -203,6 +204,28 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
             expect(currentClientForm('mobile')).toBeNull();
             be(true, 960, 599);
             expect(currentClientForm('mobile')).toBeNull();
+        });
+
+        it('inside an embedding host (Steam Deck, 1280x800) a coarse pointer is no tablet', async () => {
+            const w = window as unknown as { __PUCA_EMBED_HOST__?: unknown };
+            w.__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'Steam Deck host' };
+            resetEmbedHostForTest();
+            try {
+                be(true, 1280, 800);
+                const q = await params();
+                expect(q.get('kind')).toBe('browser');
+                expect(q.has('form')).toBe(false);
+                expect(currentClientForm('mobile')).toBeNull();
+            } finally {
+                delete w.__PUCA_EMBED_HOST__;
+                resetEmbedHostForTest();
+            }
+            // CONTROL: the same screen in a plain tab is a tablet held sideways.
+            wsClient.disconnect();
+            be(true, 1280, 800);
+            const c = await params();
+            expect(c.get('kind')).toBe('mobile');
+            expect(c.get('form')).toBe('tablet');
         });
 
         it('CONTROL: a 390x844 phone sends kind=mobile and no form; a desktop browser neither', async () => {
