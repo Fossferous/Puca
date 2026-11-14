@@ -1404,8 +1404,10 @@ Inside Notes:
   **Overdue**, **Today** and **Upcoming**. The Tasks view in Púca itself has
   the same list as a **Reminders** tab, beside **Calendar** — so you can see
   what is due in Púca's phone app too, where Púca Notes' page is not
-  reachable. A due-item notification opens it, in the desktop app too, and
-  there it plays Windows' notification sound. An item in a shared
+  reachable. A due-item notification opens it. In the desktop app it plays
+  Windows' notification sound, and clicking it opens the list while it is on
+  screen; once it has gone into the notification centre, a click may only
+  bring Púca's window up. An item in a shared
   checklist that someone else set is marked *Reminds whoever set it*: it goes
   off for them, not for you.
 - **A checklist from somewhere else** — say, step-by-step instructions from an

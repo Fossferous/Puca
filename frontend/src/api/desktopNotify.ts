@@ -100,6 +100,8 @@ const groups = new NotifyGroups();
 const activations = new Map<string, () => void>();
 /** The web app's notification per conversation, while it exists. */
 const webLive = new Map<string, Notification>();
+/** The web app's task reminder, while it exists. */
+let webReminder: Notification | null = null;
 /** What the desktop app's own toasts (src-tauri/src/toasts.rs) last answered,
  *  for the app as a whole: 'yes' Windows shows them; 'off' Windows shows none
  *  of Púca's notifications (turned off in Settings, or a policy); 'no' the
@@ -118,7 +120,7 @@ const refusedToasts = new Set<string>();
 const nativeToastShowing = (key: string) =>
     (nativeToasts === 'yes' || nativeToasts === 'unknown') && !refusedToasts.has(key);
 /** What one toast_show came to. An older shell answered nothing: it showed it. */
-type ToastAnswer = 'shown' | 'off' | 'failed' | 'no';
+type ToastAnswer = 'shown' | 'queued' | 'off' | 'failed' | 'no';
 function readToastAnswer(key: string, answer: unknown): ToastAnswer {
     if (answer === 'off') {
         nativeToasts = 'off';
@@ -138,7 +140,9 @@ function readToastAnswer(key: string, answer: unknown): ToastAnswer {
         return 'failed';
     }
     refusedToasts.delete(key);
-    return 'shown';
+    // toasts.rs's ANSWER_WAIT ran out: Windows has it and will most likely
+    // show it, but nobody can say it did.
+    return answer === 'queued' ? 'queued' : 'shown';
 }
 let activationListener: Promise<void> | null = null;
 /** Every toast command goes through here, ONE at a time: Tauri does not
@@ -210,9 +214,10 @@ export function seeConversation(key: string): void {
         webLive.delete(key);
         try { n.close(); } catch { /* already gone */ }
     }
-    if (isTauri() && nativeToasts !== 'no') {
-        nativeCall('toast_clear', { key }).catch(() => { nativeToasts = 'no'; });
-    }
+    // Asked even after a refusal ('no' is not for good: one refused command
+    // must not leave every toast behind). A shell without them refuses this
+    // as cheaply as it would anything.
+    if (isTauri()) nativeCall('toast_clear', { key }).catch(() => undefined);
 }
 
 /** You came back to the window: whatever conversation goes on, its next
@@ -230,9 +235,12 @@ export function clearAllConversationNotifications(): void {
         try { n.close(); } catch { /* already gone */ }
     }
     webLive.clear();
-    if (isTauri() && nativeToasts !== 'no') {
-        nativeCall('toast_clear_all').catch(() => { nativeToasts = 'no'; });
+    if (webReminder) {
+        try { webReminder.close(); } catch { /* already gone */ }
+        webReminder = null;
     }
+    // Always: names stay in a notification centre after sign-out otherwise.
+    if (isTauri()) nativeCall('toast_clear_all').catch(() => undefined);
 }
 
 /** The notification plugin's toast, where the shell has none of its own:
@@ -349,6 +357,7 @@ export function resetConversationNotificationsForTests(): void {
     groups.clear();
     activations.clear();
     webLive.clear();
+    webReminder = null;
     nativeToasts = 'unknown';
     refusedToasts.clear();
     nativeQueue = Promise.resolve();
@@ -750,7 +759,10 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
             const answer = await askNativeToast({ key: TASKS_DUE_KEY, title: 'Púca Tasks', body, popup: true, sound: true });
             // ONE diagnostics entry, once Windows has answered. 'off':
             // Windows shows none of Púca's, the plugin's included.
-            if (answer === 'shown' || answer === 'off') { record(answer === 'shown' ? 'fired' : 'windows-off'); return; }
+            if (answer === 'shown' || answer === 'queued' || answer === 'off') {
+                record(answer === 'shown' ? 'fired' : answer === 'queued' ? 'fired (unanswered)' : 'windows-off');
+                return;
+            }
             // A shell without them (not Windows), or Windows refused this
             // one: a deadline has no other surface, so the plugin's, which
             // can neither sound nor be clicked through, but is something.
@@ -764,13 +776,28 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (notificationPermission() !== 'granted') return;
     try {
         // No `silent`: there is no in-app sound for reminders, so the OS
-        // default chime is the only audible cue.
-        const n = new Notification('Púca Tasks', { body, tag: TASKS_DUE_KEY });
+        // default chime is the only audible cue. Tagged, so a new reminder
+        // replaces the last; and a replacement must alert again, or one still
+        // in the browser's list makes the next reminder silent (Chromium
+        // replaces a same-tag notification quietly unless `renotify`). Where
+        // there is no `renotify` (browserRenotifies) the old one is closed
+        // first, so the new one is a notification of its own.
+        const renotifies = browserRenotifies();
+        if (!renotifies && webReminder) {
+            try { webReminder.close(); } catch { /* already gone */ }
+        }
+        webReminder = null;
+        const options: NotificationOptions & { renotify?: boolean } = {
+            body, tag: TASKS_DUE_KEY, ...(renotifies ? { renotify: true } : {}),
+        };
+        const n = new Notification('Púca Tasks', options);
+        webReminder = n;
         n.onclick = () => {
             void focusApp();
             openReminders();
             n.close();
         };
+        n.onclose = () => { if (webReminder === n) webReminder = null; };
     } catch {
         // Construction can fail with permission granted (OS-level disable).
     }
@@ -827,6 +854,7 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
         });
         if (answer === 'off') return { ok: false, reason: 'Windows has notifications for Púca turned off' };
         if (answer === 'failed') return { ok: false, reason: 'Windows refused to show it' };
+        if (answer === 'queued') return { ok: false, reason: 'Windows took too long to answer, so it may or may not appear' };
         if (answer === 'shown') return { ok: true };
         // A shell without them: the plugin below, as before.
     }

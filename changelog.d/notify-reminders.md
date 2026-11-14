@@ -2,7 +2,10 @@
 
 - **A task reminder in the desktop app makes a sound, and clicking it opens Reminders.** It used to
   come up silent, and a click on it did nothing. Now it plays Windows' notification sound, and a
-  click opens the Tasks view on its **Reminders** tab. Needs the new desktop app (full and Lite).
+  click on it while it is on screen opens the Tasks view on its **Reminders** tab (from the
+  notification centre afterwards, a click may only bring Púca's window up). Needs the new desktop
+  app (full and Lite). In the web app, a reminder that comes while the last one is still listed now
+  pops up and sounds again in Chrome and Edge, where it used to replace the old one in silence.
 - **With Púca's notifications turned off in Windows, you still hear every message.** While a
   conversation went on, Púca played its message sound only for the first message, as if the
   notification was showing, when Windows was showing nothing at all. Now every message plays it

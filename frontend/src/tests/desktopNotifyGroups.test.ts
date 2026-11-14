@@ -303,8 +303,11 @@ describe('a conversation going on while you are away (desktop app)', () => {
         env.toastClick = null;
         vi.resetModules();
         try {
+            // Loaded first, one at a time, as at the top of the file: the
+            // reset made every mocked module's next import a first one again.
             await import('@tauri-apps/api/event');
             await import('@tauri-apps/api/core');
+            await import('@tauri-apps/plugin-notification');
             await import('../api/desktopNotify');
             const freshNav = await import('../api/mobileApp');
             await settle();
@@ -830,5 +833,83 @@ describe('review round 1: a refusal is about its own toast, and a refused remind
         expect(notify.notifyDiag().recent.at(-1)).toBe(before);
         await settle();
         expect(notify.notifyDiag().recent.at(-1)).toMatchObject({ kind: 'task', outcome: 'fired' });
+    });
+});
+
+describe('review round 2', () => {
+    it('one refused command does not keep the clears from being sent: nothing is left behind at sign-out (finding 1)', async () => {
+        channelMessage('alice', 'a', 7);
+        await settle();
+        env.failOnce.add('toast_show');
+        channelMessage('bob', 'b', 8);
+        await settle();
+        expect(notify.notifyDiag().live.nativeToasts).toBe('no');
+        notify.seeConversation('chan:s1:7');
+        notify.clearAllConversationNotifications();
+        await settle();
+        expect(env.invokes.slice(-2)).toEqual([
+            { cmd: 'toast_clear', args: { key: 'chan:s1:7' } },
+            { cmd: 'toast_clear_all', args: undefined },
+        ]);
+    });
+
+    it('an answer Windows did not give in time: Send test does not call it a success; a reminder is not shown twice (finding 5)', async () => {
+        env.answers.toast_show = 'queued';
+        const r = await notify.sendTestNotification();
+        expect(r.ok).toBe(false);
+        expect(r.reason).toMatch(/too long/);
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        await settle();
+        expect(env.pluginShown).toHaveLength(0);
+        expect(notify.notifyDiag().recent.at(-1)).toMatchObject({ kind: 'task', outcome: 'fired (unanswered)' });
+        // Most likely shown: a message's update after it stays quiet.
+        channelMessage('alice', 'a');
+        await settle();
+        vi.advanceTimersByTime(2_000);
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true, quiet: true });
+    });
+
+    describe('the web app: a reminder after one still in the list pops and sounds again (finding 2)', () => {
+        beforeEach(() => { env.tauri = false; });
+
+        it('in Chromium, with renotify', () => {
+            FakeNotification.reset();
+            (globalThis as { Notification?: unknown }).Notification = FakeNotification;
+            notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+            vi.advanceTimersByTime(60_000);
+            notify.notifyTasksDue(1, [{ id: 6, mark: 'b' }]);
+            expect(FakeNotification.popups).toBe(2);
+            expect(FakeNotification.made.map(n => [n.tag, n.renotify, n.silent])).toEqual([
+                ['tasks-due', true, undefined], ['tasks-due', true, undefined],
+            ]);
+            expect(FakeNotification.list.size).toBe(1);
+        });
+
+        it('in Safari, by closing the old one first: one on screen', () => {
+            SafariNotification.reset();
+            (globalThis as { Notification?: unknown }).Notification = SafariNotification;
+            notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+            notify.notifyTasksDue(2, [{ id: 6, mark: 'b' }, { id: 7, mark: 'c' }]);
+            expect(SafariNotification.popups).toBe(2);
+            expect(SafariNotification.instances[0].closed).toBe(true);
+            expect(SafariNotification.open()).toHaveLength(1);
+            expect('renotify' in SafariNotification.made[1]).toBe(false);
+        });
+
+        it('a click still opens Reminders with its ids', () => {
+            FakeNotification.reset();
+            (globalThis as { Notification?: unknown }).Notification = FakeNotification;
+            vi.spyOn(window, 'focus').mockImplementation(() => { });
+            notify.notifyTasksDue(1, [{ id: 9, mark: 'z' }]);
+            const opened: unknown[] = [];
+            const onOpen = (e: Event) => opened.push((e as CustomEvent).detail);
+            window.addEventListener('sovereign:open-reminders', onOpen);
+            try {
+                FakeNotification.list.get('tasks-due')!.onclick!();
+            } finally {
+                window.removeEventListener('sovereign:open-reminders', onOpen);
+            }
+            expect(opened).toEqual([{ ids: [9] }]);
+        });
     });
 });
