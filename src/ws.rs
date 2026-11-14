@@ -3196,8 +3196,12 @@ pub(crate) async fn handle_message(
         // Web Push (src/wake/sender.rs): whether the page on this connection
         // can show a notification by itself. In memory, per connection, read
         // by nothing but Web Push. Never answered, never an Error.
-        ClientMessage::SetPushAway { away } => {
-            state.set_conn_push_away(user_id, conn_id, away);
+        ClientMessage::SetPushAway { away, carried } => {
+            if away && carried {
+                state.carry_conn_push_away(user_id, conn_id);
+            } else {
+                state.set_conn_push_away(user_id, conn_id, away);
+            }
         }
 
         // Games (docs/GAMES.md; src/games.rs). Every refusal is a typed
@@ -11251,6 +11255,7 @@ mod push_away_ws_tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../frontend/src/tests/fixtures/pushAway.json")).expect("JSON");
         let (away, back) = (fixture["away"].to_string(), fixture["back"].to_string());
+        state.web_push_watch(7); // the account has a subscription
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
         let (conn, _, _) = state.register_session(7, "me".into(), tx, false, None, "phone".into());
         let mut joined = HashSet::new();
@@ -11262,6 +11267,14 @@ mod push_away_ws_tests {
         assert_eq!(handle_message(&state, 7, conn, "me", &away, &mut joined, "").await, Ok(()));
         assert_eq!(handle_message(&state, 7, conn, "me", &back, &mut joined, "").await, Ok(()));
         assert!(state.sid_is_present(7, "phone"), "on screen again: present");
+        // The first report of a new socket while still hidden: away, and the
+        // away moment the earlier `away` recorded is kept.
+        let age = state.web_push_away_age("phone").expect("went away once");
+        let carried = fixture["carried"].to_string();
+        assert_eq!(handle_message(&state, 7, conn, "me", &carried, &mut joined, "").await, Ok(()));
+        assert!(!state.sid_is_present(7, "phone"));
+        assert!(state.web_push_away_age("phone").unwrap() >= age, "carried records no new departure");
+        assert_eq!(handle_message(&state, 7, conn, "me", &back, &mut joined, "").await, Ok(()));
         assert!(rx.try_recv().is_err(), "nothing is answered");
 
         // From a delivery socket (never a page): taken, changes nothing, no

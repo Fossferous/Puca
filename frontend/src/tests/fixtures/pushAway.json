@@ -1,4 +1,5 @@
 {
   "away": {"type":"SetPushAway","payload":{"away":true}},
-  "back": {"type":"SetPushAway","payload":{"away":false}}
+  "back": {"type":"SetPushAway","payload":{"away":false}},
+  "carried": {"type":"SetPushAway","payload":{"away":true,"carried":true}}
 }

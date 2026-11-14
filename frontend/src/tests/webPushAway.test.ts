@@ -176,16 +176,26 @@ describe('startWebPushAwayReporter', () => {
         expect(awayFrames()).toEqual([fixture.away]);
     });
 
-    it('a socket that confirms it while the page is away is told at once; a closed one forgets', async () => {
+    it('a socket that confirms it while the page is away is told at once, as carried over; a closed one forgets', async () => {
         start();
-        setHidden(true);
         await openSocket([PUSH_AWAY_FEATURE]);
-        expect(awayFrames()).toEqual([fixture.away]);
-        expect(pageToldAwayForPush()).toBe(true);
+        setHidden(true);
+        expect(awayFrames()).toEqual([fixture.away]); // it left while this socket was up: a departure
         // The transport drops (the server's reaper, a network change).
         (sock() as unknown as { onclose: (e: object) => void }).onclose({ code: 1006, reason: '', wasClean: false });
         expect(pageToldAwayForPush()).toBe(false);
+        // Reconnected while still in the background: away from its first
+        // word, and carried over (the page did not come back in between).
+        sent = [];
+        await openSocket([PUSH_AWAY_FEATURE]);
+        expect(awayFrames()).toEqual([fixture.carried]);
+        expect(pageToldAwayForPush()).toBe(true);
+        // On screen and away again on the same socket: a plain departure.
+        setHidden(false);
+        setHidden(true);
+        expect(awayFrames()).toEqual([fixture.carried, fixture.back, fixture.away]);
         // A reconnect to an OLDER host: still hidden, still nothing for it.
+        (sock() as unknown as { onclose: (e: object) => void }).onclose({ code: 1006, reason: '', wasClean: false });
         sent = [];
         await openSocket(['presence']);
         expect(awayFrames()).toEqual([]);

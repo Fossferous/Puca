@@ -580,8 +580,11 @@ conversation, a channel or a byte of a message. Exactly what it does see:
   service issued to your browser; Apple and Google can usually tie it to the account
   signed into the phone or browser.
 - **The timing.** When your server had something for you while Púca was closed (or, on
-  a phone, in the background): at most one wake per browser per 30 seconds, a burst
-  being coalesced.
+  a phone, in the background), a burst being coalesced: at most one wake per browser
+  per 30 seconds while it stays away. A browser that came back on screen after a wake
+  and went away again starts a new burst and can be woken sooner (the reply after you
+  answered must not wait), so two wakes close together can also say that you looked
+  in between.
 - **Correlations between people.** A channel message wakes every away, subscribed
   member, each after a random delay of up to 3 seconds (`web_push_jitter_ms`). A
   service that serves several members of one server sees them woken by the same

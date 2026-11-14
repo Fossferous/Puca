@@ -34,8 +34,10 @@
  * which the chat view shows as a notice. With an older server everything
  * stays as it was (pushed once the socket is gone). A fresh connection is
  * present on the server, so a socket that confirms it while the page is away
- * is told at once. Transitions only; the push itself still carries nothing
- * but the constant {"w":"1"}.
+ * is told at once, as `carried`: the page left before this socket existed (a
+ * phone that reconnected in the background), and the server keeps the moment
+ * it really left. Transitions only; the push itself still carries nothing but
+ * the constant {"w":"1"}.
  */
 import { wsClient } from './websocket';
 import { isAppleTouchDevice, OPT_IN_EVENT, webPushEnabledHere, webPushEnvironment } from './webPush';
@@ -88,10 +90,11 @@ export function startWebPushAwayReporter(opts: AwayReporterOptions = {}): () => 
     let stopped = false;
 
     const hidden = () => document.visibilityState === 'hidden';
-    const tell = (away: boolean) => {
+    const tell = (away: boolean, carried = false) => {
         if (stopped || !wsClient.hasServerFeature(PUSH_AWAY_FEATURE)) return;
         if (away === told) return; // transitions only
-        if (wsClient.send({ type: 'SetPushAway', payload: { away } })) {
+        const payload = away && carried ? { away, carried: true } : { away };
+        if (wsClient.send({ type: 'SetPushAway', payload })) {
             told = away;
             setPageToldAwayForPush(away);
         }
@@ -116,10 +119,13 @@ export function startWebPushAwayReporter(opts: AwayReporterOptions = {}): () => 
         evaluate();
     };
     const onFeatures = () => {
-        // A new server session: it holds this connection present.
+        // A new server session: it holds this connection present. A page
+        // that is away as its socket opens was away before it (a reconnect in
+        // the background, a network change): `carried`, so the server keeps
+        // the moment the page really left, and names what came since.
         told = false;
         setPageToldAwayForPush(false);
-        evaluate();
+        tell(decideAway({ pushOn: pushOn(), hiddenCannotNotify: cannotNotify(), hidden: hidden(), leaving }), true);
     };
     const onClosed = () => {
         told = false;

@@ -100,8 +100,11 @@ that limit — but cannot read content.
     standard requires. The push service also knows your browser — it issued
     its push address — and, for Apple and Google, usually the account signed
     into the phone or browser.
-  - **When.** Each wake is a timestamped request. At most one per browser
-    every 30 seconds: a burst is one wake.
+  - **When.** Each wake is a timestamped request. A burst is one wake: at
+    most one per browser every 30 seconds while it stays away. A phone that
+    opened Púca after a wake and left it again starts a new burst, so it
+    can be woken sooner than that; the service then also learns, roughly,
+    that you looked in between.
   - **Who else that server wakes at the same time.** A channel message wakes
     every member who is away and turned this on, within a few seconds (each
     is delayed at random by up to 3 seconds, to blur this). A push service

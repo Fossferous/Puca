@@ -600,7 +600,13 @@ by itself, and when it can again:
 ```json
 {"type":"SetPushAway","payload":{"away":true}}
 {"type":"SetPushAway","payload":{"away":false}}
+{"type":"SetPushAway","payload":{"away":true,"carried":true}}
 ```
+
+The third is the first word of a NEW socket from a page that is already away
+(a phone that reconnected in the background): the browser goes away as with
+the first, but the moment it really left is kept, so what arrived since is
+still named and the reconnect does not count as a return.
 
 The web app sends them only where this account has turned Web Push on in that
 browser: `true` when it goes to the background on an iPhone, iPad or Android

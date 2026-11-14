@@ -333,9 +333,16 @@ pub enum ClientMessage {
     /// and only on a socket whose server confirmed `push_away` in
     /// `ServerFeatures` (an older server answers an unknown variant with an
     /// Error). Read by nothing but Web Push; never answered, never an Error.
+    /// `carried: true` (with `away: true`, the first report on a NEW socket
+    /// of a page that was already away, e.g. a phone in the background whose
+    /// network changed): the page was not on screen in between, so this is no
+    /// return and no new departure — its browser's away mark stays where it
+    /// was, and what arrived since is still named (`carry_conn_push_away`).
     SetPushAway {
         #[serde(default)]
         away: bool,
+        #[serde(default)]
+        carried: bool,
     },
 
     // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
@@ -1655,9 +1662,11 @@ mod presence_frame_tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../frontend/src/tests/fixtures/pushAway.json")).expect("JSON");
         let away: ClientMessage = serde_json::from_value(fixture["away"].clone()).expect("away");
-        assert!(matches!(away, ClientMessage::SetPushAway { away: true }));
+        assert!(matches!(away, ClientMessage::SetPushAway { away: true, carried: false }));
         let back: ClientMessage = serde_json::from_value(fixture["back"].clone()).expect("back");
-        assert!(matches!(back, ClientMessage::SetPushAway { away: false }));
+        assert!(matches!(back, ClientMessage::SetPushAway { away: false, carried: false }));
+        let carried: ClientMessage = serde_json::from_value(fixture["carried"].clone()).expect("carried");
+        assert!(matches!(carried, ClientMessage::SetPushAway { away: true, carried: true }));
         // Anything but a boolean is refused rather than guessed at.
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetPushAway","payload":{"away":"yes"}}"#).is_err());
     }

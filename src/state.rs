@@ -3334,6 +3334,25 @@ impl AppState {
         true
     }
 
+    /// `SetPushAway { away: true, carried: true }`: the first report on a new
+    /// connection of a page that was ALREADY away before it existed (a phone
+    /// in the background whose network changed, so its socket reconnected).
+    /// The connection goes away exactly as `set_conn_push_away` would take it,
+    /// but its browser's away mark is left alone: the page was never on
+    /// screen in between, so this is no departure. Moving the mark would bury
+    /// what arrived during the earlier stretch and was not yet named, and a
+    /// fresh mark would read as a return (`wake::sender::back_since_push`)
+    /// and undo the coalescing. Returns whether anything changed.
+    pub fn carry_conn_push_away(&self, user_id: UserId, conn_id: u64) -> bool {
+        let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
+        let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) else { return false };
+        if s.delivery || s.push_away {
+            return false;
+        }
+        s.push_away = true;
+        true
+    }
+
     /// What subscription `sub_id` (the browser holding session `sid`) has not
     /// been told about yet, oldest first, and mark it told. Nothing while that
     /// browser is present (`sid_is_present`): the app on screen has it already.
@@ -5776,6 +5795,41 @@ mod web_push_away_tests {
         state.unregister_session(7, old);
         state.web_push_record(7, dm("laptop-missed"));
         assert_eq!(convs(&state.web_push_unseen(7, 2, "laptop")), vec!["laptop-missed"]);
+    }
+
+    /// A phone in the background whose network changes reconnects while its
+    /// page is still hidden. The new socket registers present (a server
+    /// cannot know better) and its first report says "away, carried": no
+    /// return and no new departure, so what arrived in the earlier stretch
+    /// and was not yet named is still named, and no fresh away moment is
+    /// recorded to read as a return. CONTROL: the same reconnect reported as a
+    /// plain `away` buries it.
+    #[tokio::test]
+    async fn a_hidden_page_reconnecting_keeps_its_mark() {
+        let state = test_state();
+        for (sid, carried) in [("phone", true), ("control", false)] {
+            let (old, _rx) = connect(&state, sid, false);
+            state.web_push_record(7, dm(&format!("{sid}-seen")));
+            state.set_conn_push_away(7, old, true);
+            let age_before = state.web_push_away_age(sid).expect("went away");
+            state.web_push_record(7, dm(&format!("{sid}-missed"))); // coalesced: not told yet
+            state.unregister_session(7, old); // the network changed
+            let (new, _rx2) = connect(&state, sid, false);
+            if carried {
+                assert!(state.carry_conn_push_away(7, new));
+                assert!(!state.sid_is_present(7, sid), "away again, on the new socket");
+                assert!(state.web_push_away_age(sid).unwrap() >= age_before, "no new away moment recorded");
+                assert_eq!(convs(&state.web_push_unseen(7, 1, sid)), vec![format!("{sid}-missed")]);
+            } else {
+                state.set_conn_push_away(7, new, true);
+                assert!(state.web_push_unseen(7, 2, sid).is_empty(), "CONTROL: a plain away buries it");
+            }
+        }
+        // Carried changes nothing on a delivery socket, an unknown connection,
+        // or one already away.
+        let (pocket, _rx3) = connect(&state, "android", true);
+        assert!(!state.carry_conn_push_away(7, pocket));
+        assert!(!state.carry_conn_push_away(7, 999_999));
     }
 
     /// The same for a connection the per-user cap evicted: its teardown finds
