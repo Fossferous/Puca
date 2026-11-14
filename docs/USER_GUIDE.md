@@ -1526,8 +1526,8 @@ messages*.
   than popping for every message.
 - If Windows has Púca's notifications turned off (**Settings → System →
   Notifications**), nothing shows, so Púca plays its message sound for
-  every message instead of once per conversation, and **Send test** says
-  they are turned off.
+  every message instead of once per conversation. While notifications are
+  grouped, **Send test** says they are turned off.
 
 ### Notifications while Púca is closed
 In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in

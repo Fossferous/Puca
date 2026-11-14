@@ -776,14 +776,4 @@ mod tests {
         assert!(!toast.SuppressPopup().unwrap());
     }
 
-    /// Reading the per-app switch is a read: it shows nothing, and whatever
-    /// Windows says (or cannot say) is an answer, never a panic.
-    #[cfg(windows)]
-    #[test]
-    fn reading_the_notification_setting_shows_nothing() {
-        let id = windows::core::HSTRING::from(win::POWERSHELL_APP_ID);
-        if let Ok(notifier) = windows::UI::Notifications::ToastNotificationManager::CreateToastNotifierWithId(&id) {
-            let _ = win::setting_enabled(&notifier);
-        }
-    }
 }

@@ -100,25 +100,45 @@ const groups = new NotifyGroups();
 const activations = new Map<string, () => void>();
 /** The web app's notification per conversation, while it exists. */
 const webLive = new Map<string, Notification>();
-/** What the desktop app's own toasts (src-tauri/src/toasts.rs) last answered:
- *  'yes' Windows showed or updated it; 'off' Windows shows none of Púca's
- *  notifications (turned off in Settings, or a policy); 'failed' Windows
- *  refused that one; 'no' the shell has none (a build for anything but
- *  Windows: the page ships inside the installer with its shell, so a Windows
- *  app always has them). None of these is for good: every pop-up asks again,
- *  so turning Púca's notifications back on, or a one-off refusal, mends
- *  itself by the next burst. */
-type NativeToasts = 'unknown' | 'yes' | 'off' | 'failed' | 'no';
+/** What the desktop app's own toasts (src-tauri/src/toasts.rs) last answered,
+ *  for the app as a whole: 'yes' Windows shows them; 'off' Windows shows none
+ *  of Púca's notifications (turned off in Settings, or a policy); 'no' the
+ *  shell has none (a build for anything but Windows: the page ships inside
+ *  the installer with its shell, so a Windows app always has them). Neither
+ *  is for good: every pop-up asks again, so turning Púca's notifications back
+ *  on, or a one-off refusal of the command, mends itself by the next burst. */
+type NativeToasts = 'unknown' | 'yes' | 'off' | 'no';
 let nativeToasts: NativeToasts = 'unknown';
-/** Is the last toast still on screen to be updated, as far as we know? A
- *  quiet update is quiet to the caller (no sound) only then. */
-const nativeToastsShowing = () => nativeToasts === 'yes' || nativeToasts === 'unknown';
-/** toast_show's answer, as the state above. An older shell answered nothing:
- *  it showed it. */
-function toastAnswer(answer: unknown): NativeToasts {
-    if (answer === 'off') return 'off';
-    if (answer === 'failed') return 'failed';
-    return 'yes';
+/** The toasts Windows refused to show, by key, until one of theirs is shown
+ *  again (or seen): a refusal is about that toast, so another conversation's
+ *  success must not make this one's next update look shown. */
+const refusedToasts = new Set<string>();
+/** Is this key's toast on screen to be updated, as far as we know? A quiet
+ *  update is quiet to the caller (no sound) only then. */
+const nativeToastShowing = (key: string) =>
+    (nativeToasts === 'yes' || nativeToasts === 'unknown') && !refusedToasts.has(key);
+/** What one toast_show came to. An older shell answered nothing: it showed it. */
+type ToastAnswer = 'shown' | 'off' | 'failed' | 'no';
+function readToastAnswer(key: string, answer: unknown): ToastAnswer {
+    if (answer === 'off') {
+        nativeToasts = 'off';
+        return 'off';
+    }
+    // Windows' switch is on either way: it showed it, or refused this one.
+    nativeToasts = 'yes';
+    if (answer === 'failed') {
+        refusedToasts.delete(key);
+        refusedToasts.add(key);
+        // Bounded like the counts; the oldest refusal goes first.
+        while (refusedToasts.size > 200) {
+            const oldest = refusedToasts.values().next().value;
+            if (oldest === undefined) break;
+            refusedToasts.delete(oldest);
+        }
+        return 'failed';
+    }
+    refusedToasts.delete(key);
+    return 'shown';
 }
 let activationListener: Promise<void> | null = null;
 /** Every toast command goes through here, ONE at a time: Tauri does not
@@ -184,6 +204,7 @@ listenForToastClicks();
 export function seeConversation(key: string): void {
     groups.seen(key);
     activations.delete(key);
+    refusedToasts.delete(key);
     const n = webLive.get(key);
     if (n) {
         webLive.delete(key);
@@ -204,6 +225,7 @@ export function endConversationBursts(): void {
 export function clearAllConversationNotifications(): void {
     groups.clear();
     activations.clear();
+    refusedToasts.clear();
     for (const n of webLive.values()) {
         try { n.close(); } catch { /* already gone */ }
     }
@@ -234,16 +256,16 @@ async function pluginNotify(title: string, body: string): Promise<boolean> {
 }
 
 /** Ask the desktop app's own toasts (toasts.rs) for one, and keep what it
- *  answered. False when this shell has none ('no'). */
-async function askNativeToast(args: { key: string; title: string; body: string; popup: boolean; sound: boolean }): Promise<boolean> {
+ *  answered (readToastAnswer). 'no' when this shell has none. */
+async function askNativeToast(args: { key: string; title: string; body: string; popup: boolean; sound: boolean }): Promise<ToastAnswer> {
     try {
-        nativeToasts = toastAnswer(await nativeCall('toast_show', args));
+        const answer = readToastAnswer(args.key, await nativeCall('toast_show', args));
         listenForToastClicks();
-        return true;
+        return answer;
     } catch (err) {
         if (nativeToasts !== 'no') console.warn('[notify] toasts that replace each other are unavailable here:', err);
         nativeToasts = 'no';
-        return false;
+        return 'no';
     }
 }
 
@@ -251,12 +273,14 @@ async function askNativeToast(args: { key: string; title: string; body: string; 
  *  `toast_show` (see nativeToasts) the plugin raises one when the rule says
  *  pop, and nothing when it says update: it can neither replace nor update.
  *  A quiet update after a refusal is not asked for (it has nothing to
- *  change); the next pop asks again. 'off' and 'failed' fall back to nothing:
- *  the plugin's toasts go through the same Windows switch. */
+ *  change); the next pop asks again. 'off' and 'failed' fall back to nothing
+ *  for a message: the plugin's toasts go through the same Windows switch, and
+ *  the message is not quiet (nativeToastShowing), so the app's sound and its
+ *  unread marks still carry it. */
 async function showNativeToast(key: string, step: Pick<GroupStep, 'pop' | 'title' | 'body'>): Promise<void> {
     if (!step.pop && nativeToasts === 'no') return;
-    const asked = await askNativeToast({ key, title: step.title, body: step.body, popup: step.pop, sound: false });
-    if (!asked && step.pop) await pluginNotify(step.title, step.body);
+    const answer = await askNativeToast({ key, title: step.title, body: step.body, popup: step.pop, sound: false });
+    if (answer === 'no' && step.pop) await pluginNotify(step.title, step.body);
 }
 
 /**
@@ -326,6 +350,7 @@ export function resetConversationNotificationsForTests(): void {
     activations.clear();
     webLive.clear();
     nativeToasts = 'unknown';
+    refusedToasts.clear();
     nativeQueue = Promise.resolve();
 }
 
@@ -352,8 +377,10 @@ export function resetConversationNotificationsForTests(): void {
  *    popping up. `live.groups` says how many each conversation holds and
  *    `live.nativeToasts` what the desktop app's own toasts last answered
  *    ('off': Windows has Púca's notifications turned off, so nothing shows;
- *    'failed': Windows refused the last one; 'no': a shell without them, so
- *    the plugin's toasts, one per burst).
+ *    'no': a shell without them, so the plugin's toasts, one per burst), and
+ *    `live.refusedToasts` the keys of toasts Windows refused to show (ids).
+ *  - a task entry 'windows-off', 'fired-plugin (...)' or 'not-shown (...)' →
+ *    the desktop reminder's toast was not shown by Windows, and what then.
  */
 export function notifyDiag() {
     return {
@@ -373,6 +400,7 @@ export function notifyDiag() {
             mobileBackgroundDelivery: loadSettings().mobileBackgroundDelivery,
             groupNotifications: groupingOn(),
             nativeToasts,
+            refusedToasts: [...refusedToasts],
             // Keys (ids only) and counts. Never the names the toast shows.
             groups: groups.keys().map(key => ({ key, count: groups.get(key)?.count ?? 0 })),
         },
@@ -593,7 +621,7 @@ export function notifyNewMessage(opts: {
             // last one. There a quiet message shows nothing, so it must not
             // take the app's sound away too. Read before this message's own
             // answer: the burst's pop has answered by now.
-            const quiet = !step.pop && nativeToastsShowing();
+            const quiet = !step.pop && nativeToastShowing(group.key);
             void showNativeToast(group.key, step);
             return quiet ? { fire: true, quiet: true } : decision;
         }
@@ -710,7 +738,6 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
         })();
         return;
     }
-    record('fired');
 
     if (isTauri()) {
         // The desktop app's own toast (toasts.rs), whatever the message
@@ -720,13 +747,19 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
         activations.delete(TASKS_DUE_KEY);
         activations.set(TASKS_DUE_KEY, openReminders);
         void (async () => {
-            const asked = await askNativeToast({ key: TASKS_DUE_KEY, title: 'Púca Tasks', body, popup: true, sound: true });
-            // A shell without them (not Windows): the plugin's, which can
-            // neither sound nor be clicked through.
-            if (!asked) await pluginNotify('Púca Tasks', body);
+            const answer = await askNativeToast({ key: TASKS_DUE_KEY, title: 'Púca Tasks', body, popup: true, sound: true });
+            // ONE diagnostics entry, once Windows has answered. 'off':
+            // Windows shows none of Púca's, the plugin's included.
+            if (answer === 'shown' || answer === 'off') { record(answer === 'shown' ? 'fired' : 'windows-off'); return; }
+            // A shell without them (not Windows), or Windows refused this
+            // one: a deadline has no other surface, so the plugin's, which
+            // can neither sound nor be clicked through, but is something.
+            const handed = await pluginNotify('Púca Tasks', body);
+            record(handed ? `fired-plugin (${answer})` : `not-shown (${answer})`);
         })();
         return;
     }
+    record('fired');
 
     if (notificationPermission() !== 'granted') return;
     try {
@@ -785,16 +818,16 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
     }
     // The desktop app's own toast, as a grouped message uses (toasts.rs):
     // a second press replaces the first rather than adding one, and it says
-    // what Windows did with it, so a test that showed nothing says so.
+    // what Windows did with it, so a test that showed nothing says so. With
+    // grouping off a message goes through the plugin, so the test does too,
+    // and the plugin cannot tell whether Windows showed it.
     if (groupingOn()) {
-        const asked = await askNativeToast({
+        const answer = await askNativeToast({
             key: 'test', title: 'Púca', body: 'Test notification — this is what a new message looks like.', popup: true, sound: false,
         });
-        if (asked) {
-            if (nativeToasts === 'off') return { ok: false, reason: 'Windows has notifications for Púca turned off' };
-            if (nativeToasts === 'failed') return { ok: false, reason: 'Windows refused to show it' };
-            return { ok: true };
-        }
+        if (answer === 'off') return { ok: false, reason: 'Windows has notifications for Púca turned off' };
+        if (answer === 'failed') return { ok: false, reason: 'Windows refused to show it' };
+        if (answer === 'shown') return { ok: true };
         // A shell without them: the plugin below, as before.
     }
     try {

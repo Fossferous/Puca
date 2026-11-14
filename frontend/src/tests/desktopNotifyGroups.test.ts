@@ -124,12 +124,15 @@ function channelMessage(author: string, id: string, channel = 7, extra: Partial<
  *  tag pops. Firefox-shaped (no `renotify` anywhere, as in Firefox and
  *  Safari): every replacement pops, because Firefox closes the old toast and
  *  shows a new one (widget/windows/ToastNotification.cpp,
- *  ShowAlertWithCallbacks), and the old one hears its close. */
-function makeFakeNotification(renotifySupported: boolean) {
+ *  ShowAlertWithCallbacks), and the old one hears its close. Safari-shaped
+ *  (`replacesSameTag` false): no renotify, and a same-tag notification shows
+ *  at once BESIDE the old one (WebKit bug 258922, iOS). */
+function makeFakeNotification(renotifySupported: boolean, replacesSameTag = true) {
     class Fake {
         static permission: NotificationPermission = 'granted';
         static list = new Map<string, Fake>();
         static made: { title: string; tag?: string; renotify?: boolean; silent?: boolean; body?: string }[] = [];
+        static instances: Fake[] = [];
         static popups = 0;
         onclick: (() => void) | null = null;
         onclose: (() => void) | null = null;
@@ -142,17 +145,19 @@ function makeFakeNotification(renotifySupported: boolean) {
             this.title = title;
             this.tag = opts.tag ?? `untagged#${Fake.made.length}`;
             Fake.made.push({ title, ...opts });
+            Fake.instances.push(this);
             const old = Fake.list.get(this.tag);
             if (!old || opts.renotify || !renotifySupported) Fake.popups++;
             Fake.list.set(this.tag, this);
-            if (old && !renotifySupported) { old.closed = true; old.onclose?.(); }
+            if (old && !renotifySupported && replacesSameTag) { old.closed = true; old.onclose?.(); }
         }
         close() {
             this.closed = true;
             if (Fake.list.get(this.tag) === this) Fake.list.delete(this.tag);
             this.onclose?.();
         }
-        static reset() { Fake.list.clear(); Fake.made = []; Fake.popups = 0; }
+        static open() { return Fake.instances.filter(n => !n.closed); }
+        static reset() { Fake.list.clear(); Fake.made = []; Fake.instances = []; Fake.popups = 0; }
     }
     if (renotifySupported) {
         Object.defineProperty(Fake.prototype, 'renotify', { get() { return false; }, configurable: true });
@@ -161,6 +166,7 @@ function makeFakeNotification(renotifySupported: boolean) {
 }
 const FakeNotification = makeFakeNotification(true);
 const FirefoxNotification = makeFakeNotification(false);
+const SafariNotification = makeFakeNotification(false, false);
 
 beforeEach(() => {
     env.tauri = true;
@@ -743,5 +749,86 @@ describe('the web app in a browser with no renotify (Firefox, Safari): review lo
         channelMessage('alice', 'a', 7, { onActivate: opened });
         FirefoxNotification.list.get('chan:s1:7')!.onclick!();
         expect(opened).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('the web app in Safari, where a same-tag notification shows beside the old one (review round 1, finding 4)', () => {
+    beforeEach(() => {
+        env.tauri = false;
+        SafariNotification.reset();
+        (globalThis as { Notification?: unknown }).Notification = SafariNotification;
+    });
+
+    it('the next burst closes the old notification before its new one: one on screen, not two', () => {
+        channelMessage('alice', 'a');
+        for (let i = 0; i < 3; i++) {
+            vi.advanceTimersByTime(3_000);
+            channelMessage('bob', `b${i}`);
+        }
+        vi.advanceTimersByTime(61_000);
+        channelMessage('carol', 'c');
+        expect(SafariNotification.instances).toHaveLength(2);
+        expect(SafariNotification.instances[0].closed).toBe(true);
+        expect(SafariNotification.open()).toHaveLength(1);
+        expect(SafariNotification.made.at(-1)).toMatchObject({ body: 'carol and 2 others: 5 new messages' });
+    });
+});
+
+describe('review round 1: a refusal is about its own toast, and a refused reminder still shows', () => {
+    it('another conversation shown does not make a refused one look shown (finding 3)', async () => {
+        env.answers.toast_show = 'failed';
+        channelMessage('alice', 'a', 7);
+        await settle();
+        env.answers.toast_show = 'popped';
+        channelMessage('bob', 'b', 8);
+        await settle();
+        vi.advanceTimersByTime(2_000);
+        // #general's toast was refused: its update is not quiet.
+        expect(channelMessage('carol', 'c', 7)).toEqual({ fire: true });
+        await settle();
+        // #random's was shown: its update is.
+        vi.advanceTimersByTime(1_000);
+        env.answers.toast_show = 'updated';
+        expect(channelMessage('dave', 'd', 8)).toEqual({ fire: true, quiet: true });
+        await settle();
+        // #general's re-add was answered: shown again, so quiet again.
+        vi.advanceTimersByTime(1_000);
+        expect(channelMessage('erin', 'e', 7)).toEqual({ fire: true, quiet: true });
+        expect(notify.notifyDiag().live.refusedToasts).toEqual([]);
+    });
+
+    it('reading a refused conversation forgets the refusal', async () => {
+        env.answers.toast_show = 'failed';
+        channelMessage('alice', 'a');
+        await settle();
+        expect(notify.notifyDiag().live.refusedToasts).toEqual(['chan:s1:7']);
+        notify.seeConversation('chan:s1:7');
+        expect(notify.notifyDiag().live.refusedToasts).toEqual([]);
+    });
+
+    it("a reminder Windows refused falls back to the plugin's, and says so in the diagnostics (finding 5)", async () => {
+        env.answers.toast_show = 'failed';
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        await settle();
+        expect(env.pluginShown).toEqual([{ title: 'Púca Tasks', body: 'A task is due' }]);
+        expect(notify.notifyDiag().recent.at(-1)).toMatchObject({ kind: 'task', outcome: 'fired-plugin (failed)' });
+    });
+
+    it('with Windows notifications off, the reminder tries nothing else (they would not show either)', async () => {
+        env.answers.toast_show = 'off';
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        await settle();
+        expect(env.pluginShown).toHaveLength(0);
+        expect(notify.notifyDiag().recent.at(-1)).toMatchObject({ kind: 'task', outcome: 'windows-off' });
+    });
+
+    it('a shown reminder is one diagnostics entry, fired, once Windows answered', async () => {
+        // The ring is capped, so compare its newest entry, not its length.
+        channelMessage('alice', 'a');
+        const before = notify.notifyDiag().recent.at(-1);
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        expect(notify.notifyDiag().recent.at(-1)).toBe(before);
+        await settle();
+        expect(notify.notifyDiag().recent.at(-1)).toMatchObject({ kind: 'task', outcome: 'fired' });
     });
 });
