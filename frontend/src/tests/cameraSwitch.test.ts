@@ -206,6 +206,24 @@ describe('Flip on a phone', () => {
         expect(rig.open.size).toBe(1);
     });
 
+    it('whatever holds a copy of the camera is told to let go of it BEFORE the next opens (a clone keeps the camera open, and a phone opens one)', async () => {
+        useCameras([FRONT, BACK]);
+        const media = inCall();
+        await media.toggleVideo(true);
+        const front = videoOf(media)[0];
+        const told: Array<{ track: unknown; live: boolean; asked: number }> = [];
+        const off = media.onCameraReleasing((t) => told.push({ track: t, live: t.readyState === 'live', asked: rig.asked.length }));
+        const asked = rig.asked.length;
+        await media.flipCamera();
+        off();
+        expect(told, 'nobody holding a copy was told').toHaveLength(1);
+        expect(told[0].track).toBe(front);
+        expect(told[0].live, 'told after the camera was stopped').toBe(true);
+        expect(told[0].asked, 'told after the next camera was asked for').toBe(asked);
+        await media.flipCamera();
+        expect(told, 'an unregistered listener is not told').toHaveLength(1);
+    });
+
     it('the choice is remembered: the camera turned off and on again is the rear one', async () => {
         useCameras([FRONT, BACK]);
         const media = inCall();

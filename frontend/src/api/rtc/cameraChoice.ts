@@ -316,3 +316,31 @@ export function onLocalCameraState(fn: () => void): () => void {
 function sameCameras(a: CameraInfo[], b: CameraInfo[]): boolean {
     return a.length === b.length && a.every((c, i) => c.deviceId === b[i].deviceId && c.label === b[i].label && c.facing === b[i].facing);
 }
+
+/**
+ * Keep the camera list current while something shows it (the call's camera
+ * controls, while the camera is on): looked at again whenever the browser
+ * says its devices changed. It was looked at only when the camera came on,
+ * on a switch and when the menu opened, so a webcam plugged in mid-call
+ * brought no Flip and no camera arrow (the menu that would have listed it
+ * opens from that arrow), and one unplugged stayed in the menu. The newest
+ * look wins: one that answers after a later one is dropped. Returns a stop.
+ */
+export function watchCameraList(): () => void {
+    const md = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices;
+    if (!md?.addEventListener) return () => { /* nothing to watch here */ };
+    let looks = 0;
+    let stopped = false;
+    const look = () => {
+        const mine = ++looks;
+        void listCameras().then((cameras) => {
+            if (stopped || mine !== looks) return;
+            setLocalCameraState({ cameras });
+        });
+    };
+    md.addEventListener('devicechange', look);
+    return () => {
+        stopped = true;
+        md.removeEventListener('devicechange', look);
+    };
+}

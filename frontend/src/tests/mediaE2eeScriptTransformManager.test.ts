@@ -975,6 +975,35 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         expect(camSender.track).toBe(cam2);
     });
 
+    it('a camera switched during the hold: its stand-in (a CLONE of the camera, which keeps the camera open) is stopped before the next camera opens', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        const stand = camSender.track as FakeTrack;
+        let standWhenOpening = '';
+        // The media layer's switch in its real order: those holding a copy
+        // told, the camera stopped, then the next opened.
+        media.switchCamera = async () => {
+            for (const fn of (media as unknown as { cameraReleasing: Set<(t: unknown) => void> }).cameraReleasing) fn(cam);
+            cam.stop();
+            local.splice(1, 1);
+            standWhenOpening = stand.readyState;
+            local.push(cam2);
+            return { ok: true, track: cam2 };
+        };
+        await mgr.switchCamera({ facing: 'environment' });
+        await settle();
+        expect(standWhenOpening, 'the stand-in kept the old camera open while the next was opened (a phone refuses it)').toBe('ended');
+        expect((camSender.track as FakeTrack).id, 'the next camera went on held').toBe('cam2+stand');
+        sealedFirst(camSender);
+        await settle();
+        expect(camSender.track).toBe(cam2);
+    });
+
     it('a camera switch under way keeps the hold: the 1 s sweep does not end it on the stopped camera, and the next camera goes on the SAME held sender', async () => {
         // The media layer's switch in its real order: the old camera stopped
         // and out of the stream FIRST (a phone opens one camera), the next one
@@ -1118,6 +1147,58 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         await mgr.switchCamera({ facing: 'environment' });
         await settle();
         expect(pc3.senders.length, 'peer 3 got no camera').toBe(count3 + 1);
+    });
+
+    /** The camera turned off (media.toggleVideo(false): stopped and taken
+     *  out) and on again (acquired, then published as the panel does). */
+    function cameraOffOn(mgr: WebRTCManager, media: Record<string, unknown>, local: FakeTrack[], next: FakeTrack) {
+        media.toggleVideo = async (on: boolean) => {
+            if (on) { local.push(next); return next; }
+            for (const t of local.filter(x => x.kind === 'video')) { t.stop(); local.splice(local.indexOf(t), 1); }
+            return null;
+        };
+        return {
+            off: () => mgr.toggleVideo(false),
+            on: async () => { mgr.publishCameraTrack((await mgr.acquireCamera())!); await settle(); },
+        };
+    }
+
+    it('SECURITY: the camera turned off before its transform sealed anything and on again goes back on its sender HELD, like a new one, until sealed', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        const turn = cameraOffOn(mgr, media, local, cam2);
+        await turn.off();
+        await settle();
+        expect(camSender.track, 'turned off, nothing on its sender').toBeNull();
+        await turn.on();
+        expect(pc.senders.length, 'a second camera sender was added (the other side\'s tile plays the first: frozen)').toBe(2);
+        expect((camSender.track as FakeTrack | null)?.id, 'the camera went on a sender whose transform has sealed nothing, unheld').toBe('cam2+stand');
+        sealedFirst(camSender);
+        await settle();
+        expect(camSender.track).toBe(cam2);
+    });
+
+    it('CONTROL: a camera sender that HAS sealed takes the camera turned on again at once (as Flip does)', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const cam2 = track('video', 'cam2');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        sealedFirst(camSender);
+        await settle();
+        expect(camSender.track).toBe(cam);
+        const turn = cameraOffOn(mgr, media, local, cam2);
+        await turn.off();
+        await turn.on();
+        expect(pc.senders.length).toBe(2);
+        expect(camSender.track).toBe(cam2);
     });
 
     it('stopping a share finds its held sender (by the track it waits to send) and removes it', async () => {

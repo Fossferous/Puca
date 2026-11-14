@@ -30,7 +30,7 @@ import {
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useLocalCamera } from './useLocalCamera';
 import { usePipDrag } from './usePipDrag';
-import { cameraDisplayName, canFlip, flipLabel, listCameras, selfViewMirrored, setLocalCameraState } from '../api/rtc/cameraChoice';
+import { canFlip, flipLabel, listCameras, selfViewMirrored, setLocalCameraState, watchCameraList } from '../api/rtc/cameraChoice';
 import type { CameraSwitch } from '../api/rtc/media';
 
 /** Which control opened the camera menu (its aria-expanded). */
@@ -76,6 +76,8 @@ const SPEAK_GRANTED_NOTICE = 'You can speak in this channel now. Leave and rejoi
  *  (Settings, or a stream-only account): nothing to unmute, nothing missing. */
 const NO_MIC_CHOSEN_TITLE = 'You joined without a microphone — nobody can hear you';
 /** No CONNECT on this voice channel: refused before the mic is ever asked for. */
+/** A camera switch on an SFU call that could not reach the call (applyCameraSwitch). */
+const CAMERA_NOT_SENT_NOTICE = 'Your camera could not be sent to the call after the switch, so it is off. Turn it on again to send it.';
 const CONNECT_DENIED_NOTICE = "You don't have permission to join this voice channel.";
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
@@ -126,13 +128,17 @@ import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon, SlidersIcon, RocketIcon } from './Icons';
+import { VoiceConnectionLine } from './VoiceConnectionLine';
+import { cameraMenuItems } from './cameraMenuItems';
+import { settingsReacquireMic } from './settingsMicReacquire';
+import { useFocusAcrossTakeover } from './useFocusAcrossTakeover';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon, SlidersIcon, RocketIcon } from './Icons';
 import { Toast } from './Toast';
 import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from './useDfSettledOffer';
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers, showOwnCamera } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, stopSpeakingDetectors, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers, showOwnCamera } from './voiceState';
 import { tellUser, tellUserAndWait } from '../api/appDialogs';
 
 interface VoicePanelProps {
@@ -396,6 +402,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pipRef = useRef<HTMLDivElement>(null);
     // The camera this device has on, and the camera menu (api/rtc/cameraChoice.ts).
     const ownCamera = useLocalCamera();
+    // The camera list kept current while the camera is on: a webcam plugged
+    // in mid-call brings its Flip and the camera arrow (cameraChoice.watchCameraList).
+    useEffect(() => (isCameraOn ? watchCameraList() : undefined), [isCameraOn]);
+    // Full screen and back: the focus to full screen's Exit, then back to the
+    // self-view's button (the camera button, once the camera is off), never
+    // left on nothing (useFocusAcrossTakeover).
+    const fullscreenExitRef = useRef<HTMLButtonElement>(null);
+    const selfViewMenuRef = useRef<HTMLButtonElement>(null);
+    const cameraButtonRef = useRef<HTMLButtonElement>(null);
+    useFocusAcrossTakeover(isCameraOn && isFullscreen,
+        () => fullscreenExitRef.current,
+        () => selfViewMenuRef.current ?? cameraButtonRef.current);
+    // Turned off (full screen's Turn Off Camera, the menu's Turn off camera):
+    // the self-view that had the focus goes, and the camera button takes it.
+    useFocusAcrossTakeover(isCameraOn, () => null, () => cameraButtonRef.current);
     const [cameraMenu, setCameraMenu] = useState<{ at: { x: number; y: number }; opener: HTMLElement; fromKeyboard: boolean; from: CameraMenuOpener } | null>(null);
     const [cameraSwitching, setCameraSwitching] = useState(false);
     const cameraSwitchingRef = useRef(false);
@@ -2695,10 +2716,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         stopPendingTimer();
         document.querySelectorAll('[id^="audio-"]').forEach(el => el.remove());
 
-        // Clean up all voice activity detectors (incl. the -1 silence sentinel)
-        voiceDetectorCleanups.current.forEach(cleanup => cleanup());
-        voiceDetectorCleanups.current.clear();
-        clearSpeaking();
+        // Clean up all voice activity detectors (incl. the -1 silence
+        // sentinel), and every ring they lit.
+        stopSpeakingDetectors(voiceDetectorCleanups.current);
         setMicNotice(null);
         setDfOffer(null);
 
@@ -2815,9 +2835,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             if (onScreenShareStoppedRef.current) { wsClient.off('ScreenShareStopped', onScreenShareStoppedRef.current); onScreenShareStoppedRef.current = null; }
             if (onCameraStartedRef.current) { wsClient.off('CameraStarted', onCameraStartedRef.current); onCameraStartedRef.current = null; }
             if (onCameraStoppedRef.current) { wsClient.off('CameraStopped', onCameraStoppedRef.current); onCameraStoppedRef.current = null; }
-            // Tear down any remaining VAD detectors + their intervals.
-            vadCleanups.forEach(cleanup => cleanup());
-            vadCleanups.clear();
+            // Tear down any remaining VAD detectors + their intervals, and
+            // the rings they lit (a switch while talking left yours lit in
+            // the next channel, and streams ducked under it).
+            stopSpeakingDetectors(vadCleanups);
             // Unconditional, like the (removed) legacy unmount effect: a stale
             // currentStreamingUserId is remote control's final host-side gate
             // (remoteControl.ts handleIncomingInput) — leaving it set after a
@@ -3050,12 +3071,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             JSON.stringify([s.echoCancellation, s.noiseSuppression, s.autoGainControl, s.inputDeviceId]);
         audioConstraintSigRef.current = sigOf(loadSettings());
         dfTuningSigRef.current = loadSettings().deepFilterPostFilter;
+        let inputDevice = loadSettings().inputDeviceId;
         const onSettings = () => {
             const s = loadSettings();
             setVoiceInputMode(s.voiceInputMode ?? 'open');
             const sig = sigOf(s);
             const constraintsChanged = sig !== audioConstraintSigRef.current;
             audioConstraintSigRef.current = sig;
+            const deviceChanged = s.inputDeviceId !== inputDevice;
+            inputDevice = s.inputDeviceId;
             // deepFilterPostFilter is a DeepFilter-worker CONSTRUCTOR argument,
             // so flipping it needs the same graph re-acquire as a constraint
             // change — but ONLY while DeepFilter is the live mode. It is
@@ -3072,7 +3096,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // Gain needs a graph it doesn't have (was 1.0 at join in a native
             // mode, slider moved since).
             const gainNeedsGraph = inputGain() !== 1 && !hasLiveGainStage();
-            if (!isInVoiceRef.current || (!constraintsChanged && !dfTuningChanged && !gainNeedsGraph)) return;
+            // Listen-only: only a microphone picked (settingsMicReacquire.ts).
+            if (!settingsReacquireMic({
+                inVoice: isInVoiceRef.current,
+                listenOnly: webrtcManager.isListenOnly(),
+                deviceChanged, constraintsChanged, dfTuningChanged, gainNeedsGraph,
+            })) return;
             if (reacquireTimerRef.current) clearTimeout(reacquireTimerRef.current);
             reacquireTimerRef.current = setTimeout(() => {
                 reacquireTimerRef.current = null;
@@ -3310,7 +3339,17 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             try {
                 await sfuManager.replaceCameraTrack(live);
             } catch (err) {
+                // The swap failed AND publishing the new camera afresh failed
+                // (sfuManager.replaceCameraTrack): the call has no camera from
+                // us any more, though the panel, the server's announcement and
+                // our own tile all still said it was on. It was only logged.
+                // Off, all of it, and said: turned on again it is published
+                // afresh.
                 console.error('[VoicePanel] could not put the new camera on the SFU:', err);
+                if (!isInVoiceRef.current) return;
+                setError(CAMERA_NOT_SENT_NOTICE);
+                await setCameraEnabled(false).catch(e => console.error('Failed to stop camera:', e));
+                return;
             }
         }
         // Only while still on (voiceState.showOwnCamera): turned off, or the
@@ -3331,37 +3370,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const flipCamera = useCallback(() => applyCameraSwitch(() => webrtcManager.flipCamera()), [applyCameraSwitch]);
     const chooseCamera = useCallback((deviceId: string) => applyCameraSwitch(() => webrtcManager.switchCamera({ deviceId })), [applyCameraSwitch]);
 
-    /** The camera menu: every camera by name (the one on ticked), Flip, Full
-     *  screen and Turn off. */
-    const cameraMenuItems = (): ContextMenuItem[] => {
-        const cams = ownCamera.cameras;
-        const items: ContextMenuItem[] = cams.map(c => ({
-            id: `camera-${c.deviceId}`,
-            label: cameraDisplayName(c, cams),
-            checked: c.deviceId === ownCamera.deviceId,
-            testId: 'camera-option',
-            value: c.deviceId,
-            onClick: () => { if (c.deviceId !== ownCamera.deviceId) void chooseCamera(c.deviceId); },
-        }));
-        if (cams.length > 0) items.push({ id: 'camera-sep', label: '', separator: true });
-        if (canFlip(ownCamera)) {
-            items.push({ id: 'camera-flip', label: flipLabel(ownCamera), icon: 'flip-camera', testId: 'camera-menu-flip', onClick: () => { void flipCamera(); } });
-        }
-        if (!isFullscreen) {
-            items.push({ id: 'camera-fullscreen', label: 'Full screen', icon: 'fullscreen', onClick: () => setIsFullscreen(true) });
-        }
-        items.push({
-            id: 'camera-off',
-            label: 'Turn off camera',
-            icon: 'camera-off',
-            danger: true,
-            onClick: () => {
-                setIsFullscreen(false);
-                void setCameraEnabled(false).catch(err => console.error('Failed to stop camera:', err));
-            },
-        });
-        return items;
-    };
+    /** The camera menu (cameraMenuItems.ts): its cameras and Flip held back
+     *  while a switch is under way. */
+    const cameraMenuRows = (): ContextMenuItem[] => cameraMenuItems({
+        camera: ownCamera,
+        switching: cameraSwitching,
+        fullscreen: isFullscreen,
+        choose: (deviceId) => { void chooseCamera(deviceId); },
+        flip: () => { void flipCamera(); },
+        fullScreen: () => setIsFullscreen(true),
+        turnOff: () => {
+            setIsFullscreen(false);
+            void setCameraEnabled(false).catch(err => console.error('Failed to stop camera:', err));
+        },
+    });
 
     // Function to stop own screen sharing - callable from StreamStage via global callback.
     // Also the manager's onScreenShareEnded: the picture ending while a share is
@@ -3712,7 +3734,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             right-click diagnostics menu. */}
         {cameraMenu && isCameraOn && createPortal(
             <ContextMenu
-                items={cameraMenuItems()}
+                items={cameraMenuRows()}
                 position={cameraMenu.at}
                 onClose={closeCameraMenu}
                 opener={cameraMenu.opener}
@@ -3957,34 +3979,36 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 </button>
             ) : (
                 <>
-                    {/* Connection Info */}
-                    <div className="voice-connection-info" data-testid="voice-connected">
-                        <div className="voice-status-row">
-                            <span className="voice-connected-icon">{isAfkChannel ? <MoonIcon /> : <SignalIcon />}</span>
-                            <div className="voice-connection-text">
-                                <span className="voice-connected-label">{isAfkChannel ? 'AFK — mic disabled' : micOffByChoice ? 'Voice Connected · no microphone' : speakDenied ? "Voice Connected · can't speak" : listenOnly ? 'Voice Connected · listen-only' : 'Voice Connected'}</span>
-                                <span className="voice-channel-name">{channelName || roomId}</span>
-                            </div>
-                            {mediaSecure.total > 0 && (
-                                <span
-                                    className={`voice-e2ee ${e2eeBadge.cls}`}
-                                    ref={e2eeBadgeRef}
-                                    tabIndex={0}
-                                    role="button"
-                                    aria-label={`Media encryption: ${e2eeBadge.title}. Hover for details.`}
-                                    onMouseEnter={() => setE2eeTipOpen(true)}
-                                    onMouseLeave={() => setE2eeTipOpen(false)}
-                                    onFocus={() => setE2eeTipOpen(true)}
-                                    onBlur={() => setE2eeTipOpen(false)}
-                                >
-                                    {/* The phone's one-row bar shows this alone (VoicePanel.css). */}
-                                    <span className="voice-e2ee-lock" aria-hidden="true">{e2eeBadge.cls === 'on' ? <LockIcon size={14} /> : <LockOpenIcon size={14} />}</span>
-                                    <span className="voice-e2ee-label">{e2eeBadge.label}</span>
-                                    <span className="e2ee-info" aria-hidden="true"><InfoIcon /></span>
-                                </span>
-                            )}
-                        </div>
-                    </div>
+                    {/* Connection Info: "Connecting…" until the join is done
+                        (on an SFU channel, until LiveKit is connected), then
+                        "Voice Connected" (VoiceConnectionLine). */}
+                    <VoiceConnectionLine
+                        joining={isConnecting}
+                        isAfkChannel={isAfkChannel}
+                        micOffByChoice={micOffByChoice}
+                        speakDenied={speakDenied}
+                        listenOnly={listenOnly}
+                        channelName={channelName || roomId}
+                    >
+                        {mediaSecure.total > 0 && (
+                            <span
+                                className={`voice-e2ee ${e2eeBadge.cls}`}
+                                ref={e2eeBadgeRef}
+                                tabIndex={0}
+                                role="button"
+                                aria-label={`Media encryption: ${e2eeBadge.title}. Hover for details.`}
+                                onMouseEnter={() => setE2eeTipOpen(true)}
+                                onMouseLeave={() => setE2eeTipOpen(false)}
+                                onFocus={() => setE2eeTipOpen(true)}
+                                onBlur={() => setE2eeTipOpen(false)}
+                            >
+                                {/* The phone's one-row bar shows this alone (VoicePanel.css). */}
+                                <span className="voice-e2ee-lock" aria-hidden="true">{e2eeBadge.cls === 'on' ? <LockIcon size={14} /> : <LockOpenIcon size={14} />}</span>
+                                <span className="voice-e2ee-label">{e2eeBadge.label}</span>
+                                <span className="e2ee-info" aria-hidden="true"><InfoIcon /></span>
+                            </span>
+                        )}
+                    </VoiceConnectionLine>
 
                     {/* Compact Controls */}
                     <div className="voice-controls-compact">
@@ -4051,6 +4075,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             )}
                         </select>
                         <button
+                            ref={cameraButtonRef}
                             className={`voice-btn vp-camera ${isCameraOn ? 'active' : ''}`}
                             onClick={async () => {
                                 try {
@@ -4261,6 +4286,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             />
                             <span className="camera-label">You (Camera)</span>
                             <button
+                                ref={selfViewMenuRef}
                                 type="button"
                                 className="pip-open-menu"
                                 data-testid="camera-self-view-menu"
@@ -4327,6 +4353,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     </button>
                                 )}
                                 <button
+                                    ref={fullscreenExitRef}
                                     className="fullscreen-btn exit-btn"
                                     onClick={() => setIsFullscreen(false)}
                                 >

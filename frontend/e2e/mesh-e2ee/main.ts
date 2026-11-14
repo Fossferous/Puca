@@ -47,8 +47,10 @@ function sink(stream: MediaStream, kind: 'audio' | 'video'): HTMLMediaElement {
     void el.play().catch(() => { /* autoplay is allowed by the runner */ });
     return el;
 }
-/** Each peer's camera, as this page shows it. */
+/** Each peer's camera, as this page shows it (the last one handed over). */
 const cameras = new Map<number, HTMLVideoElement>();
+/** How many times each peer's camera was handed over (onCameraStream). */
+const cameraDeliveries = new Map<number, number>();
 
 const unhex = (h: string) => new Uint8Array(h.match(/../g)!.map((b) => parseInt(b, 16)));
 
@@ -103,7 +105,10 @@ const harness = {
         mgr.setRequireMediaE2ee(opts.required);
         await (mgr.media as unknown as MediaManager).startTone(opts.tone, opts.camera !== false);
         mgr.setOnRemoteStream((uid, s) => { voices.set(uid, s); sink(s, 'audio'); });
-        mgr.setOnCameraStream((uid, s) => { cameras.set(uid, sink(s, 'video') as HTMLVideoElement); });
+        mgr.setOnCameraStream((uid, s) => {
+            cameras.set(uid, sink(s, 'video') as HTMLVideoElement);
+            cameraDeliveries.set(uid, (cameraDeliveries.get(uid) ?? 0) + 1);
+        });
         mgr.setPeerCamera(peerId, true); // the server's announcement (B7)
     },
 
@@ -111,9 +116,46 @@ const harness = {
         await mgr!.callUser(peerId);
     },
 
-    /** Turn the camera on mid-call, the way the app's camera button does. */
-    cameraOn(): void {
-        mgr!.publishCameraTrack((mgr!.media as unknown as MediaManager).addCamera());
+    /** Turn the camera on mid-call, the way the app's camera button does
+     *  (of one `colour`, if given). */
+    cameraOn(colour?: string): void {
+        mgr!.publishCameraTrack((mgr!.media as unknown as MediaManager).addCamera(colour));
+    },
+
+    /** The camera off and on the way 0.9.862 and older did it: off stopped
+     *  the track and left it on its sender (no renegotiation), on ADDED a
+     *  second sender in the same stream. The viewer half of the fix is for
+     *  peers that still do. */
+    async legacyCameraOff(): Promise<void> { await (mgr!.media as unknown as MediaManager).toggleVideo(false); },
+    legacyCameraOn(colour: string): void {
+        const media = mgr!.media as unknown as MediaManager;
+        const track = media.addCamera(colour);
+        const local = media.getLocalStreamSync()!;
+        const peers = (mgr as unknown as { peers: Map<number, PeerView> }).peers;
+        const wire = (mgr as unknown as { wireSender: (u: number, s: RTCRtpSender) => void }).wireSender.bind(mgr);
+        for (const [uid, p] of peers) wire(uid, p.connection.addTrack(track, local));
+    },
+
+    /** How many times a peer's camera was handed over to be shown. */
+    cameraDeliveries: (id: number) => cameraDeliveries.get(id) ?? 0,
+
+    /** This page's video transceivers toward a peer (one m-line each). */
+    videoTransceivers: (id: number) => peer(id).connection.getTransceivers().filter((t) => t.receiver.track.kind === 'video').length,
+
+    /** The peer's camera picture shown here now, as its mean colour [r, g, b]
+     *  (0-255), or null before it has a frame. */
+    pictureColour(id: number): [number, number, number] | null {
+        const v = cameras.get(id);
+        if (!v || v.videoWidth === 0) return null;
+        const c = document.createElement('canvas');
+        c.width = 32; c.height = 24;
+        const g = c.getContext('2d', { willReadFrequently: true })!;
+        g.drawImage(v, 0, 0, 32, 24);
+        const d = g.getImageData(0, 0, 32, 24).data;
+        const sum = [0, 0, 0];
+        for (let i = 0; i < d.length; i += 4) { sum[0] += d[i]; sum[1] += d[i + 1]; sum[2] += d[i + 2]; }
+        const n = d.length / 4;
+        return [Math.round(sum[0] / n), Math.round(sum[1] / n), Math.round(sum[2] / n)];
     },
 
     status: (id: number) => mgr?.mediaE2eeStatus(id) ?? null,

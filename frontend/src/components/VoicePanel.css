@@ -95,6 +95,13 @@
     letter-spacing: 0.3px;
 }
 
+/* Still connecting (VoiceConnectionLine): not the green of a connected call,
+   which the phone's one-row bar shows by its icon alone. */
+.voice-connection-info.voice-connecting .voice-connected-icon,
+.voice-connection-info.voice-connecting .voice-connected-label {
+    color: var(--text-muted);
+}
+
 .voice-channel-name {
     font-size: 0.7rem;
     color: var(--text-muted);

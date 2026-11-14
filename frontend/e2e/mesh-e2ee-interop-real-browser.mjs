@@ -503,6 +503,75 @@ await run('camera-mid-call', async () => {
     }
 });
 
+await run('camera-off-on', async () => {
+    // A camera turned OFF and ON again (the owner's emulator walk, OFF_ON=1:
+    // the other side's tile stayed frozen or black). It used to go back on
+    // a SECOND sender in the same stream, the stopped one first, and the
+    // viewer played the first. Each camera here is one colour, so "the new
+    // camera is shown" is read off the picture: red, then off, then green.
+    // Both ways (Edge's camera to Firefox, Firefox's to Edge), then a peer
+    // that turns it on the old way (a second sender) for the viewer's half.
+    const tag = `[${cr.name} <-> ${ff.name}, a camera turned off and on again]`;
+    const p = await pair({ a: cr, b: ff });
+    const dominant = (c, ch) => !!c && c[ch] >= 90 && c[ch] > c[(ch + 1) % 3] + 50 && c[ch] > c[(ch + 2) % 3] + 50;
+    /** Until `viewer` shows `from`'s camera in colour channel `ch` (0 r, 1 g, 2 b) for 3 looks running. */
+    const shows = async (viewer, from, ch, ms = 15_000) => {
+        const end = Date.now() + ms;
+        let run = 0, last = null;
+        while (Date.now() < end) {
+            last = await viewer.evaluate((id) => window.harness.pictureColour(id), from);
+            run = dominant(last, ch) ? run + 1 : 0;
+            if (run >= 3) return { ok: true, last };
+            await sleep(250);
+        }
+        return { ok: false, last };
+    };
+    try {
+        await enterCall(p, { camera: false });
+        const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways`, JSON.stringify([s1?.reason, s2?.reason]));
+        for (const [from, viewer, name, other] of [[1, 2, cr.name, ff.name], [2, 1, ff.name, cr.name]]) {
+            const fromPage = p.pages[from], viewerPage = p.pages[viewer];
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+            const red = await shows(viewerPage, from, 0);
+            ck(red.ok, `${tag} ${other} shows ${name}'s camera (red)`, JSON.stringify(red.last));
+            const lines = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            const handed = await viewerPage.evaluate((id) => window.harness.cameraDeliveries(id), from);
+            await fromPage.evaluate(() => window.harness.stopCamera());
+            await sleep(2000);
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(0, 200, 0)'));
+            const green = await shows(viewerPage, from, 1);
+            ck(green.ok, `${tag} THE BUG: turned off and on, ${other} shows ${name}'s NEW camera (green), not the old one frozen or black`, JSON.stringify(green.last));
+            ck(await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer) === lines,
+                `${tag} ${name}'s camera went back on its own sender: no second video transceiver`, `before ${lines}`);
+            ck(await viewerPage.evaluate((id) => window.harness.cameraDeliveries(id), from) > handed,
+                `${tag} ${other} was handed the camera again (ontrack: the tile that went with it comes back in the app)`);
+            await fromPage.evaluate(() => window.harness.stopCamera());
+            await sleep(1500);
+        }
+        const st = [await statusOf(p.pages[1], 2), await statusOf(p.pages[2], 1)];
+        ck(st.every((x) => x?.encrypted), `${tag} still encrypted both ways`, JSON.stringify(st.map((x) => x?.reason)));
+        await bothHear(p, tag, 'each still hears the other (the voice stream lost and regained a video track)');
+        const refused = [1, 2].flatMap((uid) => p.logs[uid].filter((l) => /setRemoteDescription\(|Failed to parse|rejects the offer|rebuilding/i.test(l)));
+        ck(refused.length === 0, `${tag} no description was refused and nothing was rebuilt`, refused.slice(0, 2).join(' / '));
+        // A peer on 0.9.862 or older: off leaves the stopped track on its
+        // sender, on ADDS another in the same stream (the dead one first).
+        const before = await p.pages[1].evaluate((id) => window.harness.videoTransceivers(id), 2);
+        await p.pages[1].evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+        ck((await shows(p.pages[2], 1, 0)).ok, `${tag} precondition: Firefox shows Edge's red camera`);
+        await p.pages[1].evaluate(() => window.harness.legacyCameraOff());
+        await sleep(1500);
+        await p.pages[1].evaluate(() => window.harness.legacyCameraOn('rgb(0, 0, 230)'));
+        const legacyLines = await (async () => { await sleep(3000); return p.pages[1].evaluate((id) => window.harness.videoTransceivers(id), 2); })();
+        ck(legacyLines > before, `${tag} precondition: the old way added a second video transceiver`, `${before} -> ${legacyLines}`);
+        const blue = await shows(p.pages[2], 1, 2);
+        ck(blue.ok, `${tag} a peer that turned its camera on the OLD way: Firefox shows its live camera (blue), not the dead first track`, JSON.stringify(blue.last));
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
 await run('glare-then-renegotiate', async () => {
     // Both offer at once, cameras on, and Firefox is the polite one (user 2):
     // it rolls its own offer back and applies Edge's, which takes over the
