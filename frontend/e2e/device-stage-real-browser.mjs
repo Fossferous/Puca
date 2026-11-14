@@ -82,9 +82,10 @@ const browser = await chromium.launch({ channel: 'msedge', headless: true, args:
 /** `knobs`: the stand-in host's knobs from its very first hand-over (an
  *  agent too old to send shapes, say) — fakeSession.ts reads them at load.
  *  `monitors`: another desk for the stand-in host (fakeSession.ts's
- *  MONITORS); `storage`: the stage's remembered settings, set before load. */
-async function open(knobs = null, { monitors = null, storage = null } = {}) {
-    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+ *  MONITORS); `storage`: the stage's remembered settings, set before load;
+ *  `viewport`: another phone shape (a phone turned sideways, say). */
+async function open(knobs = null, { monitors = null, storage = null, viewport = { width: 390, height: 844 } } = {}) {
+    const ctx = await browser.newContext({ viewport, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     page.on('pageerror', e => { fail++; console.log('[pageerror]', String(e).slice(0, 300)); });
     if (knobs) await page.addInitScript(k => { window.__stageKnobsInit = k; }, knobs);
@@ -123,7 +124,7 @@ async function open(knobs = null, { monitors = null, storage = null } = {}) {
         await touch('touchEnd', []);
     };
     const focused = () => page.evaluate(() => document.activeElement?.className || document.activeElement?.tagName);
-    return { ctx, page, tap, drag, pinch, pan2, focused };
+    return { ctx, page, cdp, tap, drag, pinch, pan2, focused };
 }
 
 /** The stage's "<PC> runs an older Púca" line, measured where it is drawn. */
@@ -462,6 +463,7 @@ const hopChip = (page, dir) => page.evaluate(dir => {
     return {
         x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height,
         left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+        shift: Number(b.dataset.hopShift) || 0,
         surf: { left: s.left, right: s.right, top: s.top, bottom: s.bottom },
         W: document.documentElement.clientWidth, H: document.documentElement.clientHeight,
         hitCentre: mine(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)),
@@ -527,8 +529,10 @@ async function hopPainted(page, dir) {
     }, { shots: [shown, again, hidden].map(b => b.toString('base64')), dpr: 3 });
 }
 
-/** Every check a chip on the touch layout must pass, in `dir`'s place. */
-async function checkHopChip(page, dir, label) {
+/** Every check a chip on the touch layout must pass, in `dir`'s place.
+ *  `slid`: it should have slid along its edge out from under a floating
+ *  control (otherwise it should be centred on it). */
+async function checkHopChip(page, dir, label, slid = false) {
     const c = await hopChip(page, dir);
     ck(`hop ${dir}: a chip is offered toward ${label}`, !!c);
     if (!c) return null;
@@ -548,14 +552,14 @@ async function checkHopChip(page, dir, label) {
         `centre ${c.hitCentre}, corners ${c.hitCorners}`);
     ck(`hop ${dir}: …clear of the mouse pad and the toolbar`, c.overlaps.length === 0, c.overlaps.join(', ') || 'clear');
     const cx = (c.surf.left + c.surf.right) / 2, cy = (c.surf.top + c.surf.bottom) / 2;
-    const placed = {
-        left: c.left - c.surf.left <= 12 && Math.abs(c.y - cy) <= 1,
-        right: c.surf.right - c.right <= 12 && Math.abs(c.y - cy) <= 1,
-        up: c.top - c.surf.top <= 12 && Math.abs(c.x - cx) <= 1,
-        down: c.surf.bottom - c.bottom <= 12 && Math.abs(c.x - cx) <= 1,
+    const onEdge = {
+        left: c.left - c.surf.left <= 12, right: c.surf.right - c.right <= 12,
+        up: c.top - c.surf.top <= 12, down: c.surf.bottom - c.bottom <= 12,
     }[dir];
-    ck(`hop ${dir}: …on its own edge of the picture, centred along it`, placed,
-        `target ${Math.round(c.left)}..${Math.round(c.right)} x ${Math.round(c.top)}..${Math.round(c.bottom)} in ${Math.round(c.surf.left)}..${Math.round(c.surf.right)} x ${Math.round(c.surf.top)}..${Math.round(c.surf.bottom)}`);
+    const along = dir === 'left' || dir === 'right' ? c.y - cy : c.x - cx;
+    const placed = onEdge && Math.abs(along - c.shift) <= 1 && (slid ? c.shift !== 0 : c.shift === 0);
+    ck(`hop ${dir}: …on its own edge of the picture, ${slid ? 'slid along it out from under a control' : 'centred along it'}`, placed,
+        `target ${Math.round(c.left)}..${Math.round(c.right)} x ${Math.round(c.top)}..${Math.round(c.bottom)} in ${Math.round(c.surf.left)}..${Math.round(c.surf.right)} x ${Math.round(c.surf.top)}..${Math.round(c.surf.bottom)}, ${Math.round(along)} px off centre, shift ${c.shift}`);
     // The arrow points the way it goes: up and down have their own chevrons,
     // left is the right chevron turned round.
     const arrow = {
@@ -570,27 +574,34 @@ async function checkHopChip(page, dir, label) {
     return c;
 }
 
-/** Zoomed into the main display (trackpad mode, a phone's default), then
- *  taken to a corner of it, two ways a person does:
- *   - 'pan': two fingers pull the picture toward the top-left. In the upper
- *     half: the mouse pad's default places are lower down, and a finger on
- *     one leaves a one-finger drag that moves the pointer instead.
+/** Zoomed into the main display (trackpad mode, a phone's default), the
+ *  mouse pad shown, then taken to a corner of it, two ways a person does:
+ *   - 'pan': two fingers pull the picture toward the top-left, clear of the
+ *     pad's clusters (a finger on one leaves a one-finger drag, which moves
+ *     the pointer instead).
  *   - 'pointer': one finger walks the pointer to the bottom-right and the
  *     camera follows it (follow-cursor, on by default). Not two fingers
  *     there: a two-finger pan settles short of the right and bottom edges
  *     (the stage clamps between the two fingers' separate pointer moves, a
- *     transient zoom), so it never reaches the far edges' offers. */
-async function hopStage(route) {
-    const o = await open(null, { monitors: HOP_DESK, storage: { 'device-stage-virtual-mouse': 'on' } });
+ *     transient zoom), so it never reaches the far edges' offers.
+ *  `sideways`: a phone turned sideways (844x390), with a pinned key too — the
+ *  shape where the pad's default places cover the middle of both side edges. */
+async function hopStage(route, sideways = false) {
+    const storage = { 'device-stage-virtual-mouse': 'on' };
+    if (sideways) storage['device-stage-pinned-keys'] = JSON.stringify([{ id: 'hoppin', code: 'F5', mods: [] }]);
+    const o = await open(null, { monitors: HOP_DESK, storage, viewport: sideways ? { width: 844, height: 390 } : { width: 390, height: 844 } });
     await o.page.evaluate(() => window.__stage.setActive(0));
     await o.page.waitForTimeout(1500);
     const s = await o.page.evaluate(() => { const r = document.querySelector('.device-stage-surface').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
     const fitted = await o.page.locator('.device-stage-hop').count();
     await o.pinch(s, 60, 360);
     await o.page.waitForTimeout(400);
+    const zoom = await o.page.evaluate(() => window.__stage.transform()?.scale ?? 0);
+    ck('precondition: the pinch zoomed in (x4 or more)', zoom >= 4, `x${zoom}`);
     await o.page.evaluate(() => { window.__stage.inputs.length = 0; });
-    for (let i = 0; i < 6; i++) {
-        if (route === 'pan') await o.pan2({ x: s.x - 125, y: 150 }, 250, 300);
+    for (let i = 0; i < (sideways ? 8 : 6); i++) {
+        if (route === 'pan') await o.pan2({ x: s.x - 125, y: sideways ? 40 : 150 }, 250, sideways ? 200 : 300);
+        else if (sideways) await o.drag({ x: 300, y: 60 }, { x: 600, y: 250 }, 12);
         else await o.drag({ x: 100, y: 200 }, { x: 330, y: 420 }, 12);
         await o.page.waitForTimeout(300);
     }
@@ -601,9 +612,82 @@ async function hopStage(route) {
     return { ...o, fitted };
 }
 
+/** A chip pressed, then really tapped.
+ *  PRESSED: it stays put and unfaded (mobile.css's `button:active` transform
+ *  once replaced its centring and slid it 22 px under the finger). The press
+ *  state is FORCED through DevTools (CSS.forcePseudoState): a CDP touch held
+ *  down never turns :active on in headless Chromium, so a held finger could
+ *  not show it; that the press styles did apply is the precondition (the
+ *  disc darkens).
+ *  TAPPED (a real touch): no focus taken from a field being typed into,
+ *  the screen it names shown, nothing pressed over there. */
+async function hopPress(o, dir, monitorId, name) {
+    const { page, cdp, tap } = o;
+    const before = await hopChip(page, dir);
+    if (!before) return;
+    await cdp.send('DOM.enable');
+    await cdp.send('CSS.enable');
+    const { root } = await cdp.send('DOM.getDocument');
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: `.device-stage-hop-${dir}` });
+    await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['active'] });
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const pressed = await page.evaluate(dir => {
+        const b = document.querySelector(`.device-stage-hop-${dir}`);
+        const r = b.getBoundingClientRect();
+        const disc = getComputedStyle(b.querySelector('.device-stage-hop-icon')).backgroundColor;
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2, opacity: getComputedStyle(b).opacity, disc };
+    }, dir);
+    await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] });
+    ck(`hop ${dir}: precondition: the press styles apply when pressed (the disc darkens)`, pressed.disc === 'rgba(0, 0, 0, 0.8)', pressed.disc);
+    ck(`hop ${dir}: …pressed, it stays where it is and does not fade`,
+        Math.hypot(pressed.x - before.x, pressed.y - before.y) < 0.5 && pressed.opacity === '1',
+        `moved ${Math.hypot(pressed.x - before.x, pressed.y - before.y).toFixed(1)} px, opacity ${pressed.opacity}`);
+
+    await page.evaluate(() => {
+        const i = document.createElement('input');
+        i.id = 'hop-focus-probe';
+        i.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
+        document.body.appendChild(i);
+        i.focus();
+    });
+    await page.evaluate(() => { window.__stage.inputs.length = 0; });
+    const asked = await page.evaluate(() => window.__stage.monitorRequests.length);
+    await tap({ x: before.x, y: before.y });
+    await page.waitForTimeout(100);
+    const focus = await page.evaluate(() => document.activeElement?.id || document.activeElement?.className || document.activeElement?.tagName);
+    ck(`hop ${dir}: a real tap on it takes no focus from the field being typed into`, focus === 'hop-focus-probe', `focus on ${focus}`);
+    await page.waitForTimeout(1200);
+    const r = await page.evaluate(n => ({
+        asked: window.__stage.monitorRequests.slice(n).map(q => q.monitor),
+        active: window.__stage.state.activeMonitor,
+        sent: window.__stage.inputs.map(e => e.t),
+    }), asked);
+    ck(`…and switches to the ${name}`, r.asked.join(',') === String(monitorId) && r.active === monitorId,
+        `asked for ${r.asked.join(',') || 'nothing'}, now on ${r.active}`);
+    // The one move the trackpad mode may send is the stage carrying its
+    // pointer across the seam AFTER the host confirmed (vitest pins it);
+    // nothing the tap itself made may reach the far side.
+    ck('…and presses nothing on the far side', r.sent.filter(t => t !== 'move').length === 0 && r.sent.filter(t => t === 'move').length <= 1,
+        r.sent.join(',') || 'nothing sent');
+}
+
+/** CONTROL for the sideways runs: at its centred spot the chip WOULD be under
+ *  one of the pad's clusters — what a tap there hits is the cluster. */
+const coveredAtCentre = (page, dir) => page.evaluate(dir => {
+    const b = document.querySelector(`.device-stage-hop-${dir}`);
+    const shift = Number(b?.dataset.hopShift) || 0;
+    if (!b || !shift) return null;
+    const r = b.getBoundingClientRect();
+    const sideways = dir === 'left' || dir === 'right';
+    const x = r.left + r.width / 2 - (sideways ? 0 : shift);
+    const y = r.top + r.height / 2 - (sideways ? shift : 0);
+    return document.elementFromPoint(x, y)?.closest('.device-stage-virtual-mouse')?.className ?? null;
+}, dir);
+
 {
     // Toward the top-left: two fingers carry the picture right and down.
-    const { ctx, page, tap, fitted } = await hopStage('pan');
+    const o = await hopStage('pan');
+    const { ctx, page, tap, fitted } = o;
     ck('CONTROL: a fitted view offers no hop', fitted === 0, `${fitted} chips`);
     const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.className));
     ck('precondition: panned into the top-left corner, the left and up hops are offered', dirs.length === 2, dirs.join(' | '));
@@ -644,49 +728,48 @@ async function hopStage(route) {
     const onPicture = await page.evaluate(() => window.__stage.inputs.map(e => e.t));
     ck('POSITIVE CONTROL: a real tap on the picture presses on the far side', onPicture.includes('down'), onPicture.join(',') || 'nothing');
 
-    if (left) {
-        await page.evaluate(() => { window.__stage.inputs.length = 0; });
-        const asked = await page.evaluate(() => window.__stage.monitorRequests.length);
-        await tap({ x: left.x, y: left.y });
-        await page.waitForTimeout(1200);
-        const r = await page.evaluate(n => ({
-            asked: window.__stage.monitorRequests.slice(n).map(q => q.monitor),
-            active: window.__stage.state.activeMonitor,
-            sent: window.__stage.inputs.map(e => e.t),
-        }), asked);
-        ck('a real tap on the left chip switches to the left screen', r.asked.join(',') === '1' && r.active === 1,
-            `asked for ${r.asked.join(',') || 'nothing'}, now on ${r.active}`);
-        // The one move the trackpad mode may send is the stage carrying its
-        // pointer across the seam AFTER the host confirmed (vitest pins it);
-        // nothing the tap's own contact made may reach the far side.
-        ck('…and presses nothing on the far side', r.sent.filter(t => t !== 'move').length === 0 && r.sent.filter(t => t === 'move').length <= 1,
-            r.sent.join(',') || 'nothing sent');
-    }
+    if (left) await hopPress(o, 'left', 1, 'left screen');
     await ctx.close();
 }
 {
     // Toward the bottom-right: the pointer walked there, the camera after it.
-    const { ctx, page, tap } = await hopStage('pointer');
+    const o = await hopStage('pointer');
+    const { ctx, page } = o;
     const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.className));
     ck('precondition: following the pointer into the bottom-right corner, the right and down hops are offered', dirs.length === 2, dirs.join(' | '));
     await checkHopChip(page, 'right', 'Right display (2560x1440)');
     const down = await checkHopChip(page, 'down', 'Bottom display (2560x1440)');
     await page.screenshot({ path: join(outdir, 'phone-hop-right-down.png') });
-    if (down) {
-        await page.evaluate(() => { window.__stage.inputs.length = 0; });
-        const asked = await page.evaluate(() => window.__stage.monitorRequests.length);
-        await tap({ x: down.x, y: down.y });
-        await page.waitForTimeout(1200);
-        const r = await page.evaluate(n => ({
-            asked: window.__stage.monitorRequests.slice(n).map(q => q.monitor),
-            active: window.__stage.state.activeMonitor,
-            sent: window.__stage.inputs.map(e => e.t),
-        }), asked);
-        ck('a real tap on the bottom chip (beside the toolbar) switches to the bottom screen', r.asked.join(',') === '4' && r.active === 4,
-            `asked for ${r.asked.join(',') || 'nothing'}, now on ${r.active}`);
-        ck('…and presses nothing on the far side', r.sent.filter(t => t !== 'move').length === 0 && r.sent.filter(t => t === 'move').length <= 1,
-            r.sent.join(',') || 'nothing sent');
-    }
+    if (down) await hopPress(o, 'down', 4, 'bottom screen (beside the toolbar)');
+    await ctx.close();
+}
+// SIDEWAYS (844x390), the pad at its default places and a pinned key: the
+// L/M/R row covers the middle of the left edge and the scroll column the
+// middle of the right one, so each side chip must slide out from under them.
+{
+    const o = await hopStage('pan', true);
+    const { ctx, page } = o;
+    const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.className));
+    ck('sideways: precondition: panned into the top-left corner, the left and up hops are offered', dirs.length === 2, dirs.join(' | '));
+    const under = await coveredAtCentre(page, 'left');
+    ck('sideways: CONTROL: at its centred spot the left chip would be under the mouse pad', !!under, under ?? 'not covered (or not slid)');
+    await checkHopChip(page, 'left', 'Left display (2560x1440)', true);
+    await checkHopChip(page, 'up', 'Top display (2560x1440)');
+    await page.screenshot({ path: join(outdir, 'phone-sideways-hop-left-up.png') });
+    await hopPress(o, 'left', 1, 'left screen');
+    await ctx.close();
+}
+{
+    const o = await hopStage('pointer', true);
+    const { ctx, page } = o;
+    const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.className));
+    ck('sideways: precondition: following the pointer into the bottom-right corner, the right and down hops are offered', dirs.length === 2, dirs.join(' | '));
+    const under = await coveredAtCentre(page, 'right');
+    ck('sideways: CONTROL: at its centred spot the right chip would be under the scroll column', !!under, under ?? 'not covered (or not slid)');
+    await checkHopChip(page, 'right', 'Right display (2560x1440)', true);
+    await checkHopChip(page, 'down', 'Bottom display (2560x1440)');
+    await page.screenshot({ path: join(outdir, 'phone-sideways-hop-right-down.png') });
+    await hopPress(o, 'right', 2, 'right screen');
     await ctx.close();
 }
 

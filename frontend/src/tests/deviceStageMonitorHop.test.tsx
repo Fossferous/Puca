@@ -227,6 +227,33 @@ describe('the monitor-hop offer', () => {
         ).toEqual([]);
     });
 
+    it('POSITIVE CONTROL (touch layout): the same touch on the PICTURE does press on the remote machine', async () => {
+        // The touch layout routes a press through the trackpad's gesture
+        // machine, not the desktop path the control above exercises; without
+        // this, "nothing sent" above could mean the path sends nothing at all.
+        window.matchMedia = ((q: string) => ({
+            matches: q === '(pointer: coarse)', media: q, onchange: null,
+            addEventListener() { /* noop */ }, removeEventListener() { /* noop */ },
+            addListener() { /* noop */ }, removeListener() { /* noop */ }, dispatchEvent() { return false; },
+        })) as unknown as typeof window.matchMedia;
+        await mount(1);
+        await zoomToEdge('left');
+        expect(chips()[0]?.classList.contains('device-stage-hop-compact'), 'precondition: the touch layout').toBe(true);
+        h.sendInput.mockClear();
+        await act(async () => {
+            for (const type of ['pointerdown', 'pointerup'] as const) {
+                surface().dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, cancelable: true, pointerId: 1, pointerType: 'touch', clientX: 400, clientY: 300,
+                }));
+            }
+        });
+        await act(async () => { await new Promise(r => setTimeout(r, 400)); });
+        expect(
+            h.sendInput.mock.calls.map(c => (c[1] as { t?: string })?.t),
+            'if this is empty the touch-layout arrow test above proves nothing',
+        ).toContain('down');
+    });
+
     it('the offer does NOTHING until it is tapped — the whole point', async () => {
         await mount(1);
         await zoomToEdge('left');
