@@ -102,8 +102,10 @@ updates:
 
   # --- The workflows themselves ---------------------------------------------
   # Every action in .github/workflows is pinned to a commit SHA, which is the
-  # right call and also means a pinned action never updates on its own. This is
-  # what stops those pins from silently rotting.
+  # right call and also means a pinned action never updates on its own. With
+  # open-pull-requests-limit: 0 this entry no longer bumps them either, and
+  # GitHub raises no alert for an action pinned by SHA, so the pins are updated
+  # only by hand.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

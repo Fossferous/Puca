@@ -6,7 +6,7 @@
  * The owner's rule: nothing a session runs plays audio on this machine. Playwright mutes a
  * HEADLESS Chromium by itself and nothing else: a headed or PWDEBUG run, Firefox and WebKit
  * get no mute unless the script asks. Before the check, 36 Chromium launches relied on that
- * default and two WebKit launches had nothing.
+ * default and six WebKit launches had nothing.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -115,6 +115,28 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'spoken-assigned.mjs': 's.voiceTTS = true;',
             'toasts.mjs': "const b = await chromium.launch({ args: ['--mute-audio'] });\nawait (await b.newContext()).grantPermissions(['notifications']);",
             'toasts-named.mjs': "const PERMS = ['notifications'];\nconst b = await chromium.launch({ args: ['--mute-audio'] });\nawait (await b.newContext()).grantPermissions(PERMS);",
+            // Chromium keeps only the LAST --disable-features=, so a second one turns toasts back on.
+            'toasts-overridden.mjs': "const b = await chromium.launch({ args: ['--mute-audio', '--disable-features=NativeNotifications,SystemNotifications', '--disable-features=WebRtcHideLocalIpsWithMdns'] });\nawait (await b.newContext()).grantPermissions(['notifications']);",
+            'toasts-pushed.mjs': "const args = ['--mute-audio', '--disable-features=NativeNotifications'];\nargs.push('--disable-features=Translate');\nconst b = await chromium.launch({ args });\nawait (await b.newContext()).grantPermissions(['notifications']);",
+            // Adding to ignoreDefaultArgs is how the flag is lost.
+            'ignore-grown.mjs': "const ignore = []; ignore.push('--mute-audio');\nconst b = await chromium.launch({ args: ['--mute-audio'], ignoreDefaultArgs: ignore });",
+            'ignore-grown-inside.mjs': "const opts = { args: ['--mute-audio'], ignoreDefaultArgs: [] }; opts.ignoreDefaultArgs.push('--mute-audio');\nconst b = await chromium.launch(opts);",
+            // A path that gives nothing back.
+            'falls-through.mjs': "function opts() { if (process.env.MUTE !== '0') return { args: ['--mute-audio'] }; }\nconst b = await chromium.launch(opts());",
+            // Which browser it is goes by what was imported, not by the name.
+            'renamed.mjs': "import { firefox as chromium } from '@playwright/test';\nconst b = await chromium.launch({ args: ['--mute-audio'] });",
+            'local-engine.mjs': "const chromium = globalThis.firefoxLike;\nconst b = await chromium.launch({ args: ['--mute-audio'] });",
+            'through-object.mjs': "import { firefox } from '@playwright/test';\nconst pw = { chromium: firefox };\nconst b = await pw.chromium.launch({ args: ['--mute-audio'] });",
+            'nested-destructure.mjs': "const { chromium: { launch } } = await import('playwright');\nconst b = await launch();",
+            'webkit-stand-in.mjs': `${IMPORT_MUTE}async function go() { const muteWebkit = (b) => b; return muteWebkit(await webkit.launch()); }`,
+            'webkit-other-helper.mjs': "import { muteWebkit } from './lib/muted.mjs';\nconst w = muteWebkit(await webkit.launch());",
+            // Playwright Test, switched to a browser launchOptions' flag does not reach.
+            'iphone.spec.ts': "import { test, devices } from '@playwright/test';\ntest.use({ ...devices['iPhone 13'] });\ntest('x', async () => {});",
+            'webkit.spec.ts': "import { test } from '@playwright/test';\ntest.use({ browserName: 'webkit' });",
+            'config-default-browser.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'w', use: { defaultBrowserType: 'webkit' } }] });",
+            // The spoken join/leave reached another way.
+            'spoken-setting.mjs': "await page.evaluate(() => store.updateSetting('voiceTTS', true));",
+            'spoken-checkbox.mjs': "await page.getByLabel('Speak Join/Leave (TTS)').check();",
         };
         const { named, status, output } = flagged(bad);
         expect(status, output).toBe(1);
@@ -142,6 +164,11 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'spread-then-said.mjs': "export const go = (opts) => chromium.launch({ ...opts, args: ['--mute-audio'], ignoreDefaultArgs: false });",
             'config-chrome.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'c', use: { ...devices['Desktop Chrome'], browserName: 'chromium' } }] });",
             'webview2-assigned.mjs': "process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222 --mute-audio';",
+            'imported.mjs': "import { chromium, firefox } from '@playwright/test';\nawait chromium.launch({ args: ['--mute-audio'] }); await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': '0.0' } });",
+            'required.mjs': "const { chromium } = require('@playwright/test');\nawait chromium.launch({ args: ['--mute-audio'] });",
+            'both-branches-return.mjs': "function opts(x) { if (x) { return { args: ['--mute-audio', '--x'] }; } else { return { args: ['--mute-audio'] }; } }\nawait chromium.launch(opts(1));",
+            'config-pixel.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'p', use: { ...devices['Pixel 5'] } }] });",
+            'toasts-one-switch.mjs': "const args = ['--mute-audio', '--disable-features=NativeNotifications,WebRtcHideLocalIpsWithMdns'];\nconst b = await chromium.launch({ args });\nawait (await b.newContext()).grantPermissions(['notifications']);",
             'webkit.mjs': `${IMPORT_MUTE}let w;\ntry { w = muteWebkit(await webkit.launch()); } catch { w = null; }\nconst x = muteWebkit(await webkit.launch({ headless: true }));`,
             'config.ts': "export default { use: { launchOptions: { args: ['--mute-audio', '--use-fake-ui-for-media-stream'] } } };",
             'webview2.mjs': "spawn(exe, [], { env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT} --mute-audio` } });",
@@ -205,7 +232,7 @@ describe('e2e/muted.mjs: WebKit, muted', () => {
     });
 
     it('play() mutes first, and still plays', async () => {
-        const el = new Audio();
+        const el = document.createElement('audio');
         expect(isMuted(el)).toBe(false);
         await el.play();
         expect(played).toContain(el);
@@ -241,6 +268,19 @@ describe('e2e/muted.mjs: WebKit, muted', () => {
         const div = document.createElement('div');
         div.setAttribute('data-x', '1');
         expect(div.getAttribute('data-x')).toBe('1');
+    });
+
+    it('new Audio(url) and toggleAttribute are muted first, and Audio is still the constructor', () => {
+        const a = new Audio('data:audio/wav;base64,');
+        expect(isMuted(a)).toBe(true);
+        expect(a.muted).toBe(false);
+        expect(a).toBeInstanceOf(Audio);
+        expect(a).toBeInstanceOf(HTMLAudioElement);
+        const t = document.createElement('video');
+        expect(isMuted(t)).toBe(false); // CONTROL
+        t.toggleAttribute('autoplay');
+        expect(isMuted(t)).toBe(true);
+        expect(t.hasAttribute('autoplay')).toBe(true);
     });
 
     it("what the parser puts in the page (autoplay in the page's own HTML) is muted as it lands", async () => {

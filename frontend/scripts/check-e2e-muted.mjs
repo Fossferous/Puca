@@ -8,11 +8,12 @@
  * machine is at. Playwright adds --mute-audio by itself only to a HEADLESS Chromium: a
  * headed run (headless: false, PWDEBUG=1, `npm run e2e:headed`) drops it, and it does
  * nothing at all for Firefox (no volume pref) or WebKit (no such switch). Before this
- * check, 36 Chromium launches relied on that default, two WebKit ones and the Playwright
+ * check, 36 Chromium launches relied on that default, six WebKit ones and the Playwright
  * config's launchOptions had nothing, so a debug run or a WebKit page that played
  * anything would have been heard.
  *
- * WHAT IS REQUIRED, per launch:
+ * WHAT IS REQUIRED, per launch (which browser it is goes by what the file imported from
+ * Playwright, so `firefox as chromium` is Firefox and a local `chromium` is unknown):
  *   chromium.launch / launchPersistentContext / launchServer   '--mute-audio' in its args, and no
  *                                                              ignoreDefaultArgs that could drop it
  *   firefox.launch / ...                                       firefoxUserPrefs 'media.volume_scale': '0.0'
@@ -23,9 +24,11 @@
  *                                                              (WebKit has no mute switch; that gives
  *                                                              every context an init script that mutes
  *                                                              media elements and Web Audio)
- *   a `launchOptions` object (playwright.config.ts, test.use)  '--mute-audio' in its args; a config's
- *                                                              projects Chromium only (the flag is a
- *                                                              Chromium one)
+ *   a `launchOptions` object (playwright.config.ts, test.use)  '--mute-audio' in its args
+ *   a Playwright Test file (a config, a spec, a test.use)      Chromium only: a browserName or
+ *                                                              defaultBrowserType that is not, or a
+ *                                                              device that brings WebKit or Firefox
+ *                                                              (looked up in Playwright's own list)
  *   chromium.connectOverCDP / connect (a browser the script    listed in ATTACHED below, with where its sound
  *     did not start: an emulator's WebView, the desktop app)   is turned off; a new one fails until reviewed
  *   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS set by a script      '--mute-audio' in it (the desktop app's WebView2)
@@ -33,20 +36,25 @@
  *     every launch is one this check reads
  *
  * And two sounds a browser's mute does not reach, because the OS makes them:
- *   - a file that may turn the app's spoken join/leave on (voiceTTS anything but false)
- *     must replace window.speechSynthesis: on Windows speech goes through the OS speech
- *     engine, outside the browser's audio output, so --mute-audio is not relied on for it;
- *   - a file that grants 'notifications' must launch Chromium with NativeNotifications
- *     disabled: a native toast plays Windows' notification sound.
+ *   - a file that mentions the app's spoken join/leave at all (voiceTTS other than
+ *     `voiceTTS: false`, or its checkbox's label) must replace window.speechSynthesis: on
+ *     Windows speech goes through the OS speech engine, outside the browser's audio
+ *     output, so --mute-audio is not relied on for it;
+ *   - a file that grants 'notifications' (the word anywhere beside a permission grant)
+ *     must launch Chromium with NativeNotifications in EVERY --disable-features= switch
+ *     it passes, because Chromium keeps only the last one: a native toast plays
+ *     Windows' notification sound.
  *
  * Parsed, not grepped: the flag has to be in THIS launch's options, followed through
  * the variables, spreads, .concat()s, ternaries (both sides) and option-building
  * functions the scripts use. Anything it cannot follow is a no: a name that is a
- * parameter, an import or a `let`, a const that is ever changed after it is made in a
- * way that could lose the flag (args.splice, opts.args = ..., delete, Object.assign;
- * args.push only adds), a spread it cannot read (which
- * could set anything), a `var` that could shadow it. The launch then fails and says so;
- * write the flag where the launch can be seen to have it.
+ * parameter, an import or a `let`; a const changed after it is made in a way that could
+ * lose the flag (args.splice, opts.args = ..., delete, Object.assign; args.push only adds,
+ * except to a list that must hold only harmless entries, such as ignoreDefaultArgs); a
+ * spread it cannot read (which could set anything); a `var` that could shadow it; a
+ * function that can return nothing. The launch then fails and says so; write the flag
+ * where the launch can be seen to have it. Not seen: a change made through an alias or
+ * a function the options are handed to, and a grant made over raw CDP.
  *
  *   node scripts/check-e2e-muted.mjs          # e2e/ and playwright.config.ts, as the lint chain runs it
  *   node scripts/check-e2e-muted.mjs <dir>    # every script file there, for the test's fixtures
@@ -55,18 +63,32 @@
  */
 import ts from 'typescript';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FRONTEND = join(HERE, '..');
+const MUTED_HELPER = join(FRONTEND, 'e2e', 'muted.mjs');
+
+/** Which browser each Playwright device runs: a device brings its own (an iPhone is WebKit). */
+const DEVICE_BROWSER = (() => {
+    try {
+        const { devices } = createRequire(join(FRONTEND, 'package.json'))('playwright-core');
+        return new Map(Object.entries(devices).map(([name, d]) => [name, d.defaultBrowserType]));
+    } catch {
+        return new Map(); // no Playwright here: every device is unknown, so flagged
+    }
+})();
+const PLAYWRIGHT_MODULES = new Set(['@playwright/test', 'playwright', 'playwright-core']);
 
 /**
  * Scripts that ATTACH to a browser they did not start, so there is no launch for the
  * flag to be on. Keyed by path from frontend/, with how many attach calls the file has:
  * a new one fails until someone has read where its sound goes and said so here.
- * (e2e/spike-clips/runner.mjs attaches over raw CDP, which this cannot see; it plays
- * sound on purpose and its header says so.)
+ * Three scripts attach over raw CDP (a WebSocket to a debugging port), which this cannot
+ * see: e2e/spike-clips/runner.mjs and s1-manual.mjs, and e2e/tauri-raw-cdp-verify.mjs.
+ * Each drives the unmuted dev shell, and each header says to ask before running it.
  */
 const EMULATOR = "the debug APK's WebView on a HEADLESS emulator, whose sound is the emulator's: the header has it started -no-window -no-audio, and the script refuses any serial but emulator-NNNN";
 const ATTACHED = {
@@ -86,21 +108,29 @@ const WEBVIEW2 = 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS';
 /** An object shape that a spread nobody can read went into: any key may be anything. */
 const WILD = Symbol('wild');
 /**
- * Methods that can take an element out of an array or write over one. push, unshift, sort
- * and reverse cannot lose the flag (args.push('--allow-loopback-in-peer-connection') is
- * fine); assigning to an element or to length is caught as an assignment.
+ * Methods that can take an element out of an array or write over one; assigning to an
+ * element or to length is caught as an assignment.
  */
 const MUTATORS = new Set(['pop', 'shift', 'splice', 'fill', 'copyWithin']);
+/**
+ * Methods that only add. On an args array they cannot lose the flag
+ * (args.push('--allow-loopback-in-peer-connection') is fine), so a name grown this way can
+ * still be followed where the question is "does it hold the flag?". Where the question is
+ * "does it hold ONLY harmless entries?" (ignoreDefaultArgs, the --disable-features rule),
+ * adding is exactly the danger, and a grown name is a no.
+ */
+const GROWERS = new Set(['push', 'unshift', 'sort', 'reverse']);
 const MUTATING_STATICS = new Set(['assign', 'defineProperty', 'defineProperties', 'set', 'deleteProperty', 'setPrototypeOf']);
 
 function problemsIn(fileName, text, relName) {
     const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true,
         /\.(c|m)?tsx?$/.test(fileName) ? ts.ScriptKind.TS : ts.ScriptKind.JS);
     const problems = [];
-    const report = (node, what) => {
-        const { line, character } = source.getLineAndCharacterOfPosition(node.getStart(source));
+    const reportAt = (pos, what) => {
+        const { line, character } = source.getLineAndCharacterOfPosition(pos);
         problems.push({ line: line + 1, column: character + 1, what });
     };
+    const report = (node, what) => reportAt(node.getStart(source), what);
 
     const unwrap = (e) => {
         while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)
@@ -138,33 +168,45 @@ function problemsIn(fileName, text, relName) {
         while (e && (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e))) e = unwrap(e.expression);
         return e && ts.isIdentifier(e) ? e.text : null;
     };
-    /** Is the thing called `name` changed in place anywhere in `scope`? (By name: a shadowing name counts too.) */
+    /**
+     * Is the thing called `name` changed in place anywhere in `scope`? 'mutated' when it may
+     * have lost or overwritten something, 'grown' when it was only added to directly
+     * (args.push(...)), else null. By name: a shadowing name counts too. Not seen: a change
+     * made through an alias or a function it is handed to.
+     */
     const mutatedIn = (scope, name) => {
-        let found = false;
+        let mutated = false;
+        let grown = false;
         const visit = (n) => {
-            if (found) return;
+            if (mutated) return;
             if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
                 && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
                 const left = unwrap(n.left);
-                if ((ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) && rootName(left) === name) found = true;
+                if ((ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) && rootName(left) === name) mutated = true;
             }
-            if (ts.isDeleteExpression(n) && rootName(n.expression) === name) found = true;
+            if (ts.isDeleteExpression(n) && rootName(n.expression) === name) mutated = true;
             if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
                 && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(n.operator)) {
                 const operand = unwrap(n.operand);
-                if ((ts.isPropertyAccessExpression(operand) || ts.isElementAccessExpression(operand)) && rootName(operand) === name) found = true;
+                if ((ts.isPropertyAccessExpression(operand) || ts.isElementAccessExpression(operand)) && rootName(operand) === name) mutated = true;
             }
             if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
                 const callee = n.expression;
-                if (MUTATORS.has(callee.name.text) && rootName(callee.expression) === name) found = true;
+                const method = callee.name.text;
+                if (rootName(callee.expression) === name) {
+                    const direct = ts.isIdentifier(unwrap(callee.expression));
+                    if (MUTATORS.has(method)) mutated = true;
+                    // opts.ignoreDefaultArgs.push(...) grows a list inside: not readable as "only adds".
+                    else if (GROWERS.has(method)) { if (direct) grown = true; else mutated = true; }
+                }
                 const on = unwrap(callee.expression);
-                if (ts.isIdentifier(on) && ['Object', 'Reflect'].includes(on.text) && MUTATING_STATICS.has(callee.name.text)
-                    && n.arguments[0] && rootName(n.arguments[0]) === name) found = true;
+                if (ts.isIdentifier(on) && ['Object', 'Reflect'].includes(on.text) && MUTATING_STATICS.has(method)
+                    && n.arguments[0] && rootName(n.arguments[0]) === name) mutated = true;
             }
             ts.forEachChild(n, visit);
         };
         visit(scope);
-        return found;
+        return mutated ? 'mutated' : grown ? 'grown' : null;
     };
 
     /** What a name refers to where it is used: the nearest enclosing scope that declares it. */
@@ -178,12 +220,12 @@ function problemsIn(fileName, text, relName) {
                         if (ts.isIdentifier(d.name) && d.name.text === name) {
                             // `let x` assigned later, or a `let` that is ever reassigned, cannot be followed.
                             const isConst = (st.declarationList.flags & ts.NodeFlags.Const) !== 0;
-                            return { init: d.initializer, followable: isConst && !!d.initializer };
+                            return { init: d.initializer, followable: isConst && !!d.initializer, local: true };
                         }
-                        if (!ts.isIdentifier(d.name) && bindsName(d.name, name)) return { followable: false };
+                        if (!ts.isIdentifier(d.name) && bindsName(d.name, name)) return { followable: false, local: true };
                     }
                 }
-                if (ts.isFunctionDeclaration(st) && st.name?.text === name) return { fn: st, followable: true };
+                if (ts.isFunctionDeclaration(st) && st.name?.text === name) return { fn: st, followable: true, local: true };
             }
             return null;
         };
@@ -195,30 +237,46 @@ function problemsIn(fileName, text, relName) {
                     if (!found.followable || found.fn) return found;
                     // A var in any function between here and there hoists over it; and a const
                     // object that is changed after it is made is not what its initializer says.
-                    if (scopesPassed.some((s) => hoistedVar(s, name))) return { followable: false };
-                    if (mutatedIn(node, name)) return { followable: false };
-                    return found;
+                    if (scopesPassed.some((s) => hoistedVar(s, name))) return { followable: false, local: true };
+                    const changed = mutatedIn(node, name);
+                    if (changed === 'mutated') return { followable: false, local: true };
+                    return { ...found, grown: changed === 'grown' };
                 }
             }
             if (ts.isFunctionLike(node) && node.parameters) {
-                for (const p of node.parameters) if (bindsName(p.name, name)) return { followable: false };
+                for (const p of node.parameters) if (bindsName(p.name, name)) return { followable: false, local: true };
             }
             if ((ts.isForStatement(node) || ts.isForOfStatement(node) || ts.isForInStatement(node))
                 && node.initializer && ts.isVariableDeclarationList(node.initializer)) {
-                for (const d of node.initializer.declarations) if (bindsName(d.name, name)) return { followable: false };
+                for (const d of node.initializer.declarations) if (bindsName(d.name, name)) return { followable: false, local: true };
             }
-            if (ts.isCatchClause(node) && node.variableDeclaration && bindsName(node.variableDeclaration.name, name)) return { followable: false };
+            if (ts.isCatchClause(node) && node.variableDeclaration && bindsName(node.variableDeclaration.name, name)) return { followable: false, local: true };
         }
         // An import, or a global: whatever it is, it is not in this file to read.
         return { followable: false };
     };
 
-    /** Every expression a function call can give back (arrow bodies and return statements). */
+    /** Does this statement always end in a return or a throw? (If not, the function may give undefined.) */
+    const ends = (st) => {
+        if (!st) return false;
+        if (ts.isReturnStatement(st) || ts.isThrowStatement(st)) return true;
+        if (ts.isBlock(st)) return st.statements.some(ends);
+        if (ts.isIfStatement(st)) return !!st.elseStatement && ends(st.thenStatement) && ends(st.elseStatement);
+        if (ts.isTryStatement(st)) {
+            return (ends(st.tryBlock) && (!st.catchClause || ends(st.catchClause.block))) || (!!st.finallyBlock && ends(st.finallyBlock));
+        }
+        return false;
+    };
+    /**
+     * Every expression a function call can give back (arrow bodies and return statements),
+     * with undefined among them when it can run off its end or `return;`.
+     */
     const returnsOf = (fn) => {
         if (!fn.body) return [];
         if (!ts.isBlock(fn.body)) return [fn.body];
         const out = [];
         walkOwnScope(fn.body, (n) => { if (ts.isReturnStatement(n)) out.push(n.expression); });
+        if (!ends(fn.body)) out.push(undefined);
         return out;
     };
     const functionOf = (callee) => {
@@ -242,7 +300,7 @@ function problemsIn(fileName, text, relName) {
         seen = new Set(seen).add(expr);
         if (ts.isIdentifier(expr)) {
             const d = declarationOf(expr);
-            return d.followable && !d.fn && definitely(d.init, test, seen);
+            return d.followable && !d.fn && !(d.grown && test.strict) && definitely(d.init, test, seen);
         }
         if (ts.isConditionalExpression(expr)) return definitely(expr.whenTrue, test, seen) && definitely(expr.whenFalse, test, seen);
         if (ts.isBinaryExpression(expr) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(expr.operatorToken.kind)) {
@@ -291,8 +349,11 @@ function problemsIn(fileName, text, relName) {
         const test = (e, seen) => ts.isArrayLiteralExpression(e) && e.elements.every((el) => ts.isSpreadElement(el)
             ? definitely(el.expression, test, seen)
             : (stringOf(el) !== null && ok(stringOf(el))));
+        test.strict = true;
         return test;
     };
+    /** Marks a test as one where a name that was only added to cannot be trusted. */
+    const strict = (test) => Object.assign(test, { strict: true });
 
     const keyOf = (p) => {
         if (!p.name) return null;
@@ -357,27 +418,83 @@ function problemsIn(fileName, text, relName) {
         return s !== null && /^\s*[+-]?0*(\.0*)?\s*$/.test(s) && /0/.test(s);
     };
     const isBoolean = (e) => e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword;
-    const keepsMute = (e, seen) => isBoolean(e) || arrayOnly((s) => s !== MUTE)(e, seen);
+    const keepsMute = strict((e, seen) => isBoolean(e) || arrayOnly((s) => s !== MUTE)(e, seen));
 
     const chromiumMuted = (e, seen) => objectHas('args', arrayHolds((s) => s === MUTE))(e, seen)
         && objectLacksOr('ignoreDefaultArgs', keepsMute)(e, seen);
     const firefoxMuted = objectHas('firefoxUserPrefs', objectHas('media.volume_scale', isZeroString));
-    const noNativeToasts = objectHas('args', arrayHolds((s) => /^--disable-features=/.test(s) && s.slice(19).split(',').includes('NativeNotifications')));
+    // Chromium keeps only the LAST --disable-features= switch, so every one in the args must
+    // name NativeNotifications, and nothing that cannot be read may add another.
+    const disablesFeatures = (s) => /^--disable-features=/.test(s);
+    const disablesToasts = (s) => disablesFeatures(s) && s.slice(19).split(',').includes('NativeNotifications');
+    const noNativeToasts = objectHas('args', strict((e, seen) => arrayHolds(disablesToasts)(e, seen)
+        && arrayOnly((s) => !disablesFeatures(s) || disablesToasts(s))(e, seen)));
 
     // Granted however it is spelled (a variable, a list built elsewhere): the word is the tell.
     const grantsNotifications = /['"`]notifications['"`]/.test(text) && /\bgrantPermissions\b|\bpermissions\s*:/.test(text);
-    const isConfig = /\bdefineConfig\s*\(/.test(text);
+    // Playwright Test reads its browser from these: a config, a spec, a test.use().
+    const isRunner = /\bdefineConfig\s*\(/.test(text) || /\btest\.use\s*\(/.test(text) || /\.(spec|test)\.[cm]?[jt]s$/.test(fileName);
 
+    /** Named imports from Playwright and from the helper, by local name. */
+    const imported = new Map();
+    const namespaces = new Set();
+    for (const st of source.statements) {
+        if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+        const from = st.moduleSpecifier.text;
+        const bindings = st.importClause?.namedBindings;
+        if (bindings && ts.isNamespaceImport(bindings) && PLAYWRIGHT_MODULES.has(from)) namespaces.add(bindings.name.text);
+        if (!bindings || !ts.isNamedImports(bindings)) continue;
+        for (const el of bindings.elements) {
+            imported.set(el.name.text, { name: (el.propertyName ?? el.name).text, from });
+        }
+    }
+    // const { chromium } = require('@playwright/test') / await import('playwright') count as imports.
+    const moduleOf = (e) => {
+        e = unwrap(e);
+        if (e && ts.isAwaitExpression(e)) e = unwrap(e.expression);
+        if (!e || !ts.isCallExpression(e) || !e.arguments[0]) return null;
+        const callee = e.expression;
+        const isRequire = ts.isIdentifier(callee) && callee.text === 'require';
+        const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+        return isRequire || isImport ? stringOf(e.arguments[0]) : null;
+    };
+    const requiredBindings = [];
+    const findRequires = (n) => {
+        if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectBindingPattern(n.name)) {
+            const from = moduleOf(n.initializer);
+            if (from) {
+                for (const el of n.name.elements) {
+                    const key = (el.propertyName ?? el.name).getText(source);
+                    if (ts.isIdentifier(el.name)) imported.set(el.name.text, { name: key, from });
+                    else if (PLAYWRIGHT_MODULES.has(from) && ENGINES.has(key)) requiredBindings.push({ engine: key, pattern: el.name });
+                }
+            }
+        }
+        ts.forEachChild(n, findRequires);
+    };
+    findRequires(source);
+    /**
+     * Which browser an expression is: a name imported from Playwright is the engine it was
+     * imported as (`firefox as chromium` is Firefox); a name declared in the file is
+     * anyone's guess; an undeclared one (a fixture) goes by its name.
+     */
     const engineOf = (obj) => {
         obj = unwrap(obj);
-        if (ts.isIdentifier(obj)) return obj.text;
-        if (ts.isPropertyAccessExpression(obj)) return obj.name.text;
+        if (ts.isIdentifier(obj)) {
+            const imp = imported.get(obj.text);
+            if (imp) return PLAYWRIGHT_MODULES.has(imp.from) ? imp.name : null;
+            return declarationOf(obj).local ? null : obj.text;
+        }
+        if (ts.isPropertyAccessExpression(obj) && ts.isIdentifier(unwrap(obj.expression)) && namespaces.has(unwrap(obj.expression).text)) return obj.name.text;
         return null;
     };
-    const importsMuteWebkit = source.statements.some((st) => ts.isImportDeclaration(st)
-        && ts.isStringLiteral(st.moduleSpecifier) && /(^|\/)muted\.mjs$/.test(st.moduleSpecifier.text)
-        && st.importClause?.namedBindings && ts.isNamedImports(st.importClause.namedBindings)
-        && st.importClause.namedBindings.elements.some((el) => el.name.text === 'muteWebkit' && !el.propertyName));
+    const fixtureRoot = process.argv[2] ? resolve(process.argv[2]) : null;
+    /** e2e/muted.mjs itself (or, for the test's fixtures, muted.mjs at their root). */
+    const isHelper = (from) => {
+        const at = resolve(dirname(fileName), from);
+        return at === MUTED_HELPER || (fixtureRoot !== null && at === join(fixtureRoot, 'muted.mjs'));
+    };
+    const importsMuteWebkit = [...imported].some(([local, imp]) => local === 'muteWebkit' && imp.name === 'muteWebkit' && isHelper(imp.from));
     /** muteWebkit(await webkit.launch(...)): the browser, not the promise of one. */
     const wrappedByMuteWebkit = (call) => {
         let n = call;
@@ -387,7 +504,9 @@ function problemsIn(fileName, text, relName) {
             n = n.parent;
         }
         const p = n.parent;
-        return awaited && ts.isCallExpression(p) && ts.isIdentifier(p.expression) && p.expression.text === 'muteWebkit' && p.arguments[0] === n;
+        return awaited && ts.isCallExpression(p) && ts.isIdentifier(p.expression) && p.expression.text === 'muteWebkit'
+            && !declarationOf(p.expression).local // the import, not a stand-in of the same name
+            && p.arguments[0] === n;
     };
     const wordsOf = (value) => {
         const v = unwrap(value);
@@ -397,13 +516,14 @@ function problemsIn(fileName, text, relName) {
     const checkWebview2 = (node, value) => {
         if (!wordsOf(value).split(/\s+/).includes(MUTE)) report(node, `${WEBVIEW2} starts the desktop app's WebView2 unmuted: add '${MUTE}' to it`);
     };
-    const checkTts = (node, value) => {
-        const v = unwrap(value);
-        if (v && v.kind === ts.SyntaxKind.FalseKeyword) return;
-        if (!/defineProperty\(\s*window\s*,\s*['"]speechSynthesis['"]/.test(text)) {
-            report(node, 'voiceTTS may be on with the real speechSynthesis: replace window.speechSynthesis first (Object.defineProperty(window, \'speechSynthesis\', ...)); --mute-audio is not relied on to reach the OS speech engine');
-        }
-    };
+    // The app's spoken join/leave, however it is reached: the setting by name (a property,
+    // an updateSetting call, saved JSON) or its checkbox by its label. Only `voiceTTS: false`
+    // is plainly off.
+    const speechReplaced = /defineProperty\(\s*window\s*,\s*['"]speechSynthesis['"]/.test(text);
+    const ttsMention = /voiceTTS(?!['"]?\s*:\s*false\b)|Speak Join\/Leave/i.exec(text);
+    if (ttsMention && !speechReplaced) {
+        reportAt(ttsMention.index, 'the spoken join/leave (voiceTTS) may be turned on with the real speechSynthesis: replace window.speechSynthesis first (Object.defineProperty(window, \'speechSynthesis\', ...)); --mute-audio is not relied on to reach the OS speech engine');
+    }
     const memberName = (e) => (ts.isPropertyAccessExpression(e) ? e.name.text
         : ts.isElementAccessExpression(e) ? stringOf(e.argumentExpression) : null);
 
@@ -453,15 +573,15 @@ function problemsIn(fileName, text, relName) {
                 report(node, `launchOptions does not say '${MUTE}' where this check can follow it: put it in its args`);
             }
             if (key === WEBVIEW2) checkWebview2(node, value);
-            if (key === 'voiceTTS') checkTts(node, value);
-            if (isConfig && key === 'browserName' && stringOf(value) !== 'chromium') {
-                report(node, `a project that may run ${stringOf(value) ?? 'another browser'}: launchOptions' '${MUTE}' is a Chromium switch; keep the config's projects Chromium`);
+            if (isRunner && (key === 'browserName' || key === 'defaultBrowserType') && stringOf(value) !== 'chromium') {
+                report(node, `${key} ${stringOf(value) ?? '(not readable)'} for Playwright Test: launchOptions' '${MUTE}' is a Chromium switch, and a test here has no muteWebkit; keep it Chromium`);
             }
         }
-        if (isConfig && ts.isElementAccessExpression(node) && ts.isIdentifier(unwrap(node.expression)) && unwrap(node.expression).text === 'devices') {
+        if (isRunner && ts.isElementAccessExpression(node) && ts.isIdentifier(unwrap(node.expression)) && unwrap(node.expression).text === 'devices') {
             const device = stringOf(node.argumentExpression);
-            if (!device || !/^Desktop (Chrome|Edge)\b/.test(device)) {
-                report(node, `devices['${device ?? '?'}'] in a config may run Firefox or WebKit (a device brings its own browser), which launchOptions' '${MUTE}' does not reach`);
+            const browser = device ? DEVICE_BROWSER.get(device) : undefined;
+            if (browser !== 'chromium') {
+                report(node, `devices['${device ?? '?'}'] runs ${browser ?? 'a browser this cannot tell'} in Playwright Test (a device brings its own browser), which launchOptions' '${MUTE}' does not reach`);
             }
         }
         // process.env.X = ... and env['X'] = ...
@@ -469,11 +589,18 @@ function problemsIn(fileName, text, relName) {
             const left = unwrap(node.left);
             const name = left && (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) ? memberName(left) : null;
             if (name === WEBVIEW2) checkWebview2(node, node.right);
-            if (name === 'voiceTTS') checkTts(node, node.right);
         }
         ts.forEachChild(node, visit);
     };
     visit(source);
+    // const { chromium: { launch } } = await import('playwright')
+    for (const { engine, pattern } of requiredBindings) {
+        if (!ts.isObjectBindingPattern(pattern)) continue;
+        for (const el of pattern.elements) {
+            const name = (el.propertyName ?? el.name).getText(source);
+            if (LAUNCH.has(name) || ATTACH.has(name)) report(el, `${name} destructured from ${engine}: call ${engine}.${name}(...) directly, so its options can be checked`);
+        }
+    }
 
     if (attaches.length) {
         const reviewed = ATTACHED[relName];

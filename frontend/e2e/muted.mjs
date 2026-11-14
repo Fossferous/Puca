@@ -23,7 +23,8 @@
  * (createMediaElementSource, captureStream), and play() is always a muted play, so an
  * autoplay policy that refuses unmuted playback never refuses here. Not covered: an
  * element the parser makes in a tree never put in the page (or a declarative shadow
- * root) that then plays by itself. speechSynthesis is not touched: no script turns the
+ * root) that then plays by itself, and a src or autoplay attribute given through
+ * element.attributes (setNamedItem) or an Attr's value. speechSynthesis is not touched: no script turns the
  * app's spoken announcements on without replacing it (the lint checks that).
  *
  * src/tests/e2eMuted.test.ts runs silencePage() on a page's prototypes and shows each of
@@ -70,11 +71,25 @@ export function silencePage() {
         const d = Object.getOwnPropertyDescriptor(P, name);
         if (d && d.set) Object.defineProperty(P, name, { ...d, set(value) { hush(this); d.set.call(this, value); } });
     }
-    const setAttribute = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function (...args) {
-        if (this instanceof HTMLMediaElement) hush(this);
-        return setAttribute.apply(this, args);
-    };
+    for (const name of ['setAttribute', 'setAttributeNS', 'toggleAttribute']) {
+        const original = Element.prototype[name];
+        if (!original) continue;
+        Element.prototype[name] = function (...args) {
+            if (this instanceof HTMLMediaElement) hush(this);
+            return original.apply(this, args);
+        };
+    }
+    // new Audio(url) sets its src without the setter: muted as it is made.
+    const NativeAudio = globalThis.Audio;
+    if (typeof NativeAudio === 'function') {
+        const Audio = function Audio(...args) {
+            const el = new NativeAudio(...args);
+            hush(el);
+            return el;
+        };
+        Audio.prototype = NativeAudio.prototype;
+        globalThis.Audio = Audio;
+    }
     // An element the parser makes (the page's own HTML, innerHTML, document.write) goes
     // through none of the above, and can start by itself (autoplay): muted as it is put in
     // the page. A mutation callback runs long before any of its media could have loaded.
