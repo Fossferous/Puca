@@ -293,7 +293,8 @@ const PINS: Pin[] = [
         holds: (c) => {
             const add = body(c, 'private async addScreenShareTracks(');
             return add !== null
-                && inOrder(add, 'const sender = pc.addTrack(track, stream);', 'this.wireSender(userId, sender);')
+                // wireSenderAgain: wireSender, or a reused sender held as a new one (manager.ts).
+                && inOrder(add, 'const sender = pc.addTrack(track, stream);', 'this.wireSenderAgain(userId, sender);')
                 && !/setCodecPreferences|preferH264|hostScreenShare/.test(add);
         },
         mutants: [

@@ -1201,6 +1201,28 @@ describe('the third review: a give-up lasts one call, the pin comes first, sende
         expect(camSender.track).toBe(cam2);
     });
 
+    it('SECURITY: a share addTrack put on a sender wired before (a camera turned off before it was negotiated) is held like a new one until sealed', async () => {
+        scriptEngine();
+        const mic = track('audio', 'mic');
+        const cam = track('video', 'cam');
+        const scr = track('video', 'screen');
+        const local: FakeTrack[] = [mic, cam];
+        const { mgr, media, pc } = await callWith(true, local);
+        const camSender = pc.senders.find(s => (s.track as FakeTrack | null)?.id === 'cam+stand')!;
+        await cameraOffOn(mgr, media, local, track('video', 'unused')).off();
+        await settle();
+        expect(camSender.track).toBeNull();
+        // addTrack reuses that transceiver for the share (it never sent).
+        pc.addTrack = (t: unknown) => { camSender.track = t; return camSender; };
+        media.getScreenShareStreamSync = () => streamOf('screen', [scr]);
+        await mgr.addScreenShareToPeers();
+        await settle();
+        expect((camSender.track as FakeTrack | null)?.id, 'the share went out on a sender that has sealed nothing, unheld').toBe('screen+stand');
+        sealedFirst(camSender);
+        await settle();
+        expect(camSender.track).toBe(scr);
+    });
+
     it('stopping a share finds its held sender (by the track it waits to send) and removes it', async () => {
         scriptEngine();
         const mic = track('audio', 'mic');

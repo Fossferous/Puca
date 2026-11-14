@@ -555,6 +555,26 @@ export class WebRTCManager {
         }
     }
 
+    /**
+     * wireSender for a sender addTrack may have handed back: one wired before
+     * (see addScreenShareTracks), which wireSender passes by. Under "Require
+     * encryption" it is treated as a new one would be: emptied when no
+     * transform wraps it, and on the worker path held until its transform
+     * has sealed a frame (it may never have sent one).
+     */
+    private wireSenderAgain(userId: UserId, sender: RTCRtpSender): void {
+        if (!this.transformedSenders.has(sender)) { this.wireSender(userId, sender); return; }
+        if (!this.requireMediaE2ee) return;
+        if (this.unsealedSenders.has(sender)) {
+            void sender.replaceTrack(null).catch(() => { /* peer gone */ });
+            return;
+        }
+        const c = this.peers.get(userId)?.mediaCrypto;
+        if (mediaTransformApi() === 'script-transform' && !this.heldSenders.has(sender) && !(c instanceof PeerMediaCrypto && c.sealed(sender))) {
+            void this.holdUntilSealed(userId, sender);
+        }
+    }
+
     /** Attach the encrypt transform to a sender we haven't wired yet. */
     private wireSender(userId: UserId, sender: RTCRtpSender): void {
         if (!isMediaE2eeSupported() || this.transformedSenders.has(sender)) return;
@@ -1099,6 +1119,13 @@ export class WebRTCManager {
         if (on && released === 0) this.showCameraAgain(userId);
     }
 
+    /** What ontrack demands before it hands anything over, asked again for a
+     *  receiver handed over again: we receive media at all, and under "Require
+     *  encryption" a decrypt transform is on it. */
+    private mayShowAgain(receiver: RTCRtpReceiver): boolean {
+        return !this.selfNoReceive && (!this.requireMediaE2ee || this.transformedReceivers.has(receiver));
+    }
+
     /** Peers whose camera was announced OFF (its tile taken down) since it was
      *  last handed over. */
     private cameraHidden = new Set<UserId>();
@@ -1121,7 +1148,7 @@ export class WebRTCManager {
         const receiver = this.cameraReceiverOf.get(userId);
         const pc = this.peers.get(userId)?.connection;
         const t = receiver && pc?.getTransceivers().find(x => x.receiver === receiver);
-        if (!t || !receiver.track || receiver.track.readyState !== 'live') return;
+        if (!t || !receiver.track || receiver.track.readyState !== 'live' || !this.mayShowAgain(receiver)) return;
         if (t.currentDirection !== 'sendrecv' && t.currentDirection !== 'recvonly') return;
         console.log(`[WebRTC] camera of ${userId} announced again on the receiver it had: handing it over again`);
         this.deliverVideo(userId, 'camera', new MediaStream([receiver.track]), receiver);
@@ -1188,13 +1215,14 @@ export class WebRTCManager {
      *  cannot say). Not its synchronization sources: packets that carry no
      *  picture keep those fresh, and Firefox, its camera stopped, still
      *  sends about a frame a second on that sender (both measured). */
-    private async cameraFrameDeltas(receivers: RTCRtpReceiver[]): Promise<Map<RTCRtpReceiver, number>> {
-        const out = new Map<RTCRtpReceiver, number>();
+    private async cameraFrameDeltas(receivers: RTCRtpReceiver[]): Promise<Map<RTCRtpReceiver, number | null>> {
+        const out = new Map<RTCRtpReceiver, number | null>();
         for (const r of receivers) {
             const n = await WebRTCManager.framesDecoded(r);
             const before = this.cameraFrames.get(r);
             if (n !== null) this.cameraFrames.set(r, n);
-            out.set(r, n !== null && before !== undefined ? Math.max(0, n - before) : 0);
+            // null: nothing to compare with yet (its first look).
+            out.set(r, n !== null && before !== undefined ? Math.max(0, n - before) : null);
         }
         return out;
     }
@@ -1211,11 +1239,14 @@ export class WebRTCManager {
                 const frames = await this.cameraFrameDeltas(all);
                 if (this.peers.get(userId) !== peer || this.cameraHidden.has(userId) || !this.videoGate.hasCamera(userId)) continue;
                 const shown = this.cameraReceiverOf.get(userId);
+                // The one shown just arrived (no look at it yet): its frames
+                // are not known, so nothing is judged against them this time.
+                if (shown && frames.get(shown) == null) continue;
                 const shownFrames = shown ? frames.get(shown) ?? 0 : 0;
                 // The camera is where the frames are: one receiver with a
                 // picture's worth of them, the one shown with a trickle at most.
                 const live = all.find(r => r !== shown && (frames.get(r) ?? 0) >= 5 && (frames.get(r) ?? 0) > 3 * shownFrames);
-                if (!live) continue;
+                if (!live || !this.mayShowAgain(live)) continue;
                 console.log(`[WebRTC] the camera of ${userId} came back on another receiver: handing that one over`);
                 this.deliverVideo(userId, 'camera', new MediaStream([live.track]), live);
             }
@@ -1296,8 +1327,12 @@ export class WebRTCManager {
 
     /** This peer's camera sender (cameraSenders), if its transceiver can still send. */
     private cameraSenderOf(pc: RTCPeerConnection): { sender: RTCRtpSender; transceiver: RTCRtpTransceiver | null } | null {
+        // Never the share's, whatever it was before (addScreenShareTracks).
+        const screen = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getTracks() ?? []);
         for (const sender of pc.getSenders()) {
             if (!this.cameraSenders.has(sender)) continue;
+            const carried = this.trackOf(sender);
+            if (carried && screen.has(carried)) continue;
             const transceiver = pc.getTransceivers().find(t => t.sender === sender) ?? null;
             if (transceiver && (transceiver.currentDirection === 'stopped' || (transceiver as { stopped?: boolean }).stopped)) continue;
             return { sender, transceiver };
@@ -1744,7 +1779,13 @@ export class WebRTCManager {
         for (const track of stream.getTracks()) {
             if (existing.some(s => this.trackOf(s) === track)) continue;
             const sender = pc.addTrack(track, stream);
-            this.wireSender(userId, sender); // media-E2EE encrypt transform
+            // addTrack takes a sender that was never used to send: a camera's
+            // turned off before its turning on was ever negotiated (an offer
+            // still unanswered meanwhile). It is the share's now, not the
+            // camera's to come back on (putCameraOn would put the camera over
+            // the share, and its turning off end it).
+            this.cameraSenders.delete(sender);
+            this.wireSenderAgain(userId, sender); // media-E2EE encrypt transform
             if (track.kind === 'video') await this.tuneScreenShareSender(sender);
         }
     }

@@ -295,6 +295,27 @@ describe('the camera turned off and on again (mesh), the sending side', () => {
         expect(camT.streams).toEqual(['voice']);
     });
 
+    it('REVIEW: a share that addTrack put on the sender of the camera (turned off before it was ever negotiated) is never taken back for the camera', async () => {
+        const c = await inCall();
+        await c.cameraOn();
+        await c.cameraOff();
+        const [camT] = c.pc.video();
+        // Its turning on was never negotiated (an offer still unanswered
+        // meanwhile): it has never been used to send, so addTrack reuses it.
+        camT.usedToSend = false;
+        const screen = await c.startShare();
+        const shareTrack = screen.getVideoTracks()[0];
+        expect(camT.sender.track, 'precondition: the share went on the transceiver of the camera').toBe(shareTrack);
+        const cam = await c.cameraOn();
+        expect(camT.sender.track, 'the camera was put over the share').toBe(shareTrack);
+        const newCam = c.pc.video().find(t => t.sender.track === cam)!;
+        expect(newCam, 'the camera went out on a sender of its own').toBeTruthy();
+        expect(newCam.streams).toEqual(['voice']);
+        await c.cameraOff();
+        expect(camT.sender.track, 'turning the camera off ended the share').toBe(shareTrack);
+        expect(camT.direction).toBe('sendrecv');
+    });
+
     it('turned off while sharing: the share goes on, untouched', async () => {
         const c = await inCall();
         await c.cameraOn();
@@ -398,7 +419,7 @@ describe('the receiving side, when no new track comes for a camera', () => {
             cams.push(t);
         }
         const last = () => shown.at(-1)?.getVideoTracks()[0];
-        return { mgr, pc, cams, shown, last };
+        return { mgr, pc, cams, shown, last, voice };
     }
 
     it('REVIEW: turned off and on before the off was negotiated (no ontrack again): announced on, it is handed over again', async () => {
@@ -443,6 +464,32 @@ describe('the receiving side, when no new track comes for a camera', () => {
         }
     });
 
+    it('REVIEW: a camera receiver that just arrived (nothing to compare its frames with yet) is not passed over for an older one', async () => {
+        vi.useFakeTimers();
+        try {
+            const v = await viewing(2);
+            const [dead, live] = v.cams;
+            for (let i = 0; i < 2; i++) {
+                dead.receiver.frames += 1;
+                live.receiver.frames += 45;
+                await vi.advanceTimersByTimeAsync(1500);
+            }
+            // The old peer turns it off and on again: a third receiver, shown;
+            // the one before still counts what it decoded before it stopped.
+            const t3 = v.pc.addTransceiver('video', { direction: 'recvonly' });
+            t3.currentDirection = 'recvonly';
+            v.voice.addTrack(t3.receiver.track);
+            v.pc.ontrack!({ track: t3.receiver.track, receiver: t3.receiver, streams: [v.voice] });
+            expect(v.last()).toBe(t3.receiver.track);
+            live.receiver.frames += 45;
+            dead.receiver.frames += 1;
+            await vi.advanceTimersByTimeAsync(1500);
+            expect(v.last(), 'the stopped camera was handed over for the one that just came').toBe(t3.receiver.track);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('CONTROL: while the receiver shown has the frames, it stays shown', async () => {
         vi.useFakeTimers();
         try {
@@ -458,5 +505,43 @@ describe('the receiving side, when no new track comes for a camera', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('handed over again only as ontrack would', () => {
+    it('REVIEW: under "Require encryption" switched on since, a receiver with no decrypt transform is not handed over again', async () => {
+        // An engine that can encrypt (createEncodedStreams), so turning the
+        // setting on rebuilds nothing; this receiver's transform did not attach.
+        class Sender {}
+        (Sender.prototype as unknown as Record<string, unknown>).createEncodedStreams = () => ({});
+        vi.stubGlobal('RTCRtpSender', Sender);
+        const mgr = new WebRTCManager();
+        mgr.setLocalUserId(1);
+        mgr.setRequireMediaE2ee(false);
+        const media = mgr.media as unknown as Record<string, unknown>;
+        media.getLocalStreamSync = () => new FakeStream([new FakeTrack('audio', 'mic')], 'mine');
+        media.getScreenShareStreamSync = () => null;
+        const shown: MediaStream[] = [];
+        mgr.setOnCameraStream((_uid, s) => { shown.push(s); });
+        mgr.setOnRemoteStream(() => {});
+        await mgr.callUser(2);
+        const pc = pcs.at(-1)!;
+        const voice = new FakeStream([new FakeTrack('audio', 'their mic')], 'their-voice');
+        pc.ontrack!({ track: voice.getAudioTracks()[0], receiver: { track: voice.getAudioTracks()[0] }, streams: [voice] });
+        mgr.setPeerCamera(2, true);
+        const t = pc.addTransceiver('video', { direction: 'recvonly' });
+        t.currentDirection = 'recvonly';
+        voice.addTrack(t.receiver.track);
+        pc.ontrack!({ track: t.receiver.track, receiver: t.receiver, streams: [voice] });
+        expect(shown, 'precondition: shown while not required').toHaveLength(1);
+        mgr.setPeerCamera(2, false);
+        mgr.setRequireMediaE2ee(true);
+        expect(pcs.at(-1), 'precondition: nothing was rebuilt').toBe(pc);
+        mgr.setPeerCamera(2, true);
+        expect(shown, 'a receiver nothing decrypts was put back on screen under enforcement').toHaveLength(1);
+        mgr.setRequireMediaE2ee(false);
+        mgr.setPeerCamera(2, false);
+        mgr.setPeerCamera(2, true);
+        expect(shown, 'CONTROL: not required, it is handed over again').toHaveLength(2);
     });
 });
