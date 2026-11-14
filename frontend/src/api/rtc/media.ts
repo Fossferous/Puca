@@ -297,6 +297,17 @@ export class MediaManager {
         return this.screenShareStream;
     }
 
+    private shareCaptureListeners = new Set<(video: MediaStreamTrack) => void>();
+    /** Told the video track of every screen-share capture this manager
+     *  starts, as soon as it has one (before the share is announced or
+     *  published, which may still be abandoned). The listener must not stop
+     *  or re-constrain the track: it belongs to the share. A clone is its
+     *  own. Returns the unsubscribe. */
+    onShareCapture(cb: (video: MediaStreamTrack) => void): () => void {
+        this.shareCaptureListeners.add(cb);
+        return () => { this.shareCaptureListeners.delete(cb); };
+    }
+
     /**
      * The ML noise graph failed to build — put the user back on native NS.
      *
@@ -920,6 +931,13 @@ export class MediaManager {
             const videoTrack = this.screenShareStream.getVideoTracks()[0];
             if (videoTrack) {
                 try { videoTrack.contentHint = 'motion'; } catch { /* not supported */ }
+                // Whoever else captures this surface may read this capture
+                // instead of making its own (replayBuffer.ts
+                // followShareCapture: the clip ring, docs/CLIPS.md "Sharing
+                // while armed"). A listener's failure is not the share's.
+                for (const l of [...this.shareCaptureListeners]) {
+                    try { l(videoTrack); } catch (e) { console.warn('[WebRTC] share-capture listener failed:', e); }
+                }
             }
 
             return this.screenShareStream;
