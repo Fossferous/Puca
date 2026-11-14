@@ -4709,12 +4709,14 @@ export function Chat({ onLogout }: ChatProps) {
         { section: foldedHere.has('text'), collections: foldedCollections(foldedHere) },
         { openId: openRowId, unread: id => (currentServerMuted ? 0 : (unreadCounts.get(id) || 0)), isMuted: isChannelMuted },
     );
-    // The voice list: a folded section keeps the rooms with somebody in them and the one you are in.
+    // The voice list: a folded section keeps the rooms with somebody in them, the one you are in,
+    // and the one whose page is open (a server with no text channel opens on a voice room's).
     const voiceListed = channels.filter(c => c.channel_type === 1).filter(listed);
     const voiceDrawn = foldedHere.has('voice')
         ? voiceListed.filter(c => keptVoiceWhenCollapsed(c.id, {
             occupants: id => getVoiceUsersInRoom(`voice_${id}`).length,
             voiceChannelId: currentVoiceChannel?.id,
+            openId: openRowId,
         }))
         : voiceListed;
 

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useActiveInServers, type ActiveReadStatus } from '../components/activeServers';
+import { ACTIVE_READ_CONCURRENCY, useActiveInServers, type ActiveReadStatus } from '../components/activeServers';
 import { globalVoiceUsers } from '../components/voiceState';
 import * as servers from '../api/servers';
 
@@ -133,6 +133,30 @@ describe('useActiveInServers', () => {
         await act(async () => { release(); });
         await act(async () => { await new Promise(r => setTimeout(r, 20)); });
         expect(fetchVoiceUsers.mock.calls.length).toBe(first * 2);
+    });
+
+    it('asks a few servers at a time, never all at once, and still reads every one', async () => {
+        const many = Array.from({ length: 13 }, (_, i) => ({ id: `s${i}` }));
+        let inFlight = 0;
+        let most = 0;
+        const waiting: Array<() => void> = [];
+        fetchVoiceUsers.mockImplementation(async () => {
+            inFlight++;
+            most = Math.max(most, inFlight);
+            await new Promise<void>(r => waiting.push(r));
+            inFlight--;
+            return { voice_users: [] };
+        });
+        await mount(baseOpts({ servers: many, currentServerId: 's0' }));
+        expect(fetchVoiceUsers.mock.calls.length, 'the first few asked').toBe(ACTIVE_READ_CONCURRENCY);
+        // Answer them one by one: each answer lets one more go, never more than the cap at once.
+        for (let i = 0; i < 40 && waiting.length > 0; i++) {
+            await act(async () => { waiting.shift()!(); await new Promise(r => setTimeout(r, 0)); });
+        }
+        expect(most, 'never more than the cap at once').toBe(ACTIVE_READ_CONCURRENCY);
+        expect(fetchVoiceUsers.mock.calls.map(c => c[0]).sort(), 'every server but the open one, once')
+            .toEqual(many.filter(s => s.id !== 's0').map(s => s.id).sort());
+        expect(status()).toBe('ok');
     });
 
     it('lets go of a room that the next read no longer names', async () => {

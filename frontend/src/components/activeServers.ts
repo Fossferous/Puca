@@ -20,6 +20,23 @@ import { globalVoiceUsers, type VoiceUserStatus } from './voiceState';
 export const OTHER_SERVERS_POLL_MS = 60_000;
 /** How long a server's channel list, fetched only to name rooms, is trusted before it is read again. */
 const CHANNEL_NAMES_STALE_MS = 120_000;
+/** How many servers' snapshots are asked for at once. It was every one at the same moment: an
+ *  account in sixty servers sent sixty reads, and a channel list for each with a call, in one burst
+ *  each minute and on every reconnect. The server allows an address a burst of 100 requests
+ *  (middleware/rate_limit.rs), so past it the app's own requests beside them were refused too. */
+export const ACTIVE_READ_CONCURRENCY = 4;
+
+/** `fn` over `items`, at most `limit` at a time, in order; settles when every one has. */
+export async function eachLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+    let next = 0;
+    const lane = async () => {
+        while (next < items.length) {
+            const item = items[next++];
+            await fn(item);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
+}
 
 export interface ActiveUser {
     id: number;
@@ -156,7 +173,7 @@ export function useActiveInServers(opts: {
             let changed = false;
             const { servers, currentServerId, eventSeq, onChange } = latest.current;
             try {
-                await Promise.all(servers.filter(s => s.id !== currentServerId).map(async server => {
+                await eachLimited(servers.filter(s => s.id !== currentServerId), ACTIVE_READ_CONCURRENCY, async server => {
                     const seqAtFetch = eventSeq();
                     let occupants: Awaited<ReturnType<typeof fetchVoiceUsers>>['voice_users'];
                     try {
@@ -199,7 +216,7 @@ export function useActiveInServers(opts: {
                         if (users.size > 0 || was) globalVoiceUsers.set(roomId, users);
                     }
                     seeded.current.set(server.id, nowSeeded);
-                }));
+                });
             } finally {
                 running = false;
             }
