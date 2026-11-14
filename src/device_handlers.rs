@@ -1766,11 +1766,14 @@ mod tests {
             mint = crate::device_token::INSERT_DEVICE_SESSION,
         ))
         .execute(&pool).await.expect("create rig function");
-        sqlx::query(&format!(
-            "CREATE TRIGGER {rig} AFTER UPDATE ON token_sessions REFERENCING NEW TABLE AS touched \
-             FOR EACH STATEMENT EXECUTE FUNCTION {rig}()"
-        ))
-        .execute(&pool).await.expect("create rig trigger");
+        crate::migrator::test_ddl(
+            &pool,
+            &format!(
+                "CREATE TRIGGER {rig} AFTER UPDATE ON token_sessions REFERENCING NEW TABLE AS touched \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {rig}()"
+            ),
+        )
+        .await;
 
         let live_bound = |pool: sqlx::PgPool, device: String| async move {
             let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM token_sessions WHERE device_id = $1 AND revoked_at IS NULL")
@@ -1785,8 +1788,9 @@ mod tests {
         let claims = Claims { sub: uid as crate::state::UserId, username: name.clone(), exp: 0, tv, sst: 0, sid: sid.clone(), ls: false };
         let revoked = revoke_device(State(state.clone()), Extension(claims), Path(device.clone())).await;
 
-        let _ = sqlx::query(&format!("DROP TRIGGER IF EXISTS {rig} ON token_sessions")).execute(&pool).await;
-        let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS {rig}()")).execute(&pool).await;
+        // Through test_ddl: a DROP TRIGGER beside another test's on token_sessions can deadlock.
+        crate::migrator::test_ddl(&pool, &format!("DROP TRIGGER IF EXISTS {rig} ON token_sessions")).await;
+        crate::migrator::test_ddl(&pool, &format!("DROP FUNCTION IF EXISTS {rig}()")).await;
         let live_after = live_bound(pool.clone(), device.clone()).await;
         let (device_revoked,): (bool,) = sqlx::query_as("SELECT revoked_at IS NOT NULL FROM devices WHERE id = $1")
             .bind(&device).fetch_one(&pool).await.unwrap();

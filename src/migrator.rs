@@ -112,9 +112,81 @@ pub(crate) async fn connect_test_database(url: &str, max_connections: u32) -> sq
         .unwrap_or_else(|e| unreachable(e))
 }
 
+/// Run one DDL statement a test needs (a fault trigger made or dropped, say),
+/// again while Postgres picks it as a deadlock's victim, and panic on any other
+/// error. Tests run concurrently on one database, and two of them dropping
+/// their own triggers on the same table can deadlock each other: Postgres then
+/// cancels one DROP (40P01). The helpers this replaced ignored the error, so the
+/// fault trigger stayed and the test's healthy control was refused by it (the
+/// 0.9.863 gates: device_token's "a healthy redeem still mints" got a 503,
+/// with "deadlock detected" between two DROP TRIGGERs on token_sessions in the
+/// server log).
+#[cfg(test)]
+pub(crate) async fn test_ddl(pool: &sqlx::PgPool, sql: &str) {
+    const TRIES: u64 = 20;
+    for attempt in 1..=TRIES {
+        match sqlx::query(sql).execute(pool).await {
+            Ok(_) => return,
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("40P01") && attempt < TRIES => {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            Err(e) => panic!("test DDL failed ({sql}): {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `test_ddl` outlasts being a deadlock's victim. Staged, not hoped for:
+    /// another transaction holds table A; the DROP of B and A locks B and waits
+    /// for A; once it is seen waiting, the other asks for B. That is a cycle,
+    /// and the DROP, waiting longer, is the one Postgres cancels. The other then
+    /// takes B and commits, and the DROP must go through on a retry.
+    #[tokio::test]
+    async fn test_ddl_retries_a_statement_cancelled_as_a_deadlocks_victim() {
+        let Some(pool) = test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (a, b) = (format!("test_ddl_a_{tag}"), format!("test_ddl_b_{tag}"));
+        for t in [&a, &b] {
+            sqlx::query(&format!("CREATE TABLE {t} (x int)")).execute(&pool).await.unwrap();
+        }
+        let mut other = pool.begin().await.unwrap();
+        sqlx::query(&format!("LOCK TABLE {a} IN ACCESS EXCLUSIVE MODE")).execute(&mut *other).await.unwrap();
+        let (p, drop) = (pool.clone(), format!("DROP TABLE {b}, {a}"));
+        let dropper = tokio::spawn(async move { test_ddl(&p, &drop).await });
+        let mut waiting = false;
+        for _ in 0..200 {
+            let (w,): (bool,) = sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = $1 AND NOT l.granted)",
+            )
+            .bind(&a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if w {
+                waiting = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(waiting, "fixture: the DROP holds B and waits for A");
+        let took_b = sqlx::query(&format!("LOCK TABLE {b} IN ACCESS EXCLUSIVE MODE")).execute(&mut *other).await;
+        assert!(took_b.is_ok(), "fixture: the DROP, not the other side, was the deadlock's victim: {:?}", took_b.err());
+        other.commit().await.unwrap();
+        let done = tokio::time::timeout(std::time::Duration::from_secs(30), dropper).await;
+        let (left,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pg_class WHERE relname = ANY($1)")
+            .bind(vec![a.clone(), b.clone()])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for t in [&a, &b] {
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {t}")).execute(&pool).await;
+        }
+        assert!(matches!(done, Ok(Ok(()))), "test_ddl went through after the deadlock: {done:?}");
+        assert_eq!(left, 0, "both tables dropped");
+    }
 
     #[test]
     fn the_startup_migrator_tolerates_newer_databases_and_embeds_everything() {

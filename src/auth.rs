@@ -978,22 +978,23 @@ mod session_tests {
 #[cfg(test)]
 pub(crate) async fn refuse_session_rows_for(pool: &sqlx::PgPool, uid: i32) -> String {
     let name = format!("test_refuse_ts_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!(
-        "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $f$ \
-         BEGIN IF NEW.user_id = {uid} THEN RAISE EXCEPTION 'test: the session store is unavailable'; END IF; RETURN NEW; END $f$"
-    ))
-    .execute(pool)
-    .await
-    .expect("create fault function");
-    sqlx::query(&format!("CREATE TRIGGER {name} BEFORE INSERT ON token_sessions FOR EACH ROW EXECUTE FUNCTION {name}()"))
-        .execute(pool)
-        .await
-        .expect("create fault trigger");
+    crate::migrator::test_ddl(
+        pool,
+        &format!(
+            "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $f$ \
+             BEGIN IF NEW.user_id = {uid} THEN RAISE EXCEPTION 'test: the session store is unavailable'; END IF; RETURN NEW; END $f$"
+        ),
+    )
+    .await;
+    crate::migrator::test_ddl(pool, &format!("CREATE TRIGGER {name} BEFORE INSERT ON token_sessions FOR EACH ROW EXECUTE FUNCTION {name}()")).await;
     name
 }
 
+/// Takes the fault away again. Panics if it cannot: a fault left behind
+/// refuses the test's own healthy control, and two tests dropping triggers on
+/// token_sessions at once can deadlock (migrator::test_ddl retries that).
 #[cfg(test)]
 pub(crate) async fn allow_session_rows(pool: &sqlx::PgPool, name: &str) {
-    let _ = sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON token_sessions")).execute(pool).await;
-    let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS {name}()")).execute(pool).await;
+    crate::migrator::test_ddl(pool, &format!("DROP TRIGGER IF EXISTS {name} ON token_sessions")).await;
+    crate::migrator::test_ddl(pool, &format!("DROP FUNCTION IF EXISTS {name}()")).await;
 }
