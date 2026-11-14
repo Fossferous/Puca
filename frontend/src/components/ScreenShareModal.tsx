@@ -136,6 +136,11 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
     const handleSelectScreen = async () => {
         setBusy(true);
         let captured = false;
+        // Once Go Live has the capture, a failure is Go Live's to take down: it
+        // takes the dialog's start (VoicePanel), so a Cancel after it found none,
+        // and with none it stopped whatever capture the slot held and never took
+        // the announcement back.
+        let handedOn = false;
         // Read the remembered values, not state, for a quick launch: it runs
         // from the open effect, before the re-read above has re-rendered.
         const s = loadSettings();
@@ -158,6 +163,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                     // The shared window's own app: exact, so no question to ask.
                     // Anything else can be added from Audio sources while live.
                     const label = owner.window_title?.trim() ? owner.window_title : owner.name;
+                    handedOn = true;
                     await onGoLive('app', [{ pid: owner.pid, name: label, gainPercent: savedGainFor(owner) ?? 100 }]);
                     reset();
                     onClose();
@@ -196,12 +202,13 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                 effAudio = result.hasBrowserAudio ? 'browser' : 'none';
             }
 
+            handedOn = true;
             await onGoLive(effAudio);
             reset();
             onClose();
         } catch (e) {
             console.error('[ScreenShare] capture/go-live failed:', e);
-            if (captured) onCancelAfterCapture(); // tear the surface down on a failed go-live
+            if (captured && !handedOn) onCancelAfterCapture(); // tear the surface down: nothing else will
             setBusy(false);
             if (launch === 'quick') { reset(); onClose(); }
         }
@@ -238,19 +245,25 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
         // the go-live line does not charge it to the audio start.
         goLiveMark('app-step');
         setBusy(true);
+        let handedOn = false; // as in handleSelectScreen
         try {
             const chosen: SelectedApp[] = mixerApps
                 .filter(a => mixerSel.get(a.pid)?.on)
                 .map(a => ({ pid: a.pid, name: appLabel(a), gainPercent: mixerSel.get(a.pid)?.gainPercent ?? 100 }));
             saveSelection(chosen.map(c => ({ name: c.name, gainPercent: c.gainPercent ?? 100 })));
             // Nothing ticked = deliberate video-only stream.
+            handedOn = true;
             await onGoLive(chosen.length > 0 ? 'app' : 'none', chosen.length > 0 ? chosen : undefined);
             reset();
             onClose();
         } catch (e) {
             console.error('[ScreenShare] mixer go-live failed:', e);
-            onCancelAfterCapture();
+            if (!handedOn) onCancelAfterCapture();
             reset();
+            // A quick launch has nothing to go back to: left open with nothing
+            // drawn, it held Share and the arrow (both ignore a press while the
+            // dialog is open), so no share could start again.
+            if (launch === 'quick') onClose();
         }
     };
 

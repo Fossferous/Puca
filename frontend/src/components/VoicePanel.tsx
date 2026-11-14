@@ -3648,7 +3648,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 return { ok: false, error: (shareErr as Error).message || 'Screen share failed' };
             }
         } else {
-            await webrtcManager.addScreenShareToPeers();
+            try {
+                await webrtcManager.addScreenShareToPeers();
+            } catch (shareErr) {
+                // addTrack on a connection that closed meanwhile. Taken back here
+                // like the SFU's refusal: thrown, it left the announcement standing
+                // (a share everyone was told of, with nothing sent), and the
+                // dialog's Cancel then found no start of its own to go by.
+                if (!isInVoiceRef.current) return leftCall();
+                console.warn('[VoicePanel] screen share could not be sent to the call:', shareErr);
+                if (release({ retract: true })) {
+                    goLiveEnd('failed');
+                    setError((shareErr as Error).message || 'Screen share failed');
+                }
+                return { ok: false, error: (shareErr as Error).message || 'Screen share failed' };
+            }
         }
         goLiveMark('published');
         // The capture + publish awaits above can outlive the call
