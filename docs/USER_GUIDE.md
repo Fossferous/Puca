@@ -466,8 +466,10 @@ tablet** (a touch screen whose shorter side is 600 pixels or more; anything
 smaller is your phone). The bar says **in a browser** for a computer's web
 browser (a phone's browser counts as your phone and a tablet's as your
 tablet) and **on another device** when the other device did not say what it
-is. An app or a server from before this release calls a tablet your phone. A PC that was asleep or offline when its
-call was moved or ended does not rejoin that call when it wakes up, and does
+is. Until the server and the apps on both devices are from this release, a
+tablet is called what it was before: your phone, or a browser when an older
+app on a tablet held sideways is the one in the call. A PC that was asleep
+or offline when its call was moved or ended does not rejoin that call when it wakes up, and does
 not rejoin any call while you are in voice on another device; click the
 channel again if you want it there. The bar needs a server and an app
 from this release or later: against an older server it is simply not shown.

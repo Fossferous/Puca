@@ -85,9 +85,11 @@ AGC automatically adjusts your microphone's amplification level to maintain cons
 - **Web app (any browser, and the iPhone and iPad Home Screen app): off.** In a
   browser, auto gain can also lower your **system** microphone level (on Windows,
   the input level in Sound settings), and that level stays low after the call;
-  a web page cannot stop the browser doing it. It once took three microphones
-  down to 7.8 %. Turn it on in **Settings > Voice & Video** if you want it; that
-  choice is kept.
+  a web page cannot stop the browser doing it. It is the same Chromium behaviour
+  that took three microphones down to 7.8 % in the desktop app, before the desktop
+  app turned it off there (0.9.830). Turn it on in **Settings > Voice & Video** if
+  you want it; that choice is kept. Púca Notes' voice notes in a browser follow
+  the same setting.
 - An existing web profile that still had the old default (on) is switched off
   once by the update, with Manual Gain back at 100 % (a Manual Gain left from an
   earlier time it was off would otherwise apply again). If you had switched it

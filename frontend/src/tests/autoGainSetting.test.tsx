@@ -68,7 +68,12 @@ async function openVoice() {
     await settle();
 }
 
-const box = () => container.querySelector<HTMLInputElement>('[data-testid="settings-auto-gain"]')!;
+/** The Auto Gain Control row, found by its label (no data-testid: the
+ *  `settings-` ids are the automation contract, docs/AUTOMATION.md). */
+const row = () => Array.from(container.querySelectorAll('.settings-option'))
+    .find(r => r.querySelector('label')?.textContent === 'Auto Gain Control')!;
+const box = () => row().querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+const hintText = () => row().querySelector('.option-hint')!.textContent!.replace(/\s+/g, ' ');
 const manualGainShown = () => Array.from(container.querySelectorAll('label')).some(l => l.textContent === 'Manual Gain');
 
 async function reopen() {
@@ -81,7 +86,7 @@ describe('Settings > Auto Gain Control in the web app', () => {
     it('is off on a new profile, says why, and shows Manual Gain', async () => {
         await openVoice();
         expect(box().checked).toBe(false);
-        const hint = container.querySelector('[data-testid="settings-auto-gain-hint"]')!.textContent!.replace(/\s+/g, ' ');
+        const hint = hintText();
         expect(hint).toContain('Off by default in the web app');
         expect(hint).toContain('it can lower your system microphone level');
         expect(manualGainShown()).toBe(true);

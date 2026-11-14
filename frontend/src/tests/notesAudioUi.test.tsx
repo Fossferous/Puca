@@ -163,6 +163,31 @@ describe('AudioRecorder: the microphone', () => {
         expect(order).toEqual(['confirm', 'getUserMedia']);
     });
 
+    it('asks for auto gain as Settings has it: off by default in a browser, on once chosen', async () => {
+        // `audio: true` meant Chromium's own default, auto gain ON, which can
+        // lower the Windows microphone level for good (settingsStore.ts,
+        // autoGainOnByDefault). jsdom is a browser: no Tauri, no Android app.
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const gum = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
+        await act(async () => { root.render(<AudioRecorder onSave={() => true} onCancel={() => {}} />); });
+        await settle();
+        expect(gum).toHaveBeenCalledTimes(1);
+        expect(gum.mock.calls[0][0]).toEqual({ audio: { autoGainControl: false } });
+
+        await act(async () => { root.unmount(); });
+        root = createRoot(container);
+        installMic();
+        const { loadSettings, saveSettings } = await import('../components/settingsStore');
+        const store = new Map<string, string>();
+        vi.mocked(localStorage.getItem).mockImplementation((k: string) => store.get(k) ?? null);
+        vi.mocked(localStorage.setItem).mockImplementation((k: string, v: string) => { store.set(k, String(v)); });
+        saveSettings({ ...loadSettings(), autoGainControl: true }); // switched on in Settings
+        await act(async () => { root.render(<AudioRecorder onSave={() => true} onCancel={() => {}} />); });
+        await settle();
+        const again = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
+        expect(again.mock.calls[0][0]).toEqual({ audio: { autoGainControl: true } });
+    });
+
     it('dismissing the disclosure never touches the microphone', async () => {
         vi.spyOn(window, 'confirm').mockImplementation(() => { order.push('confirm'); return false; });
         const onCancel = vi.fn();

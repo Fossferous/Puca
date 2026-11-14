@@ -2888,7 +2888,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     <div className="settings-option">
                                         <div className="option-info">
                                             <label>Auto Gain Control</label>
-                                            <span className="option-hint" data-testid="settings-auto-gain-hint">
+                                            <span className="option-hint">
                                                 Evens out how loud you sound in calls: louder when you're quiet,
                                                 softer when you're loud. {autoGainLevelNote()} With it off,
                                                 Manual Gain sets your level.
@@ -2897,7 +2897,6 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <input
                                             type="checkbox"
                                             checked={settings.autoGainControl}
-                                            data-testid="settings-auto-gain"
                                             onChange={(e) => updateSetting('autoGainControl', e.target.checked)}
                                         />
                                     </div>
