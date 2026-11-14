@@ -269,9 +269,15 @@ const MAX_ZOOM = 40;
 /** Stable empty list so "no edge is offering anything" — the overwhelmingly
  *  common case — never hands the render a fresh array reference. */
 const NO_EDGE_HOPS: EdgeHop[] = [];
-/** What a touch-layout hop arrow steps out from under (placeHopArrows):
- *  everything that floats over the picture and takes a tap. */
-const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, .device-stage-mobile-toolbar-toggle, .device-stage-older-host';
+/** What a touch-layout hop arrow steps out from under (placeHopArrows): what
+ *  floats over the picture, takes a tap and stays until the user moves it.
+ *  The mouse pad, pinned keys and the collapsed toolbar's toggle are drawn
+ *  ABOVE the arrow (fixed, z-index 460/499); the paused banner is under it
+ *  but would lose its words and Resume to it. Not the feedback line nor the
+ *  older-agent band: both let touches through, are drawn under the arrow
+ *  and come and go on their own timers, so an arrow that moved for them
+ *  moved out from under a finger aimed at it. */
+const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, .device-stage-mobile-toolbar-toggle';
 
 /** How long to wait for the peer's first caret report before placing the view
  *  from where this end last AIMED instead.
@@ -2749,19 +2755,20 @@ export function DeviceStage() {
     // above the picture, and dragged anywhere; in landscape their default
     // places cover the middle of both side edges, exactly where an arrow sits,
     // so it was invisible and a tap on its spot pressed the pad instead. The
-    // paused banner, the collapsed toolbar's toggle and the older-agent band
-    // can cover one too. Each arrow slides along its edge to the nearest free
-    // spot (deviceStageHopPlace.ts).
-    // NOT the feedback line (.device-stage-mobile-error): it lets touches
-    // through, so an arrow under it is still pressed, and it comes and goes
-    // on its own. An arrow that slid aside for a 6 s note and snapped back as
-    // it expired moved out from under the finger aimed at it, and that tap
-    // clicked the picture.
+    // collapsed toolbar's toggle can cover one too, and the paused banner
+    // would lose its words to one. Each arrow slides along its edge to the
+    // nearest free spot (deviceStageHopPlace.ts; HOP_ARROW_OBSTACLES says
+    // what counts).
+    // NOT the feedback line (.device-stage-mobile-error) nor the older-agent
+    // band: they let touches through, are drawn under the arrow, and come
+    // and go on their own. An arrow that slid aside for a 6 s note and
+    // snapped back as it expired moved out from under the finger aimed at
+    // it, and that tap clicked the picture.
     // Measured when the arrows' directions or those controls change, when the
     // picture's box or the bars around it change, once more a frame later (a
-    // cluster re-clamps itself in its own layout effect, which runs after
-    // this one), on a resize, and after every lift of a finger (a cluster is
-    // moved by a drag, which ends in one). Not on every pan frame: where an
+    // cluster re-clamps itself after a change, and that commit lands after
+    // this measurement), on a resize, and after every lift of a finger (a
+    // cluster is moved by a drag, which ends in one). Not on every pan frame: where an
     // arrow sits depends on nothing a pan changes. Read back from the button
     // itself, less the shift it carries (data-hop-shift), so the stylesheet
     // stays the one place that says where an arrow's centred spot is.

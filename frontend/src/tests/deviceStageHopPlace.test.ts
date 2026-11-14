@@ -70,11 +70,11 @@ describe('hopChipShift', () => {
         expect(at.bottom).toBeLessThanOrEqual(171);
     });
 
-    it('the bottom chip slides sideways past a feedback line over the bottom centre', () => {
-        const line: PlaceRect = { left: 340, right: 504, top: 280, bottom: 312 };
-        const d = hopChipShift('down', DOWN, BOUNDS, [line]);
+    it('the bottom chip slides sideways past a control over the bottom centre (a cluster dragged there)', () => {
+        const row: PlaceRect = { left: 340, right: 504, top: 280, bottom: 312 };
+        const d = hopChipShift('down', DOWN, BOUNDS, [row]);
         const at = moved(DOWN, d, false);
-        expect(overlaps(at, line)).toBe(false);
+        expect(overlaps(at, row)).toBe(false);
         expect(Math.abs(d)).toBeLessThan(120);
     });
 });
