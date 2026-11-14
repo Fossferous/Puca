@@ -493,7 +493,11 @@ pub async fn pending(State(state): State<Arc<AppState>>, Json(req): Json<Pending
     }
     let gates = WebGates { muted_servers, muted_channels, blocked_ids };
     let user_id = user_id as UserId;
-    let items = pending_items(&state.web_push_unseen(user_id, req.id, &sid), user_id, &gates);
+    // What knocked, re-checked against what the member may see NOW: a frame was logged while
+    // they could see its channel, and a deny, a kick or a block may have landed since. The same
+    // re-check the Android delivery socket runs on its parked frames (ws::still_entitled).
+    let frames = crate::ws::still_entitled(&state, user_id, state.web_push_unseen(user_id, req.id, &sid)).await;
+    let items = pending_items(&frames, user_id, &gates);
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "items": items })),

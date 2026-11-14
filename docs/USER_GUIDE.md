@@ -1154,6 +1154,13 @@ Manage Tasks, Manage Messages and Create Clips. A voice channel also lists:
 How the settings combine:
 
 - Denies never apply to the server owner or to administrators.
+- A **Deny** of View Channel holds for people with Manage Channels too. A
+  channel they cannot see (on its own, or through its collection) is not in
+  their list, and they cannot rename it, move it, delete it or change its
+  permissions by any other way either: the server answers them as if it did
+  not exist. To undo a deny that hides a channel from you, ask the owner, an
+  administrator or someone who can still see it. Nor can they put a channel
+  into a collection they cannot see.
 - When a member's roles disagree, an **Allow** on any of them wins over a
   **Deny**. Any role's setting also wins over the @everyone role's, so to
   silence one role in a channel where @everyone is allowed to speak, deny

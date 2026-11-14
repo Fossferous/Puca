@@ -896,14 +896,28 @@ async fn settle(state: &Arc<AppState>, switch: Switch) -> HashMap<i32, usize> {
     .await;
     // At once rather than one after another: each waits on LiveKit for its SFU cut,
     // and the last person should not hear the game for several seconds longer than
-    // the first.
+    // the first. Everyone in a hidden room goes in the same sweep, so they are taken
+    // out TOGETHER, as a channel delete does: told one by one, each client still in
+    // the call played a leave sound (and read the name out) for every other one
+    // before the RoomLeft that ended its own call arrived.
     let evictions = switch
         .hidden
         .iter()
-        .flat_map(|&channel| occupants(state, channel).into_iter().map(move |user| (channel, user)))
-        .map(|(channel, user)| async move {
+        .flat_map(|&channel| {
+            let together = occupants(state, channel);
+            together.clone().into_iter().map(move |user| (channel, user, together.clone()))
+        })
+        .map(|(channel, user, together)| async move {
             let room = format!("voice_{channel}");
-            let out = crate::ws::evict_user_from_voice_room(state, &room, user, true, crate::ws::SelfNotice::ModeEnded).await;
+            let out = crate::ws::evict_user_from_voice_room_together(
+                state,
+                &room,
+                user,
+                true,
+                crate::ws::SelfNotice::ModeEnded,
+                &together,
+            )
+            .await;
             (channel, user, out)
         });
     let mut gone: HashMap<i32, usize> = HashMap::new();

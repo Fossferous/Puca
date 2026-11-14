@@ -29,7 +29,10 @@ A channel a mode hides is still there for everyone allowed to see it:
 
 - it is still in `GET /servers/:id/channels`, and an older client lists it. A channel is
   listed only if its own `mode_ids` and its collection's `parent_mode_ids` each allow the
-  mode that is on: an empty list allows any mode, and the AFK channel is exempt;
+  mode that is on: an empty list allows any mode, and the AFK channel is exempt. A member
+  denied the collection (the channel's own allow lets them see it) is not told the
+  collection's id or modes: their row carries the modes both allow in `mode_ids`, and
+  `[0]` (no mode has that id) when there are none, so it is listed exactly when it was;
 - a #mention or a notification still opens it, and it can be joined;
 - its messages are kept, its keys are untouched, and it comes back with the mode.
 
