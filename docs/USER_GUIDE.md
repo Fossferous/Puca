@@ -1404,8 +1404,8 @@ Inside Notes:
   **Overdue**, **Today** and **Upcoming**. The Tasks view in Púca itself has
   the same list as a **Reminders** tab, beside **Calendar** — so you can see
   what is due in Púca's phone app too, where Púca Notes' page is not
-  reachable. A due-item notification opens it, except in the desktop app,
-  where clicking one opens nothing yet. An item in a shared
+  reachable. A due-item notification opens it, in the desktop app too, and
+  there it plays Windows' notification sound. An item in a shared
   checklist that someone else set is marked *Reminds whoever set it*: it goes
   off for them, not for you.
 - **A checklist from somewhere else** — say, step-by-step instructions from an
@@ -1520,7 +1520,14 @@ messages*.
 - **Group notifications by conversation**, under the same setting, is on by
   default. Off, every message has a notification of its own, as before.
 - In the web app it is your browser that draws the notification, so how a
-  replaced one looks is up to it.
+  replaced one looks is up to it. Firefox and Safari show a replaced
+  notification as a new one, popping it up again, so there a conversation's
+  notification keeps the words it popped with until it pops again, rather
+  than popping for every message.
+- If Windows has Púca's notifications turned off (**Settings → System →
+  Notifications**), nothing shows, so Púca plays its message sound for
+  every message instead of once per conversation, and **Send test** says
+  they are turned off.
 
 ### Notifications while Púca is closed
 In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in

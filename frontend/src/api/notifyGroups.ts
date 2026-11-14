@@ -78,6 +78,9 @@ export interface GroupState {
     count: number;
     /** Distinct, most recent LAST. */
     authors: string[];
+    /** More people wrote than `authors` keeps (MAX_AUTHORS): the toast
+     *  cannot say exactly how many, so it says "more than". */
+    moreAuthors: boolean;
     ids: string[];
     importantIds: string[];
     /** When the last message was counted. */
@@ -135,7 +138,7 @@ export function stepGroup(prev: GroupState | undefined, m: GroupMessage, now: nu
     // A new burst: no toast yet, or the conversation went quiet for a while.
     const newBurst = !prev || now - prev.lastAt >= QUIET_WINDOW_MS;
     const base: GroupState = prev ?? {
-        key: m.key, kind: m.kind, where: m.where, count: 0, authors: [], ids: [], importantIds: [],
+        key: m.key, kind: m.kind, where: m.where, count: 0, authors: [], moreAuthors: false, ids: [], importantIds: [],
         lastAt: now, lastPopAt: Number.NEGATIVE_INFINITY, lastPopId: null, importantPopAt: null,
     };
     const state: GroupState = {
@@ -144,6 +147,8 @@ export function stepGroup(prev: GroupState | undefined, m: GroupMessage, now: nu
         where: m.where,
         count: base.count + 1,
         authors: pushCapped(base.authors, m.author, MAX_AUTHORS),
+        // A new name pushed the oldest off the kept list.
+        moreAuthors: base.moreAuthors || (base.authors.length >= MAX_AUTHORS && !base.authors.includes(m.author)),
         ids: m.messageId !== undefined ? pushCapped(base.ids, m.messageId, MAX_IDS) : base.ids,
         importantIds: important && m.messageId !== undefined ? pushCapped(base.importantIds, m.messageId, MAX_IDS) : base.importantIds,
         lastAt: now,
@@ -165,27 +170,29 @@ function finish(state: GroupState, pop: boolean, now: number, important = true, 
     return { pop, ...groupText(next), state: next };
 }
 
-/** 'alice', 'bob and alice', 'carol and 2 others': the most recent first. */
-export function whoPhrase(authors: string[]): string {
+/** 'alice', 'bob and alice', 'carol and 2 others': the most recent first.
+ *  `more`: more people than `authors` holds, so 'carol and more than 49 others'. */
+export function whoPhrase(authors: string[], more = false): string {
     const recentFirst = [...authors].reverse();
-    if (recentFirst.length <= 1) return recentFirst[0] ?? 'Someone';
-    if (recentFirst.length === 2) return `${recentFirst[0]} and ${recentFirst[1]}`;
+    if (recentFirst.length <= 1 && !more) return recentFirst[0] ?? 'Someone';
+    if (recentFirst.length === 2 && !more) return `${recentFirst[0]} and ${recentFirst[1]}`;
     const others = recentFirst.length - 1;
-    return `${recentFirst[0]} and ${others} others`;
+    return more ? `${recentFirst[0] ?? 'Someone'} and more than ${others} others` : `${recentFirst[0]} and ${others} others`;
 }
 
 /** What the conversation's toast says now. No message text, ever. */
-export function groupText(s: Pick<GroupState, 'kind' | 'where' | 'count' | 'authors'>): { title: string; body: string } {
+export function groupText(s: Pick<GroupState, 'kind' | 'where' | 'count' | 'authors'> & { moreAuthors?: boolean }): { title: string; body: string } {
     const n = s.count;
     const latest = s.authors[s.authors.length - 1] ?? 'Someone';
+    const who = whoPhrase(s.authors, s.moreAuthors === true);
     switch (s.kind) {
         case 'dm':
             return { title: s.where, body: n <= 1 ? 'Sent you a message' : `${n} new messages` };
         case 'join':
-            return { title: s.where, body: n <= 1 ? `${latest} joined` : `${whoPhrase(s.authors)} joined` };
+            return { title: s.where, body: n <= 1 ? `${latest} joined` : `${who} joined` };
         case 'channel':
         default:
-            return { title: s.where, body: n <= 1 ? `${latest} sent a message` : `${whoPhrase(s.authors)}: ${n} new messages` };
+            return { title: s.where, body: n <= 1 ? `${latest} sent a message` : `${who}: ${n} new messages` };
     }
 }
 
@@ -247,6 +254,10 @@ export class NotifyGroups {
 export const channelGroupKey = (serverId: string, channelId: number | string) => `chan:${serverId}:${channelId}`;
 export const dmGroupKey = (conversationId: string) => `dm:${conversationId}`;
 export const joinGroupKey = (serverId: string) => `join:${serverId}`;
+/** The task reminder's notification: one, which each new one replaces (the
+ *  same key on Android, the web and the desktop app's toasts). Not a
+ *  conversation, so nothing counts under it; a click opens Reminders. */
+export const TASKS_DUE_KEY = 'tasks-due';
 
 /** A channel's toast title: '#general · Server', or what is known of it. */
 export function channelWhere(channel: string | undefined, server: string | undefined): string {
@@ -259,6 +270,9 @@ export function channelWhere(channel: string | undefined, server: string | undef
  *  'sovereign-navigate' target Chat already applies (Android taps use the same
  *  door). Null for a key that names no place. */
 export function navForGroupKey(key: string): string | null {
+    // The Tasks view's Reminders tab (Chat's 'reminders' target, the one an
+    // Android tap on a due-item notification uses).
+    if (key === TASKS_DUE_KEY) return 'reminders';
     if (key.startsWith('dm:')) return key;
     if (key.startsWith('join:')) return `server:${key.slice(5)}`;
     if (key.startsWith('chan:')) {

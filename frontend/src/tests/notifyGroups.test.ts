@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-    IMPORTANT_REPOP_MS, NotifyGroups, QUIET_WINDOW_MS, channelGroupKey, channelWhere, dmGroupKey, groupText,
+    IMPORTANT_REPOP_MS, NotifyGroups, QUIET_WINDOW_MS, TASKS_DUE_KEY, channelGroupKey, channelWhere, dmGroupKey, groupText,
     joinGroupKey, navForGroupKey, whoPhrase, type GroupMessage,
 } from '../api/notifyGroups';
 
@@ -226,6 +226,35 @@ describe('the words on it', () => {
         expect(s.body).toBe('alice and bob: 3 new messages');
     });
 
+    it('past the names it keeps, it says "more than" rather than a count that stopped growing', () => {
+        const { groups, advance } = harness();
+        let step = groups.record(chan('p0', 'm0'))!;
+        for (let i = 1; i < 50; i++) {
+            advance(1);
+            step = groups.record(chan(`p${i}`, `m${i}`))!;
+        }
+        // 50 people: still exact.
+        expect(step.body).toBe('p49 and 49 others: 50 new messages');
+        for (let i = 50; i < 60; i++) {
+            advance(1);
+            step = groups.record(chan(`p${i}`, `m${i}`))!;
+        }
+        // 60 people wrote; only 50 names are kept.
+        expect(step.state.authors).toHaveLength(50);
+        expect(step.body).toBe('p59 and more than 49 others: 60 new messages');
+        // Someone already there speaking again changes nothing of that.
+        advance(1);
+        step = groups.record(chan('p59', 'm60'))!;
+        expect(step.body).toBe('p59 and more than 49 others: 61 new messages');
+        // A server's joins say it the same way.
+        const fifty = Array.from({ length: 50 }, (_, i) => `j${i}`);
+        expect(groupText({ kind: 'join', where: 'Lads', count: 70, authors: fifty, moreAuthors: true }))
+            .toEqual({ title: 'Lads', body: 'j49 and more than 49 others joined' });
+        // Seen: it starts again from nothing.
+        groups.seen('chan:s1:7');
+        expect(groups.record(chan('p1', 'n1'))!.body).toBe('p1 sent a message');
+    });
+
     it('per kind', () => {
         expect(groupText({ kind: 'dm', where: 'Alice', count: 1, authors: ['Alice'] })).toEqual({ title: 'Alice', body: 'Sent you a message' });
         expect(groupText({ kind: 'dm', where: 'Alice', count: 4, authors: ['Alice'] })).toEqual({ title: 'Alice', body: '4 new messages' });
@@ -255,6 +284,10 @@ describe('keys and where a click lands', () => {
         expect(navForGroupKey('chan:s1')).toBe('server:s1');
         expect(navForGroupKey('test')).toBeNull();
         expect(navForGroupKey('file:123')).toBeNull();
+        // The task reminder's toast lands on the Reminders tab, through
+        // the same target an Android tap uses.
+        expect(navForGroupKey(TASKS_DUE_KEY)).toBe('reminders');
+        expect(TASKS_DUE_KEY).toBe('tasks-due');
     });
 });
 

@@ -34,12 +34,22 @@
 //! burst, a mention, a DM again after a while); this module only carries that
 //! out: `popup: true` replaces the conversation's toast and pops it,
 //! `popup: false` updates it in place, and re-adds it silently when the user
-//! had dismissed it. Every toast is silent (`<audio silent="true"/>`), as the
-//! plugin's were (notify-rust hands tauri-winrt-notification no sound, which
-//! it writes as that same element): the app plays its own message sound.
+//! had dismissed it. A message toast is silent (`<audio silent="true"/>`), as
+//! the plugin's were (notify-rust hands tauri-winrt-notification no sound,
+//! which it writes as that same element): the app plays its own message
+//! sound. A task reminder (`sound: true`, key `tasks-due`) carries Windows'
+//! default sound instead, because the app has no sound of its own for one.
+//!
+//! `toast_show` answers with what Windows did (`popped`, `updated`,
+//! `re-added`), or `off` when Windows will not show Púca's notifications at
+//! all (Settings > System > Notifications, or a policy: `ToastNotifier.Setting`)
+//! and `failed` when it refused this one. The page needs that to know whether
+//! a quiet update is on screen: when nothing shows, it must not take the app's
+//! own sound away too.
 //!
 //! A click lands on the in-process `Activated` handler: it raises the window
-//! and tells the page which conversation to open (`toast-activated`). Windows
+//! and tells the page which toast it was (`toast-activated` with the key: a
+//! conversation to open, or `tasks-due` for the Reminders view). Windows
 //! delivers that for a toast still on screen. Púca's Start-menu shortcut
 //! carries an AppUserModelID and no ToastActivatorCLSID, so a click on an
 //! entry in the notification centre after its pop-up has gone may reach
@@ -50,9 +60,11 @@
 // Off Windows the commands refuse and the rule below is only its tests'.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-/// The one Group every message toast is filed under. Removing it removes
-/// every message toast and nothing else (Púca Tasks and the plugin's toasts
-/// carry no group).
+/// The one Group every toast of this module is filed under: messages, and
+/// since 0.9.863 the task reminder. Removing it (sign-out) removes them all
+/// and nothing else: the plugin's toasts carry no group. Its value predates
+/// the reminder and stays: a new one would leave toasts already in a
+/// notification centre out of reach.
 pub const GROUP: &str = "puca-msg";
 
 /// Longest title or body handed to Windows, in characters. A toast shows two
@@ -80,6 +92,19 @@ pub const TOAST_XML: &str = concat!(
     r#"</binding></visual><audio silent="true"/></toast>"#,
 );
 
+/// The same toast with Windows' default notification sound
+/// (`ms-winsoundevent:Notification.Default`, what a toast with no `<audio>`
+/// plays), for a task reminder.
+pub const TOAST_XML_SOUND: &str = concat!(
+    r#"<toast><visual><binding template="ToastGeneric">"#,
+    r#"<text>{title}</text><text>{body}</text>"#,
+    r#"</binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>"#,
+);
+
+pub fn toast_xml(sound: bool) -> &'static str {
+    if sound { TOAST_XML_SOUND } else { TOAST_XML }
+}
+
 fn clamp(s: &str) -> String {
     s.chars().take(MAX_TEXT).collect()
 }
@@ -87,7 +112,8 @@ fn clamp(s: &str) -> String {
 /// One request from the page, in the order the page sent them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
-    Show { key: String, title: String, body: String, popup: bool },
+    /// `sound`: Windows' default sound (a task reminder) rather than none.
+    Show { key: String, title: String, body: String, popup: bool, sound: bool },
     Clear { key: String },
     ClearAll,
 }
@@ -102,7 +128,12 @@ pub enum Updated {
 
 /// Where the toasts go: Windows in the app, a recorder in the tests.
 pub trait Sink {
-    fn show(&mut self, key: &str, tag: &str, title: &str, body: &str, popup: bool, seq: u32) -> Result<(), String>;
+    /// Will Windows show this app's toasts at all? `Ok(false)`: turned off
+    /// for Púca or for every app in Settings, or by a policy. `Err`: Windows
+    /// could not say (an id it has no setting for), and the toast is shown
+    /// regardless, as before this was asked.
+    fn enabled(&mut self) -> Result<bool, String>;
+    fn show(&mut self, key: &str, tag: &str, title: &str, body: &str, popup: bool, sound: bool, seq: u32) -> Result<(), String>;
     fn update(&mut self, tag: &str, title: &str, body: &str, seq: u32) -> Result<Updated, String>;
     fn remove(&mut self, tag: &str) -> Result<(), String>;
     fn remove_all(&mut self) -> Result<(), String>;
@@ -117,8 +148,25 @@ pub enum Outcome {
     Updated,
     /// It was gone (dismissed): put back silently, no pop-up.
     ReAddedQuietly,
+    /// Windows shows none of Púca's notifications (see `Sink::enabled`):
+    /// nothing was shown, and nothing will be until that is turned back on.
+    Off,
     Cleared,
     Failed,
+}
+
+impl Outcome {
+    /// What `toast_show` tells the page (desktopNotify.ts reads it).
+    pub fn answer(self) -> &'static str {
+        match self {
+            Outcome::Popped => "popped",
+            Outcome::Updated => "updated",
+            Outcome::ReAddedQuietly => "re-added",
+            Outcome::Off => "off",
+            Outcome::Cleared => "cleared",
+            Outcome::Failed => "failed",
+        }
+    }
 }
 
 /// The rule, apart from Windows so it can be tested. Sequence numbers only
@@ -141,12 +189,17 @@ impl<S: Sink> Toasts<S> {
 
     pub fn handle(&mut self, job: Job) -> Outcome {
         match job {
-            Job::Show { key, title, body, popup } => {
+            Job::Show { key, title, body, popup, sound } => {
+                // Asked every time, never remembered: the user can turn
+                // Púca's notifications back on at any moment.
+                if self.sink.enabled() == Ok(false) {
+                    return Outcome::Off;
+                }
                 let tag = tag_for(&key);
                 let (title, body) = (clamp(&title), clamp(&body));
                 let seq = self.next_seq();
                 if popup {
-                    return match self.sink.show(&key, &tag, &title, &body, true, seq) {
+                    return match self.sink.show(&key, &tag, &title, &body, true, sound, seq) {
                         Ok(()) => Outcome::Popped,
                         Err(e) => { log::warn!("[notify] toast show failed: {e}"); Outcome::Failed }
                     };
@@ -160,7 +213,7 @@ impl<S: Sink> Toasts<S> {
                         // pop-up. A new sequence number: the old data's is
                         // gone with it.
                         let seq = self.next_seq();
-                        match self.sink.show(&key, &tag, &title, &body, false, seq) {
+                        match self.sink.show(&key, &tag, &title, &body, false, sound, seq) {
                             Ok(()) => Outcome::ReAddedQuietly,
                             Err(e) => { log::warn!("[notify] quiet toast failed: {e}"); Outcome::Failed }
                         }
@@ -180,25 +233,49 @@ impl<S: Sink> Toasts<S> {
     }
 }
 
+/// A job on its way to the worker, and where to say what came of it (a
+/// `toast_show` waiting to answer the page; clears are not waited for).
+pub struct Request {
+    pub job: Job,
+    pub reply: Option<std::sync::mpsc::Sender<Outcome>>,
+}
+
+/// Carry out one request and answer it, AFTER Windows has been asked: the
+/// answer is what happened, not that it was queued.
+pub fn serve<S: Sink>(toasts: &mut Toasts<S>, req: Request) -> Outcome {
+    let outcome = toasts.handle(req.job);
+    if let Some(reply) = req.reply {
+        // The page gave up waiting: nothing to tell.
+        let _ = reply.send(outcome);
+    }
+    outcome
+}
+
+/// How long `toast_show` waits for Windows before answering `queued`: the
+/// toast still goes up when Windows gets to it; only the answer is lost.
+#[cfg(windows)]
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 // --- Windows -------------------------------------------------------------
 
 #[cfg(windows)]
 mod win {
-    use super::{Sink, Updated, GROUP, TOAST_XML};
+    use super::{toast_xml, Sink, Updated, GROUP};
     use std::collections::VecDeque;
     use tauri::{AppHandle, Emitter};
     use windows::core::{IInspectable, HSTRING};
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::Foundation::TypedEventHandler;
     use windows::UI::Notifications::{
-        NotificationData, NotificationUpdateResult, ToastNotification, ToastNotificationManager, ToastNotifier,
+        NotificationData, NotificationSetting, NotificationUpdateResult, ToastNotification, ToastNotificationManager,
+        ToastNotifier,
     };
 
     /// `notify-rust`'s fallback, used by the plugin for a build that runs out
     /// of `target\debug` or `target\release`: such a build has no Start-menu
     /// shortcut carrying the app's id, and Windows shows nothing for an id
     /// with none.
-    const POWERSHELL_APP_ID: &str = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+    pub const POWERSHELL_APP_ID: &str ="{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
     /// The id the toasts are filed under: the plugin's own rule
     /// (tauri-plugin-notification 2.4.0, desktop.rs), so these and its
@@ -255,10 +332,16 @@ mod win {
         Ok(data)
     }
 
+    /// Whether a notifier's toasts are shown at all: only `Enabled` is.
+    /// Reading it shows nothing.
+    pub fn setting_enabled(notifier: &ToastNotifier) -> windows::core::Result<bool> {
+        Ok(notifier.Setting()? == NotificationSetting::Enabled)
+    }
+
     /// The toast object, without showing it.
-    pub fn build(tag: &str, title: &str, body: &str, popup: bool, seq: u32) -> windows::core::Result<ToastNotification> {
+    pub fn build(tag: &str, title: &str, body: &str, popup: bool, sound: bool, seq: u32) -> windows::core::Result<ToastNotification> {
         let xml = XmlDocument::new()?;
-        xml.LoadXml(&HSTRING::from(TOAST_XML))?;
+        xml.LoadXml(&HSTRING::from(toast_xml(sound)))?;
         let toast = ToastNotification::CreateToastNotification(&xml)?;
         toast.SetTag(&HSTRING::from(tag))?;
         toast.SetGroup(&HSTRING::from(GROUP))?;
@@ -268,8 +351,12 @@ mod win {
     }
 
     impl Sink for WinSink {
-        fn show(&mut self, key: &str, tag: &str, title: &str, body: &str, popup: bool, seq: u32) -> Result<(), String> {
-            let toast = build(tag, title, body, popup, seq).map_err(|e| e.to_string())?;
+        fn enabled(&mut self) -> Result<bool, String> {
+            setting_enabled(&self.notifier()?).map_err(|e| e.to_string())
+        }
+
+        fn show(&mut self, key: &str, tag: &str, title: &str, body: &str, popup: bool, sound: bool, seq: u32) -> Result<(), String> {
+            let toast = build(tag, title, body, popup, sound, seq).map_err(|e| e.to_string())?;
             let app = self.app.clone();
             let key = key.to_string();
             toast
@@ -325,17 +412,17 @@ fn activated(app: &tauri::AppHandle, key: &str) {
 }
 
 #[cfg(windows)]
-static WORKER: std::sync::OnceLock<crate::ordered_worker::OrderedWorker<Job>> = std::sync::OnceLock::new();
+static WORKER: std::sync::OnceLock<crate::ordered_worker::OrderedWorker<Request>> = std::sync::OnceLock::new();
 
 #[cfg(windows)]
-fn send(app: &tauri::AppHandle, job: Job) -> Result<(), String> {
+fn send(app: &tauri::AppHandle, req: Request) -> Result<(), String> {
     let worker = WORKER.get_or_init(|| {
         let app = app.clone();
         let mut toasts: Option<Toasts<win::WinSink>> = None;
         // One thread, in order: a quiet update must never overtake the
         // pop-up it updates. Off the UI thread, which a sync command runs on
         // (ordered_worker.rs), in its own MTA as heif.rs does.
-        crate::ordered_worker::OrderedWorker::spawn("toasts", move |job: Job| {
+        crate::ordered_worker::OrderedWorker::spawn("toasts", move |req: Request| {
             let t = toasts.get_or_insert_with(|| {
                 let _ = unsafe {
                     windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
@@ -343,40 +430,59 @@ fn send(app: &tauri::AppHandle, job: Job) -> Result<(), String> {
                 let id = win::app_id(&app.config().identifier);
                 Toasts::new(win::WinSink::new(app.clone(), id))
             });
-            let what = match &job { Job::Show { popup: true, .. } => "show", Job::Show { .. } => "update", Job::Clear { .. } => "clear", Job::ClearAll => "clear-all" };
-            let outcome = t.handle(job);
+            let what = match &req.job { Job::Show { popup: true, .. } => "show", Job::Show { .. } => "update", Job::Clear { .. } => "clear", Job::ClearAll => "clear-all" };
+            let outcome = serve(t, req);
             log::debug!("[notify] toast {what}: {outcome:?}");
         })
     });
-    worker.send(job).map_err(|_| "the toast worker is gone".to_string())
+    worker.send(req).map_err(|_| "the toast worker is gone".to_string())
 }
 
-/// Show or update the toast for one conversation (see the module header).
-/// Returns as soon as the request is queued; the page falls back to the
-/// plugin only when this command itself is missing or refuses.
+/// Show or update one toast (see the module header): a conversation's, or
+/// with `sound` the task reminder's. Answers what Windows did (`popped`,
+/// `updated`, `re-added`, `off`, `failed`; `queued` when Windows took longer
+/// than ANSWER_WAIT), so the page knows whether anything is on screen. Async
+/// so the wait is off the UI thread; the page sends the next toast command
+/// only once this one has answered, so the order still holds. An `Err` means
+/// this shell has no such toasts, and the page uses the plugin's.
 #[tauri::command]
-pub fn toast_show(app: tauri::AppHandle, key: String, title: String, body: String, popup: bool) -> Result<(), String> {
+pub async fn toast_show(
+    app: tauri::AppHandle,
+    key: String,
+    title: String,
+    body: String,
+    popup: bool,
+    sound: Option<bool>,
+) -> Result<String, String> {
     if key.is_empty() {
         return Err("a toast needs a key".into());
     }
     #[cfg(windows)]
     {
-        send(&app, Job::Show { key, title, body, popup })
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job = Job::Show { key, title, body, popup, sound: sound.unwrap_or(false) };
+        send(&app, Request { job, reply: Some(tx) })?;
+        let waited = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(ANSWER_WAIT)).await;
+        match waited {
+            Ok(Ok(outcome)) => Ok(outcome.answer().to_string()),
+            Ok(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) => Ok("queued".into()),
+            Ok(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) | Err(_) => Err("the toast worker is gone".into()),
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, title, body, popup);
+        let _ = (app, title, body, popup, sound);
         Err("toasts that replace each other are Windows-only".into())
     }
 }
 
-/// Take one conversation's toast out of the notification centre (it was read
-/// in the app, or clicked).
+/// Take one toast out of the notification centre (its conversation was read
+/// in the app, or it was clicked).
 #[tauri::command]
 pub fn toast_clear(app: tauri::AppHandle, key: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        send(&app, Job::Clear { key })
+        send(&app, Request { job: Job::Clear { key }, reply: None })
     }
     #[cfg(not(windows))]
     {
@@ -385,12 +491,12 @@ pub fn toast_clear(app: tauri::AppHandle, key: String) -> Result<(), String> {
     }
 }
 
-/// Take every message toast out (sign-out).
+/// Take every toast of this module out (sign-out): messages and the reminder.
 #[tauri::command]
 pub fn toast_clear_all(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
-        send(&app, Job::ClearAll)
+        send(&app, Request { job: Job::ClearAll, reply: None })
     }
     #[cfg(not(windows))]
     {
@@ -413,11 +519,20 @@ mod tests {
         centre: Vec<(String, String, String)>,
         popups: usize,
         fail_update: bool,
+        /// Windows' per-app switch: `Some(false)` off, `None` unreadable.
+        setting: Option<Option<bool>>,
     }
 
     impl Sink for Recorder {
-        fn show(&mut self, _key: &str, tag: &str, title: &str, body: &str, popup: bool, seq: u32) -> Result<(), String> {
-            self.calls.push(format!("show {tag} popup={popup} seq={seq}"));
+        fn enabled(&mut self) -> Result<bool, String> {
+            match self.setting {
+                None | Some(Some(true)) => Ok(true),
+                Some(Some(false)) => Ok(false),
+                Some(None) => Err("Element not found".into()),
+            }
+        }
+        fn show(&mut self, _key: &str, tag: &str, title: &str, body: &str, popup: bool, sound: bool, seq: u32) -> Result<(), String> {
+            self.calls.push(format!("show {tag} popup={popup} sound={sound} seq={seq}"));
             self.centre.retain(|(t, _, _)| t != tag);
             self.centre.push((tag.to_string(), title.to_string(), body.to_string()));
             if popup {
@@ -452,7 +567,74 @@ mod tests {
     }
 
     fn show(key: &str, body: &str, popup: bool) -> Job {
-        Job::Show { key: key.into(), title: "#general".into(), body: body.into(), popup }
+        Job::Show { key: key.into(), title: "#general".into(), body: body.into(), popup, sound: false }
+    }
+
+    fn reminder() -> Job {
+        Job::Show { key: "tasks-due".into(), title: "Púca Tasks".into(), body: "A task is due".into(), popup: true, sound: true }
+    }
+
+    #[test]
+    fn with_windows_notifications_off_for_puca_nothing_is_shown_and_the_answer_says_so() {
+        let mut t = Toasts::new(Recorder { setting: Some(Some(false)), ..Default::default() });
+        assert_eq!(t.handle(show("chan:s:1", "a", true)), Outcome::Off);
+        assert_eq!(t.handle(show("chan:s:1", "b", false)), Outcome::Off);
+        assert_eq!(t.handle(reminder()), Outcome::Off);
+        assert!(t.sink.calls.is_empty(), "{:?}", t.sink.calls);
+        assert_eq!(Outcome::Off.answer(), "off");
+        // Turned back on: asked again, not remembered.
+        t.sink.setting = Some(Some(true));
+        assert_eq!(t.handle(show("chan:s:1", "c", false)), Outcome::ReAddedQuietly);
+        assert_eq!(t.handle(show("chan:s:1", "d", true)), Outcome::Popped);
+    }
+
+    #[test]
+    fn a_setting_windows_cannot_read_still_shows_the_toast() {
+        let mut t = Toasts::new(Recorder { setting: Some(None), ..Default::default() });
+        assert_eq!(t.handle(show("chan:s:1", "a", true)), Outcome::Popped);
+        assert_eq!(t.sink.popups, 1);
+    }
+
+    #[test]
+    fn a_reminder_carries_the_default_sound_and_a_message_none() {
+        let mut t = Toasts::new(Recorder::default());
+        assert_eq!(t.handle(reminder()), Outcome::Popped);
+        t.handle(show("chan:s:1", "a", true));
+        assert!(t.sink.calls[0].contains(&format!("show {} popup=true sound=true", tag_for("tasks-due"))), "{:?}", t.sink.calls);
+        assert!(t.sink.calls[1].contains("sound=false"), "{:?}", t.sink.calls);
+        assert_eq!(toast_xml(true), TOAST_XML_SOUND);
+        assert_eq!(toast_xml(false), TOAST_XML);
+    }
+
+    #[test]
+    fn a_failed_show_is_answered_as_failed_not_as_success() {
+        struct Refuses;
+        impl Sink for Refuses {
+            fn enabled(&mut self) -> Result<bool, String> { Ok(true) }
+            fn show(&mut self, _: &str, _: &str, _: &str, _: &str, _: bool, _: bool, _: u32) -> Result<(), String> { Err("0x80070490".into()) }
+            fn update(&mut self, _: &str, _: &str, _: &str, _: u32) -> Result<Updated, String> { Ok(Updated::NotFound) }
+            fn remove(&mut self, _: &str) -> Result<(), String> { Ok(()) }
+            fn remove_all(&mut self) -> Result<(), String> { Ok(()) }
+        }
+        let mut t = Toasts::new(Refuses);
+        let (tx, rx) = std::sync::mpsc::channel();
+        serve(&mut t, Request { job: show("chan:s:1", "a", true), reply: Some(tx) });
+        assert_eq!(rx.try_recv().map(Outcome::answer), Ok("failed"));
+    }
+
+    #[test]
+    fn the_answer_comes_after_windows_was_asked() {
+        let mut t = Toasts::new(Recorder::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        serve(&mut t, Request { job: show("chan:s:1", "a", true), reply: Some(tx) });
+        // The show reached "Windows" before anything was answered.
+        assert_eq!(t.sink.popups, 1);
+        assert_eq!(rx.try_recv(), Ok(Outcome::Popped));
+        let (tx, rx) = std::sync::mpsc::channel();
+        serve(&mut t, Request { job: show("chan:s:1", "b", false), reply: Some(tx) });
+        assert_eq!(rx.try_recv().map(Outcome::answer), Ok("updated"));
+        // A clear is not waited for: no reply channel, nothing answered.
+        assert_eq!(serve(&mut t, Request { job: Job::Clear { key: "chan:s:1".into() }, reply: None }), Outcome::Cleared);
     }
 
     #[test]
@@ -540,16 +722,23 @@ mod tests {
     fn titles_and_bodies_are_clamped() {
         let mut t = Toasts::new(Recorder::default());
         let long = "x".repeat(1000);
-        t.handle(Job::Show { key: "k".into(), title: long.clone(), body: long, popup: true });
+        t.handle(Job::Show { key: "k".into(), title: long.clone(), body: long, popup: true, sound: false });
         assert_eq!(t.sink.centre[0].1.chars().count(), MAX_TEXT);
         assert_eq!(t.sink.centre[0].2.chars().count(), MAX_TEXT);
     }
 
     #[test]
-    fn every_toast_is_silent_and_its_lines_are_bound_not_written_in() {
+    fn a_message_toast_is_silent_and_its_lines_are_bound_not_written_in() {
         assert!(TOAST_XML.contains(r#"<audio silent="true"/>"#));
         assert!(TOAST_XML.contains("<text>{title}</text><text>{body}</text>"));
         assert!(TOAST_XML.contains(r#"template="ToastGeneric""#));
+    }
+
+    #[test]
+    fn the_reminder_toast_has_the_default_sound_and_the_same_bound_lines() {
+        assert!(TOAST_XML_SOUND.contains(r#"<audio src="ms-winsoundevent:Notification.Default"/>"#));
+        assert!(!TOAST_XML_SOUND.contains("silent"));
+        assert!(TOAST_XML_SOUND.contains("<text>{title}</text><text>{body}</text>"));
     }
 
     /// The real WinRT objects, built and never shown: the XML parses, the tag,
@@ -559,7 +748,7 @@ mod tests {
     #[test]
     fn the_real_toast_object_takes_the_tag_group_and_bound_lines() {
         let tag = tag_for("chan:s:1");
-        let toast = win::build(&tag, "#general · Server <&>", "alice and 2 others: 5 new messages", false, 7).unwrap();
+        let toast = win::build(&tag, "#general · Server <&>", "alice and 2 others: 5 new messages", false, false, 7).unwrap();
         assert_eq!(toast.Tag().unwrap().to_string(), tag);
         assert_eq!(toast.Group().unwrap().to_string(), GROUP);
         assert!(toast.SuppressPopup().unwrap());
@@ -568,7 +757,33 @@ mod tests {
         let values = data.Values().unwrap();
         // Markup in a name stays text: it is a bound value, never XML.
         assert_eq!(values.Lookup(&windows::core::HSTRING::from("title")).unwrap().to_string(), "#general · Server <&>");
-        let popped = win::build(&tag, "t", "b", true, 8).unwrap();
+        let popped = win::build(&tag, "t", "b", true, false, 8).unwrap();
         assert!(!popped.SuppressPopup().unwrap());
+        let silent = toast.Content().unwrap().GetXml().unwrap().to_string();
+        assert!(silent.contains(r#"silent="true""#), "{silent}");
+    }
+
+    /// The reminder's real toast object, never shown: Windows parsed the
+    /// sound into it, under the same tag rule and group as the rest.
+    #[cfg(windows)]
+    #[test]
+    fn the_real_reminder_toast_carries_windows_default_sound() {
+        let toast = win::build(&tag_for("tasks-due"), "Púca Tasks", "2 tasks are due", true, true, 1).unwrap();
+        let xml = toast.Content().unwrap().GetXml().unwrap().to_string();
+        assert!(xml.contains("ms-winsoundevent:Notification.Default"), "{xml}");
+        assert!(!xml.contains("silent"), "{xml}");
+        assert_eq!(toast.Group().unwrap().to_string(), GROUP);
+        assert!(!toast.SuppressPopup().unwrap());
+    }
+
+    /// Reading the per-app switch is a read: it shows nothing, and whatever
+    /// Windows says (or cannot say) is an answer, never a panic.
+    #[cfg(windows)]
+    #[test]
+    fn reading_the_notification_setting_shows_nothing() {
+        let id = windows::core::HSTRING::from(win::POWERSHELL_APP_ID);
+        if let Ok(notifier) = windows::UI::Notifications::ToastNotificationManager::CreateToastNotifierWithId(&id) {
+            let _ = win::setting_enabled(&notifier);
+        }
     }
 }

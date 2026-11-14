@@ -23,6 +23,12 @@ const env = vi.hoisted(() => ({
     settings: {} as Record<string, unknown>,
     invokes: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
     failCommands: new Set<string>(),
+    /** Refused once, then answered: a one-off failure. */
+    failOnce: new Set<string>(),
+    /** What a command answers (toasts.rs's toast_show: 'popped', 'updated',
+     *  're-added', 'off', 'failed'); null when unset, as before it answered. */
+    answers: {} as Record<string, unknown>,
+    pluginGranted: true,
     pluginShown: [] as { title: string; body?: string }[],
     toastClick: null as null | ((e: { payload: string }) => void),
     androidPosted: [] as unknown[][],
@@ -46,8 +52,9 @@ vi.mock('../components/settingsStore', async (orig) => {
 vi.mock('@tauri-apps/api/core', () => ({
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
         env.invokes.push({ cmd, args });
+        if (env.failOnce.delete(cmd)) throw new Error('IPC refused');
         if (env.failCommands.has(cmd)) throw new Error(`Command ${cmd} not found`);
-        return null;
+        return env.answers[cmd] ?? null;
     },
 }));
 vi.mock('@tauri-apps/api/event', () => ({
@@ -57,8 +64,8 @@ vi.mock('@tauri-apps/api/event', () => ({
     },
 }));
 vi.mock('@tauri-apps/plugin-notification', () => ({
-    isPermissionGranted: async () => true,
-    requestPermission: async () => 'granted',
+    isPermissionGranted: async () => env.pluginGranted,
+    requestPermission: async () => (env.pluginGranted ? 'granted' : 'denied'),
     sendNotification: (n: { title: string; body?: string }) => { env.pluginShown.push(n); },
 }));
 
@@ -110,35 +117,50 @@ function channelMessage(author: string, id: string, channel = 7, extra: Partial<
     });
 }
 
-/** A web Notification that keeps a model of the browser's list: the same
- *  tag replaces (no close event, as the spec says), renotify or a new tag pops. */
-class FakeNotification {
-    static permission: NotificationPermission = 'granted';
-    static list = new Map<string, FakeNotification>();
-    static made: { title: string; tag?: string; renotify?: boolean; silent?: boolean; body?: string }[] = [];
-    static popups = 0;
-    onclick: (() => void) | null = null;
-    onclose: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    closed = false;
-    title: string;
-    tag: string;
-    constructor(title: string, opts: { tag?: string; renotify?: boolean; silent?: boolean; body?: string } = {}) {
-        if (opts.renotify && !opts.tag) throw new TypeError('renotify needs a tag');
-        this.title = title;
-        this.tag = opts.tag ?? `untagged#${FakeNotification.made.length}`;
-        FakeNotification.made.push({ title, ...opts });
-        const replacing = FakeNotification.list.has(this.tag);
-        if (!replacing || opts.renotify) FakeNotification.popups++;
-        FakeNotification.list.set(this.tag, this);
+/** A web Notification that keeps a model of the browser's list.
+ *
+ *  Chromium-shaped (`renotify` on its prototype, as Chromium exposes it): the
+ *  same tag replaces (no close event, as the spec says); renotify or a new
+ *  tag pops. Firefox-shaped (no `renotify` anywhere, as in Firefox and
+ *  Safari): every replacement pops, because Firefox closes the old toast and
+ *  shows a new one (widget/windows/ToastNotification.cpp,
+ *  ShowAlertWithCallbacks), and the old one hears its close. */
+function makeFakeNotification(renotifySupported: boolean) {
+    class Fake {
+        static permission: NotificationPermission = 'granted';
+        static list = new Map<string, Fake>();
+        static made: { title: string; tag?: string; renotify?: boolean; silent?: boolean; body?: string }[] = [];
+        static popups = 0;
+        onclick: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        closed = false;
+        title: string;
+        tag: string;
+        constructor(title: string, opts: { tag?: string; renotify?: boolean; silent?: boolean; body?: string } = {}) {
+            if (renotifySupported && opts.renotify && !opts.tag) throw new TypeError('renotify needs a tag');
+            this.title = title;
+            this.tag = opts.tag ?? `untagged#${Fake.made.length}`;
+            Fake.made.push({ title, ...opts });
+            const old = Fake.list.get(this.tag);
+            if (!old || opts.renotify || !renotifySupported) Fake.popups++;
+            Fake.list.set(this.tag, this);
+            if (old && !renotifySupported) { old.closed = true; old.onclose?.(); }
+        }
+        close() {
+            this.closed = true;
+            if (Fake.list.get(this.tag) === this) Fake.list.delete(this.tag);
+            this.onclose?.();
+        }
+        static reset() { Fake.list.clear(); Fake.made = []; Fake.popups = 0; }
     }
-    close() {
-        this.closed = true;
-        if (FakeNotification.list.get(this.tag) === this) FakeNotification.list.delete(this.tag);
-        this.onclose?.();
+    if (renotifySupported) {
+        Object.defineProperty(Fake.prototype, 'renotify', { get() { return false; }, configurable: true });
     }
-    static reset() { FakeNotification.list.clear(); FakeNotification.made = []; FakeNotification.popups = 0; }
+    return Fake;
 }
+const FakeNotification = makeFakeNotification(true);
+const FirefoxNotification = makeFakeNotification(false);
 
 beforeEach(() => {
     env.tauri = true;
@@ -148,6 +170,9 @@ beforeEach(() => {
     env.settings = {};
     env.invokes = [];
     env.failCommands = new Set();
+    env.failOnce = new Set();
+    env.answers = {};
+    env.pluginGranted = true;
     env.pluginShown = [];
     env.androidPosted = [];
     notify.resetConversationNotificationsForTests();
@@ -263,14 +288,38 @@ describe('a conversation going on while you are away (desktop app)', () => {
         expect(shows().at(-1)).toMatchObject({ popup: true, body: 'bob sent a message' });
     });
 
-    it('a click on a toast left from before a reload opens the place its key names', () => {
-        consumePendingNav();
-        const heard = vi.fn();
-        window.addEventListener('sovereign-navigate', heard);
-        env.toastClick!({ payload: 'dm:c9' });
-        window.removeEventListener('sovereign-navigate', heard);
-        expect(heard).toHaveBeenCalledTimes(1);
-        expect(consumePendingNav()).toBe('dm:c9');
+    it('a click on a toast left from before a reload opens the place its key names', async () => {
+        // A reload is a FRESH module: nothing counted, no click actions, no
+        // toast shown yet, so only the listener it registers as it loads can
+        // hear the click. The listener earlier tests left behind belongs to
+        // the module before the "reload"; it is put back afterwards.
+        const before = env.toastClick;
+        env.toastClick = null;
+        vi.resetModules();
+        try {
+            await import('@tauri-apps/api/event');
+            await import('@tauri-apps/api/core');
+            await import('../api/desktopNotify');
+            const freshNav = await import('../api/mobileApp');
+            await settle();
+            expect(env.invokes.filter(c => c.cmd === 'toast_show')).toHaveLength(0);
+            expect(env.toastClick, 'the reloaded page listens for clicks before any toast').toBeTypeOf('function');
+            freshNav.consumePendingNav();
+            const heard = vi.fn();
+            window.addEventListener('sovereign-navigate', heard);
+            try {
+                env.toastClick!({ payload: 'dm:c9' });
+                expect(freshNav.consumePendingNav()).toBe('dm:c9');
+                // The task reminder's toast: the Reminders tab.
+                env.toastClick!({ payload: 'tasks-due' });
+                expect(freshNav.consumePendingNav()).toBe('reminders');
+            } finally {
+                window.removeEventListener('sovereign-navigate', heard);
+            }
+            expect(heard).toHaveBeenCalledTimes(2);
+        } finally {
+            env.toastClick = before;
+        }
     });
 
     it('a shell without its own toasts (not Windows): the plugin pops once per burst, never per message', async () => {
@@ -285,7 +334,7 @@ describe('a conversation going on while you are away (desktop app)', () => {
         }
         await settle();
         expect(env.pluginShown).toEqual([{ title: '#general · Lads', body: 'alice sent a message' }]);
-        // It asked once, and believed the answer.
+        // It asked once in the burst: an update has nothing to change.
         expect(env.invokes.filter(c => c.cmd === 'toast_show')).toHaveLength(1);
         // The next burst pops through the plugin again.
         vi.advanceTimersByTime(61_000);
@@ -350,6 +399,183 @@ describe('a conversation going on while you are away (desktop app)', () => {
         expect(diag.live.groups).toEqual([{ key: 'chan:s1:7', count: 2 }]);
         // Names stay out of the console.
         expect(JSON.stringify(diag.live)).not.toMatch(/alice|bob/);
+    });
+});
+
+describe('the desktop app when Windows shows nothing (review lows 1, 2, 3, 7)', () => {
+    it("with Púca's notifications turned off in Windows, no message is quiet: the app's sound says each one arrived", async () => {
+        env.answers.toast_show = 'off';
+        expect(channelMessage('alice', 'a')).toEqual({ fire: true });
+        await settle();
+        for (let i = 0; i < 4; i++) {
+            vi.advanceTimersByTime(2_000);
+            expect(channelMessage('bob', `b${i}`)).toEqual({ fire: true });
+            await settle();
+        }
+        // The plugin's toasts go through the same Windows switch: none tried.
+        expect(env.pluginShown).toHaveLength(0);
+        expect(notify.notifyDiag().live.nativeToasts).toBe('off');
+    });
+
+    it('turned back on, it is quiet again at once: asked every time, never remembered', async () => {
+        env.answers.toast_show = 'off';
+        channelMessage('alice', 'a');
+        await settle();
+        env.answers.toast_show = 'updated';
+        vi.advanceTimersByTime(2_000);
+        // Decided before this one's answer: the last said "off".
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+        await settle();
+        vi.advanceTimersByTime(2_000);
+        expect(channelMessage('carol', 'c')).toEqual({ fire: true, quiet: true });
+    });
+
+    it('a toast Windows refused is not one to update quietly', async () => {
+        env.answers.toast_show = 'failed';
+        channelMessage('alice', 'a');
+        await settle();
+        vi.advanceTimersByTime(2_000);
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+    });
+
+    it('Send test says when Windows has them turned off, or refused it', async () => {
+        env.answers.toast_show = 'off';
+        const off = await notify.sendTestNotification();
+        expect(off.ok).toBe(false);
+        expect(off.reason).toMatch(/turned off/);
+        env.answers.toast_show = 'failed';
+        expect((await notify.sendTestNotification()).ok).toBe(false);
+        env.answers.toast_show = 'popped';
+        expect(await notify.sendTestNotification()).toEqual({ ok: true });
+        expect(env.pluginShown).toHaveLength(0);
+    });
+
+    it('one refusal is not for good: the next burst asks for the replacing toast again', async () => {
+        env.failOnce.add('toast_show');
+        channelMessage('alice', 'a');
+        await settle();
+        // Refused, so the plugin carried the pop-up.
+        expect(env.pluginShown).toHaveLength(1);
+        vi.advanceTimersByTime(61_000);
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+        await settle();
+        // Asked again, answered: no second untagged toast.
+        expect(env.pluginShown).toHaveLength(1);
+        expect(shows().map(s => s.popup)).toEqual([true, true]);
+        vi.advanceTimersByTime(2_000);
+        expect(channelMessage('carol', 'c')).toEqual({ fire: true, quiet: true });
+        await settle();
+        expect(windowsModel().centre.get('chan:s1:7')?.body).toBe('carol and 2 others: 3 new messages');
+    });
+
+    it("the plugin's toast, where the shell has none of its own, asks for permission first", async () => {
+        env.failCommands.add('toast_show');
+        env.pluginGranted = false;
+        channelMessage('alice', 'a');
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'm' }]);
+        await settle();
+        expect(env.pluginShown).toHaveLength(0);
+        env.pluginGranted = true;
+        vi.advanceTimersByTime(61_000);
+        channelMessage('bob', 'b');
+        await settle();
+        expect(env.pluginShown).toEqual([{ title: '#general · Lads', body: 'bob and alice: 2 new messages' }]);
+    });
+});
+
+describe('task reminders in the desktop app', () => {
+    it("ring with Windows' default sound: the reminder's toast asks for it, a message's does not", async () => {
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'm5' }]);
+        channelMessage('alice', 'a');
+        await settle();
+        expect(shows()).toEqual([
+            { key: 'tasks-due', title: 'Púca Tasks', body: 'A task is due', popup: true, sound: true },
+            { key: 'chan:s1:7', title: '#general · Lads', body: 'alice sent a message', popup: true, sound: false },
+        ]);
+        // Not through the plugin, which has neither a sound nor a click.
+        expect(env.pluginShown).toHaveLength(0);
+    });
+
+    it('each new one replaces the last, and pops again', async () => {
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'm5' }]);
+        vi.advanceTimersByTime(2_000);
+        notify.notifyTasksDue(2, [{ id: 6, mark: 'm6' }, { id: 7, mark: 'm7' }]);
+        await settle();
+        const { centre, popups } = windowsModel();
+        expect([...centre.keys()]).toEqual(['tasks-due']);
+        expect(centre.get('tasks-due')?.body).toBe('2 tasks are due');
+        expect(popups).toBe(2);
+    });
+
+    it('a click opens Reminders with the due ids, and takes the toast away', async () => {
+        notify.notifyTasksDue(2, [{ id: 5, mark: 'a' }, { id: 6, mark: 'b' }]);
+        await settle();
+        const opened: unknown[] = [];
+        const onOpen = (e: Event) => opened.push((e as CustomEvent).detail);
+        window.addEventListener('sovereign:open-reminders', onOpen);
+        try {
+            env.toastClick!({ payload: 'tasks-due' });
+            await settle();
+        } finally {
+            window.removeEventListener('sovereign:open-reminders', onOpen);
+        }
+        expect(opened).toEqual([{ ids: [5, 6] }]);
+        expect(env.invokes.at(-1)).toEqual({ cmd: 'toast_clear', args: { key: 'tasks-due' } });
+    });
+
+    it('a click on a conversation never opens Reminders, nor the reverse', async () => {
+        const conversation = vi.fn();
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        channelMessage('alice', 'a', 7, { onActivate: conversation });
+        await settle();
+        const reminders = vi.fn();
+        window.addEventListener('sovereign:open-reminders', reminders);
+        try {
+            env.toastClick!({ payload: 'chan:s1:7' });
+            expect(reminders).not.toHaveBeenCalled();
+            expect(conversation).toHaveBeenCalledTimes(1);
+            env.toastClick!({ payload: 'tasks-due' });
+            expect(reminders).toHaveBeenCalledTimes(1);
+            expect(conversation).toHaveBeenCalledTimes(1);
+        } finally {
+            window.removeEventListener('sovereign:open-reminders', reminders);
+        }
+    });
+
+    it('rings whatever the message grouping setting says', async () => {
+        env.settings = { groupNotifications: false };
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        await settle();
+        expect(shows()).toEqual([{ key: 'tasks-due', title: 'Púca Tasks', body: 'A task is due', popup: true, sound: true }]);
+    });
+
+    it("a shell without its own toasts (not Windows) still shows the plugin's", async () => {
+        env.failCommands.add('toast_show');
+        notify.notifyTasksDue(3, []);
+        await settle();
+        expect(env.pluginShown).toEqual([{ title: 'Púca Tasks', body: '3 tasks are due' }]);
+    });
+
+    it('rides the same setting as messages, and is not held back by focus', async () => {
+        env.foreground = true;
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        await settle();
+        expect(shows()).toHaveLength(1);
+        env.settings = { desktopNotifications: false };
+        notify.notifyTasksDue(1, [{ id: 6, mark: 'b' }]);
+        await settle();
+        expect(shows()).toHaveLength(1);
+    });
+
+    it('signing out takes it away with the rest', async () => {
+        notify.notifyTasksDue(1, [{ id: 5, mark: 'a' }]);
+        notify.clearAllConversationNotifications();
+        await settle();
+        expect(env.invokes.at(-1)).toEqual({ cmd: 'toast_clear_all', args: undefined });
+        // Its click action went with it: a click now goes by the key alone.
+        consumePendingNav();
+        env.toastClick!({ payload: 'tasks-due' });
+        expect(consumePendingNav()).toBe('reminders');
     });
 });
 
@@ -456,5 +682,66 @@ describe('the web app', () => {
         channelMessage('alice', 'a');
         channelMessage('bob', 'b');
         expect(FakeNotification.made.map(n => n.tag)).toEqual(['alice sent a message', 'bob sent a message']);
+    });
+});
+
+describe('the web app in a browser with no renotify (Firefox, Safari): review low 5', () => {
+    beforeEach(() => {
+        env.tauri = false;
+        FirefoxNotification.reset();
+        (globalThis as { Notification?: unknown }).Notification = FirefoxNotification;
+    });
+
+    it('the control: Chromium has renotify on its prototype, these browsers do not', () => {
+        expect('renotify' in FakeNotification.prototype).toBe(true);
+        expect('renotify' in FirefoxNotification.prototype).toBe(false);
+    });
+
+    it('a conversation going on pops once there too: a quiet update makes no notification, since each would pop', () => {
+        const decisions: ReturnType<typeof notify.notifyNewMessage>[] = [];
+        for (let i = 0; i < 12; i++) {
+            decisions.push(channelMessage(['alice', 'bob'][i % 2], `m${i}`));
+            vi.advanceTimersByTime(3_000);
+        }
+        expect(FirefoxNotification.popups).toBe(1);
+        expect(FirefoxNotification.made).toHaveLength(1);
+        expect(FirefoxNotification.made[0]).toMatchObject({ title: '#general · Lads', body: 'alice sent a message', tag: 'chan:s1:7', silent: true });
+        // No renotify handed to a browser that has none.
+        expect('renotify' in FirefoxNotification.made[0]).toBe(false);
+        // The notification is still there, so the rest are quiet: no blip.
+        expect(decisions.slice(1).every(d => d.fire && 'quiet' in d && d.quiet)).toBe(true);
+    });
+
+    it('the next burst pops it again with the whole count, as one notification', () => {
+        channelMessage('alice', 'a');
+        for (let i = 0; i < 4; i++) {
+            vi.advanceTimersByTime(3_000);
+            channelMessage('bob', `b${i}`);
+        }
+        vi.advanceTimersByTime(61_000);
+        expect(channelMessage('carol', 'c')).toEqual({ fire: true });
+        expect(FirefoxNotification.made).toHaveLength(2);
+        expect(FirefoxNotification.popups).toBe(2);
+        expect(FirefoxNotification.list.size).toBe(1);
+        expect(FirefoxNotification.made.at(-1)).toMatchObject({ body: 'carol and 2 others: 6 new messages' });
+        // The one before it was closed first, so this one pops whatever the
+        // browser does with a replacement.
+        expect([...FirefoxNotification.list.values()][0].closed).toBe(false);
+    });
+
+    it('closed by the user, the next message is not quiet: nothing shows it', () => {
+        channelMessage('alice', 'a');
+        FirefoxNotification.list.get('chan:s1:7')!.close();
+        vi.advanceTimersByTime(2_000);
+        expect(channelMessage('bob', 'b')).toEqual({ fire: true });
+        expect(FirefoxNotification.made).toHaveLength(1);
+    });
+
+    it('a click still opens the conversation', () => {
+        vi.spyOn(window, 'focus').mockImplementation(() => { });
+        const opened = vi.fn();
+        channelMessage('alice', 'a', 7, { onActivate: opened });
+        FirefoxNotification.list.get('chan:s1:7')!.onclick!();
+        expect(opened).toHaveBeenCalledTimes(1);
     });
 });
