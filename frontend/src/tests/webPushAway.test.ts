@@ -201,6 +201,21 @@ describe('startWebPushAwayReporter', () => {
         expect(awayFrames()).toEqual([]);
     });
 
+    it('a page that was on screen while it had no socket is not carried over: it came back', async () => {
+        start();
+        await openSocket([PUSH_AWAY_FEATURE]);
+        setHidden(true);
+        expect(awayFrames()).toEqual([fixture.away]);
+        (sock() as unknown as { onclose: (e: object) => void }).onclose({ code: 1006, reason: '', wasClean: false });
+        // Opened from a notification on a dead socket: read, replied (REST),
+        // and switched away before the reconnect finished.
+        setHidden(false);
+        setHidden(true);
+        sent = [];
+        await openSocket([PUSH_AWAY_FEATURE]);
+        expect(awayFrames()).toEqual([fixture.away]); // a new departure, never `carried`
+    });
+
     it('stopping while away leaves the server as a fresh connection would find it', async () => {
         start();
         await openSocket([PUSH_AWAY_FEATURE]);

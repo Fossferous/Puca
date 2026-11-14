@@ -11267,15 +11267,25 @@ mod push_away_ws_tests {
         assert_eq!(handle_message(&state, 7, conn, "me", &away, &mut joined, "").await, Ok(()));
         assert_eq!(handle_message(&state, 7, conn, "me", &back, &mut joined, "").await, Ok(()));
         assert!(state.sid_is_present(7, "phone"), "on screen again: present");
-        // The first report of a new socket while still hidden: away, and the
-        // away moment the earlier `away` recorded is kept.
-        let age = state.web_push_away_age("phone").expect("went away once");
-        let carried = fixture["carried"].to_string();
-        assert_eq!(handle_message(&state, 7, conn, "me", &carried, &mut joined, "").await, Ok(()));
-        assert!(!state.sid_is_present(7, "phone"));
-        assert!(state.web_push_away_age("phone").unwrap() >= age, "carried records no new departure");
-        assert_eq!(handle_message(&state, 7, conn, "me", &back, &mut joined, "").await, Ok(()));
         assert!(rx.try_recv().is_err(), "nothing is answered");
+
+        // The first report of a NEW socket while still hidden (the old one
+        // gone): away, and the away moment from before is kept.
+        let carried = fixture["carried"].to_string();
+        assert_eq!(handle_message(&state, 7, conn, "me", &away, &mut joined, "").await, Ok(()));
+        state.unregister_session(7, conn);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (tx3, mut rx3) = mpsc::channel::<ServerMessage>(8);
+        let (fresh, _, _) = state.register_session(7, "me".into(), tx3, false, None, "phone".into());
+        assert_eq!(handle_message(&state, 7, fresh, "me", &carried, &mut joined, "").await, Ok(()));
+        assert!(!state.sid_is_present(7, "phone"));
+        assert!(
+            state.web_push_away_age("phone").unwrap() >= std::time::Duration::from_millis(20),
+            "carried records no new departure"
+        );
+        assert!(rx3.try_recv().is_err(), "nothing is answered");
+        assert_eq!(handle_message(&state, 7, fresh, "me", &back, &mut joined, "").await, Ok(()));
+        assert!(state.sid_is_present(7, "phone"), "and on screen again");
 
         // From a delivery socket (never a page): taken, changes nothing, no
         // Error. Beside the phone's own page, so a delivery socket marked

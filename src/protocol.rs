@@ -334,10 +334,11 @@ pub enum ClientMessage {
     /// `ServerFeatures` (an older server answers an unknown variant with an
     /// Error). Read by nothing but Web Push; never answered, never an Error.
     /// `carried: true` (with `away: true`, the first report on a NEW socket
-    /// of a page that was already away, e.g. a phone in the background whose
-    /// network changed): the page was not on screen in between, so this is no
-    /// return and no new departure — its browser's away mark stays where it
-    /// was, and what arrived since is still named (`carry_conn_push_away`).
+    /// of a page that has been away without a break since it last said so,
+    /// e.g. a phone in the background whose network changed): no return and
+    /// no new departure — its browser's away mark stays where it was, and
+    /// what arrived since is still named (`carry_conn_push_away`, which
+    /// honours it only as a connection's first report).
     SetPushAway {
         #[serde(default)]
         away: bool,

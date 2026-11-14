@@ -34,10 +34,10 @@
  * which the chat view shows as a notice. With an older server everything
  * stays as it was (pushed once the socket is gone). A fresh connection is
  * present on the server, so a socket that confirms it while the page is away
- * is told at once, as `carried`: the page left before this socket existed (a
- * phone that reconnected in the background), and the server keeps the moment
- * it really left. Transitions only; the push itself still carries nothing but
- * the constant {"w":"1"}.
+ * is told at once, as `carried` when the page has been away without a break
+ * since it last said so (a phone that reconnected in the background): the
+ * server keeps the moment it really left. Transitions only; the push itself
+ * still carries nothing but the constant {"w":"1"}.
  */
 import { wsClient } from './websocket';
 import { isAppleTouchDevice, OPT_IN_EVENT, webPushEnabledHere, webPushEnvironment } from './webPush';
@@ -86,6 +86,12 @@ export function startWebPushAwayReporter(opts: AwayReporterOptions = {}): () => 
         ?? (() => hiddenPageCannotNotify(navigator.userAgent ?? '', navigator.maxTouchPoints ?? 0));
     // What THIS socket's server was last told. A connection starts present.
     let told = false;
+    // Away without a break since the last "away" this page sent, on any
+    // socket? Only then may a new socket's first "away" be `carried`: a page
+    // that was on screen in between (with no socket up to hear it) came
+    // back, and the server must hear a new departure, or the answer to a
+    // reply sent from there is held back as part of the old burst.
+    let awayUnbroken = false;
     let leaving = false;
     let stopped = false;
 
@@ -93,14 +99,21 @@ export function startWebPushAwayReporter(opts: AwayReporterOptions = {}): () => 
     const tell = (away: boolean, carried = false) => {
         if (stopped || !wsClient.hasServerFeature(PUSH_AWAY_FEATURE)) return;
         if (away === told) return; // transitions only
-        const payload = away && carried ? { away, carried: true } : { away };
+        const payload = away && carried && awayUnbroken ? { away, carried: true } : { away };
         if (wsClient.send({ type: 'SetPushAway', payload })) {
             told = away;
             setPageToldAwayForPush(away);
+            if (away) awayUnbroken = true;
         }
     };
+    /** The rule, now; a page that is not away has broken any away stretch. */
+    const decideNow = () => {
+        const away = decideAway({ pushOn: pushOn(), hiddenCannotNotify: cannotNotify(), hidden: hidden(), leaving });
+        if (!away) awayUnbroken = false;
+        return away;
+    };
     const evaluate = () => {
-        tell(decideAway({ pushOn: pushOn(), hiddenCannotNotify: cannotNotify(), hidden: hidden(), leaving }));
+        tell(decideNow());
     };
 
     const onVisibility = () => {
@@ -120,12 +133,13 @@ export function startWebPushAwayReporter(opts: AwayReporterOptions = {}): () => 
     };
     const onFeatures = () => {
         // A new server session: it holds this connection present. A page
-        // that is away as its socket opens was away before it (a reconnect in
-        // the background, a network change): `carried`, so the server keeps
-        // the moment the page really left, and names what came since.
+        // that has been away without a break since it last said so (a
+        // reconnect in the background, a network change) says `carried`, so
+        // the server keeps the moment the page really left and names what
+        // came since; one that was on screen in between says a plain `away`.
         told = false;
         setPageToldAwayForPush(false);
-        tell(decideAway({ pushOn: pushOn(), hiddenCannotNotify: cannotNotify(), hidden: hidden(), leaving }), true);
+        tell(decideNow(), true);
     };
     const onClosed = () => {
         told = false;

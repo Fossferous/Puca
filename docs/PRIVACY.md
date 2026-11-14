@@ -102,7 +102,8 @@ that limit — but cannot read content.
     into the phone or browser.
   - **When.** Each wake is a timestamped request. A burst is one wake: at
     most one per browser every 30 seconds while it stays away. A phone that
-    opened Púca after a wake and left it again starts a new burst, so it
+    opened Púca after a wake and left it again starts a new burst once your
+    server has heard it come back (its connection up, or reconnected), so it
     can be woken sooner than that; the service then also learns, roughly,
     that you looked in between.
   - **Who else that server wakes at the same time.** A channel message wakes

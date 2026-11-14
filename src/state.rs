@@ -340,6 +340,10 @@ pub struct Session {
     /// this socket had closed; nothing else reads it. False at connect (an
     /// older client never sends the frame), never set on a delivery socket.
     pub push_away: bool,
+    /// This connection has sent a `SetPushAway`. A `carried` one is honoured
+    /// only as the FIRST (`carry_conn_push_away`): later, the connection has
+    /// been heard on screen, and its browser's away moment must move.
+    pub push_reported: bool,
 }
 
 /// One continuous stretch of a user's MEMBERSHIP of a voice room. `left_ms` is
@@ -2017,6 +2021,7 @@ impl AppState {
             presence_frames,
             games: false,
             push_away: false,
+            push_reported: false,
         });
         if !delivery {
             // Under this shard lock: see PresenceRegistry::ensure.
@@ -3322,7 +3327,11 @@ impl AppState {
         let sid = {
             let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
             let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) else { return false };
-            if s.delivery || s.push_away == away {
+            if s.delivery {
+                return false;
+            }
+            s.push_reported = true;
+            if s.push_away == away {
                 return false;
             }
             s.push_away = away;
@@ -3342,15 +3351,28 @@ impl AppState {
     /// screen in between, so this is no departure. Moving the mark would bury
     /// what arrived during the earlier stretch and was not yet named, and a
     /// fresh mark would read as a return (`wake::sender::back_since_push`)
-    /// and undo the coalescing. Returns whether anything changed.
+    /// and undo the coalescing. Only as the connection's FIRST report: after
+    /// any other, it has been heard on screen, so a `carried` then is taken as
+    /// the plain departure it is (`set_conn_push_away`). Returns whether
+    /// anything changed.
     pub fn carry_conn_push_away(&self, user_id: UserId, conn_id: u64) -> bool {
-        let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
-        let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) else { return false };
-        if s.delivery || s.push_away {
-            return false;
-        }
-        s.push_away = true;
-        true
+        let first = {
+            let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
+            let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) else { return false };
+            if s.delivery {
+                return false;
+            }
+            let first = !s.push_reported;
+            if first {
+                s.push_reported = true;
+                if s.push_away {
+                    return false;
+                }
+                s.push_away = true;
+            }
+            first
+        }; // the shard lock is released before set_conn_push_away takes it again
+        first || self.set_conn_push_away(user_id, conn_id, true)
     }
 
     /// What subscription `sub_id` (the browser holding session `sid`) has not
@@ -5811,25 +5833,46 @@ mod web_push_away_tests {
             let (old, _rx) = connect(&state, sid, false);
             state.web_push_record(7, dm(&format!("{sid}-seen")));
             state.set_conn_push_away(7, old, true);
-            let age_before = state.web_push_away_age(sid).expect("went away");
             state.web_push_record(7, dm(&format!("{sid}-missed"))); // coalesced: not told yet
             state.unregister_session(7, old); // the network changed
+            std::thread::sleep(std::time::Duration::from_millis(20)); // so a fresh away moment would show
             let (new, _rx2) = connect(&state, sid, false);
             if carried {
                 assert!(state.carry_conn_push_away(7, new));
                 assert!(!state.sid_is_present(7, sid), "away again, on the new socket");
-                assert!(state.web_push_away_age(sid).unwrap() >= age_before, "no new away moment recorded");
+                assert!(
+                    state.web_push_away_age(sid).unwrap() >= std::time::Duration::from_millis(20),
+                    "no new away moment recorded: it is still the one from before the reconnect"
+                );
                 assert_eq!(convs(&state.web_push_unseen(7, 1, sid)), vec![format!("{sid}-missed")]);
             } else {
                 state.set_conn_push_away(7, new, true);
+                assert!(state.web_push_away_age(sid).unwrap() < std::time::Duration::from_millis(20));
                 assert!(state.web_push_unseen(7, 2, sid).is_empty(), "CONTROL: a plain away buries it");
             }
         }
-        // Carried changes nothing on a delivery socket, an unknown connection,
-        // or one already away.
+        // Carried changes nothing on a delivery socket or an unknown connection.
         let (pocket, _rx3) = connect(&state, "android", true);
         assert!(!state.carry_conn_push_away(7, pocket));
         assert!(!state.carry_conn_push_away(7, 999_999));
+    }
+
+    /// `carried` is honoured only as a connection's FIRST report: a later one
+    /// comes from a connection that was heard on screen, and is the plain
+    /// departure it is (a new away moment, a new mark).
+    #[tokio::test]
+    async fn carried_after_a_report_is_a_plain_departure() {
+        let state = test_state();
+        let (conn, _rx) = connect(&state, "phone", false);
+        state.set_conn_push_away(7, conn, true);
+        state.set_conn_push_away(7, conn, false); // on screen
+        state.web_push_record(7, dm("seen-on-screen"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(state.carry_conn_push_away(7, conn));
+        assert!(!state.sid_is_present(7, "phone"));
+        assert!(state.web_push_away_age("phone").unwrap() < std::time::Duration::from_millis(20), "a new away moment");
+        state.web_push_record(7, dm("after"));
+        assert_eq!(convs(&state.web_push_unseen(7, 1, "phone")), vec!["after"], "what it had on screen is not named");
     }
 
     /// The same for a connection the per-user cap evicted: its teardown finds
