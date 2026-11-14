@@ -86,9 +86,18 @@
 // with no desktop capture in it at all (its drawing cost is the `idle` case's
 // floor under SOURCE=pan). SOURCE=tab draws the same picture full page and
 // captures the TAB with getDisplayMedia (--auto-accept-this-tab-capture): a
-// real Chromium capture, one per call, of a surface that never stops moving,
-// which is what makes a SECOND capture's cost visible (the real screen is
-// often still, and Chromium does little for a still screen).
+// real Chromium capture of a surface that never stops moving, when a capture
+// cost not tied to what the desk shows is wanted. The NATIVE cases always
+// capture the real primary monitor in the agent, whatever SOURCE says, so
+// their cost follows what that screen shows (a repeated picture skips the
+// colour conversion).
+//
+// The page here takes the codec once, from the first keyframe carrying an
+// SPS; the app also re-sends it and puts cached SPS/PPS in front of later
+// keyframes (clip_capture.rs ParamSetCache). On an encoder that emits SPS
+// only at the start, this ring would stay empty, and the case would fail as
+// INVALID rather than print a figure: every case checks that each pipeline
+// it names moved frames in the window.
 //
 // READ THE RESULT ON THIS MACHINE ONLY, AND AS DIFFERENCES. A case's CPU minus
 // the floor case's is what that pipeline costs here.
@@ -205,8 +214,14 @@ const byName = (snap, name) => new Set(snap.procs.filter((p) => p.n.toLowerCase(
 /** GPU engine utilisation per pid and engine type over the window: the mean
  *  of `samples` readings `every` seconds apart. */
 async function gpuSample(samples, every) {
-    const out = await ps(`Get-Counter -Counter '\\GPU Engine(*)\\Utilization Percentage' -SampleInterval ${every} -MaxSamples ${samples} -ErrorAction SilentlyContinue | ForEach-Object { $_.CounterSamples | Where-Object { $_.CookedValue -gt 0 } | ForEach-Object { $_.InstanceName + '=' + $_.CookedValue } }`).catch(() => '');
+    const out = await ps(`Get-Counter -Counter '\\GPU Engine(*)\\Utilization Percentage' -SampleInterval ${every} -MaxSamples ${samples} -ErrorAction SilentlyContinue | ForEach-Object { '#sample'; $_.CounterSamples | Where-Object { $_.CookedValue -gt 0 } | ForEach-Object { $_.InstanceName + '=' + $_.CookedValue } }`).catch(() => '');
     const acc = new Map(); // `${pid}|${luidLow}|${engtype}` -> sum
+    // The mean over the samples that ARRIVED (none: the counters failed,
+    // and gpuFor says n/a rather than a dash that reads as "no GPU").
+    const got = out.split(/\r?\n/).filter((l) => l.trim() === '#sample').length;
+    acc.samples = got;
+    if (!got) return acc;
+    samples = got;
     for (const line of out.split(/\r?\n/)) {
         const m = /^pid_(\d+)_luid_0x[0-9a-f]+_0x([0-9a-f]+)_phys_\d+_eng_\d+_engtype_([^=]+)=([\d.]+(?:E[-+]?\d+)?)/i.exec(line.trim());
         if (!m) continue;
@@ -216,6 +231,7 @@ async function gpuSample(samples, every) {
     return acc;
 }
 function gpuFor(acc, pids, names) {
+    if (!acc.samples) return 'n/a (no GPU counter samples)';
     const sums = new Map();
     for (const [k, v] of acc) {
         const [pid, luid, eng] = k.split('|');
@@ -238,7 +254,7 @@ const sinkPage = await sinkBrowser.newPage();
 await sinkPage.goto(origin);
 await sinkPage.evaluate(() => {
     const pcs = [];
-    const gathered = (pc) => new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
+    const gathered = (pc) => new Promise((r) => { setTimeout(r, 10_000); if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
     window.sink = {
         async answer(offer) {
             const pc = new RTCPeerConnection();
@@ -271,6 +287,7 @@ async function launch(id) {
     ];
     if (process.env.ADAPTER_LUID) args.push(`--use-adapter-luid=${process.env.ADAPTER_LUID}`);
     const browser = await chromium.launch({ headless: true, channel: process.env.CHANNEL || 'msedge', args });
+    try {
     const page = await browser.newPage({ viewport: { width: SHARE.w, height: SHARE.h } });
     await page.exposeFunction('sinkAnswer', (offer) => sinkPage.evaluate((o) => window.sink.answer(o), offer));
     page.on('pageerror', (e) => console.log('  X>', String(e).slice(0, 300)));
@@ -278,6 +295,10 @@ async function launch(id) {
     await page.goto(origin);
     await page.evaluate(installRig, { SOURCE, SHARE, CLIP, workerUrl: workerFile ? `/assets/${workerFile}` : null });
     return { browser, page };
+    } catch (e) {
+        await browser.close().catch(() => {});
+        throw e;
+    }
 }
 
 /** Runs IN THE PAGE: the pieces every case is built from, on `window.rig`. */
@@ -354,11 +375,16 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         return track;
     };
 
+    /** Read a track's frames and close them; each drained track is counted
+     *  on its own (rig.drains), so a case can show that every track it names
+     *  delivered. */
     rig.drain = (track) => {
         const r = new MediaStreamTrackProcessor({ track }).readable.getReader();
-        let n = 0; rig.stats.drained = () => n;
-        (async () => { for (;;) { const { value, done } = await r.read(); if (done) return; n++; rig.stats.drainedSize ??= `${value.codedWidth}x${value.codedHeight}`; value.close(); } })();
+        const st = { n: 0, size: null };
+        (rig.drains ??= []).push(st);
+        (async () => { for (;;) { const { value, done } = await r.read(); if (done) return; st.n++; st.size ??= `${value.codedWidth}x${value.codedHeight}`; value.close(); } })();
     };
+    rig.drainCounts = () => (rig.drains ?? []).map((d) => ({ n: d.n, size: d.size }));
 
     // An AES-GCM sender transform with frameCrypto.ts's shape: the codec's
     // clear header, the rest sealed, iv + magic appended, built and then
@@ -387,7 +413,7 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
     // which no real call does. Every encoder line prints keyframes= and
     // pli+fir= so a run shows it held. Signalling is one offer, one answer,
     // through the node side (window.sinkAnswer), ICE gathered in full first.
-    const gathered = (pc) => new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
+    const gathered = (pc) => new Promise((r) => { setTimeout(r, 10_000); if (pc.iceGatheringState === 'complete') r(); else pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });
 
     const munge = (sdp, kbps) => {
         let out = sdp;
@@ -473,7 +499,8 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
     rig.worker = () => {
         const w = new Worker(workerUrl, { type: 'module' });
         const inbox = [];
-        w.onmessage = (ev) => { inbox.push(ev.data); if (ev.data.t === 'status') rig.stats.ring = ev.data.s; };
+        w.onmessage = (ev) => { inbox.push(ev.data); if (ev.data.t === 'status') rig.stats.ring = ev.data.s; if (ev.data.t === 'error') (rig.stats.workerErrors ??= []).push(`${ev.data.stage}: ${ev.data.message}`); };
+        w.onerror = (e) => { (rig.stats.workerErrors ??= []).push(`worker: ${e.message}`); };
         rig.closers.push(() => { try { w.postMessage({ t: 'wipe' }); } catch { /* gone */ } setTimeout(() => w.terminate(), 500); });
         return { w, inbox };
     };
@@ -496,7 +523,8 @@ function installRig({ SOURCE, SHARE, CLIP, workerUrl }) {
         rig.closers.push(() => track.stop());
         const first = await new Promise((resolve) => {
             const r = new MediaStreamTrackProcessor({ track: track.clone() }).readable.getReader();
-            r.read().then(({ value }) => { resolve(value ? [value.codedWidth, value.codedHeight] : [CLIP.maxWidth, CLIP.maxHeight]); value?.close(); r.cancel(); });
+            const t = setTimeout(() => { resolve([CLIP.maxWidth, CLIP.maxHeight]); void r.cancel(); }, 5000);
+            r.read().then(({ value }) => { clearTimeout(t); resolve(value ? [value.codedWidth, value.codedHeight] : [CLIP.maxWidth, CLIP.maxHeight]); value?.close(); void r.cancel(); });
         });
         const { w } = rig.worker();
         const readable = new MediaStreamTrackProcessor({ track }).readable;
@@ -601,6 +629,7 @@ async function runCase(name) {
     const known = /^(capture|capture2|captureclone|mesh\d|sfu|sfu1|manual|follow|native|agentonly|idle)$/;
     const unknown = parts.filter((p) => !known.test(p));
     if (unknown.length) throw new Error(`unknown case part(s): ${unknown.join(', ')}`);
+    if (parts.filter((p) => p === 'native' || p === 'agentonly').length > 1) throw new Error('one agent a case');
     let browser = null, page = null, agent = null;
     try {
         ({ browser, page } = await launch(id));
@@ -635,8 +664,10 @@ async function runCase(name) {
         const ta = agentPid ? await agentThreads(agentPid) : null;
         const gpuP = gpuSample(Math.max(2, Math.floor(WINDOW_S / 2) - 1), 2);
         const encA = await page.evaluate(() => window.rig.encoders());
+        const drainA = await page.evaluate(() => ({ at: performance.now(), list: window.rig.drainCounts() }));
         await new Promise((r) => setTimeout(r, WINDOW_S * 1000));
         const encB = await page.evaluate(() => window.rig.encoders());
+        const drainB = await page.evaluate(() => ({ at: performance.now(), list: window.rig.drainCounts() }));
         const tb = agentPid ? await agentThreads(agentPid) : null;
         const b = await snapshot(id);
         const agentB = agent?.stats();
@@ -666,13 +697,28 @@ async function runCase(name) {
             const plis = before ? e.plis - before.plis : 0;
             return `${e.rid ? e.rid + ':' : ''}${e.enc} ${e.size} ${fps.toFixed(0)}fps ${kbps.toFixed(0)}kbps keyframes=${keys} pli+fir=${plis}${e.limit && e.limit !== 'none' ? ' limit=' + e.limit : ''}`;
         });
+        // NO FIGURE FOR A PIPELINE THAT DID NOT RUN. Every drained track, every
+        // encoder and every ring this case names must have moved frames in
+        // the window, or the case fails: a dead one would print a plausible
+        // CPU figure for nothing.
+        const drainWin = (drainB.at - drainA.at) / 1000;
+        const drains = drainB.list.map((d, i) => ({ size: d.size, fps: (d.n - (drainA.list[i]?.n ?? 0)) / drainWin }));
+        const problems = [];
+        drains.forEach((d, i) => { if (d.fps < 1) problems.push(`drained track ${i + 1} delivered ${d.fps.toFixed(1)} fps`); });
+        const wantEnc = parts.some((p) => /^(mesh\d|sfu|sfu1)$/.test(p));
+        if (wantEnc && (!encoders.length || encB.list.some((e, i) => (e.frames - (encA.list[i]?.frames ?? 0)) < encWin))) problems.push('an encoder sent under 1 fps (or none connected)');
+        const wantRing = parts.some((p) => /^(manual|follow|native)$/.test(p));
+        const errs = await page.evaluate(() => window.rig.stats.workerErrors ?? []);
+        if (wantRing && (!ring || !(ring.fps >= 1))) problems.push(`the ring took ${ring?.fps ?? 0} fps`);
+        if (errs.length) problems.push(`worker: ${errs.join('; ')}`);
+        if (problems.length) throw new Error(`INVALID: ${problems.join('; ')}`);
         return {
             name,
             browser: pct(tree), agent: agentPid ? pct(agentTree) : 0, dwm: pct(dwm),
             gpuBrowser: gpuFor(gpu, tree, gpuNames), gpuAgent: agentPid ? gpuFor(gpu, agentTree, gpuNames) : '',
             encoders, ring: ring ? `ring ${ring.fps}fps ${ring.kbps}kbps ${ring.width}x${ring.height}` : '',
             agentStats: agentA && agentB ? { frames: agentB.frames - agentA.frames, keyframes: agentB.keyframes - agentA.keyframes, mbps: ((agentB.bytes - agentA.bytes) * 8) / wall / 1000 } : null,
-            captured: await page.evaluate(() => window.rig.stats.drainedSize ?? null),
+            captured: drains.length ? drains.map((d) => `${d.size} ${d.fps.toFixed(1)}fps`).join(' | ') : null,
             // The agent's threads by start time: its capture loop is the first.
             agentThreads: ta && tb ? [...tb.m].map(([tid, t]) => ({ start: t.start, pct: ((t.ms - (ta.m.get(tid)?.ms ?? 0)) / (tb.at - ta.at)) * 100 }))
                 .filter((x) => x.pct >= 0.5).sort((x, y) => x.start - y.start).map((x) => x.pct.toFixed(1)).join(' ') : '',
