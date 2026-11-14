@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { RC_ENABLED } from '../api/platform';
 import {
     subscribeToStreamState,
@@ -21,6 +21,9 @@ import { installBackgroundResumeAll } from './deviceStageResume';
 import { pipSupported } from './streamPopout.utils';
 import { osWindowsSupported } from './streamOsWindows';
 import { docPipSupported, inAppPipMore, inAppPipPlan, type PopoutMode } from './streamDocPip';
+import { defaultPipSpotOnPage, fallbackPipSpot } from './streamPipSpot';
+
+const PIP_DEFAULT_SIZE = { width: 400, height: 250 };
 
 interface StreamPipProps {
     onExpand: () => void;
@@ -53,8 +56,17 @@ interface StreamPipProps {
 
 export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, poppedStreams = [], onTogglePopout, popoutMode = null }: StreamPipProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
-    const [position, setPosition] = useState({ x: window.innerWidth - 420, y: window.innerHeight - 280 });
-    const [size, setSize] = useState({ width: 400, height: 250 });
+    // Null until it is placed: above the composer (streamPipSpot.ts), measured
+    // once the page it opens over is committed, since it mounts in the same
+    // render that swaps the stage for the chat. Docked, the stylesheet places it.
+    const [placed, setPosition] = useState<{ x: number; y: number } | null>(null);
+    const [size, setSize] = useState(PIP_DEFAULT_SIZE);
+    const position = placed ?? fallbackPipSpot({ width: window.innerWidth, height: window.innerHeight }, size);
+    useLayoutEffect(() => {
+        if (docked || placed) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- measures the committed page once, before the first paint
+        setPosition(defaultPipSpotOnPage(PIP_DEFAULT_SIZE));
+    }, [docked, placed]);
     const [isDragging, setIsDragging] = useState(false);
     const [isResizing, setIsResizing] = useState(false);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });

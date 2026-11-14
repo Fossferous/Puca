@@ -41,12 +41,33 @@ type Origin = (index: number) => number;
 const atStart: Origin = (index) => index;
 
 /**
- * Where each spoiler of a parse was typed: from its opening `||` to just past its closing one,
- * in the text `parseMessage` was handed (`spoilerSpan`). Beside the tree and not in it, so a
- * tree reads and compares as it always did. A reading that disagrees with another is another
- * tree, and each spoiler in it has its own.
+ * Where each node of a parse was typed, from its first character to just past its last, in the
+ * text `parseMessage` was handed: every spoiler (`spoilerSpan`), every run of words, and every
+ * node that is drawn as more than words: a link, a picture, code, a fenced block, an address, a
+ * mention, a channel, an emoji (`typedSpan`). Not what only holds others (bold, a quote), nor the
+ * label a dangerous link is drawn as. Beside the tree and not in it, so a tree reads and compares
+ * as it always did. A reading that disagrees with another is another tree, and each node in it
+ * has its own.
  */
-const spoilerSpans = new WeakMap<Node, [number, number]>();
+const typedSpans = new WeakMap<Node, [number, number] | Untold>();
+
+/** Where a node was typed in the text its reader had, and how that maps back: told when asked
+ *  (`spanOf`). Most of a parse's nodes are never asked, and a run of words is most of its nodes. */
+interface Untold { at: Origin; from: number; to: number }
+
+/** `node`, typed from `from` to just before `to` in the text a reader has, which `at` maps back. */
+function typed<T extends Node>(node: T, at: Origin, from: number, to: number): T {
+    typedSpans.set(node, { at, from, to });
+    return node;
+}
+
+function spanOf(node: Node): readonly [number, number] | undefined {
+    const known = typedSpans.get(node);
+    if (!known || Array.isArray(known)) return known;
+    const span: [number, number] = [known.at(known.from), known.at(known.to - 1) + 1];
+    typedSpans.set(node, span);
+    return span;
+}
 
 /**
  * The part of the message a spoiler was typed in, bars and all, or undefined for a node that is
@@ -56,7 +77,17 @@ const spoilerSpans = new WeakMap<Node, [number, number]>();
  * stretch between two `||` is a spoiler (`everyBar`).
  */
 export function spoilerSpan(node: Node): readonly [number, number] | undefined {
-    return spoilerSpans.get(node);
+    return node.type === 'spoiler' ? spanOf(node) : undefined;
+}
+
+/**
+ * The part of the message a node of a parse was typed in (see `typedSpans`), or undefined for what
+ * only holds other nodes and for a node not of a parse. Edit reads it to take out exactly the files
+ * the message draws (api/messagePreview.ts splitEditableContent), and to leave what it draws as code,
+ * an address or markup where it is.
+ */
+export function typedSpan(node: Node): readonly [number, number] | undefined {
+    return spanOf(node);
 }
 
 /**
@@ -238,17 +269,29 @@ function wordsOf(n: Exclude<Node, { children: Node[] }>): string {
 
 interface Words { hidden: Map<string, number>; shown: Map<string, number> }
 
-/** Every word in `nodes`, under a spoiler or not, each with how many times. */
-function wordsIn(nodes: Node[], under = false, words: Words = { hidden: new Map(), shown: new Map() }): Words {
+/** The words of each reading already counted: a reading is held to several others, and each counts it. */
+const counted = new WeakMap<Node[], Words>();
+
+/** Every word in a reading, under a spoiler or not, each with how many times. */
+function wordsIn(nodes: Node[]): Words {
+    let words = counted.get(nodes);
+    if (!words) {
+        words = { hidden: new Map(), shown: new Map() };
+        countWords(nodes, false, words);
+        counted.set(nodes, words);
+    }
+    return words;
+}
+
+function countWords(nodes: Node[], under: boolean, words: Words): void {
     const into = under ? words.hidden : words.shown;
     for (const n of nodes) {
         if ('children' in n) {
-            wordsIn(n.children, under || n.type === 'spoiler', words);
+            countWords(n.children, under || n.type === 'spoiler', words);
         } else {
             for (const word of wordsOf(n).match(WORD_RE) ?? []) into.set(word, (into.get(word) ?? 0) + 1);
         }
     }
-    return words;
 }
 
 /**
@@ -296,8 +339,62 @@ function showsBars(nodes: Node[]): boolean {
  * what 0.9.857 read is read too, and this reading may not print a word that one hid. Where none
  * did, the message is read exactly as 0.9.857 read it, and once. The second reading shares what
  * it can with the first (`once`): a message is read at most six times where it was read four.
+ *
+ * Whatever comes of that is held, last, to what 0.9.855 read (`heldToEarly`). 0.9.857 held every
+ * reading to it but one: where each hid what the other printed, every stretch between two `||`
+ * was a spoiler, and that was only asked to leave no `||` to see. A quote or a fence next to a bar
+ * can end a stretch without one: `||⏎> l||:w8```||⏎```` printed the w8 0.9.855 hid, and so did
+ * 0.9.857 and every version after it up to 0.9.862.
+ *
+ * A text read before is not read again (`kept`): its tree is the one it was, frozen.
  */
 export function parseMessage(content: string): Node[] {
+    if (!content) return [];
+    const known = kept.get(content);
+    if (known) {
+        // The most recently asked for goes last, so the one asked for longest ago is first to go.
+        kept.delete(content);
+        kept.set(content, known);
+        return known;
+    }
+    const nodes = frozen(parseMessageUncached(content));
+    kept.set(content, nodes);
+    keptLength += content.length;
+    while (kept.size > KEPT_MOST || (keptLength > KEPT_LENGTH_MOST && kept.size > 1)) {
+        const oldest = kept.keys().next().value as string;
+        kept.delete(oldest);
+        keptLength -= oldest.length;
+    }
+    return nodes;
+}
+
+/**
+ * The trees of the texts read last. A message is read when it arrives and again on every render
+ * of the chat: by the list, by who it mentions (utils/messageMentions), by the cards under it
+ * (api/linkPreview), by every preview and by Edit (api/messagePreview), and a message with two
+ * `||` is read up to six times over each time. The same text is the same tree, so it is kept, and
+ * it is frozen, since everyone who asks for it holds the same one: nothing may change it for the next.
+ */
+const KEPT_MOST = 500;
+// And so many characters of them: a message of 8000 can be a tree of a megabyte (`||a||` over and
+// over), and five hundred of those is half a gigabyte. Messages are mostly short: this is most of them.
+const KEPT_LENGTH_MOST = 200_000;
+const kept = new Map<string, Node[]>();
+let keptLength = 0;
+
+function frozen(nodes: Node[]): Node[] {
+    for (const n of nodes) {
+        if ('children' in n) frozen(n.children);
+        Object.freeze(n);
+    }
+    return Object.freeze(nodes) as Node[];
+}
+
+/**
+ * `parseMessage` with nothing kept: what reading a message costs the first time. For what measures
+ * that (messageParser.test.ts, what a message costs to read); everything else asks `parseMessage`.
+ */
+export function parseMessageUncached(content: string): Node[] {
     if (!content) return [];
     const bars = content.indexOf('||');
     const spoilers = bars !== -1 && content.indexOf('||', bars + 2) !== -1;
@@ -306,11 +403,14 @@ export function parseMessage(content: string): Node[] {
     const nowStrays: Strays = { seen: false };
     const everyStrays: Strays = { seen: false };
     const read = readerOf(content, false, nowStrays);
-    const early = once(() => readAt855(content, read));
+    const before = once(() => read({ asItWas: true }));
+    const early = once(() => readAt855(content, read, before.get));
     const now = once(() => read({}));
     const nowEvery = once(() => readerOf(content, false, everyStrays)({ everyBar: true }));
     const nodes = readEarlier(spoilers, now.get, early.get, nowEvery.get);
-    if (!spoilers || !(nowStrays.seen || everyStrays.seen)) return nodes;
+    if (!spoilers) return nodes;
+    const held = (tree: Node[], ...others: Node[][]) => heldToEarly(content, tree, [early.get(), before.get()], others, nowEvery.get);
+    if (!(nowStrays.seen || everyStrays.seen)) return held(nodes);
     // A label with a `[` in it was turned down: read as 0.9.857 did, and this held to what that hid. A
     // reading that turned none down is the one 0.9.857 read, and is not read again; nor are the readings
     // 0.9.855 was made of.
@@ -319,12 +419,96 @@ export function parseMessage(content: string): Node[] {
     const wasEvery = nowEvery.made && !everyStrays.seen ? nowEvery : once(() => readOld({ everyBar: true }));
     const asRead = readEarlier(true, was.get, early.get, wasEvery.get);
     const wordsThen = wordsIn(asRead);
-    if (!printsWhatItHid(wordsIn(nodes), wordsThen)) return nodes;
-    if (!printsWhatItHid(wordsThen, wordsIn(nodes))) return asRead;
+    if (!printsWhatItHid(wordsIn(nodes), wordsThen)) return held(nodes, asRead);
+    if (!printsWhatItHid(wordsThen, wordsIn(nodes))) return held(asRead, nodes);
     // Neither hides all the other does. Every stretch between `||` is a spoiler, if that hides what
     // 0.9.857 did and leaves no `||` to see: a quote or a fence next to a bar can end a spoiler that way.
     const everyBar = nowEvery.get();
-    return showsBars(everyBar) || printsWhatItHid(wordsIn(everyBar), wordsThen) ? asRead : everyBar;
+    return showsBars(everyBar) || printsWhatItHid(wordsIn(everyBar), wordsThen) ? held(asRead, nodes) : held(everyBar, asRead, nodes);
+}
+
+/**
+ * `tree`, if every character of a word 0.9.855 hid is in a spoiler of it (`earlier`: 0.9.855's
+ * reading, and the parser's before it, which 0.9.855 fell back on). A word's character is what
+ * WORD_RE makes words of: a letter, a digit, an emoji, a symbol, anything but a space and a mark
+ * on the keyboard, which can be markup that draws nothing. Asked of where each was typed, not of
+ * the words: 0.9.855 read `w0Https://x/w1` as one word and this reads an address in it, and every
+ * letter of it hidden is hidden. Counting words could not see it either where the same word is said
+ * twice: `a*b,||c d*e||f*g||` with every word `w` hid three `w` and printed the two 0.9.855 hid.
+ * If not, 0.9.855's own reading, where that hides every such character `tree`, the parser before it
+ * and the readings `tree` was held to (`others`) hid; or every stretch between two `||` a spoiler
+ * (`every`), where that does and leaves no `||` to see. If neither does, no one reading keeps all
+ * that hidden: from the first `||` any of them opened to the last any of them closed is one
+ * spoiler (`coverAll`).
+ */
+function heldToEarly(content: string, tree: Node[], earlier: [Node[], Node[]], others: Node[][], every: () => Node[]): Node[] {
+    if (!printsWordCharacters(content, hiddenStretches(earlier), hiddenStretches([tree]))) return tree;
+    const all = hiddenStretches([tree, ...earlier, ...others]);
+    if (!printsWordCharacters(content, all, hiddenStretches([earlier[0]]))) return earlier[0];
+    const each = every();
+    if (!showsBars(each) && !printsWordCharacters(content, all, hiddenStretches([each]))) return each;
+    return coverAll(content, all[0][0], all[all.length - 1][1]);
+}
+
+/** Where every spoiler in `trees` was typed, bars and all, as stretches in order with none touching. */
+function hiddenStretches(trees: Node[][]): Array<[number, number]> {
+    const spans: Array<[number, number]> = [];
+    const walk = (nodes: Node[]) => {
+        for (const n of nodes) {
+            const span = spoilerSpan(n);
+            if (span) spans.push([span[0], span[1]]);
+            if ('children' in n) walk(n.children);
+        }
+    };
+    for (const nodes of trees) walk(nodes);
+    spans.sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const span of spans) {
+        const last = merged[merged.length - 1];
+        if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+        else merged.push(span);
+    }
+    return merged;
+}
+
+// WORD_RE's characters of a word. Letters and digits alone missed an emoji: `*||⏎> U+1F98A||```>https://x/a_b||⏎```` (a fox)
+// was held to 0.9.855's reading, which hides every letter 0.9.857's did, and printed the fox 0.9.857 hid.
+const WORD_CHARACTER = /[^\s!-/:-@[-`{-~]/u;
+
+/** Whether a character of a word typed in one of `wanted` is in none of `has` (both from `hiddenStretches`). */
+function printsWordCharacters(content: string, wanted: Array<[number, number]>, has: Array<[number, number]>): boolean {
+    let first = 0;
+    for (const [from, to] of wanted) {
+        while (first < has.length && has[first][1] <= from) first++;
+        let at = from;
+        for (let k = first; at < to;) {
+            if (k < has.length && has[k][0] <= at) {
+                at = Math.max(at, has[k][1]);
+                k++;
+                continue;
+            }
+            const gap = k < has.length ? Math.min(to, has[k][0]) : to;
+            if (WORD_CHARACTER.test(content.slice(at, gap))) return true;
+            at = gap;
+        }
+    }
+    return false;
+}
+
+/**
+ * The message with what was typed from `from` to `to`, a `||` at each end, read as one spoiler, and
+ * what is before and after it read as it would be alone: every spoiler any reading drew is inside
+ * it, and so is every word one of them hid. It holds a fence or a quote as one.
+ */
+function coverAll(content: string, from: number, to: number): Node[] {
+    const reading: Reading = { asItWas: false, at855: false, everyBar: false, bracketed: false, strays: { seen: false }, walkLeft: WALK_PER_CHAR * content.length };
+    const inner = from + 2;
+    const hidden = typed<Node>({ type: 'spoiler', children: parseBlocks(content.slice(inner, to - 2), reading, 1, (index) => inner + index) }, atStart, from, to);
+    return [
+        ...parseBlocks(content.slice(0, from), reading, 0, atStart),
+        hidden,
+        ...parseBlocks(content.slice(to), reading, 0, (index) => to + index),
+    ];
 }
 
 /** A reader of `content`: one reading of it, made from what `how` changes in the default. */
@@ -366,8 +550,8 @@ function readEarlier(spoilers: boolean, first: () => Node[], early: () => Node[]
  * What 0.9.855 read: its own reading, or the one before it where its own hid fewer of a
  * word, which was its rule. With no address and no link in the text the two are one.
  */
-function readAt855(content: string, read: (how: Partial<Reading>) => Node[]): Node[] {
-    const before = read({ asItWas: true });
+function readAt855(content: string, read: (how: Partial<Reading>) => Node[], asItWas: () => Node[]): Node[] {
+    const before = asItWas();
     if (!content.includes('://') && !content.includes('](')) return before;
     const own = read({ at855: true });
     const hidden = wordsIn(own).hidden;
@@ -388,7 +572,7 @@ function parseBlocks(input: string, reading: Reading, depth: number, at: Origin)
         // Fenced code block: ```lang\n...\n``` (lang optional).
         const fence = matchCodeBlock(rest);
         if (fence) {
-            nodes.push(fence.node);
+            nodes.push(typed(fence.node, here, 0, fence.length));
             rest = rest.slice(fence.length);
             continue;
         }
@@ -578,13 +762,21 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
     const { asItWas } = reading;
     const linkIsInReach = linkInReach(input);
     const nodes: Node[] = [];
-    let buf = '';
+    // The words not yet in a node: `size` of them, typed in one run from `from`. A run is the input
+    // from there, sliced, not a string put together a character at a time, which the engine keeps
+    // as a chain of every piece it was made of for as long as the tree is kept (`kept`).
+    let from = 0;
+    let size = 0;
     let i = 0;
 
+    const say = (words: string) => {
+        if (!size) from = i;
+        size += words.length;
+    };
     const flush = () => {
-        if (buf) {
-            nodes.push({ type: 'text', value: buf });
-            buf = '';
+        if (size) {
+            nodes.push(typed({ type: 'text', value: input.slice(from, from + size) }, at, from, from + size));
+            size = 0;
         }
     };
 
@@ -597,7 +789,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             const close = input.indexOf('`', i + 1);
             if (close !== -1 && close > i + 1) {
                 flush();
-                nodes.push({ type: 'code', value: input.slice(i + 1, close) });
+                nodes.push(typed({ type: 'code', value: input.slice(i + 1, close) }, at, i, close + 1));
                 i = close + 1;
                 continue;
             }
@@ -610,7 +802,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
                 flush();
                 // Neutralize a dangerous scheme (javascript:, data:, …): keep the
                 // alt text, drop the href, so it never renders as an <img src>. (H7)
-                if (isSafeUrl(m.href)) nodes.push({ type: 'image', alt: m.label, href: m.href });
+                if (isSafeUrl(m.href)) nodes.push(typed({ type: 'image', alt: m.label, href: m.href }, at, i, i + m.length));
                 else if (m.label) nodes.push({ type: 'text', value: m.label });
                 i += m.length;
                 continue;
@@ -624,7 +816,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
                 flush();
                 // Neutralize a dangerous scheme: drop the href and keep the label
                 // as plain text so `[x](javascript:…)` is never a clickable link. (H7)
-                if (isSafeUrl(m.href)) nodes.push({ type: 'link', label: m.label, href: m.href });
+                if (isSafeUrl(m.href)) nodes.push(typed({ type: 'link', label: m.label, href: m.href }, at, i, i + m.length));
                 else nodes.push({ type: 'text', value: m.label });
                 i += m.length;
                 continue;
@@ -636,7 +828,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             const href = asItWas ? URL_RE_AS_IT_WAS.exec(rest)?.[0] : reading.at855 ? urlAt(rest) : addressAt(rest, reading);
             if (href) {
                 flush();
-                nodes.push({ type: 'url', href });
+                nodes.push(typed({ type: 'url', href }, at, i, i + href.length));
                 i += href.length;
                 continue;
             }
@@ -646,20 +838,20 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
         if (ch === '@') {
             if (rest.startsWith('@everyone') && !isNameChar(rest[9])) {
                 flush();
-                nodes.push({ type: 'mentionEveryone' });
+                nodes.push(typed({ type: 'mentionEveryone' }, at, i, i + '@everyone'.length));
                 i += '@everyone'.length;
                 continue;
             }
             if (rest.startsWith('@here') && !isNameChar(rest[5])) {
                 flush();
-                nodes.push({ type: 'mentionHere' });
+                nodes.push(typed({ type: 'mentionHere' }, at, i, i + '@here'.length));
                 i += '@here'.length;
                 continue;
             }
             const nm = NAME_RE.exec(rest.slice(1));
             if (nm) {
                 flush();
-                nodes.push({ type: 'mentionUser', name: nm[0] });
+                nodes.push(typed({ type: 'mentionUser', name: nm[0] }, at, i, i + 1 + nm[0].length));
                 i += 1 + nm[0].length;
                 continue;
             }
@@ -668,7 +860,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             const nm = NAME_RE.exec(rest.slice(1));
             if (nm) {
                 flush();
-                nodes.push({ type: 'channel', name: nm[0] });
+                nodes.push(typed({ type: 'channel', name: nm[0] }, at, i, i + 1 + nm[0].length));
                 i += 1 + nm[0].length;
                 continue;
             }
@@ -681,19 +873,19 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             if (m && !asItWas && rest.startsWith('//', m[0].length)) {
                 const href = reading.at855 ? urlAt(rest.slice(1)) : addressAt(rest.slice(1), reading);
                 if (href) {
-                    buf += ':';
+                    say(':');
                     flush();
-                    nodes.push({ type: 'url', href });
+                    nodes.push(typed({ type: 'url', href }, at, i + 1, i + 1 + href.length));
                     i += 1 + href.length;
                 } else {
-                    buf += m[0];
+                    say(m[0]);
                     i += m[0].length;
                 }
                 continue;
             }
             if (m) {
                 flush();
-                nodes.push({ type: 'emoji', name: m[1] });
+                nodes.push(typed({ type: 'emoji', name: m[1] }, at, i, i + m[0].length));
                 i += m[0].length;
                 continue;
             }
@@ -714,8 +906,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
                             ? parseBlocks(innerText, reading, depth + 1, within)
                             : parseInline(innerText, depth + 1, reading, within);
                         const node = { type: delim.type, children } as Node;
-                        if (node.type === 'spoiler') spoilerSpans.set(node, [at(i), at(closeIdx + 1) + 1]);
-                        nodes.push(node);
+                        nodes.push(node.type === 'spoiler' ? typed(node, at, i, closeIdx + delim.open.length) : node);
                         i = closeIdx + delim.open.length;
                         // This `||` opens the next stretch too, if any `||` is left to close it.
                         if (reading.everyBar && delim.type === 'spoiler' && findClosing(input, i, '||', reading) !== -1) i = closeIdx;
@@ -725,7 +916,7 @@ function parseInline(input: string, depth: number, reading: Reading, at: Origin)
             }
         }
 
-        buf += ch;
+        say(ch);
         i += 1;
     }
 

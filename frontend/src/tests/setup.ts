@@ -121,7 +121,8 @@ function installDomMocks(): void {
             if (idx > -1) this.tracks.splice(idx, 1);
         }
     }
-    Object.defineProperty(window, 'MediaStream', { value: MockMediaStream });
+    // Configurable, as RTCPeerConnection's is, so a test can stub its own (vi.stubGlobal).
+    Object.defineProperty(window, 'MediaStream', { value: MockMediaStream, configurable: true, writable: true });
 
     // Mock navigator.mediaDevices
     Object.defineProperty(navigator, 'mediaDevices', {

@@ -9,7 +9,7 @@ fs.mkdirSync(outdir, { recursive: true });
 const username = 'vt_' + Math.random().toString(36).slice(2, 8);
 
 const iphone = devices['iPhone 13'];
-const browser = await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
+const browser = await chromium.launch({ args: ['--mute-audio', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL: 'http://localhost:5173' });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 300)));

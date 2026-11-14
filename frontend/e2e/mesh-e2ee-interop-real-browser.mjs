@@ -86,6 +86,7 @@
 // --mute-audio, media.volume_scale 0, every element muted, the tones go to
 // MediaStream destinations only. Headless: no window, no focus.
 import { chromium, firefox, webkit } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import http from 'node:http';
@@ -235,6 +236,8 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
     const logs = { 1: [], 2: [] };
     const heldOffers = [];
     let glareDone = !glare;
+    /** Offers FROM a page held back (an answer that is slow to come): p.holdOffers(uid, on). */
+    const holding = { 1: null, 2: null };
     for (const [uid, eng, init] of [[1, a, initA], [2, b, initB]]) {
         const ctx = await eng.browser.newContext();
         const page = await ctx.newPage();
@@ -253,6 +256,7 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
             }
             const payload = type === 'IceCandidate' ? { from_user: uid, candidate: body } : { from_user: uid, sdp: body };
             const send = () => target.evaluate(([t, p]) => window.__deliver(t, p), [type, payload]).catch(() => {});
+            if (holding[uid] && type === 'Offer') { holding[uid].push(send); return; }
             if (!glareDone && type === 'Offer') {
                 heldOffers.push(send);
                 if (heldOffers.length < 2) return;
@@ -270,7 +274,13 @@ async function pair({ a, b, csp = POLICIES.caddy, cspAsMeta = false, initA, init
     for (const uid of [1, 2]) keys[uid] = await pages[uid].evaluate(([pw, salt]) => window.harness.signIn(pw, salt), [`password-${uid}-${randomBytes(4).toString('hex')}`, randomBytes(16).toString('hex')]);
     await pages[1].evaluate((k) => window.harness.setPeerKeys(k), { 2: keys[2] });
     await pages[2].evaluate((k) => window.harness.setPeerKeys(k), { 1: keys[1] });
-    return { pages, logs, close: async () => { for (const p of Object.values(pages)) await p.context().close(); } };
+    const holdOffers = async (uid, on) => {
+        if (on) { holding[uid] ??= []; return; }
+        const queued = holding[uid] ?? [];
+        holding[uid] = null;
+        for (const f of queued) await f();
+    };
+    return { pages, logs, holdOffers, close: async () => { for (const p of Object.values(pages)) await p.context().close(); } };
 }
 
 /** Both in the channel first, then the call: as in the app, nobody's offer
@@ -503,6 +513,148 @@ await run('camera-mid-call', async () => {
     }
 });
 
+await run('camera-off-on', async () => {
+    // A camera turned OFF and ON again (the owner's emulator walk, OFF_ON=1:
+    // the other side's tile stayed frozen or black). It used to go back on
+    // a SECOND sender in the same stream, the stopped one first, and the
+    // viewer played the first. Each camera here is one colour, so "the new
+    // camera is shown" is read off the picture: red, then off, then green.
+    // Both ways (Edge's camera to Firefox, Firefox's to Edge), then a peer
+    // that turns it on the old way (a second sender) for the viewer's half.
+    const tag = `[${cr.name} <-> ${ff.name}, a camera turned off and on again]`;
+    const p = await pair({ a: cr, b: ff });
+    const dominant = (c, ch) => !!c && c[ch] >= 90 && c[ch] > c[(ch + 1) % 3] + 50 && c[ch] > c[(ch + 2) % 3] + 50;
+    /** Until `viewer` shows `from`'s camera in colour channel `ch` (0 r, 1 g, 2 b) for 3 looks running. */
+    const shows = async (viewer, from, ch, ms = 15_000) => {
+        const end = Date.now() + ms;
+        let run = 0, last = null;
+        while (Date.now() < end) {
+            last = await viewer.evaluate((id) => window.harness.pictureColour(id), from);
+            run = dominant(last, ch) ? run + 1 : 0;
+            if (run >= 3) return { ok: true, last };
+            await sleep(250);
+        }
+        return { ok: false, last };
+    };
+    try {
+        await enterCall(p, { camera: false });
+        const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways`, JSON.stringify([s1?.reason, s2?.reason]));
+        for (const [from, viewer, name, other] of [[1, 2, cr.name, ff.name], [2, 1, ff.name, cr.name]]) {
+            const fromPage = p.pages[from], viewerPage = p.pages[viewer];
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+            const red = await shows(viewerPage, from, 0);
+            ck(red.ok, `${tag} ${other} shows ${name}'s camera (red)`, JSON.stringify(red.last));
+            const lines = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            const handed = await viewerPage.evaluate((id) => window.harness.cameraDeliveries(id), from);
+            await fromPage.evaluate(() => window.harness.stopCamera());
+            await sleep(2000);
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(0, 200, 0)'));
+            const green = await shows(viewerPage, from, 1);
+            ck(green.ok, `${tag} THE BUG: turned off and on, ${other} shows ${name}'s NEW camera (green), not the old one frozen or black`, JSON.stringify(green.last));
+            ck(await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer) === lines,
+                `${tag} ${name}'s camera went back on its own sender: no second video transceiver`, `before ${lines}`);
+            ck(await viewerPage.evaluate((id) => window.harness.cameraDeliveries(id), from) > handed,
+                `${tag} ${other} was handed the camera again (ontrack: the tile that went with it comes back in the app)`);
+            await fromPage.evaluate(() => window.harness.stopCamera());
+            await sleep(1500);
+        }
+        const st = [await statusOf(p.pages[1], 2), await statusOf(p.pages[2], 1)];
+        ck(st.every((x) => x?.encrypted), `${tag} still encrypted both ways`, JSON.stringify(st.map((x) => x?.reason)));
+        await bothHear(p, tag, 'each still hears the other (the voice stream lost and regained a video track)');
+        const refused = [1, 2].flatMap((uid) => p.logs[uid].filter((l) => /setRemoteDescription\(|Failed to parse|rejects the offer|rebuilding/i.test(l)));
+        ck(refused.length === 0, `${tag} no description was refused and nothing was rebuilt`, refused.slice(0, 2).join(' / '));
+        // Off and on again before the off was ever negotiated: an offer of
+        // Edge's is still unanswered (a slow peer), so the turn off is never
+        // offered, and by the time it could be the camera is on again: no
+        // direction ever changed, so Firefox is told of no track, and its
+        // ontrack never fires again. In the app its tile went with the
+        // camera's CameraStopped and only a delivery brings it back.
+        await p.pages[1].evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+        ck((await shows(p.pages[2], 1, 0)).ok, `${tag} precondition: Firefox shows Edge's red camera again`);
+        await sleep(1500);
+        const handedBefore = await p.pages[2].evaluate((id) => window.harness.cameraDeliveries(id), 1);
+        // Held well under the 3 s after which the manager rebuilds a peer whose
+        // offer goes unanswered (scheduleStuckPeerRecovery): a rebuild would
+        // hand everything over afresh and hide this.
+        await p.holdOffers(1, true);
+        await p.pages[1].evaluate((id) => window.harness.restartIce(id), 2); // an offer that waits for its answer
+        await sleep(300);
+        await p.pages[1].evaluate(() => window.harness.stopCamera());
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, false), 1);
+        await sleep(300);
+        await p.pages[1].evaluate(() => window.harness.cameraOn('rgb(0, 200, 0)'));
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, true), 1);
+        await p.holdOffers(1, false);
+        const rebuilt = p.logs[1].some((l) => /unrecoverable .* rebuilding/.test(l));
+        await sleep(4000);
+        const handedAfter = await p.pages[2].evaluate((id) => window.harness.cameraDeliveries(id), 1);
+        ck(!rebuilt, `${tag} precondition: the peer was not rebuilt meanwhile (that would hand the camera over afresh)`);
+        ck(handedAfter > handedBefore, `${tag} off and on inside one negotiation: Firefox is handed the camera again when it is announced (its tile came back)`, `${handedBefore} -> ${handedAfter}`);
+        ck((await shows(p.pages[2], 1, 1)).ok, `${tag} off and on inside one negotiation: and shows the camera that is on (green)`);
+        await p.pages[1].evaluate(() => window.harness.stopCamera());
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, false), 1);
+        await sleep(1500);
+        await p.pages[2].evaluate((id) => window.harness.announceCamera(id, true), 1);
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('camera-off-on-old-peer', async () => {
+    // A peer on 0.9.862 or older: off leaves the stopped track on its sender,
+    // on ADDS another in the same stream (the dead one first); its Flip then
+    // goes onto its FIRST, dead, sender with no renegotiation. Each engine
+    // as the viewer of an old peer, each in a call of its own.
+    const dominant = (c, ch) => !!c && c[ch] >= 90 && c[ch] > c[(ch + 1) % 3] + 50 && c[ch] > c[(ch + 2) % 3] + 50;
+    const shows = async (viewer, from, ch, ms = 15_000) => {
+        const end = Date.now() + ms;
+        let run = 0, last = null;
+        while (Date.now() < end) {
+            last = await viewer.evaluate((id) => window.harness.pictureColour(id), from);
+            run = dominant(last, ch) ? run + 1 : 0;
+            if (run >= 3) return { ok: true, last };
+            await sleep(250);
+        }
+        return { ok: false, last };
+    };
+    for (const [from, viewer] of [[1, 2], [2, 1]]) {
+        const p = await pair({ a: cr, b: ff });
+        const name = from === 1 ? cr.name : ff.name, other = from === 1 ? ff.name : cr.name;
+        const tag = `[${name} on 0.9.862 -> ${other} viewing]`;
+        try {
+            await enterCall(p, { camera: false });
+            await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+            const fromPage = p.pages[from], viewerPage = p.pages[viewer];
+            const before = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            await fromPage.evaluate(() => window.harness.cameraOn('rgb(220, 0, 0)'));
+            ck((await shows(viewerPage, from, 0)).ok, `${tag} precondition: ${other} shows the red camera`);
+            await fromPage.evaluate(() => window.harness.legacyCameraOff());
+            await sleep(1500);
+            await fromPage.evaluate(() => window.harness.legacyCameraOn('rgb(0, 0, 230)'));
+            await sleep(3000);
+            const lines = await fromPage.evaluate((id) => window.harness.videoTransceivers(id), viewer);
+            ck(lines > before, `${tag} precondition: the old way added a second video transceiver`, `${before} -> ${lines}`);
+            const blue = await shows(viewerPage, from, 2);
+            ck(blue.ok, `${tag} turned on the OLD way: ${other} shows its live camera (blue), not the dead first track`, JSON.stringify(blue.last));
+            await fromPage.evaluate(() => window.harness.legacyFlip('rgb(220, 0, 0)'));
+            const flipped = await shows(viewerPage, from, 0);
+            ck(flipped.ok, `${tag} then Flipped the old way (onto its first, dead, sender): ${other} shows the camera it flipped to (red), not the last frame of the one before`, JSON.stringify(flipped.last));
+            if (!flipped.ok) {
+                const a = await viewerPage.evaluate((id) => window.harness.receiverFrames(id), from);
+                await sleep(1500);
+                const b = await viewerPage.evaluate((id) => window.harness.receiverFrames(id), from);
+                console.log('   frames at the viewer, 1.5 s apart:', JSON.stringify(a), JSON.stringify(b));
+                console.log('   its log:', p.logs[viewer].filter((l) => /came back on another receiver|Received remote track/.test(l)).slice(-6).join(' || '));
+            }
+        } finally {
+            dumpLogs(p, tag);
+            await p.close();
+        }
+    }
+});
+
 await run('glare-then-renegotiate', async () => {
     // Both offer at once, cameras on, and Firefox is the polite one (user 2):
     // it rolls its own offer back and applies Edge's, which takes over the
@@ -709,6 +861,9 @@ await run('no-false-alarms', async () => {
         ck(shareHolds.held === 0, `${tag} Firefox's share sender, held until its transform sealed, carries the share`, JSON.stringify(shareHolds));
         const st = [await statusOf(p.pages[1], 2), await statusOf(p.pages[2], 1)];
         ck(st.every((s) => s?.encrypted), `${tag} still encrypted both ways`, JSON.stringify(st.map((s) => s?.reason)));
+        // Counted over every video receiver: until a camera turned off stopped
+        // sending on its sender, Firefox's stopped camera's frames were counted
+        // here too, and made up for its share's (stubs/media.ts canvasTrack).
         const [atEdge, atFf] = await Promise.all([moved(p.pages[1], 2, 'open', 'video', 6000), moved(p.pages[2], 1, 'open', 'video', 6000)]);
         ck(atEdge.done >= 3 && atEdge.dropped === 0, `${tag} Edge opens Firefox's share at a frame a second`, JSON.stringify(atEdge));
         ck(atFf.done >= 3 && atFf.dropped === 0, `${tag} Firefox opens Edge's`, JSON.stringify(atFf));
@@ -949,7 +1104,7 @@ await run('worker-csp', async () => {
     }
     let wk = null;
     try {
-        wk = await webkit.launch({ headless: true });
+        wk = muteWebkit(await webkit.launch({ headless: true }));
     } catch (e) {
         sk('[worker CSP WebKit]', `WebKit did not launch: ${e.message.split('\n')[0]}`);
     }
@@ -981,7 +1136,7 @@ await run('worker-csp', async () => {
 await run('webkit', async () => {
     const tag = '[WebKit]';
     try {
-        const b = await webkit.launch({ headless: true });
+        const b = muteWebkit(await webkit.launch({ headless: true }));
         const page = await b.newPage();
         await page.goto(await serve(POLICIES.caddy));
         const probe = await page.evaluate(() => ({

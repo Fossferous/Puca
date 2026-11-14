@@ -179,6 +179,25 @@ fn dm_from(sender: &Claims, conv: &str) -> ServerMessage {
     }
 }
 
+/// What a DM needs to be handed over at all: a conversation between the two, and the
+/// recipient's consent (here, a friendship). The pending route re-runs that gate on every
+/// DirectMessage it names (ws::still_entitled), as the Android delivery socket does.
+async fn may_dm(pool: &sqlx::PgPool, a: &Claims, b: &Claims) {
+    sqlx::query("INSERT INTO dm_conversations (id, user1_id, user2_id) VALUES ($1, $2, $3)")
+        .bind(format!("wp-{}", uuid::Uuid::new_v4()))
+        .bind(a.sub)
+        .bind(b.sub)
+        .execute(pool)
+        .await
+        .expect("conversation");
+    sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)")
+        .bind(a.sub)
+        .bind(b.sub)
+        .execute(pool)
+        .await
+        .expect("friends");
+}
+
 /// A live connection of the session `sid`, as the WebSocket would register it.
 fn connect(state: &Arc<AppState>, c: &Claims, sid: &str) -> u64 {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -207,6 +226,7 @@ async fn a_dm_rings_the_browser_and_the_worker_learns_only_who() {
     let Some((pool, state, rec)) = setup().await else { return };
     let me = signed_in(&pool, "me").await;
     let alice = signed_in(&pool, "alice").await;
+    may_dm(&pool, &me, &alice).await;
     let ep = endpoint();
     let (id, secret) = subscribe(&state, &me, &ep, GatesBody::default()).await;
 
@@ -568,6 +588,7 @@ async fn a_browser_is_rung_when_it_is_away_whatever_the_other_devices_do() {
     let Some((pool, state, rec)) = setup().await else { return };
     let me = signed_in(&pool, "perbrowser").await;
     let alice = signed_in(&pool, "alice2").await;
+    may_dm(&pool, &me, &alice).await;
     let (id, secret) = subscribe(&state, &me, &endpoint(), GatesBody::default()).await;
 
     // 1. The desktop app (another session) is connected; the phone is not.
@@ -639,4 +660,138 @@ async fn a_session_that_cannot_be_revoked_cannot_subscribe() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(rows_for(&pool, &me).await, 0);
     drop_user(&pool, &me).await;
+}
+
+/// The worker is told only of what the member may see NOW. A channel message was logged while
+/// they could see its channel, and before the worker asked the channel was crossed for them, or
+/// its collection was (docs/USER_GUIDE.md, Collections and permissions), or they were taken off
+/// the server: none of those may be named ("bob sent a message" says who posted, where and
+/// when). Until 0.9.863 the route reported what it had logged with no re-check, where the
+/// Android delivery socket re-checked the same frames. A DM from someone who has blocked them
+/// since goes the same way. CONTROLS: a channel nothing happened to, and a DM from a friend.
+#[tokio::test]
+async fn the_worker_is_told_only_of_what_the_member_still_sees() {
+    let Some((pool, state, _rec)) = setup().await else { return };
+    let me = signed_in(&pool, "viewer").await;
+    let bob = signed_in(&pool, "poster").await;
+    let carol = signed_in(&pool, "friend").await;
+    let dave = signed_in(&pool, "blocker").await;
+    may_dm(&pool, &me, &carol).await;
+    may_dm(&pool, &me, &dave).await;
+    let (id, secret) = subscribe(&state, &me, &endpoint(), GatesBody::default()).await;
+
+    // One of bob's servers per case, me a member of each, one text channel in each.
+    let mut servers: Vec<(&str, String, i32, Option<i32>)> = Vec::new();
+    for case in ["crossed", "collection", "removed", "kept"] {
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(format!("wp-{case}"))
+            .bind(bob.sub as i32)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for who in [&bob, &me] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(who.sub as i32)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        let _: (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true) RETURNING id",
+        )
+        .bind(&sid)
+        .bind(crate::permissions::Permissions::VIEW_CHANNEL.bits() as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("@everyone");
+        let parent: Option<i32> = if case == "collection" {
+            let (c,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, $2, $3) RETURNING id")
+                .bind(&sid)
+                .bind("shelf")
+                .bind(2)
+                .fetch_one(&pool)
+                .await
+                .expect("collection");
+            Some(c)
+        } else {
+            None
+        };
+        let (channel,): (i32,) =
+            sqlx::query_as("INSERT INTO channels (server_id, name, type, parent_id) VALUES ($1, $2, $3, $4) RETURNING id")
+                .bind(&sid)
+                .bind("general")
+                .bind(0)
+                .bind(parent)
+                .fetch_one(&pool)
+                .await
+                .expect("channel");
+        servers.push((case, sid, channel, parent));
+    }
+    for (_, sid, channel, _) in &servers {
+        state.web_push_record(
+            me.sub,
+            ServerMessage::MessageNotification {
+                server_id: sid.clone(),
+                channel_id: *channel as i64,
+                message_id: "m".into(),
+                author: UserInfo::new(bob.sub, bob.username.clone()),
+            },
+        );
+    }
+    state.web_push_record(me.sub, dm_from(&carol, "conv-friend"));
+    state.web_push_record(me.sub, dm_from(&dave, "conv-blocker"));
+
+    // What lands between the message and the worker asking.
+    let deny = |sid: String, channel: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
+                 SELECT $1, id, 0, $2 FROM server_roles WHERE server_id = $3 AND is_default",
+            )
+            .bind(channel as i64)
+            .bind(crate::permissions::Permissions::VIEW_CHANNEL.bits() as i64)
+            .bind(sid)
+            .execute(&pool)
+            .await
+            .expect("deny");
+        }
+    };
+    let case = |name: &str| servers.iter().find(|s| s.0 == name).cloned().unwrap();
+    let crossed = case("crossed");
+    deny(crossed.1.clone(), crossed.2).await;
+    let collection = case("collection");
+    deny(collection.1.clone(), collection.3.unwrap()).await;
+    let removed = case("removed");
+    sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2")
+        .bind(&removed.1)
+        .bind(me.sub as i32)
+        .execute(&pool)
+        .await
+        .expect("removed");
+    sqlx::query("INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2)")
+        .bind(dave.sub as i32)
+        .bind(me.sub as i32)
+        .execute(&pool)
+        .await
+        .expect("block");
+
+    let (status, v) = pending(&state, id, &secret).await;
+    for (_, sid, _, _) in &servers {
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(sid).execute(&pool).await;
+    }
+    for c in [&me, &bob, &carol, &dave] {
+        drop_user(&pool, c).await;
+    }
+
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let mut tags: Vec<String> = v["items"].as_array().unwrap().iter().map(|i| i["tag"].as_str().unwrap().to_string()).collect();
+    tags.sort();
+    let mut want = vec![format!("chan:{}", case("kept").1), "dm:conv-friend".to_string()];
+    want.sort();
+    assert_eq!(tags, want, "only the channel nothing happened to, and the friend's DM: {v}");
 }

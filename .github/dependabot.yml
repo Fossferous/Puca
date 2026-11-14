@@ -1,8 +1,12 @@
 # Dependency updates — SECURITY ONLY.
 #
 # `open-pull-requests-limit: 0` switches OFF routine version updates while
-# leaving SECURITY updates untouched: Dependabot still opens a PR the day an
-# advisory lands against something in a lockfile, which is the part worth having.
+# leaving SECURITY updates untouched (they have a separate, fixed limit that
+# this option does not set). Those arrive only while the repository has
+# Dependabot alerts and security updates switched ON in its settings, which
+# this file cannot do: then Dependabot opens a PR the day an advisory lands
+# against something in a lockfile, which is the part worth having.
+# docs/SECURITY_MODEL.md §8 says what else scans, and what nothing does.
 #
 # MEASURED, which is why this setting changed within a day of the file being
 # added. Turning version updates on produced ELEVEN pull requests at once and
@@ -19,10 +23,11 @@
 # Dependency updates.
 #
 # WHY THIS EXISTS. Púca ships end-to-end encryption and a remote-desktop agent,
-# so a vulnerable transitive dependency is not cosmetic. Nothing in this
-# repository watched for one: no scanner ran in CI and no bot opened a PR, so an
-# advisory against a crate in Cargo.lock or a package in package-lock.json could
-# sit unnoticed indefinitely.
+# so a vulnerable transitive dependency is not cosmetic. When this file was
+# added nothing in this repository watched for one: no scanner ran in CI and no
+# bot opened a PR, so an advisory against a crate in Cargo.lock or a package in
+# package-lock.json could sit unnoticed indefinitely. (CI has scanned since; see
+# docs/SECURITY_MODEL.md §8.)
 #
 # GROUPED DELIBERATELY. Ungrouped, four ecosystems across five manifests produce
 # a stream of single-dependency PRs that a one-person project stops reading —
@@ -97,8 +102,10 @@ updates:
 
   # --- The workflows themselves ---------------------------------------------
   # Every action in .github/workflows is pinned to a commit SHA, which is the
-  # right call and also means a pinned action never updates on its own. This is
-  # what stops those pins from silently rotting.
+  # right call and also means a pinned action never updates on its own. With
+  # open-pull-requests-limit: 0 this entry no longer bumps them either, and
+  # GitHub raises no alert for an action pinned by SHA, so the pins are updated
+  # only by hand.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

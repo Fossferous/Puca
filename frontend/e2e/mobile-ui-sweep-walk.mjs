@@ -46,7 +46,9 @@
 //              stream with the owner's camera on) the camera strip and the floating call bar do not
 //              overlap, and the strip goes back down when a tap hides the controls.
 //   friends    Friends' Add Friend tab is whole on screen, left of the close button, with no sideways
-//              scroll (it was cut at the edge at 390, mostly hidden at 360).
+//              scroll (it was cut at the edge at 390, mostly hidden at 360). On the owner's 1280x800
+//              desktop, the All and Pending tabs' search boxes take their row, at rest and focused
+//              (Chat.css's chat-header width held them at 200 px, 280 on focus).
 //   names      The channel header's search box says its whole word ("Search this c" before) and
 //              the channel's name keeps four letters' room, even with 220px more beside it.
 //   keyboard   With the soft keyboard up (<html data-keyboard-up>, api/keyboardUp.ts) the bottom
@@ -283,6 +285,34 @@ try {
         if ((await box.isChecked()) !== before) { await box.click(); await sleep(300); }
         check('desktop settings: the setting is back as it was', (await box.isChecked()) === before);
         await O.locator('.settings-close').first().click();
+        await sleep(300);
+    }
+
+    // ── friends, on the owner's DESKTOP: Friends' search boxes take their row. They are .search-bar
+    // like the chat header's, whose Chat.css width (200 px, 280 on focus) held them to a stub of a
+    // 900 px row (the phone rule fixed only phones).
+    if (want('friends')) {
+        await O.locator('.server-icon.home-button').first().click();
+        await sleep(800);
+        const measure = () => O.evaluate(() => {
+            const i = [...document.querySelectorAll('.friends-dashboard .search-bar input')].find((x) => x.getBoundingClientRect().width > 0);
+            const c = i?.closest('.friends-content');
+            if (!i || !c) return null;
+            const cs = getComputedStyle(c);
+            return { input: Math.round(i.getBoundingClientRect().width), room: Math.round(c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) };
+        });
+        for (const [tab, label] of [['All', /^All$/], ['Pending', /^Pending/]]) {
+            await O.locator('.friends-header-bar .header-tab', { hasText: label }).first().click();
+            await sleep(400);
+            const at = await measure();
+            check(`desktop friends: the ${tab} tab's search box takes its row`, !!at && at.room > 400 && at.input >= at.room - 2, at);
+            await O.locator('.friends-dashboard .search-bar input').filter({ visible: true }).first().focus();
+            await sleep(400); // past the box's width transition
+            const focused = await measure();
+            check(`desktop friends: ...and keeps exactly its row with the focus (it jumped to 280 px)`, !!focused && Math.abs(focused.input - focused.room) <= 2, focused);
+            await O.evaluate(() => document.activeElement?.blur?.());
+        }
+        await O.locator('.friends-dashboard .close-btn[aria-label="Close"]').first().click().catch(() => {});
         await sleep(300);
     }
 

@@ -16,7 +16,7 @@ const password = process.argv[4] || 'Password123!';
 fs.mkdirSync(outdir, { recursive: true });
 
 const iphone = devices['iPhone 13'];
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL: 'http://localhost:5173' });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 300)));

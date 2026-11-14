@@ -1,6 +1,12 @@
 // Clips spike runner — drives probe.js inside the REAL WebView2 shell over raw
 // CDP (no Playwright, so no focus emulation and no fake media UI).
 //
+// IT PLAYS SOUND, on purpose: probe.js beeps through the speakers so the
+// system-audio capture has something to record, so the shell cannot be started
+// with --mute-audio. Never run it without asking the owner first (how loud, how
+// long). headless.mjs is the silent variant: its beep goes into a synthetic
+// stream, and its browser runs --mute-audio (scripts/check-e2e-muted.mjs).
+//
 // Start the dev shell first, with its own WebView2 profile and the debug port:
 //   WEBVIEW2_USER_DATA_FOLDER=%TEMP%\sovereign-clip-spike
 //   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222 --auto-select-desktop-capture-source=Entire screen"

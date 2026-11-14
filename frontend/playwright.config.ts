@@ -15,6 +15,7 @@ export default defineConfig({
         // CRITICAL: Mock WebRTC devices to prevent permission popups
         launchOptions: {
             args: [
+                '--mute-audio', // nothing a test plays reaches the speakers
                 '--use-fake-ui-for-media-stream',
                 '--use-fake-device-for-media-stream'
             ]

@@ -5,6 +5,7 @@
 import { useSyncExternalStore } from 'react';
 import { useStreamStore } from '../stores/streamStore';
 import { logRtcEvent } from '../api/rtc/rtcEventLog';
+import { registerLogoutCleanup } from '../api/logoutHooks';
 
 export interface VoiceUser {
     id: number;
@@ -203,6 +204,22 @@ export function clearSpeaking(): void {
     if (globalSpeakingUsers.size === 0) return;
     globalSpeakingUsers.clear();
     emitSpeaking();
+}
+
+/**
+ * The call's voice-activity detectors (and the silent-capture sentinel) are
+ * stopped, all of them, and with them every ring they lit: whoever was
+ * speaking when they stopped would otherwise stay "speaking" with nothing left
+ * to say otherwise. Both ways out of a call (leaveVoice, and the panel's
+ * teardown on a channel switch, which remounts it without leaveVoice) end
+ * here. The switch used to stop the detectors only: your own ring stayed lit
+ * in the next channel until you spoke again (forever, muted or in an AFK
+ * channel), and every watched stream stayed ducked under it (StreamStage).
+ */
+export function stopSpeakingDetectors(cleanups: Map<number, () => void>): void {
+    cleanups.forEach(cleanup => cleanup());
+    cleanups.clear();
+    clearSpeaking();
 }
 
 export function subscribeToSpeaking(callback: SpeakingListener): () => void {
@@ -465,3 +482,12 @@ export function clearAllStreams() {
         window.dispatchEvent(new CustomEvent('voiceControlReset'));
     }
 }
+
+// Who is in which voice room, in every server this account is in ("Active in your servers" reads it
+// for servers that are not open, and nothing empties a room this client was never in). A sign-out
+// reloads nothing, so the next account signed in on this running app was shown the last one's calls.
+export function clearVoiceRoster(): void {
+    globalVoiceUsers.clear();
+    notifyVoiceUsersChange();
+}
+registerLogoutCleanup(clearVoiceRoster);

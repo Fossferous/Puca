@@ -3,7 +3,7 @@
 // Usage: node e2e/notes-seed-user.mjs <baseURL> <username> <password>   (from frontend/)
 import { chromium } from '@playwright/test';
 const [, , baseURL, username, password] = process.argv;
-const b = await chromium.launch();
+const b = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await b.newContext({ baseURL });
 const p = await ctx.newPage();
 p.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 200)));

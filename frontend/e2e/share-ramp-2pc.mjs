@@ -302,6 +302,7 @@ const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
     args: [
+        '--mute-audio',
         // FORCE THE SOFTWARE ENCODER, which is what the shipped app actually
         // gets: every stream-diag line in the field says encoder=OpenH264.
         // Measuring the ladder against a hardware encoder answers a question

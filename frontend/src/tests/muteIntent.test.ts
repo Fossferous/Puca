@@ -461,10 +461,10 @@ const PINS: Pin[] = [
         holds: (c) => inOrder(body(c, 'private async doReapplyNoiseMode('),
             'if (micSender) {', 'await this.replaceSenderTrack(micSender, newTrack)',
             '} else if (localStream && !(this.requireMediaE2ee && !isMediaE2eeSupported())) {',
-            'this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));'),
+            'this.wireSenderAgain(userId, peer.connection.addTrack(newTrack, localStream));'),
         mutants: [
-            ['nothing is added (the old behaviour)', inBody('private async doReapplyNoiseMode(', 'this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));', '')],
-            ['added without the encrypt transform', inBody('private async doReapplyNoiseMode(', 'this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));', 'peer.connection.addTrack(newTrack, localStream);')],
+            ['nothing is added (the old behaviour)', inBody('private async doReapplyNoiseMode(', 'this.wireSenderAgain(userId, peer.connection.addTrack(newTrack, localStream));', '')],
+            ['added without the encrypt transform', inBody('private async doReapplyNoiseMode(', 'this.wireSenderAgain(userId, peer.connection.addTrack(newTrack, localStream));', 'peer.connection.addTrack(newTrack, localStream);')],
         ],
     },
 ];

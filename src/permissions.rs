@@ -788,12 +788,13 @@ impl Permissions {
 /// a server whose @everyone role carries MANAGE_CHANNELS) loses the channel
 /// and its overwrite editor in the client, and gets them back ONLY through
 /// the owner or an ADMINISTRATOR (who override the deny), or by having the
-/// role or the overwrite changed from somewhere it is still reachable: the
-/// role editor (a role holder cannot change their own roles, so that means
-/// another manager or a role edit that lifts the bit for everyone), or the
-/// overwrite routes themselves, which gate on server-level MANAGE_CHANNELS
-/// rather than channel VIEW and so still answer a direct API call for the
-/// hidden channel id. The server does not soften the deny to spare the
+/// role changed from somewhere it is still reachable: the role editor (a role
+/// holder cannot change their own roles, so that means another manager or a
+/// role edit that lifts the bit for everyone). Not through the overwrite
+/// routes: since 0.9.863 they, like every route that changes a channel, answer
+/// a channel the caller cannot see as one that does not exist
+/// (channel_handlers::require_manage_visible), so a direct API call for the
+/// hidden id is a 404 too. The server does not soften the deny to spare the
 /// client that; a manager who wants a guard rail against it is one the owner
 /// grants ADMINISTRATOR.
 ///

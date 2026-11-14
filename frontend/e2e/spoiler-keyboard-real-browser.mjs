@@ -225,10 +225,10 @@ const getIgnoresHotkeys = lazy('ignores-defaultPrevented', {
     plugins: [mutate('components/Spoiler.tsx', 'if (e.defaultPrevented) return;', '')],
 });
 const getUncovered = lazy('previews-uncovered', {
-    plugins: [mutate('api/messagePreview.ts', "const source = options.spoilers === 'keep' ? typed : coverSpoilers(typed);", 'const source = typed;')],
+    plugins: [mutate('api/messagePreview.ts', 'const covered: Covered = keep ? { text: typed, files: [] } : coverSpoilers(content, typed);', 'const covered: Covered = { text: typed, files: [] };')],
 });
 const getRewritten = lazy('previews-rewrite-words', {
-    plugins: [mutate('api/messagePreview.ts', 'covered += content.slice(at, span[0]);', "covered += content.slice(at, span[0]).replaceAll('_', '*');")],
+    plugins: [mutate('api/messagePreview.ts', 'covered += typed.slice(at, span[0]);', "covered += typed.slice(at, span[0]).replaceAll('_', '*');")],
 });
 const getNoForced = lazy('no-forced-colors', {
     css: (c) => {

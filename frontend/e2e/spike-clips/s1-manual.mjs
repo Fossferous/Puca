@@ -1,5 +1,7 @@
 // S1 only, with the REAL picker: inject the probe, call getDisplayMedia under a
 // CDP gesture, then drive the picker with pick-screen.ps1 (dump first, then pick).
+// It drives the unmuted dev shell on port 9222 and opens a real picker on the
+// desktop: ask the owner before running it (see runner.mjs's header).
 //   node e2e/spike-clips/s1-manual.mjs "Screen 3"
 import fs from 'node:fs';
 import path from 'node:path';

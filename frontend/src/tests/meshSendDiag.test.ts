@@ -33,6 +33,7 @@ function fakePc(rows: Row[], senders: unknown[] = [], receivers: unknown[] = [])
         getStats: async () => new Map(rows.map(r => [String(r.id), r])),
         getSenders: () => senders,
         getReceivers: () => receivers,
+        getTransceivers: () => [],
         signalingState: 'stable', connectionState: 'connected',
     };
 }
@@ -169,6 +170,35 @@ describe('outgoing video rows on a mesh call', () => {
         expect((await mgr.shareEncodeSample())?.sent?.ssrc, 'still nearly as much: kept').toBe(8);
         fps[8] = 12;
         expect((await mgr.shareEncodeSample())?.sent?.ssrc, 'fell well behind: the most again').toBe(7);
+    });
+
+    it('mark a camera turned off by this version (its sender kept with NO track, found by its mid) as an ended camera, not a stalled video', async () => {
+        const mgr = new WebRTCManager();
+        const sender = { track: null, getParameters: () => ({ encodings: [{ maxFramerate: 30 }] }) };
+        (mgr as unknown as { cameraSenders: WeakSet<object> }).cameraSenders.add(sender);
+        const pc = { ...fakePc([{ id: 'o', type: 'outbound-rtp', kind: 'video', mid: '1', framesPerSecond: 0, framesEncoded: 900, ssrc: 77 }], [sender]),
+            getTransceivers: () => [{ mid: '1', sender }] };
+        addPeer(mgr, 7, pc);
+        const [peer] = await mgr.meshDiagnostics();
+        const row = (peer.rtp as Row[]).find(r => r.dir === 'outbound-rtp')!;
+        expect(row.source).toBe('camera');
+        expect(row.ended).toBe(true);
+    });
+
+    it('label a share held under a stand-in (the track on its sender is the stand-in, another id) as the share, not a camera', async () => {
+        const mgr = new WebRTCManager();
+        const share = track('screen', 'live', 60);
+        const stand = track('screen+stand', 'live', 60);
+        (mgr as unknown as { media: { screenShareStream: unknown } }).media.screenShareStream =
+            { getTracks: () => [share], getVideoTracks: () => [share] };
+        const sender = { track: stand, getParameters: () => ({ encodings: [{ maxFramerate: 60 }] }) };
+        (mgr as unknown as { heldSenders: Map<unknown, unknown> }).heldSenders.set(sender, { userId: 7, real: share, stand, swaps: 0, since: Date.now() });
+        addPeer(mgr, 7, fakePc(outbound('screen+stand'), [sender]));
+        const [peer] = await mgr.meshDiagnostics();
+        const row = (peer.rtp as Row[]).find(r => r.dir === 'outbound-rtp')!;
+        expect(row.source).toBe('screen_share');
+        expect(row.ended).toBeUndefined();
+        (mgr as unknown as { heldSenders: Map<unknown, unknown> }).heldSenders.clear();
     });
 
     it('carry source, chosen and captured rates, cap and sender id for a live sender', async () => {

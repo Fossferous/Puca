@@ -21,9 +21,22 @@
 // same tag replaces the one before it, one without a tag is an entry of its
 // own and a pop-up of its own.
 //
+// The desktop app's TASK REMINDER goes the same way since 0.9.863: its toast
+// asks for Windows' default sound (the plugin's were silent, so a reminder
+// made no sound), and a click, the shell's own `toast-activated` event with
+// the key `tasks-due`, opens the Reminders view with the due ids; a click on
+// one left from before a reload lands on the 'reminders' target. The sound
+// is judged from the recorded command, never played.
+//
+// Which browsers pop a same-tag replacement up only when asked (`renotify`)
+// decides what the web path does with a quiet update, so the run also asks
+// Firefox and WebKit whether `renotify` is on Notification.prototype, a read
+// that constructs no notification (FIREFOX=0 / WEBKIT=0 skip them).
+//
 // NEGATIVE CONTROL: the same conversation through the module as it was at
 // 0.9.860 (src/tests/fixtures/desktopNotifyAt860.ts) must FAIL the same
-// checks: one notification per message on both paths.
+// checks: one notification per message on both paths, and a reminder with no
+// sound that a click does not open.
 //
 // SAFE ON THE OWNER'S DESKTOP: headless FULL Chromium (Playwright's headless
 // shell refuses notifications) with NativeNotifications and
@@ -33,11 +46,13 @@
 // desktop half never reaches an OS at all: its shell is a recorder. Focus is
 // the one thing stubbed: `document.hasFocus()` answers false, as it does with
 // the window behind a game, since a headless page cannot be unfocused.
+// Firefox and WebKit are headless and muted too, and only read a property.
 //
 //   cd frontend && node e2e/notify-coalesce-real-browser.mjs
 //
-// No server and no build needed (esbuild bundles the modules; ~15 s).
+// No server and no build needed (esbuild bundles the modules; ~20 s).
 import { chromium } from '@playwright/test';
+import { spawnSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -177,6 +192,24 @@ async function playConversation(page) {
     });
 }
 
+/** Two tasks come due, then the shell reports a click on the reminder's
+ *  toast. What the shell was asked for, and what the page did. */
+async function playReminder(page) {
+    return page.evaluate(async () => {
+        const opened = [];
+        window.addEventListener('sovereign:open-reminders', e => opened.push(e.detail ?? null));
+        const before = window.__shell.calls.length;
+        window.Notify.notifyTasksDue(2, [{ id: 5, mark: 'a' }, { id: 6, mark: 'b' }]);
+        await new Promise(r => setTimeout(r, 150));
+        const mine = window.__shell.calls.slice(before);
+        const shows = mine.filter(c => c.cmd === 'toast_show').map(c => c.args);
+        const plugin = mine.find(c => c.cmd === 'plugin:notification|notify');
+        const heard = window.__shell.emit('toast-activated', 'tasks-due');
+        await new Promise(r => setTimeout(r, 100));
+        return { shows, viaPlugin: plugin ? plugin.args.options : null, heard, opened, last: window.__shell.calls.at(-1) };
+    });
+}
+
 let pass = 0, fail = 0;
 const ck = (cond, label, extra = '') => {
     if (cond) { pass++; console.log('PASS', label, extra); }
@@ -290,10 +323,51 @@ for (const [name, module] of [['now', NOW], ['0.9.860 (control)', AT_860]]) {
         await page.waitForTimeout(100);
         const cleared = await page.evaluate(() => window.__shell.calls.at(-1));
         ck(cleared.cmd === 'toast_clear' && cleared.args.key === 'chan:s1:7', 'desktop: reading a conversation takes its toast away');
+        ck(calls.filter(c => c.cmd === 'toast_show').every(c => c.args.sound === false), 'desktop: every message toast is silent (the app plays its own sound)');
+    }
+
+    // A task reminder, then a click on it: the shell's own event, through
+    // the real event plumbing.
+    const reminder = await playReminder(page);
+    if (isNow) {
+        ck(reminder.shows.length === 1 && reminder.shows[0].sound === true && reminder.shows[0].popup === true
+            && reminder.shows[0].title === 'Púca Tasks' && reminder.shows[0].body === '2 tasks are due',
+        "desktop: a task reminder's toast asks for Windows' default sound", JSON.stringify(reminder.shows));
+        ck(!reminder.viaPlugin, 'desktop: and not through the plugin, whose toasts are silent');
+        ck(reminder.heard === 1 && JSON.stringify(reminder.opened) === JSON.stringify([{ ids: [5, 6] }]),
+            'desktop: a click on the reminder opens Reminders with the due ids', JSON.stringify(reminder.opened));
+        ck(reminder.last && reminder.last.cmd === 'toast_clear' && reminder.last.args.key === 'tasks-due', 'desktop: and takes the reminder out of the notification centre');
         ck(errors.length === 0, 'desktop: no page error', errors.join(' | '));
     } else {
         ck(!onePerConversation && popups === sent && centre.size === sent,
             'NEGATIVE CONTROL desktop: 0.9.860 raised one untagged toast per message, so it fails', `(${centre.size} entries, ${popups} pop-ups for ${sent} messages)`);
+        const silent = reminder.viaPlugin && !('sound' in reminder.viaPlugin);
+        ck(silent && reminder.opened.length === 0,
+            "NEGATIVE CONTROL desktop: 0.9.860's reminder went through the plugin with no sound, and a click opened nothing, so it fails",
+            `(${JSON.stringify(reminder.viaPlugin)}, ${reminder.heard} listeners, opened ${JSON.stringify(reminder.opened)})`);
+    }
+    await context.close();
+}
+
+// ---- a click on a reminder left from before a reload --------------------------
+
+for (const [name, module] of [['now', NOW], ['0.9.860 (control)', AT_860]]) {
+    // A fresh page is the reload: no notification shown yet, no click action
+    // kept, only the listener the module registers as it loads.
+    const { page, context, errors } = await openPage({ module, shell: true });
+    const nav = await page.evaluate(async () => {
+        const got = [];
+        window.addEventListener('sovereign-navigate', () => got.push(window.Notify.consumePendingNav()));
+        const heard = window.__shell.emit('toast-activated', 'tasks-due');
+        await new Promise(r => setTimeout(r, 50));
+        return { heard, got };
+    });
+    if (name === 'now') {
+        ck(nav.heard === 1 && JSON.stringify(nav.got) === JSON.stringify(['reminders']),
+            "desktop: after a reload, a click on the reminder goes to the Reminders tab ('reminders')", JSON.stringify(nav));
+        ck(errors.length === 0, 'desktop reload: no page error', errors.join(' | '));
+    } else {
+        ck(nav.got.length === 0, 'NEGATIVE CONTROL desktop reload: 0.9.860 opened nothing, so it fails', JSON.stringify(nav));
     }
     await context.close();
 }
@@ -313,6 +387,7 @@ for (const [name, module] of [['now', NOW], ['0.9.860 (control)', AT_860]]) {
         ck(notes.every(n => n.shown && !n.errored), 'web: every one really showed (its show event fired)', `${notes.filter(n => n.shown).length}/${notes.length}`);
         ck(live.size === CONVERSATIONS && popups === BURSTS, 'web: one notification per conversation, popping once per burst', `(${live.size} tags, ${popups} pop-ups)`);
         ck(notes.every(n => n.silent), 'web: all silent (the app plays its own sound)');
+        ck(await page.evaluate(() => 'renotify' in Notification.prototype), 'web: Chromium has renotify on Notification.prototype, so it takes the renotify path');
         ck(notes.filter(n => n.renotify).length === BURSTS, 'web: renotify only on the pops');
         // Reading #general closes the one Chromium holds for it.
         await page.evaluate(() => window.Notify.seeConversation('chan:s1:7'));
@@ -330,5 +405,20 @@ for (const [name, module] of [['now', NOW], ['0.9.860 (control)', AT_860]]) {
 }
 
 await browser.close();
+
+// ---- browsers with no renotify -------------------------------------------------
+// The web path keeps a quiet update off the screen where a replacement would
+// pop (desktopNotify.ts, browserRenotifies; vitest models what follows). Firefox
+// and WebKit are asked only whether `renotify` is on Notification.prototype, in
+// a child process: this file grants notifications to Chromium, and
+// scripts/check-e2e-muted.mjs allows no Firefox or WebKit launch beside that.
+{
+    const probe = join(here, 'notify-renotify-probe.mjs');
+    const r = spawnSync(process.execPath, [probe], { encoding: 'utf8', env: process.env, timeout: 180_000 });
+    process.stdout.write(r.stdout || '');
+    if (r.stderr) process.stderr.write(r.stderr);
+    ck(r.status === 0, 'Firefox and WebKit: no renotify on Notification.prototype (notify-renotify-probe.mjs)', `(exit ${r.status}${r.error ? ', ' + r.error.message : ''})`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

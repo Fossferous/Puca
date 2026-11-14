@@ -1,5 +1,11 @@
 // Full raw-CDP verifier (NO Playwright => no focus emulation => hasFocus()
 // stays honest). Reloads, rejoins voice, asserts the feed, tails console.
+//
+// IT CAN MAKE SOUND: it drives whatever dev shell is on port 9222, which is not
+// muted, and joining voice plays the join chime there (and the call's audio).
+// Start that shell with --mute-audio in WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,
+// or ask the owner before running it. scripts/check-e2e-muted.mjs cannot see
+// raw CDP.
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const targets = await (await fetch('http://localhost:9222/json')).json();

@@ -18,7 +18,7 @@ import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
-import { cameraDisplayName, camerasOf, type CameraInfo } from '../api/rtc/cameraChoice';
+import { cameraDisplayName, camerasOf, type CameraInfo, type RememberedCamera } from '../api/rtc/cameraChoice';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
@@ -295,6 +295,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     });
     /** The cameras, for the Camera choice (named once the camera was allowed). */
     const [cameraList, setCameraList] = useState<CameraInfo[]>([]);
+    /** The camera remembered when Voice & Video opened: a choice for as long
+     *  as it is open, listed or not (cameraChoices below). */
+    const [cameraChosenBefore, setCameraChosenBefore] = useState<RememberedCamera | null>(null);
     const [username, setUsername] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [email, setEmail] = useState('');
@@ -860,8 +863,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     useEffect(() => {
         if (!isOpen || activeSection !== 'voice') return;
         let live = true;
+        const remembered = loadSettings().camera ?? null;
         navigator.mediaDevices?.enumerateDevices?.()
-            .then(devices => { if (live) setCameraList(camerasOf(devices).filter(c => c.deviceId)); })
+            .then(devices => {
+                if (!live) return;
+                setCameraList(camerasOf(devices).filter(c => c.deviceId));
+                setCameraChosenBefore(remembered?.deviceId ? remembered : null);
+            })
             .catch(() => { /* no device list in this browser: Default only */ });
         return () => { live = false; };
     }, [isOpen, activeSection]);
@@ -1288,6 +1296,15 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
 
     // Appearance (theme/compact/animations/scale/contrast) is applied by
     // saveSettings itself and by the main.tsx bootstrap — no effect needed here.
+
+    // The Camera choice's cameras that today's list does not name: the one
+    // remembered when Voice & Video opened (it stays a choice after another
+    // is picked: it used to vanish, and picking it again was Default), and
+    // the one chosen now.
+    const unlistedCameras = [cameraChosenBefore, settings.camera]
+        .filter((c, i, all): c is RememberedCamera => !!c?.deviceId
+            && !cameraList.some(l => l.deviceId === c.deviceId)
+            && all.findIndex(x => x?.deviceId === c.deviceId) === i);
 
     if (!isOpen) return null;
 
@@ -2639,7 +2656,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             data-testid="settings-camera"
                                             value={settings.camera?.deviceId || 'default'}
                                             onChange={(e) => {
-                                                const picked = cameraList.find(c => c.deviceId === e.target.value);
+                                                // A listed camera, or one chosen before that today's list
+                                                // does not name: that one again, never Default by mistake.
+                                                const picked = cameraList.find(c => c.deviceId === e.target.value)
+                                                    ?? unlistedCameras.find(c => c.deviceId === e.target.value);
                                                 updateSetting('camera', picked
                                                     ? { deviceId: picked.deviceId, label: picked.label, facing: picked.facing }
                                                     : null);
@@ -2652,12 +2672,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 </option>
                                             ))}
                                             {/* Chosen before, and not in today's list (unplugged,
-                                                or not named yet): still shown as the choice. */}
-                                            {settings.camera?.deviceId && !cameraList.some(c => c.deviceId === settings.camera?.deviceId) && (
-                                                <option value={settings.camera.deviceId}>
-                                                    {settings.camera.label ? cameraDisplayName(settings.camera, []) : 'The camera chosen before'}
+                                                or not named yet): still a choice, also after
+                                                another camera was picked here. */}
+                                            {unlistedCameras.map(camera => (
+                                                <option key={camera.deviceId} value={camera.deviceId}>
+                                                    {camera.label ? cameraDisplayName(camera, []) : 'The camera chosen before'}
                                                 </option>
-                                            )}
+                                            ))}
                                         </select>
                                     </div>
                                     <div className="settings-option">

@@ -458,17 +458,17 @@ try {
     await selfViewRenders('front');
     save('front-screen.png', screencap());
 
-    /** `knownStaleTile`: after the camera was turned OFF and on again, the
-     *  viewer's tile shows the dead track from before (its mesh stream holds
-     *  both, the dead one first). That predates this change (OFF_ON=1 against
-     *  a build before it fails the same way) and is reported, not failed. */
+    /** After the camera was turned OFF and on again the viewer's tile used to
+     *  show the dead track from before (the mesh stream held both, the dead
+     *  one first; reported as KNOWN before the fix): a check now,
+     *  like every other tile. */
     /** The phone's own self-view renders the camera: its frames rise. */
     async function selfViewRenders(tag) {
         const a = await phoneCamera(P);
         const b2 = await until(async () => { const c = await phoneCamera(P); return c.selfFrames > (a.selfFrames ?? 0) && c.selfW > 0 ? c : null; }, 8000, 500) ?? await phoneCamera(P);
         check(`${tag}: the phone's own self-view shows the camera (its frames rise)`, b2.selfW > 0 && b2.selfFrames > (a.selfFrames ?? 0), { before: a.selfFrames, after: b2.selfFrames, w: b2.selfW });
     }
-    const viewerSees = async (tag, phone, { knownStaleTile = false } = {}) => {
+    const viewerSees = async (tag, phone) => {
         const v1 = await until(async () => { const r = await viewerCamera(V, uid.P); return r.live && r.frames > 0 && r.grid ? r : null; }, 30000, 1000) ?? { live: false };
         await sleep(2000);
         const v2 = await until(async () => { const r = await viewerCamera(V, uid.P); return r.live && r.frames > (v1.frames ?? 0) ? r : null; }, 8000, 700) ?? await viewerCamera(V, uid.P);
@@ -480,9 +480,7 @@ try {
         check(`${tag}: the viewer's picture IS what the phone's camera shows (8x16 likeness >= 0.6)`, like >= 0.6, { likeness: r3(like) });
         if (v2.tile || TILE) {
             const tl = v2.tile ? likeness(v2.tile.grid, p2.grid) : -1;
-            const ok = !!v2.tile && tl >= 0.6;
-            if (knownStaleTile && !ok) console.log(`KNOWN ${tag}: the viewer's tile still shows the camera from before it was turned off (pre-existing; OFF_ON=1)  ${JSON.stringify({ likeness: r3(tl), tracks: v2.tracks })}`);
-            else check(`${tag}: and the viewer's own tile shows it (8x16 likeness >= 0.6)`, ok, { likeness: r3(tl), tracks: v2.tracks });
+            check(`${tag}: and the viewer's own tile shows it (8x16 likeness >= 0.6)`, !!v2.tile && tl >= 0.6, { likeness: r3(tl), tracks: v2.tracks });
         }
         return { v: v2, p: p2 ?? phone };
     };
@@ -516,6 +514,16 @@ try {
         check('OFF_ON: the viewer receives the new camera track (newest track, frames rising)', b2.live && b2.frames > a.frames, { tracks: b2.tracks, before: a.frames, after: b2.frames });
         check('OFF_ON: the viewer\'s TILE shows it (frames rising, the phone\'s picture)', !!b2.tile && !!a.tile && b2.tile.frames > a.tile.frames && likeness(b2.tile.grid, p2.grid) >= 0.6,
             { tileBefore: tileBefore?.frames, a: a.tile?.frames, b: b2.tile?.frames, tracks: b2.tracks, likeness: b2.tile ? r3(likeness(b2.tile.grid, p2.grid)) : null });
+        if (!SFU) {
+            // The camera went back on its own sender: ONE video transceiver
+            // between the two (it used to add a second, the viewer's stream
+            // then holding the dead track first). Counted on the viewer's
+            // side, whose connections this walk tracks (the phone runs the
+            // APK's built bundle: none of its modules can be imported).
+            const lines = await V.evaluate(() => window.__pcs.filter(pc => pc.connectionState !== 'closed')
+                .flatMap(pc => pc.getTransceivers()).filter(t => t.receiver.track.kind === 'video').length);
+            check("OFF_ON: the phone's camera went back on its own sender (one video transceiver between them)", lines === 1, { videoTransceivers: lines });
+        }
         throw new Error('OFF_ON done');
     }
 
@@ -613,7 +621,7 @@ try {
             check('the choice is remembered: the camera back on is the BACK camera, not mirrored', again.facingMode === 'environment' && again.mirrored.length > 0 && again.mirrored.every(m => !m.mirrored),
                 { facingMode: again.facingMode, mirrored: again.mirrored });
             await selfViewRenders('remembered');
-            await viewerSees('remembered', again, { knownStaleTile: true });
+            await viewerSees('remembered', again);
             await enc('remembered');
 
             // ---- full screen: its own Flip, mirrored only for the front camera, its buttons whole ----
@@ -647,7 +655,7 @@ try {
             fsFront ??= await phoneCamera(P);
             check('full screen: its Flip puts the front camera on, mirrored', fsFront.facingMode === 'user' && fsFront.mirrored.length > 0 && fsFront.mirrored.every(m => m.mirrored), { facingMode: fsFront.facingMode, mirrored: fsFront.mirrored });
             await selfViewRenders('full screen, front');
-            await viewerSees('fullscreen-front', fsFront, { knownStaleTile: true });
+            await viewerSees('fullscreen-front', fsFront);
             await realTap(P, '.camera-fullscreen-controls .exit-btn');
         }
     }

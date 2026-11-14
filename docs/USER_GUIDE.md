@@ -1154,6 +1154,15 @@ Manage Tasks, Manage Messages and Create Clips. A voice channel also lists:
 How the settings combine:
 
 - Denies never apply to the server owner or to administrators.
+- A **Deny** of View Channel holds for people with Manage Channels too. A
+  channel they cannot see (on its own, or through its collection) is not in
+  their list, and they cannot rename it, move it, delete it or change the
+  permissions set on it by any other way either: the server answers them as if
+  it did not exist. To undo a deny that hides a channel from you, ask the
+  owner, an administrator or someone who can still see it (a save of your own
+  that hides it from you partway still finishes). Nor can they put a channel
+  into a collection they cannot see. A collection's own permissions, which
+  they can see, still reach every channel inside it.
 - When a member's roles disagree, an **Allow** on any of them wins over a
   **Deny**. Any role's setting also wins over the @everyone role's, so to
   silence one role in a channel where @everyone is allowed to speak, deny
@@ -1404,8 +1413,10 @@ Inside Notes:
   **Overdue**, **Today** and **Upcoming**. The Tasks view in Púca itself has
   the same list as a **Reminders** tab, beside **Calendar** — so you can see
   what is due in Púca's phone app too, where Púca Notes' page is not
-  reachable. A due-item notification opens it, except in the desktop app,
-  where clicking one opens nothing yet. An item in a shared
+  reachable. A due-item notification opens it. In the desktop app it plays
+  Windows' notification sound, and clicking it opens the list while it is on
+  screen; once it has gone into the notification centre, a click may only
+  bring Púca's window up. An item in a shared
   checklist that someone else set is marked *Reminds whoever set it*: it goes
   off for them, not for you.
 - **A checklist from somewhere else** — say, step-by-step instructions from an
@@ -1520,7 +1531,14 @@ messages*.
 - **Group notifications by conversation**, under the same setting, is on by
   default. Off, every message has a notification of its own, as before.
 - In the web app it is your browser that draws the notification, so how a
-  replaced one looks is up to it.
+  replaced one looks is up to it. Firefox and Safari show a replaced
+  notification as a new one, popping it up again, so there a conversation's
+  notification keeps the words it popped with until it pops again, rather
+  than popping for every message.
+- If Windows has Púca's notifications turned off (**Settings → System →
+  Notifications**), nothing shows, so Púca plays its message sound for
+  every message instead of once per conversation. While notifications are
+  grouped, **Send test** says they are turned off.
 
 ### Notifications while Púca is closed
 In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in

@@ -27,7 +27,7 @@ const userDataDir = path.join(process.env.TEMP || '.', 'sovereign-clip-spike-hea
 fs.rmSync(userDataDir, { recursive: true, force: true });
 const ctx = await chromium.launchPersistentContext(userDataDir, {
     channel: 'msedge', headless: true,
-    args: ['--autoplay-policy=no-user-gesture-required', '--enable-gpu-rasterization', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--enable-features=WebCodecs'],
+    args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--enable-gpu-rasterization', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--enable-features=WebCodecs'],
 });
 const page = await ctx.newPage();
 page.on('console', m => { const t = m.text(); if (/clip-spike/.test(t)) console.log('  C>', t.slice(0, 300)); });

@@ -57,6 +57,7 @@
 //   cd frontend && node e2e/iphone-stream-real-browser.mjs [outdir]
 // Needs WebKit once:  npx playwright install webkit
 import { chromium, webkit, devices } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
@@ -418,7 +419,7 @@ try {
 }
 let wk;
 try {
-    wk = await webkit.launch();
+    wk = muteWebkit(await webkit.launch());
 } catch (e) {
     console.error(String(e.message || e).split('\n')[0]);
     ck('WebKit is installed (npx playwright install webkit)', false);

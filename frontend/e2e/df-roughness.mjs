@@ -88,7 +88,7 @@ const AB_S = Number(process.env.DF_AB_S || 60);
 const SPEECH_WAV = fileURLToPath(new URL('./assets/df-test-speech.wav', import.meta.url));
 const TARGET_LEVEL_ENV = 0.08; // field-measured levelEnv on the reporting mic
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+const browser = await chromium.launch({ args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required'] });
 const page = await browser.newPage();
 page.on('pageerror', (e) => console.log('  [page exception]', String(e).slice(0, 200)));
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [page err]', m.text().slice(0, 200)); });

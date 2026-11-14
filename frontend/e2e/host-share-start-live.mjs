@@ -24,13 +24,25 @@
 //   8. the dialog left open while a host's share goes live: its Select Screen captures nothing over
 //      that share, whose picture stays live;
 //   9. Share pressed (as a key can, through the overlay) behind the open dialog starts nothing: no second
-//      capture, the dialog stays, the arrow does not reopen it, and Share still works once it is closed;
+//      capture, the dialog stays, and Share still works once it is closed. Then the arrow pressed the same
+//      way behind a quick launch still in the picker, once the 30 s "starting" backstop has let go of the
+//      Share button (the arrow's other guard): it must not turn the quick launch's status line into the
+//      settings dialog mid-picker (only the arrow's open-dialog guard stops that; a press behind the
+//      ARROW's own dialog could not show it, since that dialog is on its settings already);
 //  10. ONE real 61 s wait (SHARE_START_STALE_MS is 60 s) covers two rules. A start still waiting in the
 //      picker is never taken for stale, so a host's start is refused. Then, with the dialog's picture
 //      ended while its announcement awaits the server, the host's start replaces it as stale: it goes
 //      live, and the replaced start's ending takes nothing of the host's down (no ScreenShareStop, the
 //      host's picture live);
 //  11. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'.
+//  12. a Go Live whose publish THROWS (addTrack on a connection closed meanwhile; the stand-in throws
+//      once from webrtcManager.addScreenShareToPeers): through the dialog, and from a host: the
+//      announcement is taken back (a ScreenShareStop after the ScreenShareStart), the picture let go
+//      of, nothing live, the panel says why, the host is answered (never a rejection), and Share works
+//      again. It used to throw: the announcement stayed and the dialog's Cancel found no start.
+//  13. the small player (StreamPip), opened by leaving the stage for a text channel at 1280x800, opens
+//      clear of the composer: Send is what a click at its middle hits, and the player is inside the
+//      window and the chat column (it used to open over the right end of the composer and Send).
 //
 // Silent: no microphone (joinWithoutMic), Output Volume 0, sounds off, a muted browser; the picture is a
 // drawn canvas from a stand-in host, no screen is captured.
@@ -147,6 +159,8 @@ try {
     const api = (mod, fn, args = []) => page.evaluate(async ({ mod, fn, args }) => (await import(mod))[fn](...args), { mod, fn, args });
     const srv = await api('/src/api/servers.ts', 'createServer', ['Share window']);
     const lounge = await api('/src/api/servers.ts', 'createChannel', [srv.id, 'Lounge', 1]);
+    // A text channel of its own name, for 13 (the server's own are both called "default").
+    await api('/src/api/servers.ts', 'createChannel', [srv.id, 'chat13', 0]);
     // The server on screen, as a person would have it: the voice panel lives in its sidebar, and the
     // dialog's cases click it. One reload, BEFORE the call (the app lists servers at start); none after.
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -311,14 +325,32 @@ try {
     check('9. Share pressed behind the open dialog starts no capture', (await page.evaluate(() => window.__shareHost.tracks.length)) === tracks9
         && (await sharing()) === false, JSON.stringify({ tracks: await page.evaluate(() => window.__shareHost.tracks.length), was: tracks9 }));
     check('...the dialog is still there, on its settings', (await dialogOpen()) === 1 && (await page.getByTestId('share-go-live').count()) === 1);
-    await page.evaluate(() => document.querySelector('.vp-share-options').click());
-    await sleep(300);
-    check('...and the arrow does not reopen it', (await dialogOpen()) === 1 && (await page.getByTestId('share-go-live').count()) === 1);
     await page.getByRole('button', { name: 'Cancel' }).click();
     check('...Cancel closes it with nothing held', (await until(async () => (await dialogOpen()) === 0)) && (await sharing()) === false);
     frames.length = 0;
     await page.getByTestId('voice-share-screen').click();
     check('...and Share works again: a click goes live', (await until(async () => (await sharing()) === true)) && frames.includes('ScreenShareStart'), JSON.stringify(frames));
+    await page.evaluate(() => window.pucaEmbed.stopShare());
+    await settle();
+
+    // 9b. The arrow behind a quick launch still in the picker. A quick launch draws only a status line,
+    //     and while the Share button says "starting" the arrow ignores a press anyway; past that
+    //     backstop (SHARE_STARTING_MAX_MS, 30 s) only the arrow's open-dialog guard is left.
+    const quickStatus = () => page.locator('.stream-quick-status').count();
+    await page.evaluate(() => { window.__shareHost.gate = new Promise((r) => { window.__releaseGate9 = r; }); });
+    await page.getByTestId('voice-share-screen').click();
+    check('9b. fixture: Share is a quick launch, waiting in the picker with only its status line',
+        await until(async () => (await quickStatus()) === 1 && (await dialogOpen()) === 0));
+    await sleep(31000);
+    check('...fixture: past the backstop the Share button no longer says it is starting, so that is not what holds the arrow',
+        (await page.getByTestId('voice-share-screen').getAttribute('aria-busy')) === 'false' && (await sharing()) === false);
+    await page.evaluate(() => document.querySelector('.vp-share-options').click());
+    await sleep(400);
+    check('...the arrow pressed behind it does not turn the quick launch into the settings dialog mid-picker',
+        (await dialogOpen()) === 0 && (await page.getByTestId('share-go-live').count()) === 0 && (await quickStatus()) === 1,
+        JSON.stringify({ dialog: await dialogOpen(), status: await quickStatus() }));
+    await page.evaluate(() => { window.__shareHost.gate = null; window.__releaseGate9(); });
+    check('...and the quick launch, answered, goes live as it would have', await until(async () => (await sharing()) === true));
     await page.evaluate(() => window.pucaEmbed.stopShare());
     await settle();
 
@@ -368,6 +400,72 @@ try {
         return window.pucaEmbed.startShare();
     });
     check("11. a hang-up while the server answers: a quiet 'left the call', never 'the picture ended'", r11h?.ok === false && r11h.error === 'left the call', JSON.stringify(r11h));
+    await settle();
+
+    // Back in the call for 12 and 13.
+    const rejoined = await page.evaluate(({ s, c }) => window.pucaEmbed.joinVoice(s, c), { s: srv.id, c: lounge.id });
+    check('fixture: back in the call', rejoined?.ok === true
+        && await until(() => page.evaluate(() => window.pucaEmbed.getState().call?.connected === true)), JSON.stringify(rejoined));
+
+    // 12. A Go Live whose publish throws, once. The app's own module (vite serves one instance).
+    const throwOnce = () => page.evaluate(async () => {
+        const { webrtcManager } = await import('/src/api/webrtc.ts');
+        webrtcManager.addScreenShareToPeers = async function () {
+            delete webrtcManager.addScreenShareToPeers; // the prototype's again
+            throw new Error('the call connection closed');
+        };
+    });
+    const takenBack = () => frames.includes('ScreenShareStart') && frames.lastIndexOf('ScreenShareStop') > frames.indexOf('ScreenShareStart');
+    frames.length = 0;
+    await page.evaluate(() => { window.__shareHost.delayMs = 0; });
+    await throwOnce();
+    await openDialog();
+    await page.getByTestId('share-go-live').click();
+    check("12. the dialog's Go Live whose publish throws: the announcement is taken back", await until(async () => takenBack()), JSON.stringify(frames));
+    check('...nothing is live, the picture is let go of, and the dialog closes',
+        (await until(async () => (await dialogOpen()) === 0)) && (await sharing()) === false && (await lastTrackState()) === 'ended',
+        JSON.stringify({ dialog: await dialogOpen(), sharing: await sharing(), last: await lastTrackState() }));
+    check('...and the panel says why', (await page.locator('text=the call connection closed').count()) > 0);
+    frames.length = 0;
+    await throwOnce();
+    const r12 = await page.evaluate(() => window.pucaEmbed.startShare().then((r) => r, (e) => ({ rejected: String(e) })));
+    await settle();
+    check("...a host's start whose publish throws is answered why, never rejected", r12?.ok === false && r12.error === 'the call connection closed', JSON.stringify(r12));
+    check('...and takes its announcement back too', takenBack() && (await sharing()) === false && (await lastTrackState()) === 'ended', JSON.stringify(frames));
+    check('...fixture: the publish is the real one again', await page.evaluate(async () => {
+        const { webrtcManager } = await import('/src/api/webrtc.ts');
+        return !Object.prototype.hasOwnProperty.call(webrtcManager, 'addScreenShareToPeers');
+    }));
+    frames.length = 0;
+    await page.getByTestId('voice-share-screen').click();
+    check('...and Share works again afterwards: a click goes live', (await until(async () => (await sharing()) === true)) && frames.includes('ScreenShareStart'), JSON.stringify(frames));
+
+    // 13. The small player over a text channel, while that share is live (our own share opened the stage).
+    const chat13 = page.locator('#text-channel-list .channel', { hasText: 'chat13' });
+    check('fixture: the server has a text channel to leave the stage for', (await chat13.count()) === 1);
+    await chat13.first().click();
+    check('fixture: the small player opens over the channel', await until(async () => (await page.locator('.stream-pip').count()) === 1
+        && (await page.locator('.chat-main .message-form button[type="submit"]').count()) === 1));
+    await sleep(300);
+    const pip13 = await page.evaluate(() => {
+        const r = (el) => { const b = el.getBoundingClientRect(); return { left: b.left, top: b.top, right: b.right, bottom: b.bottom }; };
+        const send = document.querySelector('.chat-main .message-form button[type="submit"]');
+        const s = r(send);
+        const hit = document.elementFromPoint((s.left + s.right) / 2, (s.top + s.bottom) / 2);
+        return {
+            pip: r(document.querySelector('.stream-pip')), form: r(document.querySelector('.chat-main .message-form')),
+            main: r(document.querySelector('.chat-main')), viewport: [innerWidth, innerHeight],
+            sendHit: !!hit && send.contains(hit), hit: hit ? `${hit.tagName}.${hit.className}` : null,
+        };
+    });
+    const overlap = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    check('13. at 1280x800 the small player opens clear of the composer: Send is what a click at its middle hits',
+        pip13.sendHit && !overlap(pip13.pip, pip13.form), JSON.stringify(pip13));
+    check('...inside the window and the chat column',
+        pip13.pip.left >= pip13.main.left && pip13.pip.right <= pip13.main.right && pip13.pip.top >= 0 && pip13.pip.bottom <= pip13.viewport[1], JSON.stringify(pip13));
+    if (process.env.OUT) await page.screenshot({ path: `${process.env.OUT}/small-player-1280x800.png` }).catch(() => {});
+    await page.evaluate(() => window.pucaEmbed.stopShare());
+    await settle();
 
     await page.evaluate(() => window.pucaEmbed.leaveVoice()).catch(() => {});
 } catch (e) {

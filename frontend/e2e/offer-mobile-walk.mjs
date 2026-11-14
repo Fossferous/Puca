@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('../src/components/VoicePanel.css', import.meta.url), 'utf8');
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, args: ['--mute-audio'] });
 const page = await browser.newPage({
     viewport: { width: 390, height: 844 },
     hasTouch: true,

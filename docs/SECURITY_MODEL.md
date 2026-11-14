@@ -63,8 +63,11 @@ whether the tool fits your threat model.
   desktop and Android apps update only over signed channels whose keys never touch the
   server; use those if this matters to you (§1, trust #1).
 - **Calls are end-to-end encrypted only where the engine allows it.** Chromium-based
-  clients seal media frames; other engines fall back to transport encryption with a notice,
-  and "Require encryption for calls" (on by default) refuses rather than falls back (§4).
+  clients seal media frames through `createEncodedStreams`, and Firefox 117+ and Safari
+  15.4+ (iPhone and iPad included) through the standard `RTCRtpScriptTransform`; Safari
+  runs the same code but has not yet been tried on a device. An engine with neither falls
+  back to transport encryption with a notice, and "Require encryption for calls" (on by
+  default) refuses rather than falls back (§4).
 - **Nothing here is post-quantum.** Every key agreement is X25519. A future quantum
   computer could recover those keys from the public halves, and the ciphertext it would
   need is exactly what the database stores indefinitely — the "harvest now, decrypt
@@ -1243,8 +1246,32 @@ Other things you'd find anyway:
   neither Noise nor X3DH. **Only 2 of roughly 8 such constructions have known-answer tests.**
   This subsystem has already produced one full authentication bypass — found, fixed, and
   written up, but produced.
-- **Nothing scans dependencies.** A `cargo-audit` config exists; no CI step, npm audit,
-  dependabot or renovate ever runs it.
+- **Dependency scanning covers only part of the tree.** CI's
+  `supply-chain` job runs `cargo audit` over all three Rust lockfiles (the backend and
+  `crates/*` in `Cargo.lock`, the desktop shell's `frontend/src-tauri/Cargo.lock`, the
+  noise-suppression wasm's `frontend/df-wasm/Cargo.lock`) and fails on any vulnerability
+  advisory that `.cargo/audit.toml` has not accepted with its reasoning; informational ones
+  (a crate unmaintained, unsound or yanked) are printed as warnings and do not fail it,
+  since neither the job nor that file denies warnings. The frontend job runs `npm audit`
+  over `frontend/package-lock.json` through `frontend/scripts/check-npm-advisories.mjs`,
+  which fails on a high or critical advisory against a package with no row in
+  `docs/NPM_ADVISORIES.md`. Both run only when CI does (a push to `main` or a `work/**`
+  branch, a pull request, a manual run), never on a schedule, so an advisory published
+  after the last push waits for the next one. Nothing in CI scans the rest: the Steam Deck
+  plugin's `integrations/decky/package-lock.json`, Púca Notes'
+  `frontend/notes-app/package-lock.json`, the Android apps' Gradle dependencies (no
+  lockfile), the iOS app's Swift package (`frontend/ios/App/CapApp-SPM/Package.swift`, no
+  `Package.resolved`), or the GitHub Actions pinned by SHA in `.github/workflows`.
+  `.github/dependabot.yml` asks Dependabot for security updates only:
+  `open-pull-requests-limit: 0` on every ecosystem stops its routine version-update pull
+  requests, and its alerts and security updates arrive only while the repository has them
+  switched on in its settings, which is not something this tree can show. While they are
+  on, GitHub's dependency graph covers the npm lockfiles too, but still not the Gradle
+  builds, the Swift package or the pinned actions, as far as the tree shows: it reads
+  Gradle only through dependency submission (a workflow, of which the tree has none, or
+  GitHub's automatic submission, which is another repository setting), Swift only from a
+  `Package.resolved`, which the tree does not have, and it raises no alert for an action
+  pinned by SHA rather than by version. There is no Renovate.
 - **Bus factor 1.** One author, no second reviewer, and no outside audit has ever been
   performed. The source is now public, so one is at least *possible* — but
   "auditable" and "audited" are different words, and only the first one is true here.

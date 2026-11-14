@@ -95,7 +95,9 @@ const HOOKS: Hook[] = [
     { ids: ['server-icon'], file: 'components/ServerList.tsx', attr: 'data-testid="server-icon"', needs: ['data-server-id={server.id}', 'onSelectServer(server)'] },
     { ids: ['voice-channel'], file: 'components/Chat.tsx', attr: 'data-testid="voice-channel"', needs: ['data-channel-id={channel.id}', 'onClick={() => handleChannelClick(channel)}'] },
     { ids: ['voice-join'], file: 'components/VoicePanel.tsx', attr: 'data-testid="voice-join"', needs: ['onClick={joinVoice}'] },
-    { ids: ['voice-connected'], file: 'components/VoicePanel.tsx', attr: 'data-testid="voice-connected"', needs: ['className="voice-connection-info"'] },
+    // The same line: voice-connecting while the join is under way (an SFU
+    // channel's media still connecting), voice-connected once it is done.
+    { ids: ['voice-connected', 'voice-connecting'], file: 'components/VoiceConnectionLine.tsx', attr: "data-testid={joining ? 'voice-connecting' : 'voice-connected'}", needs: ['voice-connection-info'] },
     {
         ids: ['voice-share-screen', 'voice-stop-share'],
         file: 'components/VoicePanel.tsx',

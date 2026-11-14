@@ -55,6 +55,7 @@
 //
 // No server and no build needed. CHANNEL=msedge (default) or CHANNEL=bundled.
 import { chromium, firefox, webkit } from '@playwright/test';
+import { muteWebkit } from './muted.mjs';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -1073,12 +1074,17 @@ async function holdKeys(engine, on) {
 }
 
 await holdKeys(CHANNEL, browser);
-for (const [engine, type, off, opts] of [
-    ['firefox', firefox, process.env.FIREFOX === '0', { firefoxUserPrefs: { 'media.volume_scale': '0' } }],
-    ['webkit', webkit, process.env.WEBKIT === '0', {}],
+// Each engine launched by name, so scripts/check-e2e-muted.mjs can see how it is muted.
+const launchOther = {
+    firefox: () => firefox.launch({ headless: true, firefoxUserPrefs: { 'media.volume_scale': '0' } }),
+    webkit: async () => muteWebkit(await webkit.launch({ headless: true })),
+};
+for (const [engine, off] of [
+    ['firefox', process.env.FIREFOX === '0'],
+    ['webkit', process.env.WEBKIT === '0'],
 ]) {
     if (off) { console.log(`SKIP ${engine}: switched off`); continue; }
-    const other = await type.launch({ headless: true, ...opts }).catch((e) => { console.log(`SKIP ${engine}: ${String(e.message).split('\n')[0]} (npx playwright install ${engine})`); return null; });
+    const other = await launchOther[engine]().catch((e) => { console.log(`SKIP ${engine}: ${String(e.message).split('\n')[0]} (npx playwright install ${engine})`); return null; });
     if (!other) continue;
     await holdKeys(engine, other);
     await other.close();

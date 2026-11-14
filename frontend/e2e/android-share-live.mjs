@@ -15,8 +15,8 @@
 //     of `adb screencap` (the picture a sealed-but-undecrypted VP8 frame
 //     "decodes" to is noise; that is why framesDecoded alone proves nothing);
 //   - both panels say Encrypted;
-//   - the phone turned sideways: the picture turns with it (wider than tall),
-//     and back;
+//   - the phone turned sideways: the picture turns with it (wider than tall)
+//     and is still the phone's screen, and back; TURNS times (default 5);
 //   - the app in the BACKGROUND keeps sharing (the launcher appears on the
 //     viewer's side, frames still rising);
 //   - "Stop sharing" in the notification ends the share on both sides, the
@@ -48,7 +48,7 @@
 // throwaway LiveKit's) add a check that LiveKit itself sees the phone publish
 // a screen share.
 //
-// Usage: SERIAL=emulator-5584 API=http://127.0.0.1:3010 APP=http://127.0.0.1:5196 [SFU=1] [OUT=dir] node e2e/android-share-live.mjs
+// Usage: SERIAL=emulator-5584 API=http://127.0.0.1:3010 APP=http://127.0.0.1:5196 [SFU=1] [TURNS=5] [OUT=dir] node e2e/android-share-live.mjs
 import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -63,6 +63,12 @@ const OUT = process.env.OUT || '';
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const PKG = 'com.sovereign.app';
 const CDP_PORT = Number(process.env.CDP_PORT || 9347);
+// How many times the phone is turned sideways and back (each way checked).
+const TURNS = process.env.TURNS === undefined || process.env.TURNS === '' ? 5 : Number(process.env.TURNS);
+if (!Number.isInteger(TURNS) || TURNS < 1) {
+    console.error('TURNS must be a whole number, 1 or more.');
+    process.exit(2);
+}
 const PASS = 'Password123!pw';
 const stamp = Date.now().toString(36);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -553,20 +559,38 @@ try {
     sh('am start -W -a android.settings.SETTINGS');
     await sleep(1500);
     sh('settings put system accelerometer_rotation 0');
-    sh('settings put system user_rotation 1');
     rotated = true;
-    await sleep(4000);
-    const side = await until(async () => { const r = await received(V, uid.P); return r.live && r.w > r.h ? r : null; }, 20000, 1000)
-        ?? await received(V, uid.P);
-    check('turned sideways: the viewer gets a sideways picture', side.w > side.h, { w: side.w, h: side.h });
-    const sideLike = likeness((await received(V, uid.P)).grid, await gridOfPng(V, screencap()));
-    check('turned sideways: still the phone\'s screen (likeness >= 0.8)', sideLike >= 0.8, { likeness: Math.round(sideLike * 1000) / 1000 });
-    if (OUT) save(`${SFU ? 'sfu' : 'mesh'}-sideways-viewer.png`, await V.screenshot());
-    sh('settings put system user_rotation 0');
-    await sleep(4000);
-    const back = await until(async () => { const r = await received(V, uid.P); return r.live && r.h > r.w ? r : null; }, 20000, 1000)
-        ?? await received(V, uid.P);
-    check('turned back upright: an upright picture again', back.h > back.w, { w: back.w, h: back.h });
+    // TURNS times (default 5), each way checked for the phone's own screen.
+    // A turn used to leave viewers, now and then, on frames drawn for the
+    // OLD shape (a strip in a corner of black, ScreenShareFrames.swapReader):
+    // 3 turns in 16 on an emulator. One checked turn let that APK pass about
+    // four runs in five; ten (the default) about one in eight.
+    const tag = SFU ? 'sfu' : 'mesh';
+    for (let turn = 1; turn <= TURNS; turn++) {
+        const of = TURNS > 1 ? ` (turn ${turn} of ${TURNS})` : '';
+        sh('settings put system user_rotation 1');
+        await sleep(4000);
+        const side = await until(async () => { const r = await received(V, uid.P); return r.live && r.w > r.h ? r : null; }, 20000, 1000)
+            ?? await received(V, uid.P);
+        check(`turned sideways${of}: the viewer gets a sideways picture`, side.w > side.h, { w: side.w, h: side.h });
+        const sidePng = screencap();
+        const sideLike = likeness((await received(V, uid.P)).grid, await gridOfPng(V, sidePng));
+        if (!check(`turned sideways${of}: still the phone's screen (likeness >= 0.8)`, sideLike >= 0.8, { likeness: Math.round(sideLike * 1000) / 1000 }) || turn === 1) {
+            save(`${tag}-sideways-${turn}-phone.png`, sidePng);
+            if (OUT) save(`${tag}-sideways-${turn}-viewer.png`, await V.screenshot());
+        }
+        sh('settings put system user_rotation 0');
+        await sleep(4000);
+        const back = await until(async () => { const r = await received(V, uid.P); return r.live && r.h > r.w ? r : null; }, 20000, 1000)
+            ?? await received(V, uid.P);
+        check(`turned back upright${of}: an upright picture again`, back.h > back.w, { w: back.w, h: back.h });
+        const backPng = screencap();
+        const backLike = likeness((await received(V, uid.P)).grid, await gridOfPng(V, backPng));
+        if (!check(`turned back upright${of}: still the phone's screen (likeness >= 0.8)`, backLike >= 0.8, { likeness: Math.round(backLike * 1000) / 1000 })) {
+            save(`${tag}-upright-${turn}-phone.png`, backPng);
+            if (OUT) save(`${tag}-upright-${turn}-viewer.png`, await V.screenshot());
+        }
+    }
 
     // ---- "Stop sharing" in the notification ----
     sh('cmd statusbar expand-notifications');

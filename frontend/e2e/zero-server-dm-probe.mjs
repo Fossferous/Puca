@@ -13,7 +13,7 @@ if (!Number.isFinite(partnerId)) {
     process.exit(1);
 }
 const username = 'zs_' + Math.random().toString(36).slice(2, 8);
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false });
 const page = await ctx.newPage();
 

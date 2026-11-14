@@ -22,7 +22,8 @@ contract.
 | `server-icon` | A server in the server rail; carries `data-server-id` | Click to select that server |
 | `voice-channel` | A voice channel's row in the channel list; carries `data-channel-id` | Click to open the channel. Opening it joins the call |
 | `voice-join` | The **Join Voice** button | Shown only when opening the channel did not join (a warning was shown first). Click to join |
-| `voice-connected` | The voice panel's connection line | Present while this device is in the call |
+| `voice-connected` | The voice panel's connection line | Present while this device is in the call, its media connected |
+| `voice-connecting` | The same line while this device is still joining (**Connecting…**): on a channel whose calls go through the media server, until that connection is up | Wait for `voice-connected` |
 | `voice-share-screen` | The **Share Screen** button | Click to start sharing (the browser's screen picker opens) |
 | `share-go-live` | The share dialog's start button | Only when the share dialog is shown (the arrow beside Share Screen, or picking app audio in the desktop app) |
 | `voice-stop-share` | The same button while sharing (**Stop Sharing**) | Click to stop sharing |
@@ -51,8 +52,9 @@ Setup, done once by people rather than by the automation:
    each call.
 3. Click `[data-testid="server-icon"][data-server-id="<server>"]`, then
    `[data-testid="voice-channel"][data-channel-id="<channel>"]`.
-4. Wait for `[data-testid="voice-connected"]`. If `[data-testid="voice-join"]`
-   appears instead, read the warning beside it before clicking it.
+4. Wait for `[data-testid="voice-connected"]` (`voice-connecting` is the
+   same line until then). If `[data-testid="voice-join"]` appears instead,
+   read the warning beside it before clicking it.
 5. Click `[data-testid="voice-share-screen"]`. The client calls the browser's
    `getDisplayMedia`, so the headless browser must be set up to answer it
    with the video to share.

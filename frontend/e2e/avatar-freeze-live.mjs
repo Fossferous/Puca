@@ -15,20 +15,25 @@ import { execFileSync } from 'node:child_process';
 
 const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const PASS = 'Password123!';
+const INVITE = process.env.INVITE || ''; // the server's sign-up code, if it requires one
 const USER = 'unhide_' + Date.now().toString(36);
 let failures = 0;
 const check = (n, ok, d) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? '  — ' + d : ''}`); if (!ok) failures++; };
 const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-d', 'puca', '-t', '-A', '-c', sql],
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const page = await (await browser.newContext()).newPage();
 page.on('dialog', d => d.accept().catch(() => {}));
 try {
     await page.goto('http://localhost:5173/login');
     await page.waitForSelector('#username');
     await page.click('.toggle-mode');
-    await page.waitForSelector('#inviteCode');
+    // The sign-up form, by its password field: #inviteCode is shown only when
+    // the server requires an invite code, so waiting for it stalled on one that
+    // does not. INVITE= gives the code to a server that does.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]');
+    if (INVITE) await page.fill('#inviteCode', INVITE);
     await page.fill('#username', USER);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');

@@ -21,7 +21,7 @@ fs.mkdirSync(outdir, { recursive: true });
 let fail = 0;
 const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${detail !== undefined ? '  — ' + detail : ''}`); if (!ok) fail++; };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const iphone = devices['iPhone 13'];
 const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL });
 const page = await ctx.newPage();
