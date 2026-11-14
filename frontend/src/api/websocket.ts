@@ -1,7 +1,7 @@
 import { WS_URL } from './config';
 import { onPaintResumed } from './pagePainting';
 import { isMobile, isTauri } from './platform';
-import { applyOwnVoiceFrame, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
+import { applyOwnVoiceFrame, currentClientForm, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
 
 /**
  * The socket URL, with what this client can read (`caps=own_voice,presence,games`,
@@ -14,10 +14,14 @@ import { applyOwnVoiceFrame, currentClientKind, ownVoiceSupported, resetOwnVoice
  */
 export function socketUrl(base: string = WS_URL): string {
     const kind = currentClientKind(isTauri(), isMobile());
+    // A tablet says so beside `kind=mobile` (ownVoice.ts DeviceForm): an
+    // older server ignores `form` and records a phone, as before. A phone
+    // sends no form.
+    const form = currentClientForm(kind);
     // Every capability rides ONE `caps=a,b` list (CLIENT_CAPS): the server
     // reads `caps` once, so a second `caps=` would fail the whole upgrade.
     const withCaps = wsUrlWithCaps(base);
-    return `${withCaps}${withCaps.includes('?') ? '&' : '?'}kind=${kind}`;
+    return `${withCaps}${withCaps.includes('?') ? '&' : '?'}kind=${kind}${form ? `&form=${form}` : ''}`;
 }
 
 // The authoritative wire-protocol definition lives in the Rust backend

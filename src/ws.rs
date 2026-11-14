@@ -60,21 +60,52 @@ pub struct WsQuery {
     /// nothing privilege-bearing.
     #[serde(default)]
     pub kind: Option<String>,
+    /// What shape of `mobile` device it is: `tablet` for a touch screen whose
+    /// short side is 600 CSS px or more ("your tablet"); absent, or anything
+    /// else, is a phone ("your phone"). Read only beside `kind=mobile`. A
+    /// separate parameter rather than a fourth kind, so an older server, which
+    /// ignores it, still records `mobile`.
+    #[serde(default)]
+    pub form: Option<String>,
 }
 
-/// `?caps=` / `?kind=` as the session records them: whether the client
-/// announced `own_voice` (a whole name in the comma list, by the one rule
-/// every capability is read with - `ClientCaps::announced`), and its device
-/// kind if it is one of the three this server knows.
-pub(crate) fn parse_ws_caps(caps: Option<&str>, kind: Option<&str>) -> (bool, Option<&'static str>) {
+/// The device kind a session records for `?kind=mobile&form=tablet`. Never
+/// on the wire as a kind: `kind_on_wire` sends it as `mobile` plus a form.
+pub(crate) const TABLET: &str = "tablet";
+
+/// `?caps=` / `?kind=` / `?form=` as the session records them: whether the
+/// client announced `own_voice` (a whole name in the comma list, by the one
+/// rule every capability is read with - `ClientCaps::announced`), and its
+/// device kind if it is one of the three this server knows - a `mobile` that
+/// said `form=tablet` recorded as `TABLET`.
+pub(crate) fn parse_ws_caps(caps: Option<&str>, kind: Option<&str>, form: Option<&str>) -> (bool, Option<&'static str>) {
     let own_voice = crate::presence::ClientCaps::announced(caps, "own_voice");
     let kind = match kind.map(str::trim) {
         Some("desktop") => Some("desktop"),
+        Some("mobile") if form.map(str::trim) == Some(TABLET) => Some(TABLET),
         Some("mobile") => Some("mobile"),
         Some("browser") => Some("browser"),
         _ => None,
     };
     (own_voice, kind)
+}
+
+/// A recorded device kind as the frames carry it: `(kind, form)`. A tablet
+/// goes out as `mobile` + `tablet`, so a client that predates the form reads
+/// `mobile` and says "your phone", exactly as before; every other kind goes
+/// out as itself, with no form.
+pub(crate) fn kind_on_wire(kind: Option<&'static str>) -> (Option<String>, Option<String>) {
+    match kind {
+        Some(TABLET) => (Some("mobile".to_string()), Some(TABLET.to_string())),
+        other => (other.map(str::to_string), None),
+    }
+}
+
+/// The RoomLeft a device is sent when another device of its account ended or
+/// moved its call: `reason`, and the kind (and form) of the device that did it.
+fn room_left_by(room_id: &str, reason: &str, by: Option<&'static str>) -> ServerMessage {
+    let (by, by_form) = kind_on_wire(by);
+    ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: Some(reason.to_string()), by, by_form }
 }
 
 /// What a refused upgrade says back.
@@ -241,7 +272,7 @@ pub async fn ws_handler(
             // ones kept working. Echo the marker, never the token: putting the
             // credential in a response header would undo the whole change.
             let ws = if offered_protocol.is_some() { ws.protocols(["bearer"]) } else { ws };
-            let caps = parse_ws_caps(query.caps.as_deref(), query.kind.as_deref());
+            let caps = parse_ws_caps(query.caps.as_deref(), query.kind.as_deref(), query.form.as_deref());
             // A delivery socket takes no part in presence, whatever it says.
             let presence_caps = if delivery {
                 crate::presence::ClientCaps::default()
@@ -1140,7 +1171,7 @@ async fn withdraw_refused_join(
     let released = state.leave_room(room_id, user_id, conn_id);
     joined_rooms.remove(room_id);
     if conn_was_joined || already_member {
-        state.send_to_conn(user_id, conn_id, ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None });
+        state.send_to_conn(user_id, conn_id, ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None, by_form: None });
         announce_conn_departure(state, room_id, user_id, released).await;
     }
     if parse_voice_room(room_id).is_some() {
@@ -1538,6 +1569,7 @@ pub async fn evict_user_from_voice_room_together(
                     room_id: room_id.to_string(),
                     reason: None,
                     by: None,
+                    by_form: None,
                 },
             );
         }
@@ -1555,6 +1587,7 @@ pub async fn evict_user_from_voice_room_together(
                         room_id: room_id.to_string(),
                         reason: held.then(|| why.to_string()),
                         by: None,
+                        by_form: None,
                     },
                 );
                 if let Some(sid) = held.then(|| state.session_sid(user_id, c)).flatten() {
@@ -1581,17 +1614,13 @@ pub async fn evict_user_from_voice_room_together(
         SelfNotice::Displaced { actor_conn } => {
             let by = state.conn_kind(user_id, actor_conn);
             let actor_sid = state.session_sid(user_id, actor_conn);
-            let plain = ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None };
+            let plain = ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None, by_form: None };
             for c in state.conn_ids_of(user_id) {
                 if c != actor_conn && held_by.contains(&c) {
                     state.send_to_conn(
                         user_id,
                         c,
-                        ServerMessage::RoomLeft {
-                            room_id: room_id.to_string(),
-                            reason: Some(Displace::Moved.reason().to_string()),
-                            by: by.map(str::to_string),
-                        },
+                        room_left_by(room_id, Displace::Moved.reason(), by),
                     );
                     if let Some(sid) = state.session_sid(user_id, c) {
                         if Some(&sid) != actor_sid.as_ref() {
@@ -1722,6 +1751,7 @@ fn own_voice_frame(
             server_name: None,
             here: false,
             device: None,
+            device_form: None,
             self_muted: None,
             deafened: None,
         },
@@ -1734,6 +1764,7 @@ fn own_voice_frame(
                 .own_voice_status
                 .get(&user_id)
                 .and_then(|s| (s.0 == *room_id).then_some((s.1, s.2)));
+            let (device, device_form) = kind_on_wire(others.into_iter().find_map(|c| state.conn_kind(user_id, c)));
             ServerMessage::OwnVoiceState {
                 self_muted: status.map(|s| s.0),
                 deafened: status.map(|s| s.1),
@@ -1743,7 +1774,8 @@ fn own_voice_frame(
                 channel_name: labels.map(|l| l.1.clone()),
                 server_name: labels.map(|l| l.2.clone()),
                 here: conns.contains(&conn_id),
-                device: others.into_iter().find_map(|c| state.conn_kind(user_id, c)).map(str::to_string),
+                device,
+                device_form,
             }
         }
     }
@@ -2012,11 +2044,7 @@ pub(crate) async fn displace_own_conns(
         state.send_to_conn(
             user_id,
             c,
-            ServerMessage::RoomLeft {
-                room_id: room_id.to_string(),
-                reason: Some(why.reason().to_string()),
-                by: by.map(str::to_string),
-            },
+            room_left_by(room_id, why.reason(), by),
         );
     }
 
@@ -3254,11 +3282,7 @@ pub(crate) async fn handle_message(
                         state.send_to_conn(
                             user_id,
                             conn_id,
-                            ServerMessage::RoomLeft {
-                                room_id: room_id.clone(),
-                                reason: Some(reason.to_string()),
-                                by: by.map(str::to_string),
-                            },
+                            room_left_by(&room_id, reason, by),
                         );
                         tracing::info!(
                             "JoinRoom replay refused for user {} conn {}: {} was ended, moved or is live on another device",
@@ -3340,6 +3364,7 @@ pub(crate) async fn handle_message(
                             room_id: room_id.clone(),
                             reason: need_connect.then(|| ROOM_GONE.to_string()),
                             by: None,
+                            by_form: None,
                         },
                     );
                     return Ok(());
@@ -3707,6 +3732,7 @@ pub(crate) async fn handle_message(
                     room_id: room_id.clone(),
                     reason: None,
                     by: None,
+                    by_form: None,
                 },
             );
 
@@ -5498,7 +5524,7 @@ async fn empty_rooms_of_deleted(state: Arc<AppState>, channels: Vec<i32>, delete
                 room.remove_member(member);
             } // guard dropped before settle_room re-reads rooms
             state.settle_room(&room_id);
-            state.send_to_user(member, ServerMessage::RoomLeft { room_id: room_id.clone(), reason: None, by: None });
+            state.send_to_user(member, ServerMessage::RoomLeft { room_id: room_id.clone(), reason: None, by: None, by_form: None });
         }
     }
     // At once rather than one after another, as a mode ending does. No LiveKit here: the
@@ -6010,6 +6036,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                     room_id: room_id.clone(),
                     reason: None,
                     by: None,
+                    by_form: None,
                 },
             );
             state.broadcast_to_room(
@@ -8853,6 +8880,77 @@ mod own_voice_tests {
         let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.to_vec()).execute(pool).await;
     }
 
+    /// "your tablet": Move here pressed on a TABLET (`?kind=mobile&form=tablet`).
+    /// The PC is told the call went to a tablet - `by: "mobile"`, which every
+    /// client reads, plus `by_form: "tablet"` - and its bar hears `device:
+    /// "mobile"` plus `device_form: "tablet"`. Slept through and woken, its
+    /// refused replay says the same, from the tombstone. CONTROL: a phone (no
+    /// form) gets the frames it always got, with no form at all.
+    #[tokio::test]
+    async fn a_tablet_is_named_a_tablet_and_stays_mobile_for_an_older_client() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let au = a as UserId;
+        let caps = |kind: &str, form: Option<&str>| super::parse_ws_caps(Some("own_voice"), Some(kind), form);
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut tablet = Sock::open(&state, a, "a", "sid-tablet");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        for (s, kind, form) in [(&pc, "desktop", None), (&tablet, "mobile", Some("tablet")), (&phone, "mobile", None)] {
+            let (own_voice, kind) = caps(kind, form);
+            state.set_conn_caps(au, s.conn, own_voice, kind);
+        }
+        type Why = Vec<(Option<String>, Option<String>, Option<String>)>;
+        let why = |frames: &[ServerMessage]| -> Why {
+            frames
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::RoomLeft { room_id, reason, by, by_form } if *room_id == room => {
+                        Some((reason.clone(), by.clone(), by_form.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let elsewhere = |frames: &[ServerMessage]| {
+            frames.iter().rev().find_map(|m| match m {
+                ServerMessage::OwnVoiceState { here: false, room_id: Some(_), device, device_form, .. } => {
+                    Some((device.clone(), device_form.clone()))
+                }
+                _ => None,
+            })
+        };
+
+        pc.join(&state, &room).await.expect("pc joins");
+        let _ = (pc.drain(), tablet.drain(), phone.drain());
+        tablet.take_over(&state, &room).await.expect("Move here on the tablet");
+        let f_pc = pc.drain();
+        let _ = (tablet.drain(), phone.drain());
+
+        // As if the PC slept through it: its socket goes, comes back on the
+        // same sign-in session, and replays the call.
+        state.unregister_session(au, pc.conn);
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        state.set_conn_caps(au, pc2.conn, true, Some("desktop"));
+        let replay = pc2.replay(&state, &room).await;
+        let f_pc2 = pc2.drain();
+
+        // CONTROL: the phone takes it from the tablet; the tablet is told "a
+        // phone", with no form, byte for byte as before.
+        phone.take_over(&state, &room).await.expect("Move here on the phone");
+        let f_tablet = tablet.drain();
+        cleanup(&pool, &[a, b], &server).await;
+
+        let moved_by_tablet = (Some("moved".to_string()), Some("mobile".to_string()), Some("tablet".to_string()));
+        assert_eq!(why(&f_pc), vec![moved_by_tablet.clone()], "the PC is told the call went to a tablet");
+        assert_eq!(elsewhere(&f_pc), Some((Some("mobile".into()), Some("tablet".into()))), "its bar: on your tablet");
+        assert!(replay.is_ok(), "{replay:?}");
+        assert_eq!(why(&f_pc2), vec![moved_by_tablet], "the woken PC's refused replay says the same");
+        assert_eq!(why(&f_tablet), vec![(Some("moved".into()), Some("mobile".into()), None)], "a phone: no form");
+        assert_eq!(elsewhere(&f_tablet), Some((Some("mobile".into()), None)));
+    }
+
     /// MOVE HERE: join-then-remove, conn-scoped RoomLeft, nothing announced.
     #[tokio::test]
     async fn move_here_joins_the_phone_first_then_takes_the_pc_out_and_tells_only_the_pc() {
@@ -9135,7 +9233,7 @@ mod own_voice_tests {
             frames
                 .iter()
                 .filter_map(|m| match m {
-                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    ServerMessage::RoomLeft { room_id, reason, by, .. } if *room_id == room => Some((reason.clone(), by.clone())),
                     _ => None,
                 })
                 .collect()
@@ -9335,7 +9433,7 @@ mod own_voice_tests {
             frames
                 .iter()
                 .filter_map(|m| match m {
-                    ServerMessage::RoomLeft { room_id, reason, by } if room_id == r => Some((reason.clone(), by.clone())),
+                    ServerMessage::RoomLeft { room_id, reason, by, .. } if room_id == r => Some((reason.clone(), by.clone())),
                     _ => None,
                 })
                 .collect()
@@ -9443,7 +9541,7 @@ mod own_voice_tests {
             frames
                 .iter()
                 .filter_map(|m| match m {
-                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    ServerMessage::RoomLeft { room_id, reason, by, .. } if *room_id == room => Some((reason.clone(), by.clone())),
                     _ => None,
                 })
                 .collect()
@@ -9640,7 +9738,7 @@ mod own_voice_state_tests {
         fn open(state: &Arc<AppState>, uid: i32, sid: &str, caps: Option<&str>, kind: Option<&str>) -> Sock {
             let (tx, rx) = mpsc::channel::<ServerMessage>(256);
             let (conn, _, _) = state.register_session(uid as UserId, "a".to_string(), tx, false, None, sid.to_string());
-            let (own_voice, kind) = parse_ws_caps(caps, kind);
+            let (own_voice, kind) = parse_ws_caps(caps, kind, None);
             state.set_conn_caps(uid as UserId, conn, own_voice, kind);
             Sock { uid: uid as UserId, conn, rx, joined: HashSet::new() }
         }
@@ -9676,12 +9774,12 @@ mod own_voice_state_tests {
 
     #[test]
     fn caps_are_read_from_the_query_and_the_device_kind_is_one_of_three() {
-        assert_eq!(parse_ws_caps(None, None), (false, None));
-        assert_eq!(parse_ws_caps(Some("own_voice"), Some("desktop")), (true, Some("desktop")));
-        assert_eq!(parse_ws_caps(Some("x,own_voice,y"), Some("mobile")), (true, Some("mobile")));
-        assert_eq!(parse_ws_caps(Some("own_voices"), Some("browser")), (false, Some("browser")), "exact token only");
-        assert_eq!(parse_ws_caps(Some("own_voice"), Some("<script>")), (true, None), "a kind outside the three is dropped");
-        assert_eq!(parse_ws_caps(Some("own_voice"), None), (true, None));
+        assert_eq!(parse_ws_caps(None, None, None), (false, None));
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("desktop"), None), (true, Some("desktop")));
+        assert_eq!(parse_ws_caps(Some("x,own_voice,y"), Some("mobile"), None), (true, Some("mobile")));
+        assert_eq!(parse_ws_caps(Some("own_voices"), Some("browser"), None), (false, Some("browser")), "exact token only");
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("<script>"), None), (true, None), "a kind outside the three is dropped");
+        assert_eq!(parse_ws_caps(Some("own_voice"), None, None), (true, None));
     }
 
     /// ONE `caps=` list carries both capabilities, so both readers of it must
@@ -9691,11 +9789,11 @@ mod own_voice_state_tests {
     fn both_readers_of_the_one_caps_list_agree_on_every_spelling() {
         use crate::presence::ClientCaps;
         for raw in ["own_voice,presence", " own_voice , presence ", "OWN_VOICE,PRESENCE", "Own_Voice,Presence", ",,own_voice,,presence,,"] {
-            assert!(parse_ws_caps(Some(raw), None).0, "own_voice from {raw:?}");
+            assert!(parse_ws_caps(Some(raw), None, None).0, "own_voice from {raw:?}");
             assert!(ClientCaps::parse(Some(raw)).presence, "presence from {raw:?}");
         }
         for raw in ["own_voice presence", "own_voices,presences", "", "x"] {
-            assert!(!parse_ws_caps(Some(raw), None).0, "no own_voice from {raw:?}");
+            assert!(!parse_ws_caps(Some(raw), None, None).0, "no own_voice from {raw:?}");
             assert!(!ClientCaps::parse(Some(raw)).presence, "no presence from {raw:?}");
         }
     }
@@ -9712,7 +9810,7 @@ mod own_voice_state_tests {
         let parse = |q: &str| Query::<super::WsQuery>::try_from_uri(&format!("http://h/ws?{q}").parse::<Uri>().unwrap());
 
         let Query(q) = parse("caps=own_voice,presence&kind=desktop").expect("the client's own URL parses");
-        assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref()), (true, Some("desktop")));
+        assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref(), None), (true, Some("desktop")));
         assert!(crate::presence::ClientCaps::parse(q.caps.as_deref()).presence);
 
         let dup = parse("caps=own_voice&caps=presence").expect_err("a repeated caps= is refused");
@@ -9720,6 +9818,46 @@ mod own_voice_state_tests {
         assert_eq!(dup.status(), axum::http::StatusCode::BAD_REQUEST);
         let dup = parse("caps=own_voice,presence&kind=desktop&kind=mobile").expect_err("a repeated kind= is refused");
         assert!(dup.body_text().contains("duplicate field `kind`"), "{}", dup.body_text());
+
+        // The tablet's URL, exactly as websocket.ts socketUrl builds it.
+        let Query(q) = parse("caps=own_voice,presence,games&kind=mobile&form=tablet").expect("a tablet's URL parses");
+        assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref(), q.form.as_deref()), (true, Some(super::TABLET)));
+        // Why `form` could be added at all: a parameter this struct does not
+        // name is ignored, not refused - which is how a server from before
+        // `form` takes a tablet's URL (and records `mobile`).
+        let Query(q) = parse("caps=own_voice&kind=mobile&a_later_parameter=1").expect("an unknown parameter is ignored");
+        assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref(), q.form.as_deref()), (true, Some("mobile")));
+    }
+
+    /// "your tablet": a `mobile` client that says `form=tablet` is recorded as
+    /// a tablet, and goes out on the wire as `mobile` PLUS the form, so every
+    /// client that predates the form still reads `mobile` ("your phone").
+    #[test]
+    fn a_tablet_is_recorded_as_one_and_sent_as_mobile_plus_tablet() {
+        use super::{kind_on_wire, TABLET};
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("mobile"), Some("tablet")), (true, Some(TABLET)));
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("mobile"), Some(" tablet ")), (true, Some(TABLET)));
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("mobile"), Some("phone")), (true, Some("mobile")));
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("mobile"), Some("<script>")), (true, Some("mobile")), "an unknown form is a phone");
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("mobile"), None), (true, Some("mobile")), "no form: a phone, as before");
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("desktop"), Some("tablet")), (true, Some("desktop")), "the form is read only beside mobile");
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("tablet"), None), (true, None), "`tablet` is not a kind on the wire");
+
+        assert_eq!(kind_on_wire(Some(TABLET)), (Some("mobile".into()), Some("tablet".into())));
+        assert_eq!(kind_on_wire(Some("mobile")), (Some("mobile".into()), None));
+        assert_eq!(kind_on_wire(Some("desktop")), (Some("desktop".into()), None));
+        assert_eq!(kind_on_wire(Some("browser")), (Some("browser".into()), None));
+        assert_eq!(kind_on_wire(None), (None, None));
+        let left = super::room_left_by("voice_42", "moved", Some(TABLET));
+        assert_eq!(
+            serde_json::to_string(&left).unwrap(),
+            r#"{"type":"RoomLeft","payload":{"room_id":"voice_42","reason":"moved","by":"mobile","by_form":"tablet"}}"#
+        );
+        // A phone's frame is byte-for-byte the 0.9.832 one.
+        assert_eq!(
+            serde_json::to_string(&super::room_left_by("voice_42", "left_elsewhere", Some("mobile"))).unwrap(),
+            r#"{"type":"RoomLeft","payload":{"room_id":"voice_42","reason":"left_elsewhere","by":"mobile"}}"#
+        );
     }
 
     #[tokio::test]
@@ -9989,7 +10127,7 @@ mod own_voice_state_tests {
             frames
                 .iter()
                 .filter_map(|m| match m {
-                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    ServerMessage::RoomLeft { room_id, reason, by, .. } if *room_id == room => Some((reason.clone(), by.clone())),
                     _ => None,
                 })
                 .collect()

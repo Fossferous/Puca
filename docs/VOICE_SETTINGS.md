@@ -77,6 +77,24 @@ Echo cancellation prevents **acoustic feedback loops** where sound from your spe
 ### What It Is
 AGC automatically adjusts your microphone's amplification level to maintain consistent volume.
 
+### On or off by default
+- **Desktop app and Android app: on.** It works inside Púca and never changes your
+  microphone's own level: the desktop app starts its WebView with Chromium's
+  `WebRtcAllowInputVolumeAdjustment` turned off, and Android gives the WebView no
+  microphone level to move.
+- **Web app (any browser, and the iPhone and iPad Home Screen app): off.** In a
+  browser, auto gain can also lower your **system** microphone level (on Windows,
+  the input level in Sound settings), and that level stays low after the call;
+  a web page cannot stop the browser doing it. It is the same Chromium behaviour
+  that took three microphones down to 7.8 % in the desktop app, before the desktop
+  app turned it off there (0.9.830). Turn it on in **Settings > Voice & Video** if
+  you want it; that choice is kept. Púca Notes' voice notes in a browser follow
+  the same setting.
+- An existing web profile that still had the old default (on) is switched off
+  once by the update, with Manual Gain back at 100 % (a Manual Gain left from an
+  earlier time it was off would otherwise apply again). If you had switched it
+  off and on again before that, switch it on again.
+
 ### How It Works
 
 1. **Level Monitoring**: Continuously measures your audio input level

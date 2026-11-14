@@ -21,7 +21,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 
-vi.mock('../api/platform', () => ({ isTauri: () => false }));
+vi.mock('../api/platform', () => ({ isTauri: () => false, isAndroidApp: () => false }));
 
 import ScreenShareModal from '../components/ScreenShareModal';
 import { loadSettings, saveSettings } from '../components/settingsStore';

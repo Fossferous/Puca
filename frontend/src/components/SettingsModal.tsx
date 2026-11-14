@@ -16,7 +16,7 @@ import { apiClient } from '../api/client';
 import { safeRepositoryUrl } from './privacyDisclosure.utils';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
-import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
+import { type Settings, type KeyBinding, type AutoOpenStreams, autoGainLevelNote, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
 import { cameraDisplayName, camerasOf, type CameraInfo, type RememberedCamera } from '../api/rtc/cameraChoice';
 import {
@@ -2890,9 +2890,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Auto Gain Control</label>
                                             <span className="option-hint">
                                                 Evens out how loud you sound in calls: louder when you're quiet,
-                                                softer when you're loud. In the desktop app it works inside Púca and
-                                                never changes your microphone's Windows input level. Disable for
-                                                manual control.
+                                                softer when you're loud. {autoGainLevelNote()} With it off,
+                                                Manual Gain sets your level.
                                             </span>
                                         </div>
                                         <input

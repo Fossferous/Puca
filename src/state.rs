@@ -318,8 +318,10 @@ pub struct Session {
     /// predates the feature - those are never sent the frame.
     pub own_voice: bool,
     /// What kind of device this connection SAID it is (`?kind=`): one of
-    /// "desktop", "mobile", "browser", or None. Self-reported and unproven -
-    /// it only ever labels the account's own devices to each other ("on your
+    /// "desktop", "mobile", "browser", "tablet" (`kind=mobile&form=tablet`,
+    /// `crate::ws::parse_ws_caps`; sent as `mobile` plus a form by
+    /// `crate::ws::kind_on_wire`), or None. Self-reported and unproven - it
+    /// only ever labels the account's own devices to each other ("on your
     /// PC"), and nothing privilege-bearing reads it.
     pub client_kind: Option<&'static str>,
     /// How this connection takes part in idle/away presence

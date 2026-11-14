@@ -461,10 +461,15 @@ voice channel during a call, on any device. Only a call you start from
 nothing begins unmuted.
 
 It works the other way round too: a call on your phone shows the bar on your
-PC. The bar says **in a browser** for a computer's web browser (a phone's or
-tablet's browser counts as your phone) and **on another device** when the
-other device did not say what it is. A PC that was asleep or offline when its
-call was moved or ended does not rejoin that call when it wakes up, and does
+PC. A tablet is named as one: **on your tablet**, **You moved the call to your
+tablet** (a touch screen whose shorter side is 600 pixels or more; anything
+smaller is your phone). The bar says **in a browser** for a computer's web
+browser (a phone's browser counts as your phone and a tablet's as your
+tablet) and **on another device** when the other device did not say what it
+is. Until the server and the apps on both devices are from this release, a
+tablet is called what it was before: your phone, or a browser when an older
+app on a tablet held sideways is the one in the call. A PC that was asleep
+or offline when its call was moved or ended does not rejoin that call when it wakes up, and does
 not rejoin any call while you are in voice on another device; click the
 channel again if you want it there. The bar needs a server and an app
 from this release or later: against an older server it is simply not shown.
@@ -1487,8 +1492,8 @@ someone playing a game with Púca in the background is not idle. In a browser
 or on a phone it means using Púca itself; a phone with Púca in the background
 or its screen off counts as inactive. Talking in a voice call counts as
 activity on every device. Any activity turns the dot green again within a few
-seconds — at once for activity in Púca itself, and within about 15 seconds for
-input elsewhere on the PC.
+seconds — at once for activity in Púca itself, and within about 3 seconds for
+input elsewhere on the PC (back from a game, say).
 A game controller on its own is not seen as activity on the PC.
 
 **Settings → Privacy & Safety → Show when I'm idle or away** (on by default)

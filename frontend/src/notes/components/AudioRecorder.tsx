@@ -27,7 +27,7 @@ import { createPortal } from 'react-dom';
 import { useLayerOnScreen, usePortalTarget } from '../../components/portalTarget';
 import { CloseIcon, MicIcon, StopIcon, TrashIcon } from '../../components/Icons';
 import { MAX_CLIP_MS, assertClipUploadable, extForMime, formatClipTime, pickAudioMime } from '../model/audioNote';
-import { followOutputDeviceRef } from '../../components/settingsStore';
+import { followOutputDeviceRef, loadSettings } from '../../components/settingsStore';
 import '../noteContent.css';
 import { askConfirm } from '../../api/appDialogs';
 
@@ -149,7 +149,12 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
         }
         let stream: MediaStream;
         try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // Auto gain as Settings > Voice & Video has it (off by default in a
+            // browser: settingsStore.ts autoGainOnByDefault). `audio: true`
+            // asked for Chromium's default, which is ON, and a voice note of a
+            // few minutes could then lower the Windows microphone level the
+            // way a call once did - and leave it there for the next call.
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { autoGainControl: loadSettings().autoGainControl } });
         } catch {
             setError('Púca Notes can’t use the microphone. Allow it for this app, then try again.');
             setPhase('refused');

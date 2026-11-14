@@ -1,4 +1,4 @@
-import { isTauri } from '../api/platform';
+import { isAndroidApp, isTauri } from '../api/platform';
 import { mediaTransformApi } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
 import type { ShareLadderMode } from '../api/rtc/shareLadder';
@@ -22,6 +22,49 @@ export type KeyBinding = {
     shift: boolean;
     label: string;
 };
+
+/**
+ * Auto Gain Control's default in THIS app (Settings > Voice & Video): on in
+ * the desktop app and the Android app, OFF in a browser.
+ *
+ * getUserMedia's autoGainControl does more than even out the voice inside
+ * the page. Chromium also applies the audio processor's input-volume
+ * recommendation to the OS microphone level, and on Windows that level
+ * stays where it was dragged: on 2026-09-30 it had taken three of the
+ * owner's microphones to 7.8 % (healthLog.ts micLevels, 0.9.830). The
+ * desktop app stops it with WebView2's
+ * `--disable-features=WebRtcAllowInputVolumeAdjustment` (tauri.conf.json,
+ * pinned by micLevelAgcFlag.test.ts); a web page cannot set a browser flag,
+ * so the only lever there is not to ask for auto gain.
+ *
+ * The Android app keeps it on: its WebView is Chromium, and Chromium's
+ * Android capture streams have no level to move (AAudioInputStream and
+ * OpenSLESInputStream answer GetMaxVolume() with 0 and ignore SetVolume,
+ * media/audio/android/), so the recommendation goes nowhere. Every other
+ * non-desktop surface (any browser, the Home Screen web app) is off.
+ *
+ * Read once, as the module loads: Tauri's `__TAURI_INTERNALS__` and
+ * Capacitor's `androidBridge` are both in place before any page script runs.
+ */
+export function autoGainOnByDefault(): boolean {
+    return isTauri() || isAndroidApp();
+}
+
+/**
+ * What Settings > Voice & Video says, beside the Auto Gain Control switch,
+ * about what it does to the microphone's own level here.
+ */
+export function autoGainLevelNote(): string {
+    if (isTauri()) {
+        return "In the desktop app it works inside Púca and never changes your microphone's Windows input level.";
+    }
+    if (isAndroidApp()) {
+        return 'In the Android app it works inside Púca: Android gives apps no microphone level to change.';
+    }
+    return 'Off by default in the web app: in a browser it can lower your system microphone level '
+        + '(on Windows, the input level in Sound settings), and the level stays low after the call. '
+        + 'The desktop and Android apps never change it.';
+}
 
 // Default settings
 export const defaultSettings = {
@@ -217,7 +260,10 @@ export const defaultSettings = {
     outputVolume: 100,
     noiseSuppression: true,
     echoCancellation: true,
-    autoGainControl: true,
+    // On in the desktop and Android apps, off in a browser: autoGainOnByDefault
+    // says why, and migrateAutoGainDefaultOffInBrowser applies it to a stored
+    // profile once.
+    autoGainControl: autoGainOnByDefault(),
     manualGain: 100, // 0-200%, used when autoGainControl is false
 
     /**
@@ -863,17 +909,67 @@ function migrateAutoOpenStreamsDefaultOff(parsed: Partial<Settings> | null): Par
     return next;
 }
 
+/**
+ * One-time application of Auto Gain Control's new default in a browser: off
+ * (autoGainOnByDefault says why).
+ *
+ * Changing the default alone would reach almost nobody: any save persists
+ * the WHOLE object, and every migration above writes `{...defaultSettings,
+ * ...}` back, so nearly every profile that predates this carries an explicit
+ * `autoGainControl: true` that nobody chose. A stored `true` from before
+ * cannot be told apart from that old default, so it becomes `false`, once. A
+ * stored `false` was always a choice (the default was on) and stays.
+ *
+ * Same contract as the other migrations: runs once, the marker is what makes
+ * a later `true` a real choice ("chosen on" is stored as `true` written after
+ * the marker), and the marker must never be cleared. Marked done even with
+ * nothing stored, or the first deliberate "on" would be undone on the next
+ * load. Only where the default is off: in the desktop and Android apps it
+ * neither changes anything nor writes its marker, so a later decision to turn
+ * it off there too finds this migration still armed.
+ *
+ * Manual Gain comes back to 100 % with it. It applies only while auto gain
+ * is off, and a stored value other than 100 was set for an earlier time it
+ * was off, before the person switched auto gain back on: left alone, a 0 %
+ * set back then would make them silent the moment this ran, a 200 % twice as
+ * loud. 100 % is the microphone as it is, with no gain either way.
+ *
+ * Known accepted edge: someone who turned it off and on again in a browser
+ * before this shipped is indistinguishable from never-set and finds it off,
+ * with the reason beside the switch.
+ */
+const AUTO_GAIN_BROWSER_OFF_MIGRATION_KEY = 'autoGainDefaultOffInBrowser_v1';
+
+function migrateAutoGainDefaultOffInBrowser(parsed: Partial<Settings> | null): Partial<Settings> | null {
+    if (defaultSettings.autoGainControl) return parsed;
+    if (localStorage.getItem(AUTO_GAIN_BROWSER_OFF_MIGRATION_KEY)) return parsed;
+    const changed = parsed != null && parsed.autoGainControl === true;
+    const next: Partial<Settings> | null = changed
+        ? { ...parsed, autoGainControl: false, manualGain: defaultSettings.manualGain }
+        : parsed;
+    try {
+        localStorage.setItem(AUTO_GAIN_BROWSER_OFF_MIGRATION_KEY, '1');
+        if (changed) {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...defaultSettings, ...next }));
+            console.log('[Settings] Auto Gain Control is now off in the browser (the new default)');
+        }
+    } catch { /* storage full or blocked — the in-memory value below still applies */ }
+    return next;
+}
+
 export function loadSettings(): Settings {
     try {
         const stored = localStorage.getItem(SETTINGS_KEY);
         const parsed = stored ? (JSON.parse(stored) as Partial<Settings>) : null;
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
-        const migrated = migrateAutoOpenStreamsDefaultOff(migrateAutoOpenStreams(migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
-            migrateRequireMediaE2eeStandardPath(migrateRequireMediaE2ee(
-                migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
-            )),
-        )) as Partial<Settings>));
+        const migrated = migrateAutoGainDefaultOffInBrowser(migrateAutoOpenStreamsDefaultOff(migrateAutoOpenStreams(
+            migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
+                migrateRequireMediaE2eeStandardPath(migrateRequireMediaE2ee(
+                    migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
+                )),
+            )) as Partial<Settings>,
+        )));
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {
         console.error('Failed to load settings:', e);

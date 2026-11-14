@@ -19,8 +19,22 @@
  * `own_voice_wire_tests` serializes against the same file).
  */
 import { useSyncExternalStore } from 'react';
+import { embedHost } from './embedHost';
 
 export type DeviceKind = 'desktop' | 'mobile' | 'browser';
+
+/**
+ * What shape of `mobile` device: a TABLET is a touch screen whose short side
+ * is 600 CSS px or more (Android's own phone/tablet line, sw600dp), "your
+ * tablet"; anything else, or not said, is a phone, "your phone". Travels
+ * beside the kind (`?form=tablet`, `device_form`, `by_form`), never as a kind
+ * of its own: a client or server that predates it reads `mobile` and says
+ * "your phone", as it always did.
+ */
+export type DeviceForm = 'tablet';
+
+/** The short side, in CSS px, from which a touch screen is a tablet. */
+export const TABLET_MIN_SHORT_SIDE = 600;
 
 export interface OwnVoiceState {
     /** `voice_<channelId>`, or null when the account is in no voice call. */
@@ -33,6 +47,9 @@ export interface OwnVoiceState {
     here: boolean;
     /** The kind of device holding the call, as it reported itself. */
     device: DeviceKind | null;
+    /** 'tablet' when that `mobile` device said it is one; null for a phone,
+     *  any other kind, or a server from before it. */
+    deviceForm: DeviceForm | null;
     /** The member's own mute choice and deafen in that call, as the device
      *  in it last reported them (null: not reported yet, or a server from
      *  before 0.9.839). Move here starts the call with them. */
@@ -75,6 +92,7 @@ export function parseOwnVoiceState(payload: unknown): OwnVoiceState | null {
     const device = DEVICE_KINDS.includes(p.device as DeviceKind) ? (p.device as DeviceKind) : null;
     const flag = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
     return { roomId, channelId, serverId, channelName, serverName, here: p.here, device,
+        deviceForm: formOf(device, p.device_form),
         selfMuted: flag(p.self_muted), deafened: flag(p.deafened) };
 }
 
@@ -143,28 +161,34 @@ export function shouldTakeOver(roomId: string, snap: OwnVoiceSnapshot = snapshot
     return !!call && call.roomId === roomId;
 }
 
-/** "on your PC" / "on your phone" / "in a browser" / "on another device". */
-export function whereDevice(kind: DeviceKind | null | undefined): string {
+/** The form a frame gives a device: 'tablet' only beside `mobile`, and only
+ *  that exact word; anything else (absent, an older server, junk) is none. */
+function formOf(kind: unknown, form: unknown): DeviceForm | null {
+    return kind === 'mobile' && form === 'tablet' ? 'tablet' : null;
+}
+
+/** "on your PC" / "on your phone" / "on your tablet" / "in a browser" / "on another device". */
+export function whereDevice(kind: DeviceKind | null | undefined, form?: unknown): string {
     switch (kind) {
         case 'desktop': return 'on your PC';
-        case 'mobile': return 'on your phone';
+        case 'mobile': return formOf(kind, form) ? 'on your tablet' : 'on your phone';
         case 'browser': return 'in a browser';
         default: return 'on another device';
     }
 }
 
-/** "your PC" / "your phone" / "a browser" / "another device". */
-export function nameDevice(kind: unknown): string {
+/** "your PC" / "your phone" / "your tablet" / "a browser" / "another device". */
+export function nameDevice(kind: unknown, form?: unknown): string {
     switch (kind) {
         case 'desktop': return 'your PC';
-        case 'mobile': return 'your phone';
+        case 'mobile': return formOf(kind, form) ? 'your tablet' : 'your phone';
         case 'browser': return 'a browser';
         default: return 'another device';
     }
 }
 
 export function ownVoiceBannerText(s: OwnVoiceState): string {
-    return `You're in ${s.channelName ?? 'a voice channel'} ${whereDevice(s.device)}`;
+    return `You're in ${s.channelName ?? 'a voice channel'} ${whereDevice(s.device, s.deviceForm)}`;
 }
 
 /**
@@ -176,23 +200,56 @@ export function ownVoiceBannerText(s: OwnVoiceState): string {
  */
 export function roomLeftNotice(payload: unknown, modeName?: string | null): string | null {
     if (!payload || typeof payload !== 'object') return null;
-    const p = payload as { reason?: unknown; by?: unknown };
-    if (p.reason === 'moved') return `You moved the call to ${nameDevice(p.by)}`;
-    if (p.reason === 'left_elsewhere') return `You left voice from ${nameDevice(p.by)}`;
+    const p = payload as { reason?: unknown; by?: unknown; by_form?: unknown };
+    if (p.reason === 'moved') return `You moved the call to ${nameDevice(p.by, p.by_form)}`;
+    if (p.reason === 'left_elsewhere') return `You left voice from ${nameDevice(p.by, p.by_form)}`;
     if (p.reason === 'mode_ended') return `${modeName ?? 'The mode'} ended, so this call ended.`;
     return null;
 }
 
 /**
  * What kind of device THIS is, for the `?kind=` the server relays to the
- * account's other devices. A phone browser is a phone to its owner.
+ * account's other devices. A phone's browser is a phone to its owner, and a
+ * tablet's (a touch screen whose short side is TABLET_MIN_SHORT_SIDE or more,
+ * held either way) is `mobile` too, with the form saying tablet
+ * (currentClientForm). A touch screen used to count only while its window was
+ * at most 1024 px wide, so a tablet held sideways was "a browser".
  */
 export function currentClientKind(isTauri: boolean, isNativeMobile: boolean): DeviceKind {
     if (isTauri) return 'desktop';
     if (isNativeMobile) return 'mobile';
     try {
-        if (typeof window !== 'undefined'
-            && window.matchMedia?.('(pointer: coarse) and (max-width: 1024px)').matches) return 'mobile';
+        if (typeof window !== 'undefined') {
+            if (window.matchMedia?.('(pointer: coarse) and (max-width: 1024px)').matches) return 'mobile';
+            // Not inside an embedding host: Púca for Steam Deck's 1280x800
+            // screen would pass for a tablet held sideways if Steam's browser
+            // reports a coarse pointer, and a Deck is not a tablet. A host
+            // keeps the rule it always had.
+            if (!embedHost() && window.matchMedia?.('(pointer: coarse)').matches && screenShortSide() >= TABLET_MIN_SHORT_SIDE) return 'mobile';
+        }
     } catch { /* no matchMedia: a browser */ }
     return 'browser';
+}
+
+/** The screen's short side in CSS px (the window's when there is no screen
+ *  to ask); 0 when neither says. */
+function screenShortSide(): number {
+    if (typeof window === 'undefined') return 0;
+    const scr = window.screen;
+    const w = scr && scr.width > 0 ? scr.width : window.innerWidth;
+    const h = scr && scr.height > 0 ? scr.height : window.innerHeight;
+    return w > 0 && h > 0 ? Math.min(w, h) : 0;
+}
+
+/**
+ * What shape of `mobile` device THIS is, for `?form=`: 'tablet' when the
+ * screen's short side is TABLET_MIN_SHORT_SIDE CSS px or more, else null (a
+ * phone, which sends no form). The SCREEN, not the window, so turning a
+ * tablet, the soft keyboard or a split screen does not change what it is.
+ * Null for every other kind, and inside an embedding host (a Steam Deck is
+ * not a tablet).
+ */
+export function currentClientForm(kind: DeviceKind): DeviceForm | null {
+    if (kind !== 'mobile' || embedHost()) return null;
+    return screenShortSide() >= TABLET_MIN_SHORT_SIDE ? 'tablet' : null;
 }

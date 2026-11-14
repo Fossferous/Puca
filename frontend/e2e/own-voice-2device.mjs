@@ -30,6 +30,10 @@
 //      the PC's socket comes back, its replayed join is refused - it shows
 //      the notice instead of rejoining next to the phone (or with an open
 //      mic after Leave), and its media re-claim raises no alert().
+//   8. a TABLET (an 820x1180 touch context) signs in too: its socket URL says
+//      kind=mobile&form=tablet (the phone's says no form), Move here on it
+//      makes the PC say "You moved the call to your tablet", and the PC's and
+//      the phone's banners say "on your tablet"; Leave on the phone ends it.
 // Each check is a PASS/FAIL line; the exit code is the number of failures.
 // Screenshots of the banner (phone and desktop) go to OUT.
 //
@@ -494,6 +498,45 @@ try {
     await sleep(3000);
     const v7b = occupants(await voiceList(b, srv.id), lounge.id, A);
     check('7b: server voice list: the account is out of Lounge - the PC did not rejoin with an open mic', v7b.n === 0 && !(await inCall(pc).isVisible()), v7b.json);
+
+    // ── 8. A TABLET (an 820x1180 touch screen: its short side 600 px or more)
+    // is "your tablet"; the 390x844 phone above stays "your phone" (the
+    // control, steps 2-7). It says so on its socket URL (kind=mobile&form=tablet)
+    // and every device of the account names it that way.
+    const tabletCtx = await browser.newContext({ viewport: { width: 820, height: 1180 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+    const tabletUrls = [];
+    await tabletCtx.addInitScript((apiHost) => {
+        const Orig = window.WebSocket;
+        window.__ovTabletUrls = [];
+        window.WebSocket = class extends Orig {
+            constructor(url, protocols) {
+                super(url, protocols);
+                if (String(url).includes(apiHost)) window.__ovTabletUrls.push(String(url));
+            }
+        };
+    }, new URL(process.env.API || 'http://127.0.0.1:5322').host);
+    const tablet = await signIn(tabletCtx, AUSER, 'TABLET', false);
+    tabletUrls.push(...await tablet.evaluate(() => window.__ovTabletUrls));
+    const tq = tabletUrls.length ? new URL(tabletUrls.at(-1)).searchParams : null;
+    check('8: the tablet says kind=mobile&form=tablet on its socket URL', !!tq && tq.get('kind') === 'mobile' && tq.getAll('form').join() === 'tablet', JSON.stringify(tabletUrls));
+    const phoneUrlForm = await phone.evaluate(async () => new URL((await import('/src/api/websocket.ts')).socketUrl()).searchParams.get('form'));
+    check('8: control: the 390x844 phone sends no form', phoneUrlForm === null, String(phoneUrlForm));
+    await clickVoice(pc, 'Lounge', false);
+    check('8: the PC is in Lounge', !!await until(() => inCall(pc).isVisible(), 25000));
+    const onTablet = await until(() => banner(tablet).isVisible(), 15000);
+    check('8: the tablet shows the banner for the PC\'s call', !!onTablet && /You're in Lounge in a browser/.test(await banner(tablet).innerText()));
+    await banner(tablet).getByRole('button', { name: 'Move here' }).tap();
+    check('8: the tablet is connected after Move here', !!await until(() => inCall(tablet).isVisible(), 25000));
+    check('8: the PC drops the call with "You moved the call to your tablet"', !!await until(async () => !(await inCall(pc).isVisible()), 15000) && !!await toastSeen(pc, 'You moved the call to your tablet'));
+    const pcBanner8 = await until(async () => (await banner(pc).isVisible()) ? await banner(pc).innerText() : null, 10000);
+    check('8: the PC\'s banner: "You\'re in Lounge on your tablet"', /You're in Lounge on your tablet/.test(pcBanner8 || ''), JSON.stringify(pcBanner8));
+    const phoneBanner8 = await until(async () => (await banner(phone).isVisible()) ? await banner(phone).innerText() : null, 10000);
+    check('8: the phone\'s banner names the tablet too', /You're in Lounge on your tablet/.test(phoneBanner8 || ''), JSON.stringify(phoneBanner8));
+    await pc.screenshot({ path: path.join(OUT, 'desktop-banner-tablet.png') });
+    await banner(phone).getByRole('button', { name: 'Leave' }).tap();
+    check('8: Leave on the phone ends the tablet\'s call, which says "You left voice from your phone"', !!await until(async () => !(await inCall(tablet).isVisible()), 15000) && !!await toastSeen(tablet, 'You left voice from your phone'));
+    const v8 = occupants(await voiceList(b, srv.id), lounge.id, A);
+    check('8: server voice list: the account is out of Lounge', v8.n === 0, v8.json);
 
     check('no page errors and no alert() dialogs on any device', consoleErrors.length === 0, consoleErrors.join(' | '));
 } catch (e) {
