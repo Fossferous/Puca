@@ -13,13 +13,18 @@
  *     reads back the muted it set (so an app that unmutes, and a test reading el.muted, see
  *     what they would have), while the element underneath stays muted. It is muted before
  *     play() or load(), when it is given a src, srcObject or autoplay (as a property or an
- *     attribute), as the parser puts it in the page (autoplay in the page's own HTML), and
- *     on loadstart / play / playing;
+ *     attribute), as the parser puts it in the page or in a shadow root (autoplay in the
+ *     page's own HTML), and on loadstart / play / playing. Unmuted from outside script
+ *     (its own controls), it reads unmuted, as it would, and is muted again underneath;
  *   - Web Audio: whatever is connected to a real AudioContext's destination goes through a
- *     gain at 0 instead (analysers and everything before the destination are untouched; an
- *     OfflineAudioContext renders to a buffer, not a speaker, so it is left alone).
- * It does not touch speechSynthesis: no script turns the app's spoken announcements on
- * without replacing it (the lint checks that too).
+ *     gain at 0 instead (an OfflineAudioContext renders to a buffer, not a speaker, so it
+ *     is left alone). Playwright's Windows WebKit has no Web Audio at all.
+ * What a page can tell: a muted element plays silence into anything that reads it
+ * (createMediaElementSource, captureStream), and play() is always a muted play, so an
+ * autoplay policy that refuses unmuted playback never refuses here. Not covered: an
+ * element the parser makes in a tree never put in the page (or a declarative shadow
+ * root) that then plays by itself. speechSynthesis is not touched: no script turns the
+ * app's spoken announcements on without replacing it (the lint checks that).
  *
  * src/tests/e2eMuted.test.ts runs silencePage() on a page's prototypes and shows each of
  * these holding.
@@ -33,15 +38,28 @@ export function silencePage() {
     Object.defineProperty(P, '__pucaSilenced', { value: true });
     /** What the page set, which is what it reads back; the element itself stays muted. */
     const asked = new WeakMap();
+    const watched = new WeakSet();
+    const watch = (el) => {
+        if (watched.has(el)) return;
+        watched.add(el);
+        // Unmuted by something other than script (the element's own controls): the page
+        // reads it unmuted, as it would, and underneath it is muted again at once.
+        el.addEventListener('volumechange', () => {
+            if (!muted.get.call(el)) { asked.set(el, false); muted.set.call(el, true); }
+        });
+    };
     const hush = (el) => {
         if (!asked.has(el)) asked.set(el, muted.get.call(el));
         muted.set.call(el, true);
+        watch(el);
     };
     Object.defineProperty(P, 'muted', {
         configurable: true,
         enumerable: muted.enumerable,
-        get() { return asked.has(this) ? asked.get(this) : muted.get.call(this); },
-        set(value) { asked.set(this, Boolean(value)); muted.set.call(this, true); },
+        // Unmuted underneath can only be someone else's doing (this setter never does it):
+        // that is the truth, so it is what the page reads.
+        get() { return muted.get.call(this) && (asked.has(this) ? asked.get(this) : true); },
+        set(value) { asked.set(this, Boolean(value)); muted.set.call(this, true); watch(this); },
     });
     const play = P.play;
     P.play = function (...args) { hush(this); return play.apply(this, args); };
@@ -65,9 +83,20 @@ export function silencePage() {
         if (node instanceof HTMLMediaElement) hush(node);
         else if (node.querySelectorAll) node.querySelectorAll('audio, video').forEach(hush);
     };
-    new MutationObserver((records) => {
+    const inserted = new MutationObserver((records) => {
         for (const r of records) r.addedNodes.forEach(hushTree);
-    }).observe(document, { childList: true, subtree: true });
+    });
+    const tree = { childList: true, subtree: true };
+    inserted.observe(document, tree);
+    // A shadow root is a tree of its own, which observing the document does not reach.
+    const attachShadow = Element.prototype.attachShadow;
+    if (attachShadow) {
+        Element.prototype.attachShadow = function (...args) {
+            const root = attachShadow.apply(this, args);
+            inserted.observe(root, tree);
+            return root;
+        };
+    }
     for (const type of ['loadstart', 'loadedmetadata', 'play', 'playing']) {
         // Media events do not bubble; a capturing listener on the window still hears them.
         addEventListener(type, (e) => { if (e.target instanceof HTMLMediaElement) hush(e.target); }, true);

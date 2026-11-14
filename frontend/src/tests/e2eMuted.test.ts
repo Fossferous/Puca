@@ -3,8 +3,10 @@
  * Every browser an e2e/ script starts makes no sound (scripts/check-e2e-muted.mjs, which
  * `npm run lint` runs), and WebKit's stand-in for a mute flag (e2e/muted.mjs) really mutes.
  *
- * The owner's rule: nothing a session runs plays audio on this machine. Before the check,
- * 36 scripts launched a browser with nothing muting it.
+ * The owner's rule: nothing a session runs plays audio on this machine. Playwright mutes a
+ * HEADLESS Chromium by itself and nothing else: a headed or PWDEBUG run, Firefox and WebKit
+ * get no mute unless the script asks. Before the check, 36 Chromium launches relied on that
+ * default and two WebKit launches had nothing.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -72,6 +74,28 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'firefox.mjs': 'const f = await firefox.launch({ headless: true });',
             'firefox-loud.mjs': "const f = await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': '1.0' } });",
             'firefox-other.mjs': "const prefs = { 'media.autoplay.default': 0 }; const f = await firefox.launch({ firefoxUserPrefs: prefs });",
+            // A number: the pref is a string pref, and Firefox refuses to start (setIntPref).
+            'firefox-number.mjs': "const f = await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': 0 } });",
+            // A spread nobody can read could set anything, after the flag or inside the prefs.
+            'helper-spread.mjs': "const launchFirefox = (opts) => firefox.launch({ headless: true, firefoxUserPrefs: { 'media.volume_scale': '0.0' }, ...opts });",
+            'prefs-spread.mjs': "const f = await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': '0.0', ...EXTRA } });",
+            'args-then-spread.mjs': "export const go = (opts) => chromium.launch({ args: ['--mute-audio'], ...opts });",
+            'spread-could-ignore.mjs': "export const go = (opts) => chromium.launch({ ...opts, args: ['--mute-audio'] });",
+            // Playwright takes ignoreDefaultArgs out of the user's args too.
+            'ignored.mjs': "const b = await chromium.launch({ args: ['--mute-audio'], ignoreDefaultArgs: ['--mute-audio'] });",
+            'ignored-unknown.mjs': "const b = await chromium.launch({ args: ['--mute-audio'], ignoreDefaultArgs: IGNORE });",
+            // A const changed after it is made is not what its initializer says.
+            'changed.mjs': "const opts = { args: ['--mute-audio'] }; opts.args = []; const b = await chromium.launch(opts);",
+            'emptied.mjs': "const args = ['--mute-audio']; args.length = 0; const b = await chromium.launch({ args });",
+            'spliced.mjs': "const args = ['--mute-audio']; args.splice(0); const b = await chromium.launch({ args });",
+            'object-assigned.mjs': "const opts = { args: ['--mute-audio'] }; Object.assign(opts, { args: [] }); const b = await chromium.launch(opts);",
+            'deleted.mjs': "function make() { const o = { args: ['--mute-audio'] }; delete o.args; return o; }\nconst b = await chromium.launch(make());",
+            'hoisted.mjs': "const args = ['--mute-audio'];\nexport async function go(x) { if (x) { var args = []; } return chromium.launch({ args }); }",
+            // A launch taken without being called where it can be read.
+            'indexed.mjs': "const b = await chromium['launch']({ args: ['--mute-audio'] });",
+            'bound.mjs': 'const launch = chromium.launch.bind(chromium); const b = await launch();',
+            'destructured.mjs': 'const { launch } = chromium; const b = await launch();',
+            'webkit-unawaited.mjs': `${IMPORT_MUTE}const w = muteWebkit(webkit.launch());`,
             'webkit.mjs': 'const w = await webkit.launch();',
             'webkit-local.mjs': 'const muteWebkit = (b) => b;\nconst w = muteWebkit(await webkit.launch());',
             'webkit-then.mjs': `${IMPORT_MUTE}const w = await webkit.launch().then(muteWebkit);`,
@@ -81,10 +105,16 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'attach.mjs': "const b = await chromium.connectOverCDP('http://127.0.0.1:9222');",
             'e2e/android-share-live.mjs': "await chromium.connectOverCDP('a'); await chromium.connectOverCDP('b');",
             'webview2.mjs': "spawn(exe, [], { env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}` } });",
+            'webview2-assigned.mjs': "process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222';",
             'config.ts': "export default { use: { launchOptions: { args: ['--use-fake-ui-for-media-stream'] } } };",
+            'config-firefox.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'f', use: { browserName: 'firefox' } }] });",
+            'config-iphone.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'p', use: { ...devices['iPhone 13'] } }] });",
             // What the OS plays, which a muted browser does not stop.
             'spoken.mjs': "const b = await chromium.launch({ args: ['--mute-audio'] });\nsave({ voiceTTS: true });",
+            'spoken-maybe.mjs': 'save({ voiceTTS: process.env.TTS === "1" });',
+            'spoken-assigned.mjs': 's.voiceTTS = true;',
             'toasts.mjs': "const b = await chromium.launch({ args: ['--mute-audio'] });\nawait (await b.newContext()).grantPermissions(['notifications']);",
+            'toasts-named.mjs': "const PERMS = ['notifications'];\nconst b = await chromium.launch({ args: ['--mute-audio'] });\nawait (await b.newContext()).grantPermissions(PERMS);",
         };
         const { named, status, output } = flagged(bad);
         expect(status, output).toBe(1);
@@ -106,7 +136,12 @@ describe('scripts/check-e2e-muted.mjs', () => {
             'extra.mjs': "const launch = (extra = []) => chromium.launch({ args: ['--mute-audio', ...extra] });",
             'scoped.mjs': "const args = ['--loud'];\nasync function go() { const args = ['--mute-audio']; return chromium.launch({ args }); }",
             'persistent.mjs': "const c = await chromium.launchPersistentContext('dir', { args: ['--mute-audio'] });",
-            'firefox.mjs': "const P = { 'media.volume_scale': '0.0' }; await firefox.launch({ firefoxUserPrefs: P }); await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': 0 } });",
+            'firefox.mjs': "const P = { 'media.volume_scale': '0.0' }; await firefox.launch({ firefoxUserPrefs: P }); await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': '0' } });",
+            'pushed.mjs': "const args = ['--mute-audio']; if (process.env.SFU) args.push('--allow-loopback-in-peer-connection');\nconst b = await chromium.launch({ args });",
+            'ignore-other.mjs': "await chromium.launch({ args: ['--mute-audio'], ignoreDefaultArgs: ['--hide-scrollbars'] }); await chromium.launch({ args: ['--mute-audio'], ignoreDefaultArgs: true });",
+            'spread-then-said.mjs': "export const go = (opts) => chromium.launch({ ...opts, args: ['--mute-audio'], ignoreDefaultArgs: false });",
+            'config-chrome.ts': "export default defineConfig({ use: { launchOptions: { args: ['--mute-audio'] } }, projects: [{ name: 'c', use: { ...devices['Desktop Chrome'], browserName: 'chromium' } }] });",
+            'webview2-assigned.mjs': "process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222 --mute-audio';",
             'webkit.mjs': `${IMPORT_MUTE}let w;\ntry { w = muteWebkit(await webkit.launch()); } catch { w = null; }\nconst x = muteWebkit(await webkit.launch({ headless: true }));`,
             'config.ts': "export default { use: { launchOptions: { args: ['--mute-audio', '--use-fake-ui-for-media-stream'] } } };",
             'webview2.mjs': "spawn(exe, [], { env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT} --mute-audio` } });",
@@ -217,6 +252,30 @@ describe('e2e/muted.mjs: WebKit, muted', () => {
         await new Promise((r) => setTimeout(r, 0));
         expect(media.map(isMuted)).toEqual([true, true]);
         expect(media.map((el) => el.muted)).toEqual([false, false]);
+    });
+
+    it('unmuted by its own controls (not script): reads unmuted, as it would, and is muted again underneath', () => {
+        const el = document.createElement('audio');
+        el.muted = true;
+        expect(isMuted(el)).toBe(true);
+        native.set!.call(el, false); // what the element's own mute button does
+        expect(el.muted).toBe(false); // the truth, so an app that re-mutes on volumechange sees it
+        el.dispatchEvent(new Event('volumechange'));
+        expect(isMuted(el)).toBe(true);
+        expect(el.muted).toBe(false);
+        el.muted = true; // the app re-mutes, and reads it back
+        expect(el.muted).toBe(true);
+    });
+
+    it('what the parser puts in a shadow root is muted too', async () => {
+        const host = document.createElement('div');
+        const root = host.attachShadow({ mode: 'closed' });
+        root.innerHTML = '<video autoplay></video>';
+        document.body.append(host);
+        await new Promise((r) => setTimeout(r, 0));
+        const video = root.querySelector('video')!;
+        expect(isMuted(video)).toBe(true);
+        expect(video.muted).toBe(false);
     });
 
     it('Web Audio reaches a real destination only through a gain at 0', () => {
