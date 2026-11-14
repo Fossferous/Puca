@@ -154,14 +154,24 @@ function problemsIn(fileName, text, relName) {
         walk(root);
     };
     /** A `var` named `name` anywhere in this function (or file) scope: it hoists over consts outside it. */
-    const hoistedVar = (scope, name) => {
+    /** Each scope-wide walk once per scope and name: a big walk names `page` thousands of times. */
+    const memo = (fn) => {
+        const byScope = new WeakMap();
+        return (scope, name) => {
+            let byName = byScope.get(scope);
+            if (!byName) byScope.set(scope, byName = new Map());
+            if (!byName.has(name)) byName.set(name, fn(scope, name));
+            return byName.get(name);
+        };
+    };
+    const hoistedVar = memo((scope, name) => {
         let found = false;
         walkOwnScope(scope, (n) => {
             if (ts.isVariableDeclarationList(n) && !(n.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let))
                 && n.declarations.some((d) => bindsName(d.name, name))) found = true;
         });
         return found;
-    };
+    });
     /** The root name of a chain like opts.args[0].x, or null. */
     const rootName = (e) => {
         e = unwrap(e);
@@ -174,7 +184,7 @@ function problemsIn(fileName, text, relName) {
      * (args.push(...)), else null. By name: a shadowing name counts too. Not seen: a change
      * made through an alias or a function it is handed to.
      */
-    const mutatedIn = (scope, name) => {
+    const mutatedIn = memo((scope, name) => {
         let mutated = false;
         let grown = false;
         const visit = (n) => {
@@ -207,7 +217,7 @@ function problemsIn(fileName, text, relName) {
         };
         visit(scope);
         return mutated ? 'mutated' : grown ? 'grown' : null;
-    };
+    });
 
     /** What a name refers to where it is used: the nearest enclosing scope that declares it. */
     const declarationOf = (id) => {
@@ -433,7 +443,8 @@ function problemsIn(fileName, text, relName) {
     // Granted however it is spelled (a variable, a list built elsewhere): the word is the tell.
     const grantsNotifications = /['"`]notifications['"`]/.test(text) && /\bgrantPermissions\b|\bpermissions\s*:/.test(text);
     // Playwright Test reads its browser from these: a config, a spec, a test.use().
-    const isRunner = /\bdefineConfig\s*\(/.test(text) || /\btest\.use\s*\(/.test(text) || /\.(spec|test)\.[cm]?[jt]s$/.test(fileName);
+    const isRunner = /\bdefineConfig\s*\(/.test(text) || /\btest\.use\s*\(/.test(text)
+        || /\.(spec|test)\.[cm]?[jt]s$/.test(fileName) || /(^|[\\/])playwright\.config\.[cm]?[jt]s$/.test(fileName);
 
     /** Named imports from Playwright and from the helper, by local name. */
     const imported = new Map();
@@ -483,6 +494,7 @@ function problemsIn(fileName, text, relName) {
         if (ts.isIdentifier(obj)) {
             const imp = imported.get(obj.text);
             if (imp) return PLAYWRIGHT_MODULES.has(imp.from) ? imp.name : null;
+            if (!ENGINES.has(obj.text)) return null; // only an engine's own name can be one
             return declarationOf(obj).local ? null : obj.text;
         }
         if (ts.isPropertyAccessExpression(obj) && ts.isIdentifier(unwrap(obj.expression)) && namespaces.has(unwrap(obj.expression).text)) return obj.name.text;
@@ -547,6 +559,10 @@ function problemsIn(fileName, text, relName) {
                     if (!opts || !definitely(opts, firefoxMuted)) report(node, `${where} is not muted (Playwright sets no volume for Firefox): give it firefoxUserPrefs { 'media.volume_scale': '0.0' }, a string`);
                 } else if (method !== 'launch' || !wrappedByMuteWebkit(node) || !importsMuteWebkit) {
                     report(node, `${where} is not muted (WebKit has no switch for it): muteWebkit(await webkit.launch(...)), with muteWebkit imported from e2e/muted.mjs`);
+                }
+                // Only Chromium's native toasts are known here to be switched off.
+                if (engine !== 'chromium' && ENGINES.has(engine) && grantsNotifications) {
+                    report(node, `${where} in a file that grants notifications: grant them only to Chromium launched with '--disable-features=NativeNotifications' (${engine}'s own system notifications are not switched off here, and a Windows toast plays its sound)`);
                 }
             } else if (ATTACH.has(method) && ENGINES.has(engine)) {
                 attaches.push(node);

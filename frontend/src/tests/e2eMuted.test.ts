@@ -137,6 +137,10 @@ describe('scripts/check-e2e-muted.mjs', () => {
             // The spoken join/leave reached another way.
             'spoken-setting.mjs': "await page.evaluate(() => store.updateSetting('voiceTTS', true));",
             'spoken-checkbox.mjs': "await page.getByLabel('Speak Join/Leave (TTS)').check();",
+            // Only Chromium's native toasts are switched off by anything here.
+            'toasts-firefox.mjs': "const f = await firefox.launch({ firefoxUserPrefs: { 'media.volume_scale': '0.0' } });\nawait f.newContext({ permissions: ['notifications'] });",
+            // A config is a config whether or not it calls defineConfig.
+            'plain/playwright.config.ts': "const config = { use: { launchOptions: { args: ['--mute-audio'] }, ...devices['iPhone 13'] } };\nexport default config;",
         };
         const { named, status, output } = flagged(bad);
         expect(status, output).toBe(1);
@@ -144,6 +148,18 @@ describe('scripts/check-e2e-muted.mjs', () => {
         // A reviewed file that gains an attach fails at each, not just the new one.
         expect(named['e2e/android-share-live.mjs'], output).toBe(2);
     }, 60_000);
+
+    it('a walk the size of notes-walk.mjs, several times over, is checked in seconds', () => {
+        // Every page.x() asked for whole-file walks once (38 s for e2e/, 20 s of it one
+        // file), which would have outgrown the 60 s test above as the walks grew.
+        const calls = Array.from({ length: 12000 }, (_, i) => `await page.click('#b${i}');`).join('\n');
+        const started = Date.now();
+        const { status, output } = flagged({
+            'big.mjs': `const browser = await chromium.launch({ args: ['--mute-audio'] });\nconst page = await browser.newPage();\n${calls}\n`,
+        });
+        expect(status, output).toBe(0);
+        expect(Date.now() - started).toBeLessThan(20_000);
+    }, 120_000);
 
     it('CONTROL: what is muted passes, or the failures above prove nothing', () => {
         const { named, status, output } = flagged({
@@ -281,6 +297,10 @@ describe('e2e/muted.mjs: WebKit, muted', () => {
         t.toggleAttribute('autoplay');
         expect(isMuted(t)).toBe(true);
         expect(t.hasAttribute('autoplay')).toBe(true);
+        const ns = document.createElement('audio');
+        ns.setAttributeNS(null, 'src', 'data:audio/wav;base64,');
+        expect(isMuted(ns)).toBe(true);
+        expect(ns.getAttribute('src')).toBe('data:audio/wav;base64,');
     });
 
     it("what the parser puts in the page (autoplay in the page's own HTML) is muted as it lands", async () => {

@@ -1260,7 +1260,8 @@ Other things you'd find anyway:
   after the last push waits for the next one. Nothing in CI scans the rest: the Steam Deck
   plugin's `integrations/decky/package-lock.json`, Púca Notes'
   `frontend/notes-app/package-lock.json`, the Android apps' Gradle dependencies (no
-  lockfile), or the GitHub Actions pinned by SHA in `.github/workflows`.
+  lockfile), the iOS app's Swift package (`frontend/ios/App/CapApp-SPM/Package.swift`, no
+  `Package.resolved`), or the GitHub Actions pinned by SHA in `.github/workflows`.
   `.github/dependabot.yml` asks Dependabot for security updates only:
   `open-pull-requests-limit: 0` on every ecosystem stops its routine version-update pull
   requests, and its alerts and security updates arrive only while the repository has them

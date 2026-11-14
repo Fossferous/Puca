@@ -27,8 +27,10 @@
  * element.attributes (setNamedItem) or an Attr's value. speechSynthesis is not touched: no script turns the
  * app's spoken announcements on without replacing it (the lint checks that).
  *
- * src/tests/e2eMuted.test.ts runs silencePage() on a page's prototypes and shows each of
- * these holding.
+ * src/tests/e2eMuted.test.ts runs silencePage() on jsdom's prototypes and shows most of
+ * these holding; jsdom has no srcObject and no Web Audio (the test fakes the audio nodes),
+ * so the srcObject setter is covered only by the same wrapper as src. The media-element
+ * half was also run once in real headless WebKit, silently (no source ever played).
  */
 
 /** Runs in the page, before its scripts. Self-contained: Playwright sends its source. */
