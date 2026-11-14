@@ -337,26 +337,34 @@ export const classesFor = (node, { steady = false, arm = null } = {}) => {
     return node.variants?.length ? [...classes, node.variants[arm % node.variants.length]] : classes;
 };
 
-// What each class that comes from data can be, from the stylesheet: every class written together
-// with one of the element's own (`.voice-e2ee.on`, `.report-badge.spam`), or starting with what is
-// before it in its word (`.cal-chip.kind-task`). Each becomes one of the element's arms (toHtml's
-// `arm` k takes the k-th, round). A data class the stylesheet names nowhere changes no colour.
-export const dataVariants = ({ all }, css, { most = 10 } = {}) => {
+// What each class that comes from data can be, from the stylesheet: with what is before it in its
+// word (`kind-${e.kind}`, `share-row-status-${s.status}`), every class the stylesheet has that starts
+// with that (`.cal-chip.kind-task`, `.share-row-status-accepted-live` written alone); with nothing
+// before it (`voice-e2ee ${badge.cls}`), every class written together with one of the element's own
+// (`.voice-e2ee.on`, `.report-badge.spam`). Each becomes one of the element's arms (toHtml's `arm`
+// k takes the k-th, round). A data class the stylesheet names nowhere changes no colour.
+export const dataVariants = ({ all }, css, { most = 16 } = {}) => {
     const together = new Map();
     for (const [compound] of css.matchAll(/(?:\.[a-zA-Z_][\w-]*){2,}/g)) {
         const names = compound.split('.').filter(Boolean);
         for (const a of names) for (const b of names) if (a !== b) (together.get(a) ?? together.set(a, new Set()).get(a)).add(b);
     }
+    // Classes no JSX writes out: what only data can give. A prefix the stylesheet only writes alone
+    // takes these, so `xfer-${state}` is not read as every xfer- class the transfer list draws.
+    const literal = new Set(all.flatMap(node => node.classes));
+    const fromData = [...new Set([...css.matchAll(/\.([a-zA-Z_][\w-]*)/g)].map(([, name]) => name))].filter(name => !literal.has(name));
     for (const node of all) {
         if (!node.data?.length) continue;
         const own = new Set(node.classes);
         const found = new Set();
+        const beside = new Set(node.steady.flatMap(base => [...(together.get(base) ?? [])]));
+        const fits = prefix => name => !own.has(name) && (!prefix || (name.startsWith(prefix) && name !== prefix));
         for (const { prefix } of node.data) {
-            for (const base of node.steady) {
-                for (const name of together.get(base) ?? []) {
-                    if (!own.has(name) && (!prefix || (name.startsWith(prefix) && name !== prefix))) found.add(name);
-                }
-            }
+            // Written beside one of its own first; a prefix the stylesheet only writes alone, from what
+            // only data gives.
+            let names = [...beside].filter(fits(prefix));
+            if (!names.length && prefix) names = fromData.filter(fits(prefix));
+            names.forEach(name => found.add(name));
         }
         node.variants = [...found].sort().slice(0, most);
     }

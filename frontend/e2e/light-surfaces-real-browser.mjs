@@ -23,7 +23,7 @@
 //      held in a local or made by a helper where it is named, a portal on the page), in each arm of
 //      every branch and each value a class from data can take (skeleton's dataVariants), with the
 //      elements around it in the same arm, with and without High Contrast, at both sizes, and again
-//      at 1280x800 with every :hover and :focus on: the same 4.5:1 and 3:1, with opacity counted
+//      at both with every :hover and :focus on (a tap leaves a phone's on): the same 4.5:1 and 3:1, with opacity counted
 //      (dimmed words are read dimmed), past the two entries in NOT_AS_DRAWN, each with its reason.
 //      Until 2026-11-14 this held only 3:1 and only where the dark theme held, at rest, ignored
 //      opacity and data classes, and read each component on the chat's paper: the role editor's
@@ -138,6 +138,7 @@ button.ta-file.saved { color: #7fd18b !important; } button.ta-file.error { color
 .user-profile-bar .user-status.idle, .user-profile-bar .user-status.away, .active-status.idle, .active-status.away { color: var(--status-idle) !important; }
 .cal-chip-time, .cal-chip-span { color: var(--text-muted) !important; }
 .attachment-saved { opacity: 0.75 !important; }
+.share-row-status-accepted-live { color: var(--success, #43b581) !important; }
 [data-theme="light"] .role-editor-embedded {
     --text-normal: #313338 !important; --text-muted: #5a5c64 !important; --text-faint: #62656e !important;
     --header-primary: #060607 !important; --header-secondary: #4e5058 !important; color: #313338 !important;
@@ -222,6 +223,7 @@ const RAISED = [
     // Found once a class from data was read in each value the stylesheet gives it.
     'voice-e2ee-label', 'verify-btn changed', 'ta-file saved', 'ta-file error', 'report-badge spam', 'audit-badge ban',
     'report-status pending', 'user-status idle', 'active-status away', 'cal-chip-time', 'attachment-saved',
+    'share-row-status-accepted-live',
 ];
 // High Contrast's muted and faint words already held 4.5:1 at these, so they were below the bar
 // without it only.
@@ -780,19 +782,31 @@ for (const [name, options, sheetName, url] of [
     }
     // Under a mouse and with the keyboard's focus: the same sweep with every :hover and :focus rule
     // on, each selector keeping its weight. A pointer resting on something hovers all around it too,
-    // so those come on together, as they do. 1280x800, where there is a mouse.
-    {
-        const { page, close } = await open(sweepHoveredUrl);
-        check(await page.evaluate(() => [...document.styleSheets].every(sheet => [...sheet.cssRules].every(rule => !/:hover|:focus/.test(rule.cssText)))), 'CONTROL: no :hover or :focus is left to wait for a pointer in the hovered sweep');
+    // so those come on together, as they do. At 1280x800 for a mouse, and at 390x844 for a tap, which
+    // leaves its :hover on (sticky) under mobile.css's touch rules.
+    for (const [name, options] of [
+        ['1280x800', { viewport: { width: 1280, height: 800 } }],
+        ['390x844 touch', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
+    ]) {
+        const { page, close } = await open(sweepHoveredUrl, options);
+        if (name.startsWith('1280')) check(await page.evaluate(() => [...document.styleSheets].every(sheet => [...sheet.cssRules].every(rule => !/:hover|:focus/.test(rule.cssText)))), 'CONTROL: no :hover or :focus is left to wait for a pointer in the hovered sweep');
+        else check(await page.evaluate(() => matchMedia('(hover: none)').matches), 'CONTROL: the tapped sweep is a device that cannot hover, as a phone');
         for (const contrast of CONTRASTS) {
             const rows = await read(page, ['light', contrast]);
             readings += rows.length;
-            byLook.push([`light/${contrast} 1280x800 hovered and focused`, unexcused(rows, true)]);
+            byLook.push([`light/${contrast} ${name} hovered and focused`, unexcused(rows, true)]);
         }
-        // CONTROL: Settings' Log Out under the pointer as it was (white words on a faint pink).
-        await page.evaluate(sheet => window.__old(sheet), '.settings-modal .danger-btn:not(.__never) { color: #fff !important; background: rgba(243, 139, 168, 0.1) !important; }');
-        const then = failing(await read(page, ['light', 'normal']));
-        check(then.some(row => row.cls.split(' ').includes('danger-btn')), 'CONTROL: the hovered sweep finds a button whose words go white under the pointer on Light', `${then.length} places`);
+        if (name.startsWith('1280')) {
+            // CONTROL: Settings' Log Out under the pointer as it was (white words on a faint pink).
+            await page.evaluate(sheet => window.__old(sheet), '.settings-modal .danger-btn:not(.__never) { color: #fff !important; background: rgba(243, 139, 168, 0.1) !important; }');
+            const then = failing(await read(page, ['light', 'normal']));
+            check(then.some(row => row.cls.split(' ').includes('danger-btn')), 'CONTROL: the hovered sweep finds a button whose words go white under the pointer on Light', `${then.length} places`);
+        } else {
+            // CONTROL: mobile.css's touch reset as it was, a weight that beat a button's own fill.
+            await page.evaluate(sheet => window.__old(sheet), '@media (pointer: coarse) and (max-width: 1024px) { @media (hover: none) { button:not(.__never), .btn:not(.__never) { background-color: inherit; } } }');
+            const then = failing(await read(page, ['light', 'normal']));
+            check(then.some(row => row.cls.split(' ').includes('games-btn-primary')), 'CONTROL: the tapped sweep finds a filled button the touch reset emptied (the card table\'s Sit)', `${then.length} places`);
+        }
         await page.evaluate(() => window.__old(''));
         await close();
     }
