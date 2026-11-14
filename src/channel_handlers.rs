@@ -230,6 +230,14 @@ pub async fn list_channels(
         }
     };
 
+    // The rows the reader is listed a child of: their own modes are what that child is listed
+    // by (list_row_parent).
+    let holds_listed: std::collections::HashSet<i32> = channels
+        .iter()
+        .filter(|c| perms_map.get(&(c.0 as i64)).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL)))
+        .filter_map(|c| c.5)
+        .collect();
+
     let response: Vec<ChannelResponse> = channels
         .into_iter()
         .filter_map(
@@ -252,6 +260,16 @@ pub async fn list_channels(
                 if !perms.has(Permissions::VIEW_CHANNEL) {
                     return None;
                 }
+                let own_modes = mode_ids.get(&id).cloned().unwrap_or_default();
+                let parent_modes = parent_id.and_then(|p| mode_ids.get(&p).cloned()).unwrap_or_default();
+                // A channel taken back inside a collection the reader is denied: they have
+                // no row of the collection, and its number and its modes are not theirs to
+                // read either (list_row_parent).
+                let parent_seen = parent_id.filter(|p| {
+                    perms_map.get(&(*p as i64)).is_some_and(|pp| pp.has(Permissions::VIEW_CHANNEL))
+                });
+                let (parent_id, row_modes, row_parent_modes) =
+                    list_row_parent(holds_listed.contains(&id), parent_id, parent_seen.is_some(), own_modes, parent_modes);
                 Some(ChannelResponse {
                     id: id as i64,
                     name,
@@ -264,8 +282,8 @@ pub async fn list_channels(
                     has_checklist,
                     sfu_mode,
                     my_permissions: perms.bits() as i64,
-                    mode_ids: mode_ids.get(&id).cloned().unwrap_or_default(),
-                    parent_mode_ids: parent_id.and_then(|p| mode_ids.get(&p).cloned()).unwrap_or_default(),
+                    mode_ids: row_modes,
+                    parent_mode_ids: row_parent_modes,
                 })
             },
         )
@@ -314,8 +332,13 @@ pub async fn create_channel(
     // with MANAGE_CHANNELS on their own server could create a channel already
     // grafted under another server's collection channel (the FK enforces
     // existence, not same-server) and inject content into that server's feed.
+    //
+    // A collection hidden from the caller answers as one that is not there: a manager who
+    // cannot see it neither learns it exists nor puts a channel in it (update_channel's rule).
     if let Some(parent_id) = parent_id {
-        if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await {
+        if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
+            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
+        {
             return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
     }
@@ -497,36 +520,11 @@ pub async fn update_channel(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<UpdateChannelRequest>,
 ) -> impl IntoResponse {
-    // Get channel's server_id to check permissions.
-    // WIDTH MATCHED TO THE SIBLINGS OF THIS SQL TEXT, deliberately: sqlx
-    // caches prepared statements per connection KEYED BY THE TEXT ALONE, so
-    // every user of one text must bind the same widths or whoever prepares
-    // second inherits the first's parameter types and gets an intermittent
-    // 22P03 "incorrect binary data format" — the cold-boot device-token 500
-    // of 2026-08-20 (the long version lives in device_token.rs).
-    let channel: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-            .bind(channel_id as i32)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-
-    let server_id = match channel {
-        Some((Some(sid),)) => sid,
-        _ => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+    // Seen by the caller, and Manage Channels: a channel hidden from them is not found.
+    let server_id = match require_manage_visible(&state.pool, channel_id, claims.sub).await {
+        Ok(sid) => sid,
+        Err(e) => return e.into_response(),
     };
-
-    // Check manage channels permission
-    if !user_has_permission(
-        &state.pool,
-        &server_id,
-        claims.sub,
-        Permissions::MANAGE_CHANNELS,
-    )
-    .await
-    {
-        return (StatusCode::FORBIDDEN, "Missing manage channels permission").into_response();
-    }
 
     // What the voice transport is BEFORE the update, so a change to it can be
     // detected afterwards. Read here rather than compared to the payload alone:
@@ -547,15 +545,27 @@ pub async fn update_channel(
     // It must be a collection too, and not the channel itself: nothing else draws a
     // child, so anything else takes the row off the sidebar with no way back in the UI.
     //
-    // Only a parent that CHANGES is judged. An installed client sends the whole form on
-    // every save, so a rename of a row already under something else names that parent
-    // again, and has to keep working.
-    if let Some(Some(parent_id)) = payload.parent_id {
-        let unchanged = before.is_some_and(|(_, _, parent)| parent == Some(parent_id));
-        if !unchanged
-            && (parent_id as i64 == channel_id
-                || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
-                || parent_would_loop(&state.pool, &server_id, channel_id, parent_id as i64).await)
+    // And one the caller can see: a collection hidden from them answers as one that is not
+    // there, and gains no channel from them.
+    //
+    // Only a parent that CHANGES is judged, and written. An installed client sends the whole
+    // form on every save, so a rename of a row already under something else names that parent
+    // again, and has to keep working. "Changes" is against the parent the caller SEES: the
+    // channel list sends none for a collection hidden from them (list_channels), so a client
+    // from before 0.9.855, which sends the parent on every save, sends null for a channel taken
+    // back inside a collection it cannot see, and that must not take the channel out of it.
+    // Nor does the list name a parent in another server (rows from before the same-server
+    // guard), so that is not one the caller sees here either.
+    let parent_seen = match before.and_then(|(_, _, parent)| parent) {
+        Some(parent) if sees_channel_in(&state.pool, &server_id, parent as i64, claims.sub).await => Some(parent),
+        _ => None,
+    };
+    let parent_change = parent_change(payload.parent_id, parent_seen);
+    if let Some(Some(parent_id)) = parent_change {
+        if parent_id as i64 == channel_id
+            || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
+            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
+            || parent_would_loop(&state.pool, &server_id, channel_id, parent_id as i64).await
         {
             return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
         }
@@ -591,8 +601,8 @@ pub async fn update_channel(
     )
     .bind(&payload.name)
     .bind(&payload.description)
-    .bind(payload.parent_id.is_some()) // Flag: was parent_id in the request at all?
-    .bind(payload.parent_id.flatten()) // The new parent: null takes it out of its collection
+    .bind(parent_change.is_some()) // Flag: does the parent change at all?
+    .bind(parent_change.flatten()) // The new parent: null takes it out of its collection
     .bind(channel_id)
     .bind(payload.slowmode_seconds)
     .bind(payload.is_afk)
@@ -614,7 +624,7 @@ pub async fn update_channel(
             // key for the new viewer set, put out whoever lost the channel from
             // its rooms. Started before anything else is awaited so a request
             // cancelled from here on cannot lose it.
-            let moved = match payload.parent_id {
+            let moved = match parent_change {
                 Some(now) => before.is_none_or(|(_, _, was)| was != now),
                 None => false,
             };
@@ -739,6 +749,55 @@ pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Optio
 /// What a client is told when a channel it names cannot be a parent.
 const PARENT_REFUSED: &str = "Parent channel must be a collection in the same server";
 
+/// What a request's `parent_id` changes: `None` for nothing, `Some(new)` otherwise. Judged
+/// against `seen`, the parent the CALLER sees: their channel list says none for a collection
+/// hidden from them, so naming none (or naming again the one they see) is not a change.
+fn parent_change(requested: Option<Option<i32>>, seen: Option<i32>) -> Option<Option<i32>> {
+    requested.filter(|&now| now != seen)
+}
+
+/// A mode id no mode has (`server_modes.id` is a SERIAL, so it starts at 1): a `mode_ids` of
+/// `[NO_MODE]` is listed under no mode, and with no mode on.
+const NO_MODE: i64 = 0;
+
+/// `(parent_id, mode_ids, parent_mode_ids)` of one row of a reader's channel list.
+///
+/// A channel a reader may see can sit in a collection they are denied: its own allow took the
+/// collection's cross back (docs/USER_GUIDE.md, Collections and permissions). Their list has no
+/// row of the collection, and until 0.9.863 this row still named it, its number in `parent_id`
+/// and its modes in `parent_mode_ids`. Now it names neither: the row has no parent (the client
+/// draws a row whose parent it does not hold at the top, so where it is drawn is unchanged), and
+/// what the collection's modes do to it is folded into its own `mode_ids`, so it is listed
+/// exactly when it was. A channel is listed when its own modes and its collection's each allow
+/// the mode that is on (docs/SERVER_MODES.md), so the fold is the modes both allow: the
+/// collection's when the channel has none of its own, the ones they share when it has, and
+/// [`NO_MODE`] when they share none (listed nowhere, as for everyone). That is what the reader's
+/// list shows over time anyway, and nothing more of the collection.
+///
+/// A row the reader is listed a child of is the exception (`holds_listed`): its `mode_ids` are
+/// what that child is listed by (the client takes them from the row, the one level the
+/// server's hide reads), so a collection inside one hidden from the reader, or a legacy parent
+/// that is no collection, keeps its own modes and only loses its parent.
+fn list_row_parent(
+    holds_listed: bool,
+    parent_id: Option<i32>,
+    parent_seen: bool,
+    own_modes: Vec<i64>,
+    parent_modes: Vec<i64>,
+) -> (Option<i32>, Vec<i64>, Vec<i64>) {
+    if parent_id.is_none() || parent_seen {
+        return (parent_id, own_modes, parent_modes);
+    }
+    if holds_listed || parent_modes.is_empty() {
+        return (None, own_modes, Vec::new());
+    }
+    if own_modes.is_empty() {
+        return (None, parent_modes, Vec::new());
+    }
+    let shared: Vec<i64> = own_modes.into_iter().filter(|m| parent_modes.contains(m)).collect();
+    (None, if shared.is_empty() { vec![NO_MODE] } else { shared }, Vec::new())
+}
+
 /// Would making `parent_id` the parent of `channel_id` close a loop - is
 /// `channel_id` already one of the collections above `parent_id`? A loop makes
 /// no collection reachable and has the permission resolvers read each
@@ -795,30 +854,11 @@ pub async fn delete_channel(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    // Get channel's server and verify user is member.
-    // Width matched to this text's siblings (see update_channel above).
-    let channel: Option<(String,)> = sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-        .bind(channel_id as i32)
-        .fetch_optional(&state.pool)
-        .await
-        .unwrap_or(None);
-
-    let server_id = match channel {
-        Some((sid,)) => sid,
-        None => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+    // Seen by the caller, and Manage Channels: a channel hidden from them is not found.
+    let server_id = match require_manage_visible(&state.pool, channel_id, claims.sub).await {
+        Ok(sid) => sid,
+        Err(e) => return e.into_response(),
     };
-
-    // Check user has MANAGE_CHANNELS permission
-    if !user_has_permission(
-        &state.pool,
-        &server_id,
-        claims.sub,
-        Permissions::MANAGE_CHANNELS,
-    )
-    .await
-    {
-        return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response();
-    }
 
     // What the foreign key's cascade is about to take: this channel and everything under
     // it, at any depth (a collection can sit inside a collection). UNION, not UNION ALL, so
@@ -857,31 +897,26 @@ pub async fn delete_channel(
     // propose until the owner notices, and the settings guard reading it as
     // "legacy" forever after. Disabling is the honest outcome: the feature
     // cannot work without its one channel, and re-enabling makes the owner
-    // pick a new one. Best-effort ordering with the DELETE below (no tx):
-    // if only this UPDATE lands the pin moves nowhere; if only the DELETE
-    // lands we are back to the FK gap, which the settings guard tolerates.
-    let _ = sqlx::query(
-        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = ANY($2)",
-    )
-    .bind(&server_id)
-    // i32, matching the INTEGER column — an i64 bind against INT4 is the
-    // intermittent 22P03 the cold-boot fix documents (sqlx caches by SQL text).
-    .bind(&doomed)
-    .execute(&state.pool)
-    .await;
-
+    // pick a new one. In ONE transaction with the DELETE (delete_channel_rows), so
+    // a delete that fails leaves the switch as it was.
     let named_by_a_mode = crate::mode_handlers::channel_is_named_by_a_mode(&state.pool, channel_id as i32).await;
 
-    // INT4 as well: every other user of this text binds the column's width.
-    let deleted_rows = sqlx::query("DELETE FROM channels WHERE id = $1")
-        .bind(channel_id as i32)
-        .execute(&state.pool)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+    // A DELETE that FAILED is a 500, and nothing follows it: the channel is still there, so
+    // nobody's list is told it changed and nobody leaves its rooms. Until 0.9.863 a failure
+    // read as "0 rows" and answered 204, so the client took the channel off the list of the
+    // person who pressed Delete while it stayed in everyone else's, and every member was told
+    // to refetch for nothing. 0 rows that did not fail (somebody else's delete got there
+    // first, or its collection's) still runs the tail, which empties nothing for it.
+    let deleted_rows = match delete_channel_rows(&state.pool, &server_id, channel_id as i32, &doomed).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("delete_channel: deleting {} failed: {:?}", channel_id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel").into_response();
+        }
+    };
 
     // EVERYTHING AFTER THE ROW IS GONE runs detached, started with nothing awaited between it and
-    // the DELETE (delete_server's own rule): a client that drops its connection a few
+    // the commit (delete_server's own rule): a client that drops its connection a few
     // milliseconds after pressing Delete cancels this handler, and a tail that was still to
     // start would never run. The channel would be gone from the database with its people
     // still in its room, and nobody told the list had changed.
@@ -889,6 +924,33 @@ pub async fn delete_channel(
     let _ = tail.await;
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// The writes of [`delete_channel`], in one transaction: clips off if the cascade takes the
+/// pinned clips channel, then the row itself. Answers how many rows went (0: somebody else's
+/// delete got there first). An `Err` changed nothing.
+async fn delete_channel_rows(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    channel_id: i32,
+    doomed: &Vec<i32>,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = ANY($2)")
+        .bind(server_id)
+        // i32, matching the INTEGER column — an i64 bind against INT4 is the
+        // intermittent 22P03 the cold-boot fix documents (sqlx caches by SQL text).
+        .bind(doomed)
+        .execute(&mut *tx)
+        .await?;
+    // INT4 as well: every other user of this text binds the column's width.
+    let rows = sqlx::query("DELETE FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(rows)
 }
 
 /// What follows a `DELETE FROM channels`, detached ([`delete_channel`] says why): a mode that
@@ -970,6 +1032,18 @@ pub async fn reorder_channels(
             .into_response();
     }
 
+    // Only channels the caller can see move: one hidden from them is not theirs to change, and
+    // a client's list never holds one (update_channel's rule). Skipped, not refused, so the
+    // answer says nothing about which numbers are channels. Fail closed.
+    let seen = match get_user_channels_permissions(&state.pool, &server_id, claims.sub, &payload.channel_ids).await {
+        Ok(perms) => perms,
+        Err(e) => {
+            tracing::error!("reorder_channels: resolving the caller's view failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to reorder channels").into_response();
+        }
+    };
+    let visible = |id: &i64| seen.get(id).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL));
+
     // Update positions in a REAL transaction — this comment used to lie: each
     // UPDATE ran on the pool independently, so an error mid-loop left a partially
     // reordered channel list. Commit all-or-nothing instead.
@@ -986,6 +1060,9 @@ pub async fn reorder_channels(
     };
 
     for (position, channel_id) in payload.channel_ids.iter().enumerate() {
+        if !visible(channel_id) {
+            continue;
+        }
         let result =
             sqlx::query("UPDATE channels SET position = $1 WHERE id = $2 AND server_id = $3")
                 .bind(position as i32)
@@ -1170,47 +1247,134 @@ pub struct PutOverwriteRequest {
     pub deny: i64,
 }
 
-/// Resolve a channel's owning server and require MANAGE_CHANNELS on it.
-/// Shared gate for the overwrite CRUD endpoints.
-async fn require_manage_channels(
-    state: &AppState,
+/// The gate of every route that CHANGES a channel (edit, delete, the overwrite routes): the
+/// channel's server, if the caller may see the channel and holds Manage Channels there.
+///
+/// A channel the caller cannot see answers exactly as one that does not exist, 404, whatever
+/// rights they hold: the read routes' rule. A manager who cannot see a channel neither learns
+/// that it is there nor changes it. Until 0.9.863 these routes checked Manage Channels alone, so
+/// a manager denied a channel (on it, or on its collection: docs/USER_GUIDE.md, Collections and
+/// permissions) could rename it, read and rewrite its overwrites, or delete it with its messages,
+/// by number, and a 403 against a 404 told them which numbers were channels. A non-member is
+/// refused 403, as on the read routes. Fail closed: a lookup that fails reads as not found.
+async fn require_manage_visible(
+    pool: &sqlx::PgPool,
     channel_id: i64,
     user_id: i64,
 ) -> Result<String, (StatusCode, &'static str)> {
-    // Width matched to this text's siblings (see update_channel).
-    let channel: Option<(Option<String>,)> =
-        match sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-            .bind(channel_id as i32)
-            .fetch_optional(&state.pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!(
-                    "Overwrite gate: channel lookup failed for {}: {:?}",
-                    channel_id,
-                    e
-                );
-                return Err((StatusCode::NOT_FOUND, "Channel not found"));
-            }
-        };
-
-    let server_id = match channel {
-        Some((Some(sid),)) => sid,
-        _ => return Err((StatusCode::NOT_FOUND, "Channel not found")),
+    let server_id = match get_user_channel_permissions(pool, channel_id, user_id).await {
+        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => server_id,
+        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+            return Err((StatusCode::NOT_FOUND, "Channel not found"))
+        }
+        ChannelPermAccess::NotMember => return Err((StatusCode::FORBIDDEN, "Not a member of this server")),
     };
-
-    if !user_has_permission(
-        &state.pool,
-        &server_id,
-        user_id,
-        Permissions::MANAGE_CHANNELS,
-    )
-    .await
-    {
+    if !user_has_permission(pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
         return Err((StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission"));
     }
     Ok(server_id)
+}
+
+/// How long a write that hid a channel from the person making it leaves them to finish the save
+/// it belongs to ([`require_manage_overwrites`]).
+const OVERWRITE_SAVE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How the overwrite routes let a caller through.
+struct OverwriteGate {
+    server_id: String,
+    /// They can see the channel. False: let through only to finish their own save.
+    sees: bool,
+}
+
+/// [`require_manage_visible`] for the overwrite routes, with one allowance: Edit Channel saves
+/// one role per request, highest role first, so a save can hide the channel from the person
+/// saving it before it is done. "Make #staff public" from a manager who sees it through their
+/// own role's allow takes that allow away first, and the @everyone row after it was refused
+/// as not found: the channel was left hidden from everyone but the owner. So a write that takes
+/// View away and leaves its own writer without the channel ([`settle_save_window`]) lets them
+/// on for [`OVERWRITE_SAVE_GRACE`], if the channel is still there and they still hold Manage
+/// Channels. Nothing else opens it (a read, a write that takes no View away, a pass inside the
+/// window), and their next request on these routes that finds them able to see the channel
+/// closes it. What it does not see: someone else giving them the channel back and hiding it
+/// again inside those 60 s, with no request of theirs between (and a hide by someone else that
+/// lands between a write of theirs and its check). In memory, per process: a restart in the
+/// middle of a save forgets it.
+async fn require_manage_overwrites(
+    state: &AppState,
+    channel_id: i64,
+    user_id: i64,
+) -> Result<OverwriteGate, (StatusCode, &'static str)> {
+    let refused = match require_manage_visible(&state.pool, channel_id, user_id).await {
+        Ok(server_id) => {
+            // They see it: whatever save hid it from them is over.
+            state.overwrite_saves.remove(&(user_id, channel_id));
+            return Ok(OverwriteGate { server_id, sees: true });
+        }
+        Err(refused) => refused,
+    };
+    let saving = state
+        .overwrite_saves
+        .get(&(user_id, channel_id))
+        .is_some_and(|until| *until > std::time::Instant::now());
+    if !saving || refused.0 != StatusCode::NOT_FOUND {
+        return Err(refused);
+    }
+    let server_id = match get_user_channel_permissions(&state.pool, channel_id, user_id).await {
+        ChannelPermAccess::Allowed { server_id, .. } => server_id,
+        _ => return Err(refused),
+    };
+    if !user_has_permission(&state.pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
+        return Err(refused);
+    }
+    Ok(OverwriteGate { server_id, sees: false })
+}
+
+/// Does replacing overwrite row `old` by `new` (`None`: no row) take View away from what that
+/// row gives: an allow of it gone, or a deny of it new?
+fn hides_view(old: Option<(i64, i64)>, new: Option<(i64, i64)>) -> bool {
+    let view = Permissions::VIEW_CHANNEL.bits() as i64;
+    let (old_allow, old_deny) = old.unwrap_or((0, 0));
+    let (new_allow, new_deny) = new.unwrap_or((0, 0));
+    (old_allow & view != 0 && new_allow & view == 0) || (old_deny & view == 0 && new_deny & view != 0)
+}
+
+/// After an overwrite write that went through, the window of [`require_manage_overwrites`]:
+/// opened when the write took View away (`hid`, [`hides_view`]), was made by someone who could
+/// see the channel, and left them without it; closed when its writer can see the channel again.
+/// A lookup that does not answer opens and closes nothing.
+async fn settle_save_window(state: &AppState, gate: &OverwriteGate, channel_id: i64, user_id: i64, hid: bool) {
+    let key = (user_id, channel_id);
+    // A pass that could see the channel has already closed any window (the gate), and a write
+    // that took no View away cannot open one.
+    if gate.sees && !hid {
+        return;
+    }
+    let sees_now = match get_user_channel_permissions(&state.pool, channel_id, user_id).await {
+        ChannelPermAccess::Allowed { server_id, perms } if server_id == gate.server_id => {
+            perms.has(Permissions::VIEW_CHANNEL)
+        }
+        _ => return,
+    };
+    if sees_now {
+        state.overwrite_saves.remove(&key);
+        return;
+    }
+    if gate.sees && hid {
+        let now = std::time::Instant::now();
+        if state.overwrite_saves.len() > 4096 {
+            state.overwrite_saves.retain(|_, until| *until > now);
+        }
+        state.overwrite_saves.insert(key, now + OVERWRITE_SAVE_GRACE);
+    }
+}
+
+/// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup says no.
+async fn sees_channel_in(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, user_id: i64) -> bool {
+    matches!(
+        get_user_channel_permissions(pool, channel_id, user_id).await,
+        ChannelPermAccess::Allowed { server_id: in_server, perms }
+            if in_server == server_id && perms.has(Permissions::VIEW_CHANNEL)
+    )
 }
 
 /// List a channel's permission overwrites (managers only).
@@ -1219,7 +1383,7 @@ pub async fn list_overwrites(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_manage_channels(&state, channel_id, claims.sub).await {
+    if let Err(e) = require_manage_overwrites(&state, channel_id, claims.sub).await {
         return e.into_response();
     }
 
@@ -1264,10 +1428,11 @@ pub async fn put_overwrite(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<PutOverwriteRequest>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_channels(&state, channel_id, claims.sub).await {
-        Ok(sid) => sid,
+    let gate = match require_manage_overwrites(&state, channel_id, claims.sub).await {
+        Ok(gate) => gate,
         Err(e) => return e.into_response(),
     };
+    let server_id = gate.server_id.clone();
 
     // A bit cannot be both allowed and denied at once.
     if payload.allow & payload.deny != 0 {
@@ -1319,22 +1484,31 @@ pub async fn put_overwrite(
             .into_response();
     }
 
-    let result = sqlx::query(
-        "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
+    // The row it replaces comes back with it (the CTE reads the snapshot before the write), so
+    // whether THIS write took View away is the write's own answer (settle_save_window).
+    let result: Result<(Option<i64>, Option<i64>), sqlx::Error> = sqlx::query_as(
+        "WITH old AS (SELECT allow, deny FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2) \
+         INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (channel_id, role_id) \
-         DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny",
+         DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny \
+         RETURNING (SELECT allow FROM old), (SELECT deny FROM old)",
     )
     .bind(channel_id)
     .bind(role_id)
     .bind(payload.allow)
     .bind(payload.deny)
-    .execute(&state.pool)
+    .fetch_one(&state.pool)
     .await;
 
     match result {
-        Ok(_) => {
-            crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+        Ok((old_allow, old_deny)) => {
+            // The sweep starts straight after the commit, with nothing awaited in between
+            // (ws::start_perms_change): a request cancelled from here on cannot lose it.
+            let sweep = crate::ws::start_perms_change(&state, &server_id);
+            let hid = hides_view(old_allow.zip(old_deny), Some((payload.allow, payload.deny)));
+            settle_save_window(&state, &gate, channel_id, claims.sub, hid).await;
+            sweep.wait().await;
             StatusCode::OK.into_response()
         }
         Err(e) => {
@@ -1358,24 +1532,29 @@ pub async fn delete_overwrite(
     Path((channel_id, role_id)): Path<(i64, i64)>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let server_id = match require_manage_channels(&state, channel_id, claims.sub).await {
-        Ok(sid) => sid,
+    let gate = match require_manage_overwrites(&state, channel_id, claims.sub).await {
+        Ok(gate) => gate,
         Err(e) => return e.into_response(),
     };
+    let server_id = gate.server_id.clone();
 
-    let result = sqlx::query(
-        "DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2",
+    // What it removed comes back with it: whether THIS write took View away (settle_save_window).
+    let result: Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(
+        "DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2 RETURNING allow",
     )
     .bind(channel_id)
     .bind(role_id)
-    .execute(&state.pool)
+    .fetch_optional(&state.pool)
     .await;
 
     match result {
-        Ok(res) => {
-            // Only a real change needs the broadcast + eviction pass.
-            if res.rows_affected() > 0 {
-                crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+        Ok(removed) => {
+            // Only a real change needs the broadcast + eviction pass. Started straight after
+            // the commit, with nothing awaited in between (ws::start_perms_change).
+            if let Some(old_allow) = removed {
+                let sweep = crate::ws::start_perms_change(&state, &server_id);
+                settle_save_window(&state, &gate, channel_id, claims.sub, hides_view(Some((old_allow, 0)), None)).await;
+                sweep.wait().await;
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1408,6 +1587,84 @@ mod tests {
         assert_eq!(parse(serde_json::json!({ "parent_id": 7 })), Ok(Some(Some(7))), "a value: set it");
         assert_eq!(parse(serde_json::json!({ "parent_id": "7" })), Err(()), "not a channel id");
         assert_eq!(parse(serde_json::json!({ "parent_id": 5_000_000_000_i64 })), Err(()), "wider than the column");
+    }
+
+    #[test]
+    fn only_taking_view_away_can_hide_a_channel() {
+        let view = Permissions::VIEW_CHANNEL.bits() as i64;
+        let speak = Permissions::SPEAK.bits() as i64;
+        assert!(hides_view(Some((view, 0)), None), "an allow of View removed");
+        assert!(hides_view(Some((view | speak, 0)), Some((speak, 0))), "an allow of View taken out of the row");
+        assert!(hides_view(None, Some((0, view))), "a new deny of View");
+        assert!(hides_view(Some((0, speak)), Some((0, speak | view))), "a deny of View added to the row");
+        assert!(!hides_view(Some((0, view)), None), "a deny of View removed gives, it does not take");
+        assert!(!hides_view(Some((0, view)), Some((0, view))), "the same row again");
+        assert!(!hides_view(None, Some((0, speak))), "a deny of something else");
+        assert!(!hides_view(Some((speak, 0)), Some((view, 0))), "an allow of View added");
+        assert!(!hides_view(Some((view, 0)), Some((view, 0))), "an allow of View kept");
+    }
+
+    /// A request may be cancelled at any await, and the overwrite routes' sweep (the frames, the key,
+    /// the evictions) runs only once it is started: nothing but the write's own `.await` comes
+    /// between the write and `start_perms_change`.
+    #[test]
+    fn nothing_is_awaited_between_an_overwrite_write_and_its_sweep() {
+        let src = include_str!("channel_handlers.rs");
+        for (what, write) in [
+            ("put", "\"WITH old AS (SELECT allow, deny FROM channel_permission_overwrites"),
+            ("delete", "\"DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2 RETURNING allow\""),
+        ] {
+            let from = src.find(write).unwrap_or_else(|| panic!("the {what} write"));
+            let to = from + src[from..].find("crate::ws::start_perms_change(").unwrap_or_else(|| panic!("the {what} sweep"));
+            assert_eq!(src[from..to].matches(".await").count(), 1, "{what}: only the write's own await: {}", &src[from..to]);
+        }
+    }
+
+    #[test]
+    fn a_parent_changes_only_against_the_one_the_caller_sees() {
+        assert_eq!(parent_change(None, Some(4)), None, "left out");
+        assert_eq!(parent_change(Some(Some(4)), Some(4)), None, "named again");
+        assert_eq!(parent_change(Some(None), None), None, "none, where the caller sees none (a hidden collection too)");
+        assert_eq!(parent_change(Some(None), Some(4)), Some(None), "cleared");
+        assert_eq!(parent_change(Some(Some(5)), Some(4)), Some(Some(5)), "moved");
+        assert_eq!(parent_change(Some(Some(5)), None), Some(Some(5)), "put in one");
+    }
+
+    #[test]
+    fn a_row_names_a_parent_only_its_reader_sees() {
+        let row = |holds: bool, p: Option<i32>, seen: bool, own: &[i64], parent: &[i64]| {
+            list_row_parent(holds, p, seen, own.to_vec(), parent.to_vec())
+        };
+        assert_eq!(row(false, Some(9), true, &[1], &[2]), (Some(9), vec![1], vec![2]), "seen: as stored");
+        assert_eq!(row(false, None, false, &[1], &[]), (None, vec![1], vec![]), "no parent: as stored");
+        assert_eq!(row(false, Some(9), false, &[], &[]), (None, vec![], vec![]), "hidden: no parent, nothing to fold");
+        assert_eq!(row(false, Some(9), false, &[1, 3], &[]), (None, vec![1, 3], vec![]));
+        assert_eq!(row(false, Some(9), false, &[], &[2, 5]), (None, vec![2, 5], vec![]), "the collection's modes");
+        assert_eq!(row(false, Some(9), false, &[1, 2, 3], &[2, 3, 4]), (None, vec![2, 3], vec![]), "the ones both allow");
+        assert_eq!(row(false, Some(9), false, &[1], &[2]), (None, vec![NO_MODE], vec![]), "none both allow");
+        assert_eq!(row(true, Some(9), false, &[1], &[2]), (None, vec![1], vec![]), "a row holding a listed one keeps its own");
+    }
+
+    /// The fold lists a row exactly as before, under every mode and under none, by the client's
+    /// own rule (api/serverModes.ts, shownByMode / shownWithParent: a row with no parent is
+    /// listed by its own modes alone), for every pair of mode sets over three modes.
+    #[test]
+    fn a_folded_row_is_listed_exactly_when_it_was() {
+        let shown = |ids: &[i64], active: Option<i64>| ids.is_empty() || active.is_some_and(|a| ids.contains(&a));
+        let sets: Vec<Vec<i64>> = (0u8..8).map(|bits| (1..=3).filter(|m| bits & (1 << (m - 1)) != 0).collect()).collect();
+        for own in &sets {
+            for parent in &sets {
+                let (folded_parent, folded, folded_parent_modes) = list_row_parent(false, Some(9), false, own.clone(), parent.clone());
+                assert_eq!((folded_parent, folded_parent_modes.len()), (None, 0));
+                for active in [None, Some(1), Some(2), Some(3), Some(4)] {
+                    assert_eq!(
+                        shown(&folded, active),
+                        shown(own, active) && shown(parent, active),
+                        "own {own:?}, collection {parent:?}, mode {active:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -1181,6 +1181,10 @@ pub struct AppState {
     /// Per session id: `web_push_seq` when its last connection closed. What
     /// came before it, that browser saw while it was open.
     pub web_push_away: DashMap<String, (u64, Instant)>,
+    /// Per (user, channel): until when that user may finish a save of the channel's overwrites
+    /// that hid the channel from them partway (channel_handlers::require_manage_overwrites).
+    /// In memory, pruned.
+    pub overwrite_saves: DashMap<(UserId, i64), Instant>,
     /// Notification frames that found no live session, awaiting the delivery
     /// socket the wake signal summons. Bounded + TTL'd; see enqueue/drain.
     pub undelivered: DashMap<UserId, std::collections::VecDeque<(Instant, ServerMessage)>>,
@@ -1541,6 +1545,7 @@ impl AppState {
             ),
             web_push_cursor: DashMap::new(),
             web_push_away: DashMap::new(),
+            overwrite_saves: DashMap::new(),
             undelivered: DashMap::new(),
             orphan_presence_logs: DashMap::new(),
             clip_proposals: DashMap::new(),

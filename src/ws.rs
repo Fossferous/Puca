@@ -337,96 +337,7 @@ async fn handle_socket(
         // since blocked. Every channel-scoped or sender-scoped parked frame is
         // re-checked here; the verdicts are memoized per drain (channel_id for
         // VIEW, sender_id for the block/consent gate).
-        let mut views_cache: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
-        let mut dm_ok_cache: std::collections::HashMap<UserId, bool> = std::collections::HashMap::new();
-        for msg in state.drain_undelivered(user_id) {
-            let keep = match &msg {
-                ServerMessage::MessageNotification { channel_id, .. } => {
-                    match views_cache.get(channel_id) {
-                        Some(&v) => v,
-                        None => {
-                            let v = matches!(
-                                get_user_channel_permissions(&state.pool, *channel_id, user_id).await,
-                                ChannelPermAccess::Allowed { perms, .. }
-                                    if perms.has(Permissions::VIEW_CHANNEL)
-                            );
-                            views_cache.insert(*channel_id, v);
-                            v
-                        }
-                    }
-                }
-                // ClipPending carries only a clip_id, so resolve the proposal's
-                // channels and re-run the SAME rule the live/REST clip surfaces
-                // apply (clip_access in clip_handlers: VIEW on the voice channel):
-                // a member kicked/VIEW-denied since the proposal must not get a
-                // consent doorbell for a call they were removed from. Fail
-                // CLOSED: a proposal that has since expired or been swept
-                // resolves to no channels, so the pending frame is dropped
-                // (GET /clips/:id would 404 anyway).
-                ServerMessage::ClipPending { clip_id } => {
-                    // Snapshot the two channel ids, dropping the DashMap guard
-                    // before any await.
-                    let channels = state
-                        .clip_proposals
-                        .get(clip_id)
-                        .map(|p| (p.voice_channel_id, p.target_channel_id));
-                    match channels {
-                        Some((voice_cid, target_cid)) => {
-                            let mut ok = true;
-                            // Only the VOICE channel gates participation: an approver who
-                            // cannot VIEW the pinned target channel still holds a consent
-                            // seat and sees the target REDACTED (review finding 9), so the
-                            // doorbell must still reach them. ClipPending is content-free.
-                            let _ = target_cid;
-                            for cid in [voice_cid] {
-                                let v = match views_cache.get(&cid) {
-                                    Some(&v) => v,
-                                    None => {
-                                        let v = matches!(
-                                            get_user_channel_permissions(&state.pool, cid, user_id).await,
-                                            ChannelPermAccess::Allowed { perms, .. }
-                                                if perms.has(Permissions::VIEW_CHANNEL)
-                                        );
-                                        views_cache.insert(cid, v);
-                                        v
-                                    }
-                                };
-                                if !v {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                            ok
-                        }
-                        None => false,
-                    }
-                }
-                // A DirectMessage parked while nobody was home must not be
-                // handed over if a block (either direction) or the recipient's
-                // DM-consent flag now forbids it — the same gate the WS send
-                // path ran once at enqueue time. users_can_dm re-runs exactly
-                // that (conversation exists + no block either way + consent);
-                // fail CLOSED via its own error handling.
-                ServerMessage::DirectMessage { sender, .. } => {
-                    let from = sender.id;
-                    match dm_ok_cache.get(&from) {
-                        Some(&v) => v,
-                        None => {
-                            let v = users_can_dm(&state, from, user_id).await;
-                            dm_ok_cache.insert(from, v);
-                            v
-                        }
-                    }
-                }
-                _ => true,
-            };
-            if !keep {
-                tracing::info!(
-                    "dropping parked frame for user {}: no longer entitled at delivery time",
-                    user_id
-                );
-                continue;
-            }
+        for msg in still_entitled(&state, user_id, state.drain_undelivered(user_id)).await {
             state.send_to_conn(user_id, conn_id, msg);
         }
     } else {
@@ -2397,6 +2308,112 @@ fn truncate_reason(reason: String) -> String {
 #[cfg(test)]
 pub fn truncate_reason_for_test(reason: &str) -> String {
     truncate_reason(reason.to_string())
+}
+
+/// Of `frames`, the ones `user_id` is STILL entitled to, in order: re-checked against the
+/// CURRENT permissions, because a frame was logged while they could VIEW its channel (or while
+/// nobody blocked the sender), and a kick, a deny or a block may have landed since. Handing it
+/// over anyway told a removed member which channel got a message, when, and from whom, and
+/// named a sender they had since blocked. Every channel-scoped or sender-scoped frame is
+/// re-checked; the verdicts are memoized per call (channel_id for VIEW, sender_id for the
+/// block/consent gate). Fail closed. Both doors of the parked frames go through this one
+/// function: the Android delivery socket's drain, and the web app's `/push/web/pending`
+/// (push_web_handlers), which until 0.9.863 reported what it had logged with no re-check.
+pub(crate) async fn still_entitled(state: &Arc<AppState>, user_id: UserId, frames: Vec<ServerMessage>) -> Vec<ServerMessage> {
+    let mut views_cache: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+    let mut dm_ok_cache: std::collections::HashMap<UserId, bool> = std::collections::HashMap::new();
+    let mut kept = Vec::with_capacity(frames.len());
+    for msg in frames {
+        let keep = match &msg {
+            ServerMessage::MessageNotification { channel_id, .. } => {
+                match views_cache.get(channel_id) {
+                    Some(&v) => v,
+                    None => {
+                        let v = matches!(
+                            get_user_channel_permissions(&state.pool, *channel_id, user_id).await,
+                            ChannelPermAccess::Allowed { perms, .. }
+                                if perms.has(Permissions::VIEW_CHANNEL)
+                        );
+                        views_cache.insert(*channel_id, v);
+                        v
+                    }
+                }
+            }
+            // ClipPending carries only a clip_id, so resolve the proposal's
+            // channels and re-run the SAME rule the live/REST clip surfaces
+            // apply (clip_access in clip_handlers: VIEW on the voice channel):
+            // a member kicked/VIEW-denied since the proposal must not get a
+            // consent doorbell for a call they were removed from. Fail
+            // CLOSED: a proposal that has since expired or been swept
+            // resolves to no channels, so the pending frame is dropped
+            // (GET /clips/:id would 404 anyway).
+            ServerMessage::ClipPending { clip_id } | ServerMessage::ClipProposed { clip_id, .. } => {
+                // Snapshot the two channel ids, dropping the DashMap guard
+                // before any await.
+                let channels = state
+                    .clip_proposals
+                    .get(clip_id)
+                    .map(|p| (p.voice_channel_id, p.target_channel_id));
+                match channels {
+                    Some((voice_cid, target_cid)) => {
+                        let mut ok = true;
+                        // Only the VOICE channel gates participation: an approver who
+                        // cannot VIEW the pinned target channel still holds a consent
+                        // seat and sees the target REDACTED (review finding 9), so the
+                        // doorbell must still reach them. ClipPending is content-free.
+                        let _ = target_cid;
+                        for cid in [voice_cid] {
+                            let v = match views_cache.get(&cid) {
+                                Some(&v) => v,
+                                None => {
+                                    let v = matches!(
+                                        get_user_channel_permissions(&state.pool, cid, user_id).await,
+                                        ChannelPermAccess::Allowed { perms, .. }
+                                            if perms.has(Permissions::VIEW_CHANNEL)
+                                    );
+                                    views_cache.insert(cid, v);
+                                    v
+                                }
+                            };
+                            if !v {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
+                    }
+                    None => false,
+                }
+            }
+            // A DirectMessage parked while nobody was home must not be
+            // handed over if a block (either direction) or the recipient's
+            // DM-consent flag now forbids it — the same gate the WS send
+            // path ran once at enqueue time. users_can_dm re-runs exactly
+            // that (conversation exists + no block either way + consent);
+            // fail CLOSED via its own error handling.
+            ServerMessage::DirectMessage { sender, .. } => {
+                let from = sender.id;
+                match dm_ok_cache.get(&from) {
+                    Some(&v) => v,
+                    None => {
+                        let v = users_can_dm(state, from, user_id).await;
+                        dm_ok_cache.insert(from, v);
+                        v
+                    }
+                }
+            }
+            _ => true,
+        };
+        if !keep {
+            tracing::info!(
+                "dropping a frame for user {}: no longer entitled to it",
+                user_id
+            );
+            continue;
+        }
+        kept.push(msg);
+    }
+    kept
 }
 
 /// May `from` send `to` a file? Same rule as sending a DM: a conversation must
