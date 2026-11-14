@@ -255,6 +255,15 @@ describe('a preview never prints a spoiler\'s words', () => {
         expect(messagePreviewText(`||${ENC('a.png')}|| the butler`, undefined, { spoilers: 'keep' })).toBe('Spoiler image the butler');
     });
 
+    it('a ref runs into nothing that stands for a spoiler: each covered file keeps its chip', () => {
+        // A typed address before the bars would run on into what stands for the file in them, and that
+        // file's chip would be gone, the next spoiler's chips one place out.
+        expect(messagePreviewSegments(`sovereign-enc:abc||${ENC('x.png')}||`)).toEqual([
+            { type: 'attachment', kind: 'file', name: 'attachment', spoiler: false },
+            { type: 'attachment', kind: 'image', name: 'x.png', spoiler: true },
+        ]);
+    });
+
     it('a private-use character typed in does not change which bars pair up', () => {
         // The preview read a copy with both characters it uses replaced by one other: two different
         // words became the same word, and the readings that count words chose another reading.

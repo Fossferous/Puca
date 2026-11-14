@@ -65,9 +65,9 @@ export type PreviewSegment =
  * `i` throughout: URL schemes are case-insensitive (isSafeUrl lowercases), and
  * a case-sensitive matcher once let `SOVEREIGN-ENC:` carry its key past a scrub.
  */
-const REF_RE = /(\|\|)?(!?)\[([^[\]\n]*)\]\(\s*(sovereign-(?:enc|clip):[^)\s]*)\s*(?:\)(\|\|)?|$)|(sovereign-(?:enc|clip):[^\s)\]|]*)/gi;
+const REF_RE = /(\|\|)?(!?)\[([^[\]\n\uE000\uE001]*)\]\(\s*(sovereign-(?:enc|clip):[^)\s\uE000\uE001]*)\s*(?:\)(\|\|)?|$)|(sovereign-(?:enc|clip):[^\s)\]|\uE000\uE001]*)/gi;
 /** A markdown link cut off before its scheme was even complete: `![a.png](sover`. */
-const CUT_LINK_RE = /(\|\|)?(!?)\[([^[\]\n]*)\]\(\s*([a-z-]*)$/i;
+const CUT_LINK_RE = /(\|\|)?(!?)\[([^[\]\n\uE000\uE001]*)\]\(\s*([a-z-]*)$/i;
 
 interface RefMatch {
     start: number;
