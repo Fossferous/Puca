@@ -369,7 +369,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
   (`notes/model/dailyNote.ts`).
 - **Bold, italic, underline, strikethrough, bullets** — Ctrl+B, Ctrl+I,
   Ctrl+U, Ctrl+T and Ctrl+Shift+L in a note's text (here, in Púca's Tasks
-  view and in a sticky note), and Enter on a bullet starts the next one.
+  view and in a sticky note; in a browser tab the browser keeps Ctrl+T for
+  a new tab), and Enter on a bullet starts the next one.
   They are Markdown marks written into the text itself (`**bold**`,
   `*italic*`, `<u>underline</u>`, `~~strike~~`, `- `), drawn as formatting
   wherever the text is read rather than typed in — the open note's read

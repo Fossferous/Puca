@@ -113,6 +113,12 @@ describe('keys pressed with nothing selected, then a letter typed', () => {
         'a ~* b',
         'x *<u> y',
         'x ~</u> y',
+        'x = 2**3',
+        'a~~~~b',
+        'see note**.',
+        'rated 5**',
+        '***Note: read this***',
+        '*(,**!*',
     ];
     const SEQS: FormatKind[][] = [];
     for (const a of KINDS) {
@@ -189,6 +195,48 @@ describe('keys pressed with nothing selected, then a letter typed', () => {
                 }
             }
         }
+    });
+
+    it('mark characters a person typed are never taken out as a key\'s pair (review 7)', () => {
+        for (const [line, at, k] of [
+            ['x = 2**3', 6, 'italic'], ['a**b', 2, 'italic'], ['rated 5**', 8, 'italic'],
+            ['see note**.', 9, 'italic'], ['a~~~~b', 3, 'strike'], ['*(,**!*', 4, 'italic'],
+            // Nor folded into a pair a key puts in, where they would stop
+            // reading as characters.
+            ['*(,**!*', 4, 'bold'], ['*(,**!*', 4, 'underline'],
+        ] as const) {
+            expect(toggleMark(line, at, at, k).text, `${line} @${at} ${k}`).toBe(line);
+        }
+    });
+
+    it('inside a run that has the mark already, no pair goes in that would do nothing (review 7)', () => {
+        const line = '***Note: read this***';
+        for (const k of ['bold', 'italic'] as const) {
+            let text = line;
+            let caret = 8;
+            for (let n = 0; n < 3; n++) {
+                const r = toggleMark(text, caret, caret, k);
+                text = r.text;
+                caret = r.selStart;
+            }
+            expect(text, k).toBe(line);
+        }
+    });
+
+    it('a bare bullet marker is never marked, whatever is selected (review 7)', () => {
+        const text = '- milk\n- ';
+        expect(toggleMark(text, 0, text.length, 'bold').text).toBe('- **milk**\n- ');
+        for (const k of KINDS) {
+            expect(toggleMark(text, 7, 9, k).text, k).toBe(text);
+            expect(toggleMark('- ', 0, 2, k).text, k).toBe('- ');
+        }
+        // With nothing selected, the pair goes after the marker, and typing
+        // into it reads as a bullet with the mark.
+        const r = toggleMark('- ', 0, 0, 'bold');
+        expect(r.text).toBe('- ****');
+        const typed = r.text.slice(0, r.selStart) + 'x' + r.text.slice(r.selStart);
+        expect(readNoteFormat(typed)[0].bullet).not.toBeNull();
+        expect(readNoteFormat(typed)[0].runs.find(x => x.text === 'x')?.marks.bold).toBe(true);
     });
 
     it('a pair put in between two typed mark characters of other kinds comes out again', () => {

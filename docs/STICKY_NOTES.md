@@ -178,7 +178,9 @@ and its Android app never load it.
 
 Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+T and Ctrl+Shift+L — Microsoft's keys — work in
 a sticky note, and in every note's text in Púca Notes and Púca's Tasks view.
-A sticky note has the bar at the bottom too.
+A sticky note has the bar at the bottom too. In a web browser's tab Ctrl+T
+never reaches the page (Chrome, Edge and Firefox keep it for a new tab), so
+strikethrough there has no key; in the desktop app it does.
 
 The formatting is **written into the note's text as marks**, a subset of
 GitHub-flavoured Markdown (`notes/model/noteFormat.ts`):
@@ -215,12 +217,14 @@ afresh in one canonical form (a word of a bold phrase made italic splits the
 phrase, `**big** ***deal***`, where gluing `*` to `**` would read as
 nothing); else no change at all. A key never leaves marks that show as stray
 characters. An empty pair reads as typed characters until something goes
-between its halves, so it is judged by what typing there WOULD give: it goes
-in only where a letter typed next has the mark and every other character
-still reads as it does, and pressed again the key takes out the nearest pair
-of its kind that typing then reads right with (also one inside another
-kind's pair, `**<u>|</u>**`). Mark characters a person typed (a line of
-stars, a `*` beside a `~`) are never taken for a key's pairs.
+between its halves, so it is judged by what typing there WOULD give: the
+letter typed next must FLIP the key's mark, gaining it where it had not
+(the pair goes in) or losing it where it had (the nearest pair of its kind
+comes out, also one inside another kind's pair, `**<u>|</u>**`), with its
+other marks as they were and every other character reading as it does. So
+inside a run that is bold already the bold key puts no pair in, and mark
+characters a person typed (`2**3`, a line of stars, a `*` beside a `~`) are
+never taken out, nor folded into a key's pair.
 `src/tests/noteFormatEdits.test.ts` sweeps every selection of a set of
 awkward lines (bullets, nested marks, an address, Devanagari, an emoji) for
 every mark and holds each edit to that, and presses every sequence of up to

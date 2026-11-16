@@ -69,6 +69,9 @@ const DELIMS: Delim[] = [
 
 const MAX_DEPTH = 6;
 const BULLET_RE = /^([ \t]*)([-*•]) (?=\S)/;
+/** A bullet with nothing after its marker yet (what Enter on a bullet and
+ *  Ctrl+Shift+L leave): it reads as `- ` until something is typed. */
+const BARE_BULLET_RE = /^([ \t]*)([-*•]) $/;
 // Letters, numbers and the marks that combine with them (an accent typed
 // as its own character, a Devanagari vowel sign): one word, never two.
 // A variation selector is not one: it belongs to the emoji before it (a
@@ -294,14 +297,21 @@ interface LineModel {
 
 function lineModel(line: string): LineModel {
     const [l] = readNoteFormat(line);
-    const m = l.bullet ? BULLET_RE.exec(line) : null;
+    // A bullet's marker — also a bare one, `- ` with nothing after it yet,
+    // which is a bullet the moment anything is typed (Enter and Ctrl+Shift+L
+    // leave one): never a character a key marks.
+    const m = l.bullet ? BULLET_RE.exec(line) : BARE_BULLET_RE.exec(line);
+    const prefix = m ? m[0] : '';
     const chars: PlainChar[] = [];
     let link = 0;
     for (const r of l.runs) {
         const id = r.kind === 'link' ? link++ : -1;
-        for (let k = 0; k < r.text.length; k++) chars.push({ ch: r.text[k], src: r.from + k, marks: r.marks, link: id });
+        for (let k = 0; k < r.text.length; k++) {
+            if (r.from + k < prefix.length) continue;
+            chars.push({ ch: r.text[k], src: r.from + k, marks: r.marks, link: id });
+        }
     }
-    return { prefix: m ? m[0] : '', chars };
+    return { prefix, chars };
 }
 
 const sameMarks = (a: Marks, b: Marks) =>
@@ -408,19 +418,51 @@ function markRun(line: string, at: number): [number, number] {
 }
 
 /**
- * Typing a letter at `at` in `base`, between `open` and `close`, gives a
- * letter whose `kind` is `want`; the empty pairs around it are all used up as
- * marks, none left showing as characters; and every character of `orig`
- * outside the empty pairs around its caret (`origAt`) still reads as it does.
+ * [from, to): the empty pairs a key put in around `at` — markRun's, when
+ * they really are that. Characters that read as characters now (a pair reads
+ * as typed stars until something goes between its halves) count only if a
+ * letter typed between them uses every one of them up as a mark, every other
+ * character reading as it does; stars a person typed (`*(,**!*`, where a
+ * letter between them reads `(,*x` and `!*`) are characters, and kept.
  */
-function typingReads(orig: string, origAt: number, base: string, at: number, open: string, close: string, kind: FormatKind, want: boolean): boolean {
+function pairsAround(line: string, at: number): [number, number] {
+    const [a, b] = markRun(line, at);
+    if (a === b) return [a, b];
+    const read = lineChars(line);
+    if (!read.some(c => c.src >= a && c.src < b)) return [a, b];
+    const after = lineChars(line.slice(0, at) + 'x' + line.slice(at));
+    // In the line with the letter in, the run is [a, b + 1).
+    if (after.some(c => c.src >= a && c.src < b + 1 && c.src !== at)) return [at, at];
+    const before = read.filter(c => c.src < a || c.src >= b);
+    const rest = after.filter(c => c.src < a || c.src >= b + 1);
+    const kept = rest.length === before.length && rest.every((c, i) => c.ch === before[i].ch
+        && (c.link >= 0) === (before[i].link >= 0) && (SPACE.test(c.ch) || sameMarks(c.marks, before[i].marks)));
+    return kept ? [a, b] : [at, at];
+}
+
+/** The marks a letter typed at `at` would have, or null where typing there
+ *  gives no letter of the line's words (inside a bullet's marker). */
+function typedMarks(line: string, at: number): Marks | null {
+    const sim = line.slice(0, at) + 'x' + line.slice(at);
+    const x = lineChars(sim).find(c => c.src === at);
+    return x && x.ch === 'x' ? x.marks : null;
+}
+
+/**
+ * Typing a letter at `at` in `base`, between `open` and `close`, gives a
+ * letter with exactly the marks `want`; the empty pairs around it are all
+ * used up as marks, none left showing as characters; and every character of
+ * `orig` outside the empty pairs around its caret (`origAt`) still reads as
+ * it does.
+ */
+function typingReads(orig: string, origAt: number, base: string, at: number, open: string, close: string, want: Marks): boolean {
     const sim = base.slice(0, at) + open + 'x' + close + base.slice(at);
     const xAt = at + open.length;
-    const [oa, ob] = markRun(orig, origAt);
+    const [oa, ob] = pairsAround(orig, origAt);
     const before = lineChars(orig).filter(c => c.src < oa || c.src >= ob);
     const after = lineChars(sim);
     const x = after.find(c => c.src === xAt);
-    if (!x || x.ch !== 'x' || x.marks[kind] !== want) return false;
+    if (!x || x.ch !== 'x' || !sameMarks(x.marks, want)) return false;
     // The pairs around the letter, mirrored: [sa, xAt) and (xAt, sb).
     const simNoX = sim.slice(0, xAt) + sim.slice(xAt + 1);
     const [ra, rb] = markRun(simNoX, xAt);
@@ -538,31 +580,39 @@ function applyLine(line: string, plan: LinePlan, kind: FormatKind, add: boolean,
     if (plan.kind === 'pair') {
         // Off any word, with nothing selected. An empty pair reads as typed
         // characters until something is typed between its halves, so it is
-        // judged by what typing there WOULD give: a letter that has the mark
-        // (put in) or has not (taken out), and every other character of the
-        // line reading as it does now.
+        // judged by what typing there WOULD give: the letter typed next
+        // FLIPS the mark — had it, and now has not (taken out), or the
+        // other way (put in) — with its other marks as they were, and every
+        // other character of the line reading as it does now. Without the
+        // flip, mark characters a person typed (`2*|*3`, `a~~|~~b`) would be
+        // taken out as if a key had put them in, and a pair put inside a run
+        // that already has the mark would do nothing and show as stars.
         const at = plan.at;
         // Pressed again with nothing typed between: the pair comes out —
         // also one held around another kind's pair (`**<u>|</u>**` and
         // Ctrl+B leaves `<u>|</u>`). The nearest such pair to the caret that
         // typing then reads right with.
-        const [ra, rb] = markRun(line, at);
-        const pairs: Array<[number, number]> = [];
-        for (let i = at - open.length; i >= Math.max(ra, at - 16); i--) {
-            if (!line.startsWith(open, i)) continue;
-            for (let j = at; j + close.length <= Math.min(rb, at + 16); j++) {
-                if (line.startsWith(close, j)) pairs.push([i, j]);
+        const had = typedMarks(line, at);
+        if (had?.[kind]) {
+            const [ra, rb] = markRun(line, at);
+            const pairs: Array<[number, number]> = [];
+            for (let i = at - open.length; i >= Math.max(ra, at - 16); i--) {
+                if (!line.startsWith(open, i)) continue;
+                for (let j = at; j + close.length <= Math.min(rb, at + 16); j++) {
+                    if (line.startsWith(close, j)) pairs.push([i, j]);
+                }
             }
-        }
-        pairs.sort((x, y) => (at - x[0]) + (x[1] - at) - ((at - y[0]) + (y[1] - at)));
-        for (const [i, j] of pairs) {
-            const out = line.slice(0, i) + line.slice(i + open.length, j) + line.slice(j + close.length);
-            const caretOut = at - open.length;
-            if (typingReads(line, at, out, caretOut, '', '', kind, false)) return { line: out, s: caretOut, e: caretOut };
+            pairs.sort((x, y) => (at - x[0]) + (x[1] - at) - ((at - y[0]) + (y[1] - at)));
+            for (const [i, j] of pairs) {
+                const out = line.slice(0, i) + line.slice(i + open.length, j) + line.slice(j + close.length);
+                const caretOut = at - open.length;
+                if (typingReads(line, at, out, caretOut, '', '', { ...had, [kind]: false })) return { line: out, s: caretOut, e: caretOut };
+            }
         }
         // Put in, after a bullet's marker and never in front of it.
         const into = Math.max(at, lineModel(line).prefix.length);
-        if (typingReads(line, at, line, into, open, close, kind, true)) {
+        const hadIn = typedMarks(line, into);
+        if (hadIn && !hadIn[kind] && typingReads(line, at, line, into, open, close, { ...hadIn, [kind]: true })) {
             const out = line.slice(0, into) + open + close + line.slice(into);
             return { line: out, s: into + open.length, e: into + open.length };
         }
@@ -741,7 +791,9 @@ export function continueBullet(text: string, selStart: number, selEnd: number): 
     const lineEndRaw = text.indexOf('\n', selStart);
     const lineEnd = lineEndRaw < 0 ? text.length : lineEndRaw;
     const line = text.slice(lineStart, lineEnd);
-    const m = /^([ \t]*)([-*•]) /.exec(line);
+    // A bullet as the reader reads one, or a bare marker with nothing after
+    // it yet; `-  x` (two spaces) is no bullet, so Enter there is a newline.
+    const m = BULLET_RE.exec(line) ?? /^([ \t]*)([-*•]) [ \t]*$/.exec(line);
     if (!m) return null;
     // The caret before the bullet's own marker: an ordinary newline.
     if (selStart < lineStart + m[0].length) return null;
@@ -751,8 +803,12 @@ export function continueBullet(text: string, selStart: number, selEnd: number): 
         const at = lineStart + m[1].length;
         return { text: next, selStart: at, selEnd: at };
     }
+    // The words after the caret start the next bullet, without the spaces
+    // that stood between them and the words before it: `- milk| eggs` gives
+    // `- eggs`, where `-  eggs` would read as no bullet at all.
+    const lead = /^[ \t]*/.exec(text.slice(selStart, lineEnd))![0].length;
     const insert = `\n${m[1]}${m[2]} `;
-    const next = text.slice(0, selStart) + insert + text.slice(selStart);
+    const next = text.slice(0, selStart) + insert + text.slice(selStart + lead);
     const at = selStart + insert.length;
     return { text: next, selStart: at, selEnd: at };
 }

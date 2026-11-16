@@ -212,4 +212,17 @@ describe('Ctrl+Shift+L and Enter on a bullet', () => {
         expect(continueBullet('- milk', 1, 1)).toBeNull();
         expect(continueBullet('- milk', 2, 4)).toBeNull();
     });
+
+    it('Enter between two words of a bullet starts the next bullet with the words after it (review 7)', () => {
+        expect(continueBullet('- milk eggs', 6, 6)).toEqual({ text: '- milk\n- eggs', selStart: 9, selEnd: 9 });
+        expect(continueBullet('* buy milk', 5, 5)?.text).toBe('* buy\n* milk');
+        expect(continueBullet('- milk   eggs', 6, 6)?.text).toBe('- milk\n- eggs');
+        for (const text of ['- milk eggs', '* buy milk', '- milk   eggs']) {
+            const at = text.indexOf(' ', 2);
+            const lines = readNoteFormat(continueBullet(text, at, at)!.text);
+            expect(lines.map(l => l.bullet !== null), text).toEqual([true, true]);
+        }
+        // `-  x` reads as no bullet, so Enter there is an ordinary newline.
+        expect(continueBullet('-  x', 4, 4)).toBeNull();
+    });
 });

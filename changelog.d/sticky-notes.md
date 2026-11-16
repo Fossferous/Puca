@@ -17,8 +17,9 @@
   desktop app (full or Lite). docs/STICKY_NOTES.md has the whole list against
   Microsoft's Sticky Notes, and what is not built and why.
 - **Bold, italic, underline, strikethrough and bullets in a note's text.**
-  Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+T and Ctrl+Shift+L, in Púca Notes, Púca's
-  Tasks view and a sticky note (which has the buttons too); Enter on a bullet
+  Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+T (in the desktop app: a browser tab keeps
+  Ctrl+T for itself) and Ctrl+Shift+L, in Púca Notes, Púca's Tasks view and
+  a sticky note (which has the buttons too); Enter on a bullet
   starts the next one. The note reads formatted wherever it is not being
   typed in, on the grid's cards too. It is written as Markdown marks in the
   note's text (`**bold**`, `*italic*`, `<u>underline</u>`, `~~strike~~`,
