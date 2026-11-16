@@ -54,6 +54,7 @@ import {
     type EdgeHop, type HopDir, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView, type Visible,
 } from './deviceZoomFollow';
 import { hopChipShift, type PlaceRect } from './deviceStageHopPlace';
+import { pinchStep } from './deviceStagePinch';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
     type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press, type SurfaceSize,
@@ -3279,8 +3280,10 @@ export function DeviceStage() {
             
             if (lastPinchInfo.current) {
                 const prev = lastPinchInfo.current;
-                const safePrevDist = prev.dist > 0 ? prev.dist : 1;
-                const deltaScale = dist / safePrevDist;
+                // ONE STEP PER TOUCH EVENT, not per finger: the event's other
+                // finger may not have moved yet (deviceStagePinch.ts).
+                const at = e.timeStamp;
+                const finger = e.pointerId;
 
                 // A DELIBERATE PINCH OR TWO-FINGER PAN BEATS THE CARET CAMERA,
                 // now and for the rest of this typing bout: the solver stops
@@ -3292,9 +3295,6 @@ export function DeviceStage() {
                 if (typingViewActiveRef.current) userZoomedDuringCaretRef.current = true;
 
                 setTransform(t => {
-                    const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, t.scale * deltaScale));
-                    const ratio = newScale / t.scale;
-
                     // MEASURED ON THE SURFACE, not on the video's parent.
                     // The video now lives inside the transformed canvas, so
                     // its parent's rect is itself scaled — clamping against
@@ -3312,23 +3312,15 @@ export function DeviceStage() {
                     const ox = rect ? rect.left : 0;
                     const oy = rect ? rect.top : 0;
 
-                    let newX = (center.x - ox) - ((prev.center.x - ox) - t.x) * ratio;
-                    let newY = (center.y - oy) - ((prev.center.y - oy) - t.y) * ratio;
-
-                    if (newScale === 1) {
-                        newX = 0;
-                        newY = 0;
-                    } else if (rect) {
-                        const c = clampPan(videoRef.current, rect, newScale, newX, newY);
-                        newX = c.x;
-                        newY = c.y;
-                    }
-
-                    return {
-                        scale: newScale,
-                        x: newX,
-                        y: newY,
-                    };
+                    return pinchStep(t, {
+                        at, finger,
+                        prevDist: prev.dist, dist,
+                        prevCenter: { x: prev.center.x - ox, y: prev.center.y - oy },
+                        center: { x: center.x - ox, y: center.y - oy },
+                    }, {
+                        minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM,
+                        clampPan: (scale, x, y) => rect ? clampPan(videoRef.current, rect, scale, x, y) : null,
+                    });
                 });
             }
             lastPinchInfo.current = { dist, center };

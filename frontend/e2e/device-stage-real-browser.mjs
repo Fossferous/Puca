@@ -34,7 +34,10 @@
 //      all four directions on a desk with a screen on every side; a real tap
 //      switches screens and presses nothing over there (POSITIVE CONTROL: a
 //      tap on the picture does). NEGATIVE CONTROL: the same chip without its
-//      touch-layout class (the chip as it was, 164x44 painted) fails.
+//      touch-layout class (the chip as it was, 164x44 painted) fails;
+//   7. two fingers carry the view all the way into an edge, the far ones too
+//      (2026-11-16: the stage stepped a pan per finger, and toward the right
+//      and bottom edges it stopped short of them, so no chip came there).
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -622,15 +625,13 @@ async function checkHopChip(page, dir, label, slid = false) {
 }
 
 /** Zoomed into the main display (trackpad mode, a phone's default), the
- *  mouse pad shown, then taken to a corner of it, two ways a person does:
+ *  mouse pad shown, then taken to a corner of it, the ways a person does:
  *   - 'pan': two fingers pull the picture toward the top-left, clear of the
  *     pad's clusters (a finger on one leaves a one-finger drag, which moves
  *     the pointer instead).
+ *   - 'pan-far': two fingers push it toward the bottom-right, the same way.
  *   - 'pointer': one finger walks the pointer to the bottom-right and the
- *     camera follows it (follow-cursor, on by default). Not two fingers
- *     there: a two-finger pan settles short of the right and bottom edges
- *     (the stage clamps between the two fingers' separate pointer moves, a
- *     transient zoom), so it never reaches the far edges' offers.
+ *     camera follows it (follow-cursor, on by default).
  *  `sideways`: a phone turned sideways (844x390), with a pinned key too — the
  *  shape where the pad's default places cover the middle of both side edges. */
 async function hopStage(route, sideways = false, knobs = null) {
@@ -648,13 +649,14 @@ async function hopStage(route, sideways = false, knobs = null) {
     await o.page.evaluate(() => { window.__stage.inputs.length = 0; });
     for (let i = 0; i < (sideways ? 8 : 6); i++) {
         if (route === 'pan') await o.pan2({ x: s.x - 125, y: sideways ? 40 : 150 }, 250, sideways ? 200 : 300);
+        else if (route === 'pan-far') await o.pan2({ x: s.x + 125, y: sideways ? 240 : 450 }, -250, sideways ? -200 : -300);
         else if (sideways) await o.drag({ x: 300, y: 60 }, { x: 600, y: 250 }, 12);
         else await o.drag({ x: 100, y: 200 }, { x: 330, y: 420 }, 12);
         await o.page.waitForTimeout(300);
     }
     await o.page.waitForTimeout(500);
     const sent = await o.page.evaluate(() => window.__stage.inputs.map(e => e.t));
-    if (route === 'pan') ck('precondition: the two-finger pans moved the view, not the pointer', sent.length === 0, sent.join(',') || 'nothing sent');
+    if (route !== 'pointer') ck('precondition: the two-finger pans moved the view, not the pointer', sent.length === 0, sent.join(',') || 'nothing sent');
     else ck('precondition: the drags moved the pointer and pressed nothing', sent.length > 0 && sent.every(t => t === 'move'), `${sent.length} sent: ${[...new Set(sent)].join(',')}`);
     return { ...o, fitted };
 }
@@ -851,6 +853,21 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
         await hopPress(o, 'down', 4, 'bottom screen (beside the toolbar)');
     }
     await ctx.close();
+}
+// TWO FINGERS INTO THE FAR CORNER (2026-11-16). The browser hands a touch
+// event to the page as a pointermove per finger, and the stage stepped the
+// pan on each, clamping between them a pinch the hand never made. Chromium
+// hands the fingers over in one order, so a two-finger pan toward the right
+// and bottom edges stopped 80 px (upright) to 210 px (sideways) short of
+// them every time and neither arrow came; on a busy machine the order flips,
+// and this walk's top-left pans missed now and then too. The stage now steps
+// once per touch event (deviceStagePinch.ts). Upright and sideways.
+for (const sideways of [false, true]) {
+    const o = await hopStage('pan-far', sideways);
+    const dirs = await o.page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.dataset.hopDir).sort().join(' '));
+    ck(`${sideways ? 'sideways: ' : ''}two fingers carry the view into the bottom-right corner: the right and down hops are offered`,
+        dirs === 'down right', dirs || 'none');
+    await o.ctx.close();
 }
 // SIDEWAYS (844x390), the pad at its default places and a pinned key: the
 // L/M/R row covers the middle of the left edge and the scroll column the
