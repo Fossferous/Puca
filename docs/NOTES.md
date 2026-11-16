@@ -377,7 +377,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   app or an export. A mark counts only at the edges of words, on one line,
   so ordinary writing such as `2*3*4`, `snake_case` or `__init__` is never
   read as one, and nothing inside a web address is (*Links in a note*
-  below). `notes/model/noteFormat.ts`; docs/STICKY_NOTES.md, *Formatting*.
+  below), and the keys put their marks at word edges: a selection inside a
+  word takes the whole word, and with nothing selected it is the caret's
+  word. `notes/model/noteFormat.ts`; docs/STICKY_NOTES.md, *Formatting*.
 - **Sticky notes** (the desktop app on Windows) — a note in a small
   coloured window of its own on the desktop, with Microsoft Sticky Notes'
   keys: docs/STICKY_NOTES.md.

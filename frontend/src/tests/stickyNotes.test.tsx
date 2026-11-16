@@ -412,6 +412,63 @@ describe('a new sticky note', () => {
         expect(store.readStoredStickies(7)).toEqual(['list:501']);
     });
 
+    it('a first save ending in a new line keeps it: the trimmed create is followed by the words as typed', async () => {
+        const actions = fakeActions();
+        await render({ cards: [], ready: true, actions });
+        act(() => { store.requestNewSticky(); });
+        await flush();
+        const area = win(0).document.querySelector('textarea') as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'Shopping\n'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 80)); });
+        await flush();
+        expect(actions.createNote).toHaveBeenCalledTimes(1);
+        // The data layer trims the end of a new note's text; the words as
+        // they stand went in straight behind it.
+        expect(actions.content.setBody).toHaveBeenCalledWith(501, 'Shopping\n');
+        expect((win(0).document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Shopping\n');
+    });
+
+    it('a note whose key moves under its window (made offline, now saved) keeps its words and makes no new note', async () => {
+        const actions = fakeActions();
+        await render({ cards: [card(-5, 'made offline')], ready: true, actions });
+        act(() => { store.openStickyNote('list:-5'); });
+        await flush();
+        expect(calls('sticky_bind')[0].args).toMatchObject({ place: '7/temp:5' });
+        // The outbox saved it as list 123; the cache has not caught up yet.
+        act(() => { store.noteKeyMoved('list:-5', 'list:123'); });
+        await render({ cards: [], ready: true, actions });
+        expect(calls('sticky_close')).toHaveLength(0);
+        expect(calls('sticky_rekey').at(-1)?.args).toEqual({ slot: 1, place: '7/list:123' });
+        const area = win(0).document.querySelector('textarea') as HTMLTextAreaElement;
+        expect(area.value).toBe('made offline');
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'made offline, and more'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 80)); });
+        expect(actions.createNote).not.toHaveBeenCalled();
+        expect(actions.content.setBody).toHaveBeenCalledWith(123, 'made offline, and more', 3);
+    });
+
+    it('Delete on a draft whose words are being saved deletes the note they made', async () => {
+        const actions = fakeActions();
+        await render({ cards: [], ready: true, actions });
+        act(() => { store.requestNewSticky(); });
+        await flush();
+        const doc = win(0).document;
+        const area = doc.querySelector('textarea') as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'to be deleted'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        // The save starts; its create is still out (30 ms in the fake).
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 5)); });
+        act(() => { area.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true })); });
+        await flush(1);
+        expect(doc.querySelector('[role="alertdialog"]')).not.toBeNull();
+        act(() => { (doc.querySelector('.sticky-confirm .danger') as HTMLButtonElement).click(); });
+        await act(async () => { await new Promise(r => setTimeout(r, 80)); });
+        await flush();
+        expect(actions.deleteNote).toHaveBeenCalledWith({ kind: 'list', id: 501 });
+    });
+
     it('closing an untouched draft saves nothing', async () => {
         const actions = fakeActions();
         await render({ cards: [], ready: true, actions });
@@ -421,6 +478,8 @@ describe('a new sticky note', () => {
         await flush();
         expect(actions.createNote).not.toHaveBeenCalled();
         expect(store.readStoredStickies(7)).toEqual([]);
+        // and leaves no place behind for a later draft of the same number.
+        expect(calls('sticky_forget').map(c => c.args)).toEqual([{ place: '7/new:1' }]);
     });
 
     it('asked for before the layer exists (the shortcut, the tray), it is made when it comes', async () => {

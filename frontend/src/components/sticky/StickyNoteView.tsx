@@ -85,6 +85,15 @@ export function StickyNoteView(props: StickyNoteViewProps) {
     // it is out — the field saves on a pause, on blur and on unmount, and
     // two of those can land before the first answer.
     const created = useRef<Promise<NoteRef | null> | null>(null);
+    // The text the create was FIRST tried with. A retry after a create that
+    // got no answer must ask for the very same note — the data layer then
+    // sends it under the same key, and a server that did make it answers with
+    // that note instead of making a second (useListContent.ts, held creates)
+    // — so words typed since go in a save of their own once it exists.
+    const firstText = useRef<string | null>(null);
+    // The note the draft made, so its text field registers under it and a
+    // delete waits for the field's last words (api/listContent.ts).
+    const [madeId, setMadeId] = useState<number | null>(null);
     // What the draft saved, so the field keeps showing it until the note's
     // card arrives from the cache.
     const [savedDraft, setSavedDraft] = useState('');
@@ -119,6 +128,7 @@ export function StickyNoteView(props: StickyNoteViewProps) {
         if (!created.current) {
             const p = make().then(r => {
                 if (r) {
+                    if (r.kind === 'list') setMadeId(r.id);
                     actions.setColor(r, NEW_STICKY_COLOR);
                     props.onCreated(r);
                 } else {
@@ -141,9 +151,17 @@ export function StickyNoteView(props: StickyNoteViewProps) {
         // A draft. Its first words make the note — named after its first
         // line, as the composer names a note with no title.
         if (!created.current) {
-            const made = await createWith(() => actions.createNote('', [], { body: text }));
+            const first = firstText.current ?? text;
+            firstText.current = first;
+            const made = await createWith(() => actions.createNote('', [], { body: first }));
             if (!made) return 'failed';
             setSavedDraft(text);
+            // The create stores the text with its end trimmed (as the
+            // composer's does), and on a retry it carries the FIRST text: the
+            // words as they stand now go in straight behind it. Answered
+            // before the field is told it is saved, so the trimmed copy the
+            // cache holds meanwhile never replaces what is under the caret.
+            if (text !== first.replace(/\s+$/, '')) return actions.content.setBody(made.id, text);
             return 'saved';
         }
         const made = await created.current;
@@ -186,14 +204,17 @@ export function StickyNoteView(props: StickyNoteViewProps) {
     const doDelete = async () => {
         setConfirming(false);
         if (dontAsk) props.onDontAskAgain();
-        if (!ref) { props.onDeleted(); return; }
-        if (await actions.deleteNote(ref)) props.onDeleted();
+        // A draft whose first words are making (or have made) a note: that
+        // note is what is deleted, not just the window.
+        const target = ref ?? (created.current ? await created.current : null);
+        if (!target) { props.onDeleted(); return; }
+        if (await actions.deleteNote(target)) props.onDeleted();
         else setNotice({ text: 'This note couldn’t be deleted', tone: 'error' });
     };
     const askDelete = () => {
         setMenu(false);
         if (!canDelete) return;
-        if (props.confirmDelete && ref) setConfirming(true);
+        if (props.confirmDelete && (ref || created.current)) setConfirming(true);
         else void doDelete();
     };
 
@@ -346,7 +367,7 @@ export function StickyNoteView(props: StickyNoteViewProps) {
                         value={textValue}
                         contentRev={card?.contentRev}
                         onSave={saveText}
-                        listId={ref?.kind === 'list' ? ref.id : undefined}
+                        listId={ref?.kind === 'list' ? ref.id : madeId ?? undefined}
                         placeholder="Take a note…"
                         autoFocus={card === null}
                     />

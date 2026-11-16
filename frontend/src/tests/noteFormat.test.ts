@@ -121,8 +121,34 @@ describe('Ctrl+B / I / U / T', () => {
         expect(runs(bi.text)).toContain('word[bi]');
     });
 
-    it('with nothing selected, puts the caret between the marks', () => {
-        expect(toggleMark('ab', 1, 1, 'bold')).toEqual({ text: 'a****b', selStart: 3, selEnd: 3 });
+    it('with nothing selected, marks the word the caret is on, the caret kept on its letter', () => {
+        expect(toggleMark('ab', 1, 1, 'bold')).toEqual({ text: '**ab**', selStart: 3, selEnd: 3 });
+        expect(toggleMark('one two', 7, 7, 'italic')).toEqual({ text: 'one *two*', selStart: 8, selEnd: 8 });
+        // …and off again from inside it.
+        expect(toggleMark('**ab**', 3, 3, 'bold')).toEqual({ text: 'ab', selStart: 1, selEnd: 1 });
+    });
+
+    it('off a word, puts an empty pair in for what is typed next — and a second press takes it out', () => {
+        const on = toggleMark('a ', 2, 2, 'bold');
+        expect(on).toEqual({ text: 'a ****', selStart: 4, selEnd: 4 });
+        expect(toggleMark(on.text, on.selStart, on.selEnd, 'bold')).toEqual({ text: 'a ', selStart: 2, selEnd: 2 });
+        const u = toggleMark('', 0, 0, 'underline');
+        expect(toggleMark(u.text, u.selStart, u.selEnd, 'underline').text).toBe('');
+        // An italic pressed inside an empty BOLD pair is not that pair.
+        expect(toggleMark('x ****', 4, 4, 'italic').text).toBe('x ******');
+    });
+
+    it('a selection inside a word takes the whole word: what it writes always reads back marked', () => {
+        const r = toggleMark('abcdef', 2, 4, 'bold');
+        expect(r.text).toBe('**abcdef**');
+        expect(runs(r.text)).toEqual(['abcdef[b]']);
+        for (const [text, s, e] of [['ab cd', 1, 4], ['x yz', 4, 4], ['snake_case', 6, 8], ['héllo wörld', 2, 9]] as const) {
+            for (const k of ['bold', 'italic', 'underline', 'strike'] as const) {
+                const out = toggleMark(text, s, e, k);
+                const marked = readNoteFormat(out.text)[0].runs.filter(x => x.marks[k]);
+                expect(marked.length, `${k} on ${text} [${s},${e}] → ${out.text}`).toBeGreaterThan(0);
+            }
+        }
     });
 
     it('marks a selection over several lines line by line', () => {

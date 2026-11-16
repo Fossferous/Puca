@@ -178,10 +178,12 @@ pub struct Record {
 }
 
 /// Parse the store, keeping only well-formed places. A bad file never stops a
-/// note opening; it only forgets where the notes were.
+/// note opening; it only forgets where the notes were. A draft's place
+/// (`new:`) is not kept from one session to the next: drafts are numbered
+/// afresh by every page, and the next one would inherit a stranger's pin.
 pub fn parse_store(raw: &str) -> HashMap<String, Record> {
     let parsed: HashMap<String, Record> = serde_json::from_str(raw).unwrap_or_default();
-    parsed.into_iter().filter(|(k, _)| valid_place(k)).collect()
+    parsed.into_iter().filter(|(k, _)| valid_place(k) && !k.contains("/new:")).collect()
 }
 
 fn render_store(map: &HashMap<String, Record>) -> String {
@@ -810,16 +812,25 @@ mod hotkey {
         join: Option<std::thread::JoinHandle<()>>,
     }
 
+    enum Said {
+        Thread(u32),
+        Registered,
+        Refused(String),
+    }
+
     pub fn start<R: Runtime>(app: AppHandle<R>, mods: u32, vk: u32) -> Result<Running, String> {
-        let (tx, rx) = mpsc::channel::<Result<u32, String>>();
+        let (tx, rx) = mpsc::channel::<Said>();
         let join = std::thread::Builder::new()
             .name("sticky-hotkey".into())
             .spawn(move || unsafe {
                 let mut msg = MSG::default();
-                // Make this thread's queue before anyone can post to it.
+                // Make this thread's queue before anyone can post to it, and
+                // say which thread it is FIRST: a caller that stops waiting
+                // can still end it, and with it a registration made late.
                 let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+                let _ = tx.send(Said::Thread(GetCurrentThreadId()));
                 if let Err(e) = RegisterHotKey(None, ID, HOT_KEY_MODIFIERS(mods), vk) {
-                    let _ = tx.send(Err(if e.code().0 as u32 == 0x8007_0581 {
+                    let _ = tx.send(Said::Refused(if e.code().0 as u32 == 0x8007_0581 {
                         // ERROR_HOTKEY_ALREADY_REGISTERED
                         "taken".to_string()
                     } else {
@@ -827,7 +838,7 @@ mod hotkey {
                     }));
                     return;
                 }
-                let _ = tx.send(Ok(GetCurrentThreadId()));
+                let _ = tx.send(Said::Registered);
                 loop {
                     let r = GetMessageW(&mut msg, None, 0, 0).0;
                     if r == 0 || r == -1 {
@@ -841,17 +852,31 @@ mod hotkey {
                 let _ = UnregisterHotKey(None, ID);
             })
             .map_err(|e| e.to_string())?;
-        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Ok(tid)) => {
+        let wait = std::time::Duration::from_secs(2);
+        let tid = match rx.recv_timeout(wait) {
+            Ok(Said::Thread(t)) => t,
+            _ => return Err("the shortcut thread did not start".into()),
+        };
+        match rx.recv_timeout(wait) {
+            Ok(Said::Registered) => {
                 log::info!("[sticky] new-note shortcut registered");
                 Ok(Running { tid, join: Some(join) })
             }
-            Ok(Err(e)) => {
+            Ok(Said::Refused(e)) => {
                 let _ = join.join();
                 log::info!("[sticky] new-note shortcut refused: {e}");
                 Err(e)
             }
-            Err(_) => Err("the shortcut thread did not answer".into()),
+            _ => {
+                // No answer in time: end the thread rather than leave a
+                // registration nobody can take back holding the combination.
+                // Its message loop sees WM_QUIT whenever it gets there, and
+                // unregisters on the way out.
+                unsafe {
+                    let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+                Err("the shortcut thread did not answer".into())
+            }
         }
     }
 
@@ -991,6 +1016,7 @@ mod tests {
     fn the_store_survives_garbage_and_drops_the_least_used() {
         assert!(parse_store("not json").is_empty());
         assert!(parse_store("{\"list:1\":{},\"x\":{}}").is_empty(), "a place with no account is refused");
+        assert!(parse_store("{\"1/new:2\":{\"on_top\":true}}").is_empty(), "a draft's place does not outlive its session");
         let m = parse_store("{\"1/list:2\":{\"on_top\":true,\"used\":4},\"1/channel:3\":{\"rect\":{\"x\":1,\"y\":2,\"w\":3,\"h\":4},\"dock\":{\"side\":\"left\"}}}");
         assert!(m["1/list:2"].on_top);
         assert!(!m["1/channel:3"].on_top, "a note with no pin recorded is not on top");

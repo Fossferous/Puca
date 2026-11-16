@@ -38,7 +38,8 @@ import type { NoteActions } from '../../notes/model/notesQueries';
 import { type PruneGens, newPruneState, pruneStep } from '../../notes/model/notesPrune';
 import { anythingQueued } from '../../notes/model/noteBusy';
 import {
-    MAX_STICKY_WINDOWS, STICKY_CLOSED_EVENT, closeStickyWindow, openStickyWindow, stickyPlace, stickyShell, stickySlotClosing,
+    MAX_STICKY_WINDOWS, STICKY_CLOSED_EVENT, closeStickyWindow, noteStickySlotClosing, openStickyWindow, stickyPlace, stickyShell,
+    stickySlotClosing,
 } from './stickyShell';
 import {
     type StickyEntry, attachAccount, attachLayer, closeSticky, detachAccount, forgetStickies, promoteMade, rekeySticky,
@@ -177,7 +178,25 @@ interface StickyWindowProps {
     onCycle: (wid: number, dir: 1 | -1) => void;
 }
 
-function StickyWindow({ entry, slot, userId, card, actions, confirmDelete, openInNotes, onCycle }: StickyWindowProps) {
+/** A note key as a ref, a note made offline (a negative id) included. */
+function refOfKey(key: string): NoteRef | null {
+    const m = /^(list|channel):(-?\d+)$/.exec(key);
+    if (!m) return null;
+    const id = Number(m[2]);
+    return Number.isSafeInteger(id) && id !== 0 ? { kind: m[1] as NoteRef['kind'], id } : null;
+}
+
+function StickyWindow({ entry, slot, userId, card: cardNow, actions, confirmDelete, openInNotes, onCycle }: StickyWindowProps) {
+    // The note as it was last seen. Its key can change under an open window
+    // (a note made offline is saved, and the outbox moves it) a moment
+    // before Notes' cache has it under the new one: for that moment this
+    // window shows what it had, under the new key — never the blank page a
+    // NEW note gets, whose next save would make a second note.
+    const [lastCard, setLastCard] = useState<NoteCard | null>(cardNow);
+    if (cardNow && cardNow !== lastCard) setLastCard(cardNow);
+    const card = cardNow ?? (entry.state !== 'draft' && lastCard
+        ? { ...lastCard, key: entry.key, ref: refOfKey(entry.key) ?? lastCard.ref }
+        : null);
     const [win, setWin] = useState<Window | null>(null);
     const [onTop, setOnTop] = useState(false);
     const [docked, setDocked] = useState<'left' | 'right' | null>(null);
@@ -235,14 +254,16 @@ function StickyWindow({ entry, slot, userId, card, actions, confirmDelete, openI
             try {
                 await stickyShell.bind(slot, p, live.current.entry.focus);
             } catch {
-                if (!cancelled) closeSticky(live.current.entry.wid);
+                if (!cancelled) stickyWindowGone(live.current.entry.wid);
                 return;
             }
             if (cancelled || openedRef.current) return;
             boundPlace.current = p;
             const w = openStickyWindow(slot);
             openedRef.current = { w };
-            if (!w) { closeSticky(live.current.entry.wid); return; }
+            // Refused (the shell's slot still closing, the cap): off the screen
+            // for now, but nobody closed the note — it stays for next time.
+            if (!w) { stickyWindowGone(live.current.entry.wid); return; }
             attach(w);
             stickyShell.pin(slot).then(v => { if (!cancelled) setOnTop(v); }, () => { /* keep off */ });
             stickyShell.dockState(slot).then(v => { if (!cancelled) setDocked(v); }, () => { /* not docked */ });
@@ -256,11 +277,22 @@ function StickyWindow({ entry, slot, userId, card, actions, confirmDelete, openI
         aliveRef.current = true;
         return () => {
             aliveRef.current = false;
-            queueMicrotask(() => {
-                if (aliveRef.current) return; // StrictMode's pretend unmount
-                const w = openedRef.current?.w ?? null;
-                if (w) void closeStickyWindow(slot, w);
-            });
+            const w = openedRef.current?.w ?? null;
+            if (!w) return;
+            // Recorded NOW, not in the microtask: a window mounting for this
+            // slot in the same commit (the 25th note at the cap takes the
+            // slot of one closing) must see that it is still taken
+            // (streamOsWindows.ts noteSlotClosing has the measurement).
+            noteStickySlotClosing(slot, new Promise<void>(resolve => {
+                queueMicrotask(() => {
+                    if (aliveRef.current) { resolve(); return; } // StrictMode's pretend unmount
+                    // A draft nobody typed in leaves no place behind for the
+                    // next session's draft of the same number to inherit.
+                    const { entry: last, place: lastPlace } = live.current;
+                    if (last.state === 'draft' && lastPlace) void stickyShell.forget(lastPlace).catch(() => { /* geometry only */ });
+                    void closeStickyWindow(slot, w).then(resolve);
+                });
+            }));
         };
     }, [slot]);
 

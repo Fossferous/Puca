@@ -87,12 +87,18 @@ const closing = new Map<number, Promise<void>>();
  *  destroys only the webview's container then — popout.rs). Resolves once the
  *  slot is free; until then a window.open for it is refused. */
 export function closeStickyWindow(slot: number, fallback: Window | null): Promise<void> {
-    const done = invoke('sticky_close', { slot }).then(() => undefined, () => {
+    return invoke('sticky_close', { slot }).then(() => undefined, () => {
         try { fallback?.close(); } catch { /* already gone */ }
     });
-    closing.set(slot, done);
-    void done.then(() => { if (closing.get(slot) === done) closing.delete(slot); });
-    return done;
+}
+
+/** Record that `slot` is being freed until `done` settles — synchronously,
+ *  in the closing window's cleanup, so a window mounting for the same slot
+ *  in the same commit waits for it (streamOsWindows.ts noteSlotClosing). */
+export function noteStickySlotClosing(slot: number, done: Promise<void>): void {
+    const p = done.then(() => undefined, () => undefined);
+    closing.set(slot, p);
+    void p.then(() => { if (closing.get(slot) === p) closing.delete(slot); });
 }
 
 /** The pending close of `slot`, if one is still in flight. */

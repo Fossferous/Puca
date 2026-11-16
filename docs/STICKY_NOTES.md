@@ -140,6 +140,11 @@ leave the screen and the notes stay in the stored set, so they come back at
 the next start. Without that difference every quit would have looked like
 the person closing every note.
 
+A draft's place (`new:<n>`) is not remembered from one session to the
+next, and a draft closed untouched forgets it at once: drafts are numbered
+afresh by every page, and a later draft would otherwise open pinned and
+docked like a stranger.
+
 Slots, not note numbers, name the windows (`sticky-1` … `sticky-24`), as for
 pop-outs: the URL filter stays the strict one-number filter, and a note made
 offline — whose number changes when it is saved — keeps its window
@@ -197,8 +202,12 @@ only where it cannot be ordinary writing — it opens at the start of a word
 and closes at the end of one, on one line, around something that does not
 start or end with a space. `2*3*4`, `a**b`, `snake_case`, `__init__` and
 `C++` stay exactly as typed; nothing inside a web address is ever a mark.
-Enter on a bullet starts the next one; Enter on an empty bullet ends the
-list.
+So the keys put their marks at word edges too: a selection that starts or
+ends inside a word takes the whole word, and with nothing selected the word
+the caret is on is the one marked (Word's own rule). Off a word, the key puts
+an empty pair in for what is typed next, and pressing it again takes the
+pair out. Enter on a bullet starts the next one; Enter on an empty bullet
+ends the list.
 
 ### The global shortcut
 
@@ -208,7 +217,9 @@ hot key only when its exact combination is pressed, so no keystroke of any
 other app passes through Púca, and Windows refuses a combination another app
 already holds — Settings then says *taken by Windows or another app*. It
 needs Ctrl, Alt or the Windows key (Shift and a letter is typing), and it
-does not repeat while held. It is registered while Púca is signed in, and a
+does not repeat while held. A registration that does not answer within two
+seconds is ended rather than left holding the combination for the rest of
+the session. It is registered while Púca is signed in, and a
 press makes a new sticky note, which takes the focus.
 
 The default is Win+Shift+N. Windows' own list of shortcuts has no
@@ -258,8 +269,19 @@ untouched saves nothing, as closing an untouched *Take a note…* does. Its
 first words make the note, named after its first line, as the composer
 names a note with no title — exactly once, however many saves the text field
 asks for while that first one is still out, and the words typed meanwhile go
-into that note. It starts yellow (*sand*). A picture added to a draft makes
-the note too.
+into that note. A create that got no answer is tried again with the words it
+was first tried with, so the data layer sends it under the same key and a
+server that did make the note answers with it rather than making a second;
+the words typed since follow in a save of their own (which is also what
+keeps a new line or a space at the end of the first words, which the
+create trims). It starts yellow (*sand*). A picture added to a draft makes
+the note too. *Delete note* on a draft whose words are already making a
+note deletes that note, and asks first like any other.
+
+A note's key can change while its window is open — a note made offline is
+saved, and the outbox gives it its real number — a moment before Notes'
+cache has it under the new key. The window keeps showing what it had, under
+the new key, rather than the blank page of a new note.
 
 A note the window shows that Notes has not read yet (Púca just started) gets
 no window until Notes has it, so an empty page that typing into would make a

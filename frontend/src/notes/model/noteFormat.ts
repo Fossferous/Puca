@@ -268,11 +268,40 @@ function without(d: Delim, kind: FormatKind): { open: string; close: string } {
     return { open: '', close: '' };
 }
 
+/** An empty pair of `kind`'s marks around the caret, standing alone (the
+ *  `*` of a `**` is not an italic pair). */
+function emptyPairAt(line: string, at: number, open: string, close: string): boolean {
+    if (line.slice(at - open.length, at) !== open || line.slice(at, at + close.length) !== close) return false;
+    const ch = open[0];
+    if (ch !== '*' && ch !== '~') return true;
+    return line[at - open.length - 1] !== ch && line[at + close.length] !== ch;
+}
+
 function toggleOnLine(line: string, s: number, e: number, kind: FormatKind): { line: string; s: number; e: number } {
     const { open, close } = WRAP[kind];
+    // Pressed twice with nothing typed between: the pair it put in comes out.
+    if (s === e && emptyPairAt(line, s, open, close)) {
+        return { line: line.slice(0, s - open.length) + line.slice(s + close.length), s: s - open.length, e: s - open.length };
+    }
     // The selection's own edges are kept clear of spaces: `** x**` is not bold.
     while (s < e && SPACE.test(line[s])) s++;
     while (e > s && SPACE.test(line[e - 1])) e--;
+    // A mark only counts at the edge of a word (readInline), so it goes
+    // there: a selection that starts or ends inside a word takes the whole
+    // word, and with nothing selected the caret's word is the one marked —
+    // `ab**cd**ef` would read as typed, never as bold.
+    const caret = s === e ? s : null;
+    if (caret !== null) {
+        if (isWordish(line[s - 1]) || isWordish(line[s])) {
+            while (s > 0 && isWordish(line[s - 1])) s--;
+            while (e < line.length && isWordish(line[e])) e++;
+        }
+    } else {
+        while (s > 0 && isWordish(line[s - 1]) && isWordish(line[s])) s--;
+        while (e < line.length && isWordish(line[e]) && isWordish(line[e - 1])) e++;
+    }
+    const keepCaret = (r: { line: string; s: number; e: number }, shift: number) =>
+        (caret === null ? r : { line: r.line, s: caret + shift, e: caret + shift });
     // Already marked: the innermost pair of this kind that holds the
     // selection (or that the selection takes in whole) comes off — and only
     // a pair that really reads as one, so the `*` of a `**` is never taken
@@ -299,7 +328,7 @@ function toggleOnLine(line: string, s: number, e: number, kind: FormatKind): { l
                 : x <= holding.close ? x - shift
                     : x <= outerTo ? holding.open + keep.open.length + inner.length
                         : x - shift - (d.close.length - keep.close.length));
-        return { line: out, s: map(s), e: map(e) };
+        return keepCaret({ line: out, s: map(s), e: map(e) }, caret === null ? 0 : map(caret) - caret);
     }
     if (s === e) {
         // Nothing selected: the marks go in around the caret, and what is
@@ -307,7 +336,7 @@ function toggleOnLine(line: string, s: number, e: number, kind: FormatKind): { l
         return { line: line.slice(0, s) + open + close + line.slice(s), s: s + open.length, e: s + open.length };
     }
     const out = line.slice(0, s) + open + line.slice(s, e) + close + line.slice(e);
-    return { line: out, s: s + open.length, e: e + open.length };
+    return keepCaret({ line: out, s: s + open.length, e: e + open.length }, open.length);
 }
 
 /**
