@@ -1,4 +1,4 @@
-// LIVE, on the ANDROID APP: three things a browser cannot show, from the phone sweep (2026-11-12),
+// LIVE, on the ANDROID APP: four things a browser cannot show, from the phone sweep (2026-11-12),
 // on the real debug APK on a HEADLESS emulator, with the phone's own gestures (adb input), never a
 // script's click:
 //
@@ -8,6 +8,15 @@
 //              (hooks/useBackClose.ts, api/mobileApp.ts interceptBack).
 //   longpress  A real long press on a message opens Púca's menu and selects no words (it also
 //              highlighted the word under the finger, with handles and Android's Copy bar).
+//   stick      (2026-11-16) The newest message stays at the message box through the REAL soft
+//              keyboard: a real tap raises it (the WebView resized), words typed through adb grow the
+//              box to its ceiling, Enter sends, Back closes it; CONTROL: a reader a real finger
+//              scrolled up keeps their exact scrollTop through all of it. This passes on the bundle
+//              from before components/repinOnResize.ts too, by design: the Android WebView keeps a
+//              list that is at its bottom there by itself (no script wrote scrollTop: it moved in
+//              the frame the list shrank), which desktop Chromium and WebKit do not
+//              (mobile-ui-sweep-walk.mjs's `stick` is the negative control). It guards the Android
+//              app against a change that fights or undoes that.
 //   keyboard   A tap on the message box raises the soft keyboard and the bottom tab bar steps aside
 //              (<html data-keyboard-up>, api/keyboardUp.ts), the box at the keyboard's top. Back
 //              closes the keyboard with the box still focused, and the bar comes back.
@@ -150,6 +159,84 @@ try {
     await navTo('Channels');
     await realTap(P, '.sidebar .channel-list .channel', 'first');
     await sleep(1500);
+
+    // ── stick: the newest message stays at the message box while the real keyboard is up
+    step('the newest message and the soft keyboard');
+    {
+        const COMPOSER = 'form.message-form textarea';
+        const rows = () => P.evaluate(() => document.querySelectorAll('.messages-container > .message').length);
+        for (let i = 0; i < 20; i++) {
+            const n = await rows();
+            await P.locator(COMPOSER).fill(`History ${i}: a few words so the list has rows to scroll through ${'and more '.repeat(i % 4)}`);
+            await P.locator(COMPOSER).press('Enter');
+            await until(async () => (await rows()) > n, 15000, 150);
+        }
+        await P.evaluate(() => document.activeElement?.blur());
+        await sleep(1200);
+        if (imeShown()) { back(); await sleep(1200); }
+        const read = () => P.evaluate(() => {
+            const sc = document.querySelector('.messages-container');
+            const all = sc.querySelectorAll(':scope > .message');
+            const last = all[all.length - 1];
+            const box = document.querySelector('form.message-form');
+            return {
+                fromBottom: Math.round(sc.scrollHeight - sc.scrollTop - sc.clientHeight),
+                toBox: Math.round(box.getBoundingClientRect().top - last.getBoundingClientRect().bottom),
+                scrollTop: Math.round(sc.scrollTop), list: sc.clientHeight,
+                boxPx: Math.round(box.querySelector('textarea').getBoundingClientRect().height),
+                keyboardUp: 'keyboardUp' in document.documentElement.dataset, vh: innerHeight,
+            };
+        });
+        const at = (label, r) => check(`stick: ${label}: the newest message is at the message box`, r.fromBottom <= 1 && r.toBox >= 0, r);
+        /** The keyboard's slide and the WebView's resize are over: the page's height holds still. */
+        const settled = async () => { let h = -1; for (let i = 0; i < 20; i++) { const r = await read(); if (r.vh === h) return r; h = r.vh; await sleep(250); } return read(); };
+        const rest = await read();
+        at('at rest', rest);
+        await realTap(P, COMPOSER);
+        await until(async () => imeShown() && await P.evaluate(() => 'keyboardUp' in document.documentElement.dataset), 6000, 300);
+        const kbUp = await settled();
+        check('stick: a real tap on the box raised the soft keyboard, and the WebView is shorter', imeShown() && kbUp.keyboardUp && kbUp.vh < rest.vh - 150, { ...kbUp, wasVh: rest.vh });
+        at('the soft keyboard up', kbUp);
+        screencap('stick-keyboard-up.png');
+        // Typed through the keyboard's own input path, word by word, until the box has grown lines.
+        for (const word of 'the quick brown fox jumps over the lazy dog and runs on down the long road again'.split(' ')) sh(`input text ${word}%s`);
+        await sleep(800);
+        const typed = await read();
+        check('stick: the box grew as it was typed into', typed.boxPx >= kbUp.boxPx + 40, typed);
+        at('typing lines into the box', typed);
+        screencap('stick-typed.png');
+        let n = await rows();
+        sh('input keyevent KEYCODE_ENTER');
+        await until(async () => (await rows()) > n, 15000);
+        await sleep(800);
+        at('your own message sent, the keyboard still up', await read());
+        back();
+        const kbDown = await settled();
+        check('stick: Back closed the keyboard', !imeShown() && !kbDown.keyboardUp, kbDown);
+        at('the keyboard closed by Back', kbDown);
+        // CONTROL: a reader who scrolled up with a real finger stays exactly where they are.
+        await P.evaluate(() => document.activeElement?.blur());
+        await sleep(400);
+        const mid = await onScreen(P, '.messages-container');
+        sh(`input swipe ${mid.x} ${mid.y - 300} ${mid.x} ${mid.y + 500} 400`);
+        await sleep(1500);
+        const up0 = await read();
+        check('stick: CONTROL - a finger scrolled the list up', up0.fromBottom >= 200, up0);
+        const stays = (label, r) => check(`stick: CONTROL - scrolled up: ${label}: still exactly where they were reading`, Math.abs(r.scrollTop - up0.scrollTop) <= 1, { was: up0.scrollTop, ...r });
+        // A tap in the box, not on the list: the list is not touched.
+        await realTap(P, COMPOSER);
+        await until(async () => imeShown() && await P.evaluate(() => 'keyboardUp' in document.documentElement.dataset), 6000, 300);
+        stays('the soft keyboard up', await settled());
+        for (const word of 'still reading up there'.split(' ')) sh(`input text ${word}%s`);
+        for (const word of 'and more words to grow the box by a line or two'.split(' ')) sh(`input text ${word}%s`);
+        await sleep(800);
+        stays('typing lines into the box', await read());
+        back();
+        stays('the keyboard closed by Back', await settled());
+        await P.locator(COMPOSER).fill('');
+        await P.evaluate(() => document.activeElement?.blur());
+        await sleep(600);
+    }
 
     // ── keyboard
     step('the soft keyboard');
