@@ -407,36 +407,48 @@ describe('the offer, reached by a two-finger pan', () => {
         return ev;
     };
 
-    /** Zoomed in x2 about the middle, then two fingers 60 px apart, side by
-     *  side, carried right `steps` x 30 px (the picture follows them, so its
-     *  LEFT edge comes into view), each step ONE touch event. `leftFirst`:
-     *  the left finger's move is handed over first, so between the two the
-     *  fingers are 30 px apart. */
-    async function twoFingerPanRight(leftFirst: boolean, steps = 20) {
+    const scale = () => Number(/scale\(([-\d.e]+)\)/.exec((host!.querySelector('.device-stage-canvas') as HTMLElement).style.transform)![1]);
+
+    /** Zoomed in x3 about the middle, then two strokes of two fingers 60 px
+     *  apart, side by side, each carried right 15 x 30 px (the picture
+     *  follows them, so its LEFT edge comes into view, 800 px away), each
+     *  step ONE touch event. `leftFirst`: the left finger's move is handed
+     *  over first, so between the two the fingers are 30 px apart: a
+     *  half-step to x1.5, above the zoom floor, so what is tested is the pan
+     *  clamp acting on it. */
+    async function twoFingerPanRight(leftFirst: boolean) {
         await mount(1);
-        await act(async () => {
-            surface().dispatchEvent(new WheelEvent('wheel', {
-                bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100, clientX: BOX.w / 2, clientY: BOX.h / 2,
-            }));
-        });
-        await act(async () => { await new Promise(r => setTimeout(r, 200)); });
-        await act(async () => {
-            surface().dispatchEvent(finger('pointerdown', 1, 300, 1000));
-            surface().dispatchEvent(finger('pointerdown', 2, 360, 1000));
-        });
-        for (let i = 1; i <= steps; i++) {
-            const at = 1000 + i * 16;
+        for (let n = 0; n < 2; n++) {
             await act(async () => {
-                const left = finger('pointermove', 1, 300 + 30 * i, at);
-                const right = finger('pointermove', 2, 360 + 30 * i, at);
-                for (const ev of leftFirst ? [left, right] : [right, left]) surface().dispatchEvent(ev);
+                surface().dispatchEvent(new WheelEvent('wheel', {
+                    bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100, clientX: BOX.w / 2, clientY: BOX.h / 2,
+                }));
             });
         }
-        await act(async () => {
-            surface().dispatchEvent(finger('pointerup', 1, 300 + 30 * steps, 2000));
-            surface().dispatchEvent(finger('pointerup', 2, 360 + 30 * steps, 2000));
-        });
         await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+        expect(scale(), 'precondition: zoomed in x3').toBe(3);
+        let at = 1000;
+        for (let stroke = 0; stroke < 2; stroke++) {
+            await act(async () => {
+                surface().dispatchEvent(finger('pointerdown', 1, 100, at));
+                surface().dispatchEvent(finger('pointerdown', 2, 160, at));
+            });
+            for (let i = 1; i <= 15; i++) {
+                at += 16;
+                await act(async () => {
+                    const left = finger('pointermove', 1, 100 + 30 * i, at);
+                    const right = finger('pointermove', 2, 160 + 30 * i, at);
+                    for (const ev of leftFirst ? [left, right] : [right, left]) surface().dispatchEvent(ev);
+                });
+            }
+            at += 16;
+            await act(async () => {
+                surface().dispatchEvent(finger('pointerup', 1, 550, at));
+                surface().dispatchEvent(finger('pointerup', 2, 610, at));
+            });
+        }
+        await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+        expect(scale(), 'a pan, no zoom: still x3').toBeCloseTo(3, 9);
     }
 
     it('CONTROL: the far finger handed over first, the pan reaches the edge and the neighbour is offered', async () => {

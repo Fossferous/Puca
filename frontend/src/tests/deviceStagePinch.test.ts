@@ -99,11 +99,18 @@ describe('a two-finger step is one per touch event', () => {
 
     it('a finger moving twice under one timeStamp is two events, clamped between them', () => {
         const move = hand({ x: 100, y: 150 }, { x: 160, y: 150 });
-        // Finger 1 alone, twice, the other finger still: no browser hands one
-        // finger over twice in a touch event, so the second is a new event.
+        // Finger 1 alone, in and back out, the other finger still: no browser
+        // hands one finger over twice in a touch event, so the second is a
+        // new event and starts from the clamped view. (Back to its start, so
+        // the half-step stays above the zoom floor, which would reset the
+        // view to the same place either way.)
         const once = pinchStep(atEdge, move(1, { x: 125, y: 150 }, 16), limits);
-        const second = move(1, { x: 150, y: 150 }, 16);
-        expect(pinchStep(once, second, limits)).toEqual(pinchStep(once, { ...second, at: 99 }, limits));
+        const second = move(1, { x: 100, y: 150 }, 16);
+        const t = pinchStep(once, second, limits);
+        expect(t).toEqual(pinchStep(once, { ...second, at: 99 }, limits));
+        // CONTROL: composed as one event, the in-and-out would be no move at
+        // all and the view would be back on the edge.
+        expect(t.x, 'if this is on the edge the guard did nothing').toBeLessThan(-50);
     });
 
     it('a view another writer made (the zoom-follow landing, the wheel) is where the next step starts', () => {

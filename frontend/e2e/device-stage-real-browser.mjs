@@ -193,13 +193,16 @@ const centreDesktop = page => page.evaluate(() => {
 /** Until the host has confirmed `monitor` and the stage shows that screen's
  *  picture at its native size, which is what the host's viewer fit re-encodes
  *  it to at any zoom the follow lands on (the first frames after a switch
- *  keep the old step), plus two frames for the stage to take the resize.
- *  Resolves whether it came (true) or not (false) within 8 s. */
+ *  keep the old step). Then a second more, so what is read after it is where
+ *  the view STAYS: anything that would move it again (the follow's 120 ms
+ *  level trigger, a late correction, the stage taking the confirmation and
+ *  the resize) has had its turn. Resolves whether the condition came (true)
+ *  or not (false) within 8 s. */
 const confirmedAndRefitted = (page, monitor) => page.waitForFunction(m => {
     const S = window.__stage, v = S.video(), mon = S.MONITORS.find(x => x.id === m);
     return S.state.activeMonitor === m && v.vw === mon.width && v.vh === mon.height;
 }, monitor, { timeout: 8000 })
-    .then(() => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))))
+    .then(() => page.waitForTimeout(1000))
     .then(() => true, () => false);
 /** Client point of a desktop point on the composite picture. */
 const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
@@ -313,10 +316,14 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     const asked = await page.evaluate(() => window.__stage.monitorRequests.length);
     await pinch(c, 100, 260);                             // and the zoom goes on
     const before = await centreDesktop(page);
-    await page.evaluate(() => window.__stage.releaseSwitch());
+    // Released inside the 3.5 s the stage waits for a switch it asked for
+    // (beginMonitorSwitch's deadline): past it, the landing would be the
+    // late-confirmation path, not the one this is about.
+    const heldFor = await page.evaluate(() => { const S = window.__stage; S.releaseSwitch(); return S.now() - S.monitorRequests[0].at; });
     const landed = await confirmedAndRefitted(page, 1);
     const after = await centreDesktop(page);
     ck('precondition: the follow asked before the second pinch', asked === 1, String(asked));
+    ck('precondition: the host switched inside the 3.5 s the stage waits for it', heldFor < 3500, `released ${heldFor} ms after the request`);
     ck('precondition: the second pinch ended over All Displays, and the follow then landed on Display 2',
         before.surface === 255 && landed && after.surface === 1, `before on ${before.surface}, after on ${after.surface}, landed ${landed}`);
     // One desktop pixel's size on screen, before and after (the picture is

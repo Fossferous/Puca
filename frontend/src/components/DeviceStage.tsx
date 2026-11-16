@@ -3290,7 +3290,7 @@ export function DeviceStage() {
                 // changing the scale and only pans the caret back when it has
                 // left the visible band, and closing the keyboard restores the
                 // zoom THEY chose, not the one typing chose. (This branch is
-                // both gestures — a pan is a pinch with deltaScale ~1.) Set
+                // both gestures — a pan is a pinch whose spread stays put.) Set
                 // outside the updater — StrictMode invokes that twice.
                 if (typingViewActiveRef.current) userZoomedDuringCaretRef.current = true;
 
