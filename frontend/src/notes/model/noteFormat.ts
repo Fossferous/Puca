@@ -358,30 +358,60 @@ function lineChars(line: string): PlainChar[] {
     return [...pre, ...m.chars];
 }
 
-/** [from, to): the mark characters (`*`, `~`, `<u>`, `</u>`) running up to
- *  and on from `at` — an empty pair, or several, around the caret. */
+/** A mark character read one way from `at` — leftward (`back`) or onward —
+ *  and how long it is: `*`, `~`, `<u>` (before the caret) or `</u>` (after
+ *  it); 0 for none. */
+function markToken(line: string, at: number, back: boolean): string {
+    if (back) {
+        const ch = line[at - 1];
+        if (ch === '*' || ch === '~') return ch;
+        return line.slice(at - 3, at) === '<u>' ? '<u>' : '';
+    }
+    const ch = line[at];
+    if (ch === '*' || ch === '~') return ch;
+    return line.startsWith('</u>', at) ? '</u>' : '';
+}
+
+/**
+ * [from, to): the empty pairs around `at`, as far as they mirror each other
+ * — a `*` before the caret with a `*` after it, a `<u>` with a `</u>` — so
+ * the marks a key put in, nested or not (`**<u>|</u>**`), and nothing a
+ * person typed: of a line of stars only as many as stand on both sides of the
+ * caret count, and the rest are characters like any other.
+ */
 function markRun(line: string, at: number): [number, number] {
     let a = at;
-    for (;;) {
-        if (line[a - 1] === '*' || line[a - 1] === '~') a--;
-        else if (line.slice(a - 3, a) === '<u>') a -= 3;
-        else if (line.slice(a - 4, a) === '</u>') a -= 4;
-        else break;
-    }
     let b = at;
+    let outL = '';
+    let outR = '';
     for (;;) {
-        if (line[b] === '*' || line[b] === '~') b++;
-        else if (line.startsWith('<u>', b)) b += 3;
-        else if (line.startsWith('</u>', b)) b += 4;
-        else break;
+        const l = markToken(line, a, true);
+        const r = markToken(line, b, false);
+        if (!l || !r || (l === '<u>' ? r !== '</u>' : r !== l)) break;
+        a -= l.length;
+        b += r.length;
+        outL = l;
+        outR = r;
+    }
+    // The same mark character still beside them that READS as a character
+    // (a line of stars somebody typed) means these are that run's, not pairs
+    // a key put in: none of it counts then. A real mark beside them (the
+    // closer of the bold word the caret is at the end of) is no such thing,
+    // and nor is a typed character of another kind (`*<u>|</u>~`).
+    const left = markToken(line, a, true);
+    const right = markToken(line, b, false);
+    if ((left && left === outL) || (right && right === outR)) {
+        const read = new Set(lineModel(line).chars.map(c => c.src));
+        if ((left === outL && read.has(a - 1)) || (right === outR && read.has(b))) return [at, at];
     }
     return [a, b];
 }
 
 /**
  * Typing a letter at `at` in `base`, between `open` and `close`, gives a
- * letter whose `kind` is `want` — and every character of `orig` outside the
- * marks around its caret (`origAt`) still reads as it does.
+ * letter whose `kind` is `want`; the empty pairs around it are all used up as
+ * marks, none left showing as characters; and every character of `orig`
+ * outside the empty pairs around its caret (`origAt`) still reads as it does.
  */
 function typingReads(orig: string, origAt: number, base: string, at: number, open: string, close: string, kind: FormatKind, want: boolean): boolean {
     const sim = base.slice(0, at) + open + 'x' + close + base.slice(at);
@@ -391,8 +421,13 @@ function typingReads(orig: string, origAt: number, base: string, at: number, ope
     const after = lineChars(sim);
     const x = after.find(c => c.src === xAt);
     if (!x || x.ch !== 'x' || x.marks[kind] !== want) return false;
-    const sa = markRun(sim, xAt)[0];
-    const sb = markRun(sim, xAt + 1)[1];
+    // The pairs around the letter, mirrored: [sa, xAt) and (xAt, sb).
+    const simNoX = sim.slice(0, xAt) + sim.slice(xAt + 1);
+    const [ra, rb] = markRun(simNoX, xAt);
+    const sa = ra;
+    const sb = rb + 1;
+    // Nothing in them reads as a character but the letter.
+    if (after.some(c => c.src >= sa && c.src < sb && c.src !== xAt)) return false;
     const rest = after.filter(c => c.src < sa || c.src >= sb);
     return rest.length === before.length && rest.every((c, i) => c.ch === before[i].ch
         && (c.link >= 0) === (before[i].link >= 0) && (SPACE.test(c.ch) || sameMarks(c.marks, before[i].marks)));
@@ -411,12 +446,12 @@ const isLow = (ch: string | undefined) => ch !== undefined && ch >= '\uDC00' && 
  *  surrogate pair, or the selector, keycap or joiner of an emoji. A mark put
  *  there would split what reads as one character. */
 function snapForward(line: string, at: number): number {
-    while (at < line.length && (isLow(line[at]) || EMOJI_TAIL.test(line[at]))) {
-        // A joiner joins the next character to this one (a family emoji).
-        if (line[at] === '\u200D' && at + 1 < line.length) at += isHigh(line[at + 1]) ? 2 : 1;
-        at++;
+    for (;;) {
+        if (at < line.length && (isLow(line[at]) || EMOJI_TAIL.test(line[at]))) { at++; continue; }
+        // Just after a joiner: the character it joins on is part of the same.
+        if (at > 0 && at < line.length && line[at - 1] === '\u200D') { at += isHigh(line[at]) ? 2 : 1; continue; }
+        return at;
     }
-    return at;
 }
 
 /** Plain index of source offset `at`: the characters typed before it. */
@@ -507,13 +542,23 @@ function applyLine(line: string, plan: LinePlan, kind: FormatKind, add: boolean,
         // (put in) or has not (taken out), and every other character of the
         // line reading as it does now.
         const at = plan.at;
-        // Pressed again with nothing typed between: the pair comes out — also
-        // one held inside another kind's pair (`**<u>|</u>**`).
-        if (line.slice(at - open.length, at) === open && line.slice(at, at + close.length) === close) {
-            const out = line.slice(0, at - open.length) + line.slice(at + close.length);
-            if (typingReads(line, at, out, at - open.length, '', '', kind, false)) {
-                return { line: out, s: at - open.length, e: at - open.length };
+        // Pressed again with nothing typed between: the pair comes out —
+        // also one held around another kind's pair (`**<u>|</u>**` and
+        // Ctrl+B leaves `<u>|</u>`). The nearest such pair to the caret that
+        // typing then reads right with.
+        const [ra, rb] = markRun(line, at);
+        const pairs: Array<[number, number]> = [];
+        for (let i = at - open.length; i >= Math.max(ra, at - 16); i--) {
+            if (!line.startsWith(open, i)) continue;
+            for (let j = at; j + close.length <= Math.min(rb, at + 16); j++) {
+                if (line.startsWith(close, j)) pairs.push([i, j]);
             }
+        }
+        pairs.sort((x, y) => (at - x[0]) + (x[1] - at) - ((at - y[0]) + (y[1] - at)));
+        for (const [i, j] of pairs) {
+            const out = line.slice(0, i) + line.slice(i + open.length, j) + line.slice(j + close.length);
+            const caretOut = at - open.length;
+            if (typingReads(line, at, out, caretOut, '', '', kind, false)) return { line: out, s: caretOut, e: caretOut };
         }
         // Put in, after a bullet's marker and never in front of it.
         const into = Math.max(at, lineModel(line).prefix.length);

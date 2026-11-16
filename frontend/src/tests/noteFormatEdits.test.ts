@@ -18,7 +18,9 @@ const KINDS: FormatKind[] = ['bold', 'italic', 'underline', 'strike'];
  *  whether it is part of an address. */
 function reading(line: string): Array<{ ch: string; m: Marks; link: boolean }> {
     const [l] = readNoteFormat(line);
-    const prefix = l.bullet ? `${l.bullet.indent}• ` : '';
+    // The bullet's marker as typed: a bare `- ` that becomes a bullet once
+    // something follows it reads the same characters either way.
+    const prefix = l.bullet ? line.slice(0, l.bullet.at + 2) : '';
     return [...prefix].map(ch => ({ ch, m: { bold: false, italic: false, underline: false, strike: false }, link: false }))
         .concat(l.runs.flatMap(r => [...r.text].map(ch => ({ ch, m: r.marks, link: r.kind === 'link' }))));
 }
@@ -75,6 +77,145 @@ describe('every edit reads back as asked, or changes nothing', () => {
             }
         }
         expect(checked).toBeGreaterThan(1000);
+    });
+});
+
+/** Is the caret at `at` off any word and any address? (On a word, a key
+ *  marks that word; off one, it puts in a pair for what is typed next.) */
+function offWord(line: string, at: number): boolean {
+    const r = reading(line);
+    const [l] = readNoteFormat(line);
+    const prefixLen = l.bullet ? `${l.bullet.indent}• `.length : 0;
+    // Where `at` falls among the characters that read: the ones typed before it.
+    const runs = l.runs.flatMap(x => [...x.text].map((ch, k) => ({ ch, src: x.from + k, link: x.kind === 'link' })));
+    const p = runs.filter(c => c.src < at).length;
+    const word = (c?: { ch: string; link: boolean }) => !!c && (c.link || /[\p{L}\p{N}]/u.test(c.ch));
+    void r;
+    void prefixLen;
+    return !word(runs[p - 1]) && !word(runs[p]);
+}
+
+describe('keys pressed with nothing selected, then a letter typed', () => {
+    const BASES = [
+        'hello ',
+        '',
+        '- ',
+        '- item and ',
+        'a \u{1F389} ',
+        'see https://example.org/x ',
+        '**Note:** ',
+        '**********',
+        'a ****** b',
+        '~~~~~~',
+        'use <u> here',
+        '*one* and ',
+        'a *~ b',
+        'a ~* b',
+        'x *<u> y',
+        'x ~</u> y',
+    ];
+    const SEQS: FormatKind[][] = [];
+    for (const a of KINDS) {
+        SEQS.push([a]);
+        for (const b of KINDS) {
+            SEQS.push([a, b]);
+            for (const c of KINDS) SEQS.push([a, b, c]);
+        }
+    }
+
+    it('each key either changes nothing, or flips its own mark on the letter typed next and nothing else on the line', () => {
+        const letter = (text: string, caret: number) => {
+            const typed = text.slice(0, caret) + 'Q' + text.slice(caret);
+            const now = reading(typed);
+            const qi = now.findIndex(c => c.ch === 'Q');
+            return { typed, q: now[qi].m, rest: now.filter((_, i) => i !== qi) };
+        };
+        let checked = 0;
+        for (const base of BASES) {
+            const was = reading(base);
+            for (let at = 0; at <= base.length; at++) {
+                if (!offWord(base, at)) continue;
+                for (const seq of SEQS) {
+                    let text = base;
+                    let caret = at;
+                    for (const k of seq) {
+                        const before = letter(text, caret);
+                        const r = toggleMark(text, caret, caret, k);
+                        const label = `${JSON.stringify(base)} @${at} ${seq.join('+')}: ${k} on ${JSON.stringify(text)} → ${JSON.stringify(r.text)}`;
+                        if (r.text !== text) {
+                            const after = letter(r.text, r.selStart);
+                            // Its own mark flipped, every other kept.
+                            for (const m of KINDS) {
+                                expect(after.q[m], `${label}: ${m}`).toBe(m === k ? !before.q[m] : before.q[m]);
+                            }
+                        }
+                        text = r.text;
+                        caret = r.selStart;
+                    }
+                    // And the line around the letter reads as it did: no
+                    // character lost, none gained (no stray mark showing), no
+                    // word's marks changed. Where the caret already stood in a
+                    // mark (between a closer's two stars), typing there breaks
+                    // the line whatever is pressed: then no worse than that.
+                    const end = letter(text, caret);
+                    const plain = letter(base, at).rest;
+                    const label = `${JSON.stringify(base)} @${at} ${seq.join('+')} → ${JSON.stringify(end.typed)}`;
+                    const reads = (got: typeof plain, want: typeof plain) => got.length === want.length
+                        && got.every((c, i) => c.ch === want[i].ch && (/\s/.test(c.ch) || same(c.m, want[i].m)));
+                    const clean = reads(plain, was);
+                    expect(reads(end.rest, was) || (!clean && reads(end.rest, plain)), `${label}: ${JSON.stringify(end.rest.map(c => c.ch).join(''))}`).toBe(true);
+                    checked++;
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(3000);
+    });
+
+    it('in the ordinary places every sequence takes effect', () => {
+        for (const base of ['hello ', '', '- ', 'a \u{1F389} ', '**Note:** ']) {
+            const at = base.length;
+            for (const seq of SEQS) {
+                let text = base;
+                let caret = at;
+                for (const k of seq) {
+                    const r = toggleMark(text, caret, caret, k);
+                    text = r.text;
+                    caret = r.selStart;
+                }
+                const typed = text.slice(0, caret) + 'Q' + text.slice(caret);
+                const x = reading(typed).find(c => c.ch === 'Q')!.m;
+                for (const k of KINDS) {
+                    expect(x[k], `${JSON.stringify(base)} ${seq.join('+')} → ${JSON.stringify(typed)}: ${k}`).toBe(seq.filter(q => q === k).length % 2 === 1);
+                }
+            }
+        }
+    });
+
+    it('a pair put in between two typed mark characters of other kinds comes out again', () => {
+        for (const [line, at] of [['a *~ b', 3], ['a ~* b', 3]] as const) {
+            for (const k of KINDS) {
+                const on = toggleMark(line, at, at, k);
+                if (on.text === line) continue;
+                const off = toggleMark(on.text, on.selStart, on.selEnd, k);
+                expect(off.text, `${line} ${k}: ${JSON.stringify(on.text)}`).toBe(line);
+            }
+        }
+        // And underline is one that goes in there.
+        expect(toggleMark('a *~ b', 3, 3, 'underline').text).toBe('a *<u></u>~ b');
+    });
+
+    it('a line of stars or tildes keeps every character', () => {
+        for (const [line, at, k] of [['**********', 4, 'bold'], ['~~~~~~', 3, 'strike'], ['a ****** b', 4, 'bold'], ['**********', 5, 'italic']] as const) {
+            expect(toggleMark(line, at, at, k).text, `${line} @${at} ${k}`).toBe(line);
+        }
+    });
+
+    it('a caret just after an emoji joiner does not split the family', () => {
+        const family = 'a \u{1F468}\u200D\u{1F469} b';
+        for (let at = 0; at <= family.length; at++) {
+            const r = toggleMark(family, at, at, 'bold');
+            expect(r.text.includes('\u{1F468}\u200D\u{1F469}'), `@${at} → ${JSON.stringify(r.text)}`).toBe(true);
+        }
     });
 });
 
