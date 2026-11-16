@@ -312,9 +312,12 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
         },
         format: (kind: FormatKind | 'bullets') => {
             if (readOnly || isUndecryptable(latest.current.current)) return;
-            const text = latest.current.draft;
             const el = areaRef.current;
             const inField = !!el && el.ownerDocument.activeElement === el;
+            // The field's own text when the selection is the field's: its
+            // offsets count a line break as one character whatever the
+            // stored text holds (a body shared in with CRLF), as the keys do.
+            const text = inField && el ? el.value : latest.current.draft;
             const s = inField && el ? el.selectionStart : text.length;
             const end = inField && el ? el.selectionEnd : text.length;
             applyEditRef.current(kind === 'bullets' ? toggleBullets(text, s, end) : toggleMark(text, s, end, kind));

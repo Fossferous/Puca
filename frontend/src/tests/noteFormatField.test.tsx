@@ -128,6 +128,17 @@ describe('the formatting keys in a note’s text', () => {
         expect(area().value).toBe('a word');
     });
 
+    it('the toolbar marks the selected words in a text stored with CRLF line breaks', () => {
+        const { handle } = mount('a\r\nb\r\nx yz');
+        const el = area();
+        el.focus();
+        // The field counts each line break as one character.
+        const at = el.value.indexOf('yz');
+        el.setSelectionRange(at, at + 2);
+        act(() => handle.current!.format('bold'));
+        expect(area().value.endsWith('x **yz**')).toBe(true);
+    });
+
     it('reads formatted when not being typed in: the marks are gone and the words are bold', () => {
         mount('buy **milk** now');
         act(() => { area().blur(); });

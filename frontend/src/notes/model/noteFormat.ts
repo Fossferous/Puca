@@ -72,7 +72,10 @@ const BULLET_RE = /^([ \t]*)([-*•]) (?=\S)/;
 // as its own character, a Devanagari vowel sign): one word, never two.
 // A variation selector is not one: it belongs to the emoji before it (a
 // heart, then U+FE0F), so a mark may open straight after an emoji.
-const WORDISH = /(?![\uFE00-\uFE0F])[\p{L}\p{N}\p{M}]/u;
+const WORDISH = /(?![\uFE00-\uFE0F\u20D0-\u20FF])[\p{L}\p{N}\p{M}]/u;
+/** What makes a character before it an emoji (a variation selector, a
+ *  keycap, a joiner): it goes with that character, never apart from it. */
+const EMOJI_TAIL = /[\uFE0E\uFE0F\u20D0-\u20FF\u200D]/;
 const SPACE = /\s/;
 
 function isWordish(ch: string | undefined): boolean {
@@ -117,8 +120,12 @@ function linkSpans(line: string): Array<{ from: number; to: number; href: string
         // Only http(s) addresses are links (urlAt): nothing else need be asked.
         if (!boundary || (line[i] !== 'h' && line[i] !== 'H')) continue;
         const found = urlAt(line.slice(i));
-        const href = found?.replace(/[*~]+$/, '');
-        if (href && urlAt(href) === href) {
+        // What is left once the marks are off its end is read again, so the
+        // punctuation that ended the sentence comes off with them: in
+        // a bold sentence ending in an address and a full stop, the stop is
+        // not part of the address.
+        const href = found ? urlAt(found.replace(/[*~]+$/, '')) : null;
+        if (href) {
             spans.push({ from: i, to: i + href.length, href });
             i += href.length - 1;
         }
@@ -276,6 +283,10 @@ function without(d: Delim, kind: FormatKind): { open: string; close: string } {
  *  `*` of a `**` is not an italic pair). */
 function emptyPairAt(line: string, at: number, open: string, close: string): boolean {
     if (line.slice(at - open.length, at) !== open || line.slice(at, at + close.length) !== close) return false;
+    // Not a real pair's mark that the caret happens to sit in the middle of
+    // (`*|*hello**` is bold's opener, not an empty italic).
+    if (spansOf(line).some(sp => (at > sp.open && at < sp.open + sp.delim.open.length)
+        || (at > sp.close && at < sp.close + sp.delim.close.length))) return false;
     const ch = open[0];
     if (ch !== '*' && ch !== '~') return true;
     return line[at - open.length - 1] !== ch && line[at + close.length] !== ch;
@@ -319,7 +330,7 @@ const anyMark = (m: Marks) => m.bold || m.italic || m.underline || m.strike;
  * italic (`***` for both), with spaces at a run's ends left outside its marks
  * so every pair sits at word edges.
  */
-function serialize(prefix: string, chars: ReadonlyArray<{ ch: string; marks: Marks }>): string {
+function serialize(prefix: string, chars: ReadonlyArray<{ ch: string; marks: Marks; link: number }>): string {
     let out = prefix;
     let i = 0;
     while (i < chars.length) {
@@ -345,16 +356,30 @@ function serialize(prefix: string, chars: ReadonlyArray<{ ch: string; marks: Mar
 
 /** `line` reads as exactly `prefix` and `want`: the same characters, each
  *  with the marks it should have (a space's marks do not matter). */
-function readsAs(line: string, prefix: string, want: ReadonlyArray<{ ch: string; marks: Marks }>): boolean {
+function readsAs(line: string, prefix: string, want: ReadonlyArray<{ ch: string; marks: Marks; link: number }>): boolean {
     const got = lineModel(line);
     if (got.prefix !== prefix || got.chars.length !== want.length) return false;
-    return got.chars.every((c, i) => c.ch === want[i].ch && (SPACE.test(c.ch) || sameMarks(c.marks, want[i].marks)));
+    // The same characters, each with its marks — and each still in an
+    // address, or still not: a mark that unlinks an address is not formatting.
+    return got.chars.every((c, i) => c.ch === want[i].ch && (c.link >= 0) === (want[i].link >= 0)
+        && (SPACE.test(c.ch) || sameMarks(c.marks, want[i].marks)));
 }
 
 /** Word characters for the keys' edges: the reader's own (a variation
  *  selector is none, so a mark never splits it from its emoji). */
 function wordChar(ch: string | undefined): boolean {
     return isWordish(ch);
+}
+
+const isHigh = (ch: string | undefined) => ch !== undefined && ch >= '\uD800' && ch <= '\uDBFF';
+const isLow = (ch: string | undefined) => ch !== undefined && ch >= '\uDC00' && ch <= '\uDFFF';
+
+/** `at` moved forward off the inside of a character: the second half of a
+ *  surrogate pair, or the selector, keycap or joiner of an emoji. A mark put
+ *  there would split what reads as one character. */
+function snapForward(line: string, at: number): number {
+    while (at < line.length && (isLow(line[at]) || EMOJI_TAIL.test(line[at]))) at++;
+    return at;
 }
 
 /** Plain index of source offset `at`: the characters typed before it. */
@@ -368,8 +393,14 @@ function plainAt(chars: readonly PlainChar[], at: number): number {
  *  inside a word, where it would not read, nor inside an address, where it
  *  would change where the link goes). */
 function widen(chars: readonly PlainChar[], p0: number, p1: number): [number, number] {
+    // Whole characters: never half of a surrogate pair.
+    if (p0 > 0 && isLow(chars[p0]?.ch) && isHigh(chars[p0 - 1].ch)) p0--;
+    if (p1 < chars.length && isHigh(chars[p1 - 1]?.ch) && isLow(chars[p1].ch)) p1++;
     while (p0 > 0 && wordChar(chars[p0 - 1].ch) && wordChar(chars[p0]?.ch)) p0--;
     while (p1 < chars.length && wordChar(chars[p1].ch) && wordChar(chars[p1 - 1]?.ch)) p1++;
+    // Never between an emoji and its selector or keycap.
+    while (p1 < chars.length && EMOJI_TAIL.test(chars[p1].ch)) p1++;
+    while (p0 > 0 && EMOJI_TAIL.test(chars[p0].ch)) p0--;
     for (let changed = true; changed;) {
         changed = false;
         if (p0 > 0 && chars[p0].link >= 0 && chars[p0 - 1].link === chars[p0].link) { p0--; changed = true; }
@@ -387,6 +418,7 @@ type LinePlan =
 
 function planLine(line: string, s: number, e: number, kind: FormatKind, caretMode: boolean): LinePlan {
     const { open, close } = WRAP[kind];
+    if (caretMode) { s = snapForward(line, s); e = s; }
     if (caretMode && emptyPairAt(line, s, open, close)) return { kind: 'pair', at: s };
     const model = lineModel(line);
     const chars = model.chars;
@@ -399,6 +431,8 @@ function planLine(line: string, s: number, e: number, kind: FormatKind, caretMod
         if (wordChar(chars[p - 1]?.ch) || wordChar(chars[p]?.ch)) {
             while (p0 > 0 && wordChar(chars[p0 - 1].ch)) p0--;
             while (p1 < chars.length && wordChar(chars[p1].ch)) p1++;
+            // `1` then a selector and a keycap is the keycap emoji, whole.
+            while (p1 < chars.length && EMOJI_TAIL.test(chars[p1].ch)) p1++;
         } else if ((chars[p]?.link ?? -1) >= 0 || (chars[p - 1]?.link ?? -1) >= 0) {
             p0 = p1 = (chars[p]?.link ?? -1) >= 0 ? p : p - 1;
             p1++;
@@ -433,12 +467,26 @@ function applyLine(line: string, plan: LinePlan, kind: FormatKind, add: boolean,
             const at = plan.at - open.length;
             return { line: line.slice(0, at) + line.slice(plan.at + close.length), s: at, e: at };
         }
-        // Off any word: an empty pair, for what is typed next to go in.
-        const out = line.slice(0, plan.at) + open + close + line.slice(plan.at);
-        return { line: out, s: plan.at + open.length, e: plan.at + open.length };
+        // Off any word: an empty pair, for what is typed next to go in —
+        // after the bullet's marker, never in front of it, and only where it
+        // leaves every other character reading as it did (it reads as typed
+        // characters until something is typed between its two halves).
+        const before = lineModel(line);
+        const at = Math.max(plan.at, before.prefix.length);
+        const out = line.slice(0, at) + open + close + line.slice(at);
+        const after = lineModel(out);
+        const kept = after.prefix === before.prefix && after.chars.length === before.chars.length + open.length + close.length
+            && (() => {
+                const p = plainAt(before.chars, at);
+                const rest = [...after.chars.slice(0, p), ...after.chars.slice(p + open.length + close.length)];
+                return rest.every((c, i) => c.ch === before.chars[i].ch && sameMarks(c.marks, before.chars[i].marks)
+                    && (c.link >= 0) === (before.chars[i].link >= 0));
+            })();
+        if (!kept) return { line, s, e };
+        return { line: out, s: at + open.length, e: at + open.length };
     }
     const { model, p0, p1, caret } = plan;
-    const want = model.chars.map((c, i) => (i >= p0 && i < p1 && !SPACE.test(c.ch) ? { ch: c.ch, marks: { ...c.marks, [kind]: add } } : c));
+    const want = model.chars.map((c, i) => (i >= p0 && i < p1 && !SPACE.test(c.ch) ? { ...c, marks: { ...c.marks, [kind]: add } } : c));
     const tries: string[] = [];
     // The smallest edit first: the pair put around the words, or the pair
     // they are in taken off. Kept only if it reads exactly as wanted.

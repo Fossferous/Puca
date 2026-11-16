@@ -13,12 +13,13 @@ import { readNoteFormat, toggleBullets, toggleMark, type FormatKind, type Marks 
 
 const KINDS: FormatKind[] = ['bold', 'italic', 'underline', 'strike'];
 
-/** Each character of a one-line text as it reads, with its marks. */
-function reading(line: string): Array<{ ch: string; m: Marks }> {
+/** Each character of a one-line text as it reads, with its marks and
+ *  whether it is part of an address. */
+function reading(line: string): Array<{ ch: string; m: Marks; link: boolean }> {
     const [l] = readNoteFormat(line);
     const prefix = l.bullet ? `${l.bullet.indent}• ` : '';
-    return [...prefix].map(ch => ({ ch, m: { bold: false, italic: false, underline: false, strike: false } }))
-        .concat(l.runs.flatMap(r => [...r.text].map(ch => ({ ch, m: r.marks }))));
+    return [...prefix].map(ch => ({ ch, m: { bold: false, italic: false, underline: false, strike: false }, link: false }))
+        .concat(l.runs.flatMap(r => [...r.text].map(ch => ({ ch, m: r.marks, link: r.kind === 'link' }))));
 }
 
 const same = (a: Marks, b: Marks) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline && a.strike === b.strike;
@@ -31,6 +32,10 @@ const LINES = [
     '- milk',
     '* eggs and *ham*',
     'see https://example.org/x now',
+    'see https://example.org/path.',
+    'call (https://example.org/x)',
+    '1\uFE0F\u20E3 eggs',
+    '- \u{1F389} party',
     '<u>under</u> and ~~gone~~',
     '***both*** words',
     'नमस्ते दुनिया',
@@ -52,6 +57,8 @@ describe('every edit reads back as asked, or changes nothing', () => {
                         const after = reading(r.text);
                         // The same words, nothing gained or lost.
                         expect(after.map(c => c.ch).join(''), `${line} [${s},${e}) ${kind} → ${r.text}`).toBe(before.map(c => c.ch).join(''));
+                        // Every address still an address, and nothing else one.
+                        expect(after.map(c => c.link), `${line} [${s},${e}) ${kind} → ${r.text}: links`).toEqual(before.map(c => c.link));
                         // Every word either gained or lost exactly this mark, or kept its marks.
                         const changed = after.map((c, i) => !same(c.m, before[i].m));
                         after.forEach((c, i) => {
@@ -108,6 +115,41 @@ describe('the cases the reviews found', () => {
         const r = toggleMark('see https://example.org/x now', 12, 12, 'bold');
         expect(r.text).toBe('see **https://example.org/x** now');
         expect(readNoteFormat(r.text)[0].runs.find(x => x.kind === 'link')?.href).toBe('https://example.org/x');
+    });
+
+    it('an address that ends a sentence stays a link when the sentence is marked', () => {
+        for (const kind of KINDS) {
+            const r = toggleMark('see https://example.org/path.', 0, 29, kind);
+            const link = readNoteFormat(r.text)[0].runs.find(x => x.kind === 'link');
+            expect(link?.href, `${kind}: ${r.text}`).toBe('https://example.org/path');
+            expect(link?.marks[kind]).toBe(true);
+        }
+        // Typed by hand, too.
+        expect(readNoteFormat('**Read https://example.org/a.**')[0].runs.find(x => x.kind === 'link')?.href).toBe('https://example.org/a');
+    });
+
+    it('the caret between the two stars of a bold mark never takes the bold away', () => {
+        for (const [line, at] of [['**hello**', 1], ['**hello** world', 8], ['a **b** c', 3]] as const) {
+            const r = toggleMark(line, at, at, 'italic');
+            const bolded = reading(r.text).filter(c => c.m.bold).map(c => c.ch).join('');
+            expect(bolded, `${line} @${at} → ${r.text}`).toBe(reading(line).filter(c => c.m.bold).map(c => c.ch).join(''));
+        }
+    });
+
+    it('a keycap emoji is never split by a mark', () => {
+        const key = '1\uFE0F\u20E3';
+        for (const at of [0, 1, 2, 3]) {
+            const r = toggleMark(`${key} eggs`, at, at, 'bold');
+            expect(r.text.includes(key), `@${at} → ${r.text}`).toBe(true);
+        }
+    });
+
+    it('an empty pair goes after a bullet, and never where it would change how the line reads', () => {
+        const party = toggleMark('- \u{1F389}', 0, 0, 'bold');
+        expect(readNoteFormat(party.text)[0].bullet).not.toBeNull();
+        const line = '2 * 3 = 6 and *word*';
+        const u = toggleMark(line, 3, 3, 'underline');
+        expect(reading(u.text).filter(c => c.m.italic).map(c => c.ch).join('')).toBe('word');
     });
 
     it('an emoji keeps its variation selector', () => {
