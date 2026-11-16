@@ -214,9 +214,18 @@ words asked for (and every other word as it was); else that line written out
 afresh in one canonical form (a word of a bold phrase made italic splits the
 phrase, `**big** ***deal***`, where gluing `*` to `**` would read as
 nothing); else no change at all. A key never leaves marks that show as stray
-characters. `src/tests/noteFormatEdits.test.ts` sweeps every selection of a
-set of awkward lines (bullets, nested marks, an address, Devanagari, an
-emoji) for every mark and holds each edit to that.
+characters. An empty pair reads as typed characters until something goes
+between its halves, so it is judged by what typing there WOULD give: it goes
+in only where a letter typed next has the mark and every other character
+still reads as it does, and pressed again the key takes out the nearest pair
+of its kind that typing then reads right with (also one inside another
+kind's pair, `**<u>|</u>**`). Mark characters a person typed (a line of
+stars, a `*` beside a `~`) are never taken for a key's pairs.
+`src/tests/noteFormatEdits.test.ts` sweeps every selection of a set of
+awkward lines (bullets, nested marks, an address, Devanagari, an emoji) for
+every mark and holds each edit to that, and presses every sequence of up to
+three keys at every caret off a word, holding each key to changing nothing
+or flipping only its own mark on the letter typed next.
 
 Enter on a bullet starts the next one; Enter on an empty bullet ends the
 list.
