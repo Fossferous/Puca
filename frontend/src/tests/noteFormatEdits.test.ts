@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { readNoteFormat, toggleBullets, toggleMark, type FormatKind, type Marks } from '../notes/model/noteFormat';
+import { linkSegments } from '../utils/linkSegments';
 
 const KINDS: FormatKind[] = ['bold', 'italic', 'underline', 'strike'];
 
@@ -150,6 +151,59 @@ describe('the cases the reviews found', () => {
         const line = '2 * 3 = 6 and *word*';
         const u = toggleMark(line, 3, 3, 'underline');
         expect(reading(u.text).filter(c => c.m.italic).map(c => c.ch).join('')).toBe('word');
+    });
+
+    it('with nothing selected, a new empty bullet line takes the mark, and typing reads as a bullet with it', () => {
+        for (const [text, at] of [['- item\n- ', 9], ['- ', 2], ['* ', 2], ['  - ', 4]] as const) {
+            const r = toggleMark(text, at, at, 'bold');
+            expect(r.text, `${text}`).not.toBe(text);
+            const typed = r.text.slice(0, r.selStart) + 'x' + r.text.slice(r.selStart);
+            const last = readNoteFormat(typed).at(-1)!;
+            expect(last.bullet, typed).not.toBeNull();
+            expect(last.runs.find(x => x.text === 'x')?.marks.bold, typed).toBe(true);
+        }
+    });
+
+    it('two different marks pressed with nothing selected both apply, and either comes off again', () => {
+        for (const k1 of KINDS) {
+            for (const k2 of KINDS) {
+                if (k1 === k2) continue;
+                const one = toggleMark('hello ', 6, 6, k1);
+                const two = toggleMark(one.text, one.selStart, one.selEnd, k2);
+                const typed = two.text.slice(0, two.selStart) + 'x' + two.text.slice(two.selStart);
+                const x = reading(typed).find(c => c.ch === 'x')!;
+                expect([x.m[k1], x.m[k2]], `${k1}+${k2}: ${typed}`).toEqual([true, true]);
+                // The second key again: off, the first kept.
+                const off = toggleMark(two.text, two.selStart, two.selEnd, k2);
+                const typedOff = off.text.slice(0, off.selStart) + 'x' + off.text.slice(off.selStart);
+                const y = reading(typedOff).find(c => c.ch === 'x')!;
+                expect([y.m[k1], y.m[k2]], `${k1}+${k2}+${k2}: ${typedOff}`).toEqual([true, false]);
+            }
+        }
+    });
+
+    it('a formatted line links exactly what the plain view links', () => {
+        for (const line of ['Link:https://example.org/a', 'word:https://example.org/b', 'see https://example.org/c and http://x.example.net/d.', 'xhttps://example.org']) {
+            const plain = linkSegments(line).filter(seg => seg.kind === 'link').map(seg => (seg.kind === 'link' ? seg.href : ''));
+            const formatted = readNoteFormat(line)[0].runs.filter(r => r.kind === 'link').map(r => (r.kind === 'link' ? r.href : ''));
+            expect(formatted, line).toEqual(plain);
+        }
+    });
+
+    it('a selection or caret inside one visible character never splits it', () => {
+        const flag = 'go \u{1F3F3}\uFE0F now';
+        const family = 'a \u{1F468}\u200D\u{1F469} b';
+        for (const line of [flag, family]) {
+            for (let s = 0; s <= line.length; s++) {
+                for (let e = s; e <= line.length; e++) {
+                    for (const kind of KINDS) {
+                        const r = toggleMark(line, s, e, kind);
+                        // No lone surrogate anywhere.
+                        expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(r.text), `${line} [${s},${e}) ${kind} → ${JSON.stringify(r.text)}`).toBe(false);
+                    }
+                }
+            }
+        }
     });
 
     it('an emoji keeps its variation selector', () => {

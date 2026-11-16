@@ -25,6 +25,7 @@
  * Pure: no React, no DOM. Tested in src/tests/noteFormat.test.ts.
  */
 import { urlAt } from '../../utils/messageParser';
+import { linkSegments } from '../../utils/linkSegments';
 
 export interface Marks {
     bold: boolean;
@@ -108,27 +109,23 @@ function canClose(line: string, at: number, d: Delim, openEnd: number): boolean 
 
 /**
  * Where every web address on the line starts and ends: no mark inside one.
- * An address never ENDS in `*` or `~` here, so an address in `**` is a bold
- * link rather than a link whose last characters are `**` (urlAt, shared
- * with chat, keeps them; an address that really ends in one is vanishingly
- * rare, and the field the text is typed in still shows every character).
+ * The addresses are linkSegments' own (utils/linkSegments.ts, what Notes'
+ * plain link text and `hasLink` use), so the formatted view links exactly
+ * what the plain one does — with one difference: an address never ENDS in
+ * `*` or `~` here, so an address in `**` is a bold link rather than a link
+ * whose last characters are `**`. What is left once those are off its end is
+ * read again, so the punctuation that ended a marked sentence comes off
+ * with them (urlAt, shared with chat).
  */
 function linkSpans(line: string): Array<{ from: number; to: number; href: string }> {
     const spans: Array<{ from: number; to: number; href: string }> = [];
-    for (let i = 0; i < line.length; i++) {
-        const boundary = i === 0 || !/[A-Za-z0-9]/.test(line[i - 1]);
-        // Only http(s) addresses are links (urlAt): nothing else need be asked.
-        if (!boundary || (line[i] !== 'h' && line[i] !== 'H')) continue;
-        const found = urlAt(line.slice(i));
-        // What is left once the marks are off its end is read again, so the
-        // punctuation that ended the sentence comes off with them: in
-        // a bold sentence ending in an address and a full stop, the stop is
-        // not part of the address.
-        const href = found ? urlAt(found.replace(/[*~]+$/, '')) : null;
-        if (href) {
-            spans.push({ from: i, to: i + href.length, href });
-            i += href.length - 1;
-        }
+    let at = 0;
+    for (const seg of linkSegments(line)) {
+        if (seg.kind === 'text') { at += seg.value.length; continue; }
+        const stripped = seg.href.replace(/[*~]+$/, '');
+        const href = stripped === seg.href ? seg.href : urlAt(stripped);
+        if (href) spans.push({ from: at, to: at + href.length, href });
+        at += seg.text.length;
     }
     return spans;
 }
@@ -279,19 +276,6 @@ function without(d: Delim, kind: FormatKind): { open: string; close: string } {
     return { open: '', close: '' };
 }
 
-/** An empty pair of `kind`'s marks around the caret, standing alone (the
- *  `*` of a `**` is not an italic pair). */
-function emptyPairAt(line: string, at: number, open: string, close: string): boolean {
-    if (line.slice(at - open.length, at) !== open || line.slice(at, at + close.length) !== close) return false;
-    // Not a real pair's mark that the caret happens to sit in the middle of
-    // (`*|*hello**` is bold's opener, not an empty italic).
-    if (spansOf(line).some(sp => (at > sp.open && at < sp.open + sp.delim.open.length)
-        || (at > sp.close && at < sp.close + sp.delim.close.length))) return false;
-    const ch = open[0];
-    if (ch !== '*' && ch !== '~') return true;
-    return line[at - open.length - 1] !== ch && line[at + close.length] !== ch;
-}
-
 /** A character of a line as it reads: where it is typed, its marks, and
  *  which address it belongs to (-1: none). The marks themselves are not
  *  characters here. */
@@ -365,6 +349,55 @@ function readsAs(line: string, prefix: string, want: ReadonlyArray<{ ch: string;
         && (SPACE.test(c.ch) || sameMarks(c.marks, want[i].marks)));
 }
 
+/** A line as one string of characters: a bullet's marker (no marks, no
+ *  address) and then its words. A bare `- ` that turns into a bullet once
+ *  something follows it reads the same either way. */
+function lineChars(line: string): PlainChar[] {
+    const m = lineModel(line);
+    const pre: PlainChar[] = m.prefix.split('').map((ch, i) => ({ ch, src: i, marks: NONE, link: -1 }));
+    return [...pre, ...m.chars];
+}
+
+/** [from, to): the mark characters (`*`, `~`, `<u>`, `</u>`) running up to
+ *  and on from `at` — an empty pair, or several, around the caret. */
+function markRun(line: string, at: number): [number, number] {
+    let a = at;
+    for (;;) {
+        if (line[a - 1] === '*' || line[a - 1] === '~') a--;
+        else if (line.slice(a - 3, a) === '<u>') a -= 3;
+        else if (line.slice(a - 4, a) === '</u>') a -= 4;
+        else break;
+    }
+    let b = at;
+    for (;;) {
+        if (line[b] === '*' || line[b] === '~') b++;
+        else if (line.startsWith('<u>', b)) b += 3;
+        else if (line.startsWith('</u>', b)) b += 4;
+        else break;
+    }
+    return [a, b];
+}
+
+/**
+ * Typing a letter at `at` in `base`, between `open` and `close`, gives a
+ * letter whose `kind` is `want` — and every character of `orig` outside the
+ * marks around its caret (`origAt`) still reads as it does.
+ */
+function typingReads(orig: string, origAt: number, base: string, at: number, open: string, close: string, kind: FormatKind, want: boolean): boolean {
+    const sim = base.slice(0, at) + open + 'x' + close + base.slice(at);
+    const xAt = at + open.length;
+    const [oa, ob] = markRun(orig, origAt);
+    const before = lineChars(orig).filter(c => c.src < oa || c.src >= ob);
+    const after = lineChars(sim);
+    const x = after.find(c => c.src === xAt);
+    if (!x || x.ch !== 'x' || x.marks[kind] !== want) return false;
+    const sa = markRun(sim, xAt)[0];
+    const sb = markRun(sim, xAt + 1)[1];
+    const rest = after.filter(c => c.src < sa || c.src >= sb);
+    return rest.length === before.length && rest.every((c, i) => c.ch === before[i].ch
+        && (c.link >= 0) === (before[i].link >= 0) && (SPACE.test(c.ch) || sameMarks(c.marks, before[i].marks)));
+}
+
 /** Word characters for the keys' edges: the reader's own (a variation
  *  selector is none, so a mark never splits it from its emoji). */
 function wordChar(ch: string | undefined): boolean {
@@ -378,7 +411,11 @@ const isLow = (ch: string | undefined) => ch !== undefined && ch >= '\uDC00' && 
  *  surrogate pair, or the selector, keycap or joiner of an emoji. A mark put
  *  there would split what reads as one character. */
 function snapForward(line: string, at: number): number {
-    while (at < line.length && (isLow(line[at]) || EMOJI_TAIL.test(line[at]))) at++;
+    while (at < line.length && (isLow(line[at]) || EMOJI_TAIL.test(line[at]))) {
+        // A joiner joins the next character to this one (a family emoji).
+        if (line[at] === '\u200D' && at + 1 < line.length) at += isHigh(line[at + 1]) ? 2 : 1;
+        at++;
+    }
     return at;
 }
 
@@ -393,9 +430,13 @@ function plainAt(chars: readonly PlainChar[], at: number): number {
  *  inside a word, where it would not read, nor inside an address, where it
  *  would change where the link goes). */
 function widen(chars: readonly PlainChar[], p0: number, p1: number): [number, number] {
-    // Whole characters: never half of a surrogate pair.
-    if (p0 > 0 && isLow(chars[p0]?.ch) && isHigh(chars[p0 - 1].ch)) p0--;
-    if (p1 < chars.length && isHigh(chars[p1 - 1]?.ch) && isLow(chars[p1].ch)) p1++;
+    // Whole characters: never half of a surrogate pair, never an emoji apart
+    // from its selector, keycap or joined partner — until nothing moves.
+    for (let moved = true; moved;) {
+        moved = false;
+        if (p0 > 0 && (isLow(chars[p0]?.ch) || EMOJI_TAIL.test(chars[p0]?.ch ?? '') || chars[p0 - 1].ch === '\u200D')) { p0--; moved = true; }
+        if (p1 < chars.length && (isHigh(chars[p1 - 1]?.ch) || EMOJI_TAIL.test(chars[p1].ch) || chars[p1 - 1]?.ch === '\u200D')) { p1++; moved = true; }
+    }
     while (p0 > 0 && wordChar(chars[p0 - 1].ch) && wordChar(chars[p0]?.ch)) p0--;
     while (p1 < chars.length && wordChar(chars[p1].ch) && wordChar(chars[p1 - 1]?.ch)) p1++;
     // Never between an emoji and its selector or keycap.
@@ -416,10 +457,8 @@ type LinePlan =
     | { kind: 'pair'; at: number }
     | { kind: 'none' };
 
-function planLine(line: string, s: number, e: number, kind: FormatKind, caretMode: boolean): LinePlan {
-    const { open, close } = WRAP[kind];
+function planLine(line: string, s: number, e: number, caretMode: boolean): LinePlan {
     if (caretMode) { s = snapForward(line, s); e = s; }
-    if (caretMode && emptyPairAt(line, s, open, close)) return { kind: 'pair', at: s };
     const model = lineModel(line);
     const chars = model.chars;
     if (caretMode) {
@@ -462,28 +501,27 @@ function applyLine(line: string, plan: LinePlan, kind: FormatKind, add: boolean,
     const { open, close } = WRAP[kind];
     if (plan.kind === 'none') return { line, s, e };
     if (plan.kind === 'pair') {
-        if (emptyPairAt(line, plan.at, open, close)) {
-            // Pressed twice with nothing typed between: the pair comes out.
-            const at = plan.at - open.length;
-            return { line: line.slice(0, at) + line.slice(plan.at + close.length), s: at, e: at };
+        // Off any word, with nothing selected. An empty pair reads as typed
+        // characters until something is typed between its halves, so it is
+        // judged by what typing there WOULD give: a letter that has the mark
+        // (put in) or has not (taken out), and every other character of the
+        // line reading as it does now.
+        const at = plan.at;
+        // Pressed again with nothing typed between: the pair comes out — also
+        // one held inside another kind's pair (`**<u>|</u>**`).
+        if (line.slice(at - open.length, at) === open && line.slice(at, at + close.length) === close) {
+            const out = line.slice(0, at - open.length) + line.slice(at + close.length);
+            if (typingReads(line, at, out, at - open.length, '', '', kind, false)) {
+                return { line: out, s: at - open.length, e: at - open.length };
+            }
         }
-        // Off any word: an empty pair, for what is typed next to go in —
-        // after the bullet's marker, never in front of it, and only where it
-        // leaves every other character reading as it did (it reads as typed
-        // characters until something is typed between its two halves).
-        const before = lineModel(line);
-        const at = Math.max(plan.at, before.prefix.length);
-        const out = line.slice(0, at) + open + close + line.slice(at);
-        const after = lineModel(out);
-        const kept = after.prefix === before.prefix && after.chars.length === before.chars.length + open.length + close.length
-            && (() => {
-                const p = plainAt(before.chars, at);
-                const rest = [...after.chars.slice(0, p), ...after.chars.slice(p + open.length + close.length)];
-                return rest.every((c, i) => c.ch === before.chars[i].ch && sameMarks(c.marks, before.chars[i].marks)
-                    && (c.link >= 0) === (before.chars[i].link >= 0));
-            })();
-        if (!kept) return { line, s, e };
-        return { line: out, s: at + open.length, e: at + open.length };
+        // Put in, after a bullet's marker and never in front of it.
+        const into = Math.max(at, lineModel(line).prefix.length);
+        if (typingReads(line, at, line, into, open, close, kind, true)) {
+            const out = line.slice(0, into) + open + close + line.slice(into);
+            return { line: out, s: into + open.length, e: into + open.length };
+        }
+        return { line, s, e };
     }
     const { model, p0, p1, caret } = plan;
     const want = model.chars.map((c, i) => (i >= p0 && i < p1 && !SPACE.test(c.ch) ? { ...c, marks: { ...c.marks, [kind]: add } } : c));
@@ -559,7 +597,7 @@ export function toggleMark(text: string, selStart: number, selEnd: number, kind:
         // the line a selection merely starts at the end of, or ends at the
         // start of.
         const touches = caretMode ? a >= lf && a <= to : s < e && line.slice(s, e).trim() !== '';
-        return touches ? { plan: planLine(line, s, e, kind, caretMode), s, e } : null;
+        return touches ? { plan: planLine(line, s, e, caretMode), s, e } : null;
     });
     const add = !plans.every(p => p === null || planHas(p.plan, kind));
     let newStart = a;
