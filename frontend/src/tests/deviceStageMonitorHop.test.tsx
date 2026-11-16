@@ -377,3 +377,90 @@ describe('the monitor-hop offer', () => {
         expect(seeded[0].y).toBeCloseTo(aim.y!, 10);
     });
 });
+
+/**
+ * REACHED BY TWO FINGERS, the way a phone pans (2026-11-16). A browser hands
+ * one touch event to the page as a pointermove PER FINGER, all carrying that
+ * event's timeStamp, and the stage stepped the gesture on each: between the
+ * two it saw a pinch the hand never made, and the pan clamp acted on it. A
+ * two-finger pan into an edge then stopped short of it, so the edge's offer
+ * never came. Chromium hands the fingers over in one order, so toward one
+ * pair of edges that was every time (the right and bottom ones in the
+ * device-stage walk), and on a busy machine the order flips. Fixed in
+ * components/deviceStagePinch.ts; the arithmetic is pinned next door
+ * (deviceStagePinch.test.ts), the wiring here.
+ */
+describe('the offer, reached by a two-finger pan', () => {
+    beforeEach(() => {
+        window.matchMedia = ((q: string) => ({
+            matches: q === '(pointer: coarse)', media: q, onchange: null,
+            addEventListener() { /* noop */ }, removeEventListener() { /* noop */ },
+            addListener() { /* noop */ }, removeListener() { /* noop */ }, dispatchEvent() { return false; },
+        })) as unknown as typeof window.matchMedia;
+    });
+
+    const finger = (type: string, id: number, x: number, at: number) => {
+        const ev = new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: id, pointerType: 'touch', clientX: x, clientY: 300 });
+        // The touch event's own time, as the browser stamps every finger's
+        // pointermove of it (jsdom stamps each event with the clock).
+        Object.defineProperty(ev, 'timeStamp', { value: at });
+        return ev;
+    };
+
+    const scale = () => Number(/scale\(([-\d.e]+)\)/.exec((host!.querySelector('.device-stage-canvas') as HTMLElement).style.transform)![1]);
+
+    /** Zoomed in x3 about the middle, then two strokes of two fingers 60 px
+     *  apart, side by side, each carried right 15 x 30 px (the picture
+     *  follows them, so its LEFT edge comes into view, 800 px away), each
+     *  step ONE touch event. `leftFirst`: the left finger's move is handed
+     *  over first, so between the two the fingers are 30 px apart: a
+     *  half-step to x1.5, above the zoom floor, so what is tested is the pan
+     *  clamp acting on it. */
+    async function twoFingerPanRight(leftFirst: boolean) {
+        await mount(1);
+        for (let n = 0; n < 2; n++) {
+            await act(async () => {
+                surface().dispatchEvent(new WheelEvent('wheel', {
+                    bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100, clientX: BOX.w / 2, clientY: BOX.h / 2,
+                }));
+            });
+        }
+        await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+        expect(scale(), 'precondition: zoomed in x3').toBe(3);
+        let at = 1000;
+        for (let stroke = 0; stroke < 2; stroke++) {
+            await act(async () => {
+                surface().dispatchEvent(finger('pointerdown', 1, 100, at));
+                surface().dispatchEvent(finger('pointerdown', 2, 160, at));
+            });
+            for (let i = 1; i <= 15; i++) {
+                at += 16;
+                await act(async () => {
+                    const left = finger('pointermove', 1, 100 + 30 * i, at);
+                    const right = finger('pointermove', 2, 160 + 30 * i, at);
+                    for (const ev of leftFirst ? [left, right] : [right, left]) surface().dispatchEvent(ev);
+                });
+            }
+            at += 16;
+            await act(async () => {
+                surface().dispatchEvent(finger('pointerup', 1, 550, at));
+                surface().dispatchEvent(finger('pointerup', 2, 610, at));
+            });
+        }
+        await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+        expect(scale(), 'a pan, no zoom: still x3').toBeCloseTo(3, 9);
+    }
+
+    it('CONTROL: the far finger handed over first, the pan reaches the edge and the neighbour is offered', async () => {
+        await twoFingerPanRight(false);
+        expect(chips().map(c => c.getAttribute('aria-label'))).toEqual(['Show Main display']);
+    });
+
+    it('the near finger handed over first, the pan reaches the edge too, and the neighbour is offered', async () => {
+        await twoFingerPanRight(true);
+        expect(
+            chips().map(c => c.getAttribute('aria-label')),
+            'a pan that stopped short of the edge offers nothing',
+        ).toEqual(['Show Main display']);
+    });
+});
