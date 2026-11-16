@@ -4,6 +4,101 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.864 — 2026-11-16
+
+Phone notifications the moment the web app goes to the background, the newest message stays above the box while you type, two fingers pan a controlled screen to every edge with a small arrow to the next one, Light reads clearly, web auto gain off by default, and a tablet is your tablet
+### Changed
+
+- **Auto Gain Control is off by default in the web app.** In a browser, auto
+  gain can turn down your system microphone level (on Windows, the input level
+  in Sound settings), and the level stays low after the call: the same thing
+  took three microphones down to 7.8 % in the desktop app before it was
+  stopped there. A web page cannot stop the browser doing it, so in the web
+  app (any browser, and the iPhone and iPad Home Screen app) **Settings ›
+  Voice & Video › Auto Gain Control** now starts off, with the reason beside
+  it, and Manual Gain sets your level. Púca Notes' voice notes in a browser
+  follow the same setting. A web profile that still had the old default is
+  switched off once, with Manual Gain at 100 %; switch it on again if you want
+  it, and that choice is kept. The desktop app and the Android app keep it on,
+  as before: there it never changes your microphone's own level. Arrives as an
+  ordinary update.
+- **Back from a game, you turn green again within about 3 seconds.** While the
+  desktop app has you down as idle it now checks for input anywhere on the PC
+  every 3 seconds instead of every 15, so the dot others see turns green again
+  about 3 seconds after you touch the mouse or keyboard. Arrives as an ordinary
+  update.
+- **A tablet is called your tablet.** "You're in Lounge on your tablet", "You
+  moved the call to your tablet": a touch screen whose shorter side is 600
+  pixels or more is now named a tablet, held either way, and anything smaller
+  is still your phone. Needs the new server and the new app on both devices;
+  until then a tablet is called what it was before (your phone, or a browser
+  for a tablet's browser held sideways).
+
+### Fixed
+
+- **The newest message stays just above the message box while you type.** On an
+  iPhone, each line the message box grew covered more of the newest message,
+  and with the box at several lines every keystroke covered it again (up to
+  154 px). The other person's typing indicator covered it too, and closing the
+  keyboard left it cut off. On the desktop, a growing message box and the typing
+  indicator covered it the same way. The list now follows the box and the
+  indicator for as long as you are at the newest message. If you have scrolled
+  up to read, the list stays exactly where you were. Android's app already kept
+  it in place and behaves as before. A web update is all that is needed: no new
+  APK, no server change.
+- **Two fingers pan a controlled computer's screen all the way to its edge.**
+  Controlling a computer from a phone or a touch screen, zoomed in, a
+  two-finger pan toward the right or bottom edge of the picture stopped short
+  of it, so the last strip of that screen could not be brought into view that
+  way and the arrow to the screen beyond it never came up; now and then the
+  same happened at the left and top edges. A two-finger pan now goes all the
+  way to every edge. Arrives with the app's next update; no new APK needed.
+- **The button for the next screen no longer covers the picture on a phone.**
+  Controlling a computer from a phone, zoomed in and panned to the edge of one
+  screen, the button that goes to the screen beyond it was a dark bar with the
+  screen's name that took up to 42% of the phone's width. On a touch screen it
+  is now a small see-through circle with an arrow pointing the way the other
+  screen lies, in a full-size 44 px touch area. It moves along its edge out
+  from under the mouse buttons and pinned keys instead of hiding beneath them
+  (in landscape they used to cover it), it stays put while pressed, and a tap
+  on it switches screens, clicks nothing on the computer and no longer takes
+  the typing focus from the keyboard bar. Screen readers still say which
+  screen it goes to. Desktops keep the named button. Arrives with the app's
+  next update; no new APK needed.
+- **Words on the Light theme read clearly.** Over 200 places on Light had words or icon buttons
+  too faint against what is behind them, the worst nearly invisible: the Roles tab in Server
+  Settings (dark panels under dark words), the call's "Encrypted" badge, the selected Server
+  Settings tab, the moderation tab's badges, the voice panel's clip controls and errors, unread and
+  LIVE badges, Add Friend, avatars' initials, the brand-blue names and links in messages, "Idle",
+  "Away" and "Offline", "Key changed", the microphone test's lines in Settings, buttons whose words
+  turned white or pale under the pointer (Log Out, a window's close button), and words that were
+  dimmed: a done task, a done calendar chip, an earlier month's days. Each now holds the WCAG
+  contrast ratio (4.5:1 for words, 3:1 for icon buttons), at rest and under the pointer, with and
+  without High Contrast, on desktop and phone. Light's reds and greens for buttons and badges are a
+  little deeper, and done tasks keep a line through them in place of the fading. A role's own
+  colour on a name is the server's choice and is shown as it is. Arrives as an ordinary update.
+- **The sign-in page, the update banners and a few fixed-colour controls are easier to read.** The
+  sign-in page's labels, errors and subtitle, its title, the update banners, LIVE and unread badges,
+  the role editor, the Join Server window, the remote control's phone buttons and the "Jump to
+  latest" pill were drawn in the same colours on every theme and fell short of that ratio on all of
+  them; they now meet it, with slightly darker reds, blues and purples behind white words. The Sign
+  In button meets it on the Dark, AMOLED and Light themes (the colour themes draw it in their own
+  colour, as before). A Notes dialog's main button and the drawing's Save inside Púca no longer turn
+  blue on blue while Notes is open, nor the invite page's "Open in the Púca app" under the pointer.
+  On a phone, a button you tap keeps its own colour: many filled buttons (the card table's Sit, a
+  mode notice's Join, Approve, Allow, Send) lost their fill after a tap, white words on white on
+  Light. Arrives as an ordinary update.
+- **The web app on a phone notifies as soon as you switch away from it.** With
+  **Notifications while Púca is closed** on, a message that arrived in about the
+  first minute after you left Púca on an iPhone, iPad or Android phone showed no
+  notification at all: the phone had already paused Púca, but its connection
+  stayed up for another minute or so, so your server took Púca to be open and sent
+  no push. Púca now tells your server the moment it goes to the background, so that
+  message notifies, and it shows no second notification of its own; back on screen
+  it says so again, and the open app shows what arrives. Needs this release of both
+  the web app and your server; a desktop browser's hidden tab keeps notifying by
+  itself as before.
+
 ## 0.9.863 — 2026-11-14
 
 Turning your camera off and on works again on mesh calls, a phone's screen share stays right after the phone turns, desktop task reminders play a sound and open Reminders, and hidden channels stay hidden on the server
