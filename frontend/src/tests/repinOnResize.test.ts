@@ -67,6 +67,44 @@ describe('repinOnResize', () => {
         expect(el.fromBottom).toBe(60);
     });
 
+    it('a reader one wheel notch up (inside the slop) is left where they are when the list itself changes height', () => {
+        // The review's case: on the desktop a notch up to re-read a message, then the
+        // other side starts typing (or a notice comes up over the list). Neither is
+        // theirs; the list pinned them back down, again each time the indicator came.
+        const el = list(3000, 642, 2258);
+        const repin = repinOnResize(el, () => true); // within AT_BOTTOM_SLOP: "at the bottom"
+        el.scrollTop = 2158; // a notch up
+        el.clientHeight = 611; // the typing indicator came up
+        repin();
+        expect(el.scrollTop).toBe(2158);
+        el.clientHeight = 642; // and went again
+        repin();
+        expect(el.scrollTop).toBe(2158);
+    });
+
+    it('a reader inside the slop is still pinned when the CONTENT grows, as a new message pins them', () => {
+        const el = list(3000, 642, 2258);
+        const repin = repinOnResize(el, () => true);
+        el.scrollTop = 2158;
+        el.scrollHeight = 3200; // a link card under the newest message
+        repin();
+        expect(el.fromBottom).toBe(0);
+    });
+
+    it('a list on its way to the end (Jump to latest, mid-scroll) gets there when the box changes', () => {
+        const el = list(3000, 642, 1800);
+        let heading = true;
+        const repin = repinOnResize(el, () => true, () => heading);
+        el.clientHeight = 611;
+        repin();
+        expect(el.fromBottom).toBe(0);
+        heading = false;
+        el.scrollTop = 2000; // scrolled up again
+        el.clientHeight = 642;
+        repin();
+        expect(el.scrollTop).toBe(2000);
+    });
+
     it('a reader scrolled well up is never moved, whatever changes', () => {
         const el = list(3000, 700, 800);
         const repin = repinOnResize(el, () => false);

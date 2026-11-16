@@ -74,8 +74,15 @@
 //              a list by itself; the real Android WebView does, e2e/android-phone-sweep-live.mjs)
 //              270 px under the box with the keyboard up, 424 px typing, 455 px with the indicator;
 //              as an iPhone 154 px typing, 185 px with the indicator, 60 px with the keyboard down;
-//              on the desktop 64 px typing, 95 px with the indicator. Needs WebKit
-//              (npx playwright install webkit). Its own channel, at 390x844 only, about 3 minutes.
+//              on the desktop 64 px typing, 95 px with the indicator. A second CONTROL, from the
+//              review of the fix: a reader ONE NOTCH (100 px) up, inside the slop that still counts
+//              as "at the bottom" for a new message, is not pulled down by the other side's typing
+//              indicator coming and going or by the keyboard (a fix that pins every list in the slop
+//              when the list's own height changes fails it). It CANNOT see what a real iPhone does
+//              besides shrinking the visual viewport: iOS also pans the page to show the focused
+//              box (the layout does not move, so the list's place against the box is what this
+//              measures), and Safari's own keyboard animation. Needs WebKit
+//              (npx playwright install webkit). Its own channel, at 390x844 only, about 4 minutes.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
 // locator.click(), which scrolls first and false-passes a covered control). `stick` scrolls the
@@ -327,20 +334,25 @@ async function stickWalk(O, srv, phoneName) {
         const at = (label, r) => check(`${engine} stick: ${label}: the newest message is at the message box`, r.fromBottom <= 1 && r.toBox >= 0, r);
         const box = P.locator(COMPOSER);
         const focusBox = async () => { if (phone) await tap(P, box); else await box.click(); await twoFrames(P); };
-        /** Types until the box is `px` tall or more (or stops growing), and returns the worst reading
-         *  after any keystroke: on WebKit EVERY keystroke on a box of several lines moved the list. */
+        /** Types until the box is `px` tall or more (or stops growing), reading the list after EVERY
+         *  keystroke: on WebKit every keystroke on a box of several lines moved the list. */
         const typeUntil = async (px) => {
-            let worst = null, i = 0, grew = 0, last = (await stickRead(P)).boxPx;
-            for (; i < 900; i++) {
+            const readings = [];
+            let grew = 0, last = (await stickRead(P)).boxPx;
+            for (let i = 0; i < 900; i++) {
                 await P.keyboard.type(words[i % words.length]);
                 await twoFrames(P);
-                const r = await stickRead(P);
+                const r = { ...(await stickRead(P)), afterKeystroke: i + 1 };
+                readings.push(r);
                 if (r.boxPx !== last) { grew++; last = r.boxPx; }
-                if (!worst || r.fromBottom > worst.fromBottom || r.toBox < worst.toBox) worst = { ...r, afterKeystroke: i + 1 };
                 if (r.boxPx >= px && i % words.length === words.length - 1) break;
             }
-            return { worst, grew, boxPx: last };
+            return { readings, grew, boxPx: last };
         };
+        /** The reading furthest from the newest message (for "at the box"). */
+        const furthest = (rs) => rs.reduce((w, r) => (r.fromBottom > w.fromBottom || r.toBox < w.toBox ? r : w));
+        /** The reading furthest from where a reader was (for "stays"): any keystroke that moved them. */
+        const drifted = (rs, top) => rs.reduce((w, r) => (Math.abs(r.scrollTop - top) > Math.abs(w.scrollTop - top) || (!r.pill && w.pill) ? r : w));
 
         // ── at the newest message
         const rest = await stickRead(P);
@@ -357,7 +369,7 @@ async function stickWalk(O, srv, phoneName) {
         }
         const typed = await typeUntil(phone ? 190 : 100);
         check(`${engine} stick: the message box grew line by line as it was typed into`, typed.grew >= 3, { grew: typed.grew, boxPx: typed.boxPx });
-        at(`typing ${typed.grew} lines more, after every keystroke (worst)`, typed.worst);
+        at(`typing ${typed.grew} lines more, after every keystroke (${typed.readings.length}; the furthest)`, furthest(typed.readings));
         await shot(P, `stick-${engine}-typed`);
         // The other side starts typing: the indicator comes up between the list and the box.
         await O.locator(COMPOSER).click();
@@ -379,8 +391,13 @@ async function stickWalk(O, srv, phoneName) {
         await O.locator(COMPOSER).fill(`see https://example.com/stick/${stamp}/a/long/path/that/goes/on/and/on/index.html`);
         await O.keyboard.press('Enter');
         await until(async () => (await rowCount(P)) > n, 15000);
-        await sleep(1500);
+        const card = await until(() => P.evaluate(() => {
+            const rows = document.querySelectorAll('.messages-container > .message');
+            return !!rows[rows.length - 1]?.querySelector('.link-preview-card');
+        }), 8000);
+        await twoFrames(P);
         const link = await stickRead(P);
+        check(`${engine} stick: the newest message's link card is drawn`, !!card, link);
         at('a message with a link card received', link);
         n = await rowCount(P);
         await P.keyboard.press('Enter');
@@ -414,7 +431,7 @@ async function stickWalk(O, srv, phoneName) {
         await softKeyboard(P, engine, true);
         if (phone) stays('the keyboard up', await stickRead(P));
         const typedUp = await typeUntil(phone ? 140 : 90);
-        stays('typing lines', typedUp.worst);
+        stays(`typing lines, after every keystroke (${typedUp.readings.length}; the one furthest from where they were)`, drifted(typedUp.readings, up0.scrollTop));
         await O.locator(COMPOSER).click();
         await O.keyboard.type('more');
         await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
@@ -428,6 +445,43 @@ async function stickWalk(O, srv, phoneName) {
         await softKeyboard(P, engine, false);
         if (phone) stays('the keyboard down', await stickRead(P));
         await P.locator(COMPOSER).fill('');
+        await P.evaluate(() => document.activeElement?.blur?.());
+        await O.locator(COMPOSER).fill('');
+
+        // ── CONTROL: a reader ONE NOTCH up (100 px, inside the slop Chat.tsx still calls "at the
+        // bottom", so no Jump to latest) is not pulled down by a change that is not theirs: the
+        // other side's typing indicator, the keyboard (the review of this fix: it pinned them).
+        await P.evaluate(() => { const sc = document.querySelector('.messages-container'); sc.scrollTop = sc.scrollHeight; });
+        await sleep(600);
+        await until(() => P.evaluate(() => !document.querySelector('.typing-indicator')), 12000);
+        await twoFrames(P);
+        if (engine === 'iPhone') {
+            await P.evaluate(() => document.querySelector('.messages-container').scrollBy(0, -100));
+        } else {
+            const list = await P.locator('.messages-container').boundingBox();
+            await P.mouse.move(list.x + list.width / 2, list.y + list.height / 2);
+            await P.mouse.wheel(0, -100);
+        }
+        await sleep(700);
+        const notch = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up (inside the slop: no Jump to latest)`, notch.fromBottom >= 60 && notch.fromBottom <= 120 && !notch.pill, notch);
+        const keeps = (label, r) => check(`${engine} stick: CONTROL - one notch up: ${label}: still exactly where they were reading`, Math.abs(r.scrollTop - notch.scrollTop) <= 1, { was: notch.scrollTop, ...r });
+        await O.locator(COMPOSER).click();
+        await O.keyboard.type('typing again');
+        await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
+        await twoFrames(P);
+        keeps('the typing indicator up', await stickRead(P));
+        await O.locator(COMPOSER).fill('');
+        await until(() => P.evaluate(() => !document.querySelector('.typing-indicator')), 12000);
+        await twoFrames(P);
+        keeps('the typing indicator gone again', await stickRead(P));
+        if (phone) {
+            await focusBox();
+            await softKeyboard(P, engine, true);
+            keeps('the keyboard up', await stickRead(P));
+            await softKeyboard(P, engine, false);
+            await P.evaluate(() => document.activeElement?.blur?.());
+        }
         await ctx.close();
     }
 }

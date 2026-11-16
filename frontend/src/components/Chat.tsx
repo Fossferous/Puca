@@ -3696,15 +3696,17 @@ export function Chat({ onLogout }: ChatProps) {
     // container's children. The same observer watches the container ITSELF:
     // the soft keyboard, a line more in the message box, the typing indicator
     // or the reply banner shrink it from the bottom, and the newest message
-    // slid under the box (repinOnResize says what was measured). Depends on
-    // isLoading because the component early-returns before the container
-    // exists, so a [] dep would bind to a null ref forever. Only a change that
-    // MOVES the list re-pins it (repinOnResize): one that moves nothing must
-    // not pull back a reader who has just scrolled up less than AT_BOTTOM_SLOP.
+    // slid under the box (repinOnResize says what was measured); that change
+    // moves only a list that was at its very end (or on its way there:
+    // pinningRef), never a reader a notch up. Depends on isLoading because the
+    // component early-returns before the container exists, so a [] dep would
+    // bind to a null ref forever. Only a change that MOVES the list re-pins it
+    // (repinOnResize): one that moves nothing must not pull back a reader who
+    // has just scrolled up less than AT_BOTTOM_SLOP.
     useEffect(() => {
         const el = messagesContainerRef.current;
         if (!el || !showingMessageList) return;
-        const repin = repinOnResize(el, () => atBottomRef.current);
+        const repin = repinOnResize(el, () => atBottomRef.current, () => pinningRef.current);
         el.addEventListener('load', repin, true);
         el.addEventListener('error', repin, true);
         const ro = new ResizeObserver(repin);
