@@ -18,7 +18,9 @@
  *    an active conversation on mobile, the latest message doesn't stay at the
  *    bottom." (The real Android WebView already keeps such a list at its end by
  *    itself.) Only a list that was AT ITS END by the geometry it had until now
- *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, mid-scroll):
+ *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, while its
+ *    scroll is still more than AT_BOTTOM_SLOP away: pinningRef is let go within
+ *    the slop, and a box change in that last stretch can leave it short):
  *    a reader who has scrolled up even one wheel notch, inside the slop, keeps
  *    their scrollTop, because none of these changes is theirs (the typing
  *    indicator, a notice over the list).

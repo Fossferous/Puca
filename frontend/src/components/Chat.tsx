@@ -3697,8 +3697,9 @@ export function Chat({ onLogout }: ChatProps) {
     // the soft keyboard, a line more in the message box, the typing indicator
     // or the reply banner shrink it from the bottom, and the newest message
     // slid under the box (repinOnResize says what was measured); that change
-    // moves only a list that was at its very end (or on its way there:
-    // pinningRef), never a reader a notch up. Depends on isLoading because the
+    // moves only a list that was at its very end (or Jump to latest's scroll
+    // on its way there, until pinningRef lets go within the slop), never a
+    // reader a notch up. Depends on isLoading because the
     // component early-returns before the container exists, so a [] dep would
     // bind to a null ref forever. Only a change that MOVES the list re-pins it
     // (repinOnResize): one that moves nothing must not pull back a reader who

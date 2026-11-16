@@ -436,7 +436,9 @@ async function stickWalk(O, srv, phoneName) {
         await O.keyboard.type('more');
         await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
         await twoFrames(P);
-        stays('the typing indicator up', await stickRead(P));
+        const upTyping = await stickRead(P);
+        check(`${engine} stick: CONTROL - scrolled up: the other side's typing indicator came up`, upTyping.typing, upTyping);
+        stays('the typing indicator up', upTyping);
         n = await rowCount(P);
         await O.keyboard.press('Enter');
         await until(async () => (await rowCount(P)) > n, 15000);
@@ -470,11 +472,15 @@ async function stickWalk(O, srv, phoneName) {
         await O.keyboard.type('typing again');
         await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
         await twoFrames(P);
-        keeps('the typing indicator up', await stickRead(P));
+        const notchTyping = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up: the other side's typing indicator came up`, notchTyping.typing, notchTyping);
+        keeps('the typing indicator up', notchTyping);
         await O.locator(COMPOSER).fill('');
         await until(() => P.evaluate(() => !document.querySelector('.typing-indicator')), 12000);
         await twoFrames(P);
-        keeps('the typing indicator gone again', await stickRead(P));
+        const notchQuiet = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up: ...and went again`, !notchQuiet.typing, notchQuiet);
+        keeps('the typing indicator gone again', notchQuiet);
         if (phone) {
             await focusBox();
             await softKeyboard(P, engine, true);
