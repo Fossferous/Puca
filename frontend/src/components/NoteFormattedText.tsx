@@ -65,7 +65,9 @@ export function NoteFormattedText({ text, interactive = true, renderText }: Note
         <>
             {lines.map((line, i) => (
                 <Fragment key={i}>
-                    {i > 0 && '\n'}
+                    {/* The line break too knows where it is in the text: a
+                        click on a blank line lands on that line. */}
+                    {i > 0 && <span data-at={line.from - 1}>{'\n'}</span>}
                     {line.bullet && (
                         <span className="nf-bullet" data-at={line.bullet.at}>{line.bullet.indent}{'• '}</span>
                     )}

@@ -70,7 +70,9 @@ const MAX_DEPTH = 6;
 const BULLET_RE = /^([ \t]*)([-*•]) (?=\S)/;
 // Letters, numbers and the marks that combine with them (an accent typed
 // as its own character, a Devanagari vowel sign): one word, never two.
-const WORDISH = /[\p{L}\p{N}\p{M}]/u;
+// A variation selector is not one: it belongs to the emoji before it (a
+// heart, then U+FE0F), so a mark may open straight after an emoji.
+const WORDISH = /(?![\uFE00-\uFE0F])[\p{L}\p{N}\p{M}]/u;
 const SPACE = /\s/;
 
 function isWordish(ch: string | undefined): boolean {
@@ -279,138 +281,260 @@ function emptyPairAt(line: string, at: number, open: string, close: string): boo
     return line[at - open.length - 1] !== ch && line[at + close.length] !== ch;
 }
 
-const outerEnd = (sp: MarkSpan) => sp.close + sp.delim.close.length;
-
-/** Take `kind` off the pair `sp` (or the `**` out of a `***`): the line and
- *  where `x` lands in it. */
-function unwrapSpan(line: string, sp: MarkSpan, kind: FormatKind): { line: string; map: (x: number) => number } {
-    const d = sp.delim;
-    const keep = without(d, kind);
-    const outerTo = outerEnd(sp);
-    const inner = line.slice(sp.open + d.open.length, sp.close);
-    const out = line.slice(0, sp.open) + keep.open + inner + keep.close + line.slice(outerTo);
-    const shift = d.open.length - keep.open.length;
-    const innerFrom = sp.open + d.open.length;
-    const map = (x: number) => (x <= sp.open ? x
-        : x <= innerFrom ? sp.open + keep.open.length
-            : x <= sp.close ? x - shift
-                : x <= outerTo ? sp.open + keep.open.length + inner.length
-                    : x - shift - (d.close.length - keep.close.length));
-    return { line: out, map };
+/** A character of a line as it reads: where it is typed, its marks, and
+ *  which address it belongs to (-1: none). The marks themselves are not
+ *  characters here. */
+interface PlainChar {
+    ch: string;
+    src: number;
+    marks: Marks;
+    link: number;
 }
 
+interface LineModel {
+    /** The bullet as typed (`- `, `  * `), or ''. */
+    prefix: string;
+    chars: PlainChar[];
+}
+
+function lineModel(line: string): LineModel {
+    const [l] = readNoteFormat(line);
+    const m = l.bullet ? BULLET_RE.exec(line) : null;
+    const chars: PlainChar[] = [];
+    let link = 0;
+    for (const r of l.runs) {
+        const id = r.kind === 'link' ? link++ : -1;
+        for (let k = 0; k < r.text.length; k++) chars.push({ ch: r.text[k], src: r.from + k, marks: r.marks, link: id });
+    }
+    return { prefix: m ? m[0] : '', chars };
+}
+
+const sameMarks = (a: Marks, b: Marks) =>
+    a.bold === b.bold && a.italic === b.italic && a.underline === b.underline && a.strike === b.strike;
+const anyMark = (m: Marks) => m.bold || m.italic || m.underline || m.strike;
+
 /**
- * One line's part of Ctrl+B / I / U / T. A mark only counts at the edge of
- * a word (readInline), so it always goes there: a selection that starts or
- * ends inside a word takes the whole word (`ab**cd**ef` would read as
- * typed), and with nothing selected (`caretMode`) it is the word the caret
- * is on, or the marked words the caret is at the edge of. Off any word, an
- * empty pair goes in for what is typed next, and a second press takes it out.
+ * The line written out from its characters, every run of equal marks in one
+ * canonical form: strikethrough outermost, then underline, then bold and
+ * italic (`***` for both), with spaces at a run's ends left outside its marks
+ * so every pair sits at word edges.
  */
-function toggleOnLine(line: string, s: number, e: number, kind: FormatKind, caretMode: boolean): { line: string; s: number; e: number } {
+function serialize(prefix: string, chars: ReadonlyArray<{ ch: string; marks: Marks }>): string {
+    let out = prefix;
+    let i = 0;
+    while (i < chars.length) {
+        let j = i + 1;
+        while (j < chars.length && sameMarks(chars[j].marks, chars[i].marks)) j++;
+        const seg = chars.slice(i, j).map(c => c.ch).join('');
+        const m = chars[i].marks;
+        const lead = /^\s*/.exec(seg)![0];
+        const core = seg.slice(lead.length).replace(/\s+$/, '');
+        if (!anyMark(m) || !core) {
+            out += seg;
+        } else {
+            const trail = seg.slice(lead.length + core.length);
+            const bi = m.bold && m.italic ? '***' : m.bold ? '**' : m.italic ? '*' : '';
+            const open = (m.strike ? '~~' : '') + (m.underline ? '<u>' : '') + bi;
+            const close = bi + (m.underline ? '</u>' : '') + (m.strike ? '~~' : '');
+            out += lead + open + core + close + trail;
+        }
+        i = j;
+    }
+    return out;
+}
+
+/** `line` reads as exactly `prefix` and `want`: the same characters, each
+ *  with the marks it should have (a space's marks do not matter). */
+function readsAs(line: string, prefix: string, want: ReadonlyArray<{ ch: string; marks: Marks }>): boolean {
+    const got = lineModel(line);
+    if (got.prefix !== prefix || got.chars.length !== want.length) return false;
+    return got.chars.every((c, i) => c.ch === want[i].ch && (SPACE.test(c.ch) || sameMarks(c.marks, want[i].marks)));
+}
+
+/** Word characters for the keys' edges: the reader's own (a variation
+ *  selector is none, so a mark never splits it from its emoji). */
+function wordChar(ch: string | undefined): boolean {
+    return isWordish(ch);
+}
+
+/** Plain index of source offset `at`: the characters typed before it. */
+function plainAt(chars: readonly PlainChar[], at: number): number {
+    let n = 0;
+    while (n < chars.length && chars[n].src < at) n++;
+    return n;
+}
+
+/** Widen [p0, p1) to word edges and whole addresses (a mark never goes
+ *  inside a word, where it would not read, nor inside an address, where it
+ *  would change where the link goes). */
+function widen(chars: readonly PlainChar[], p0: number, p1: number): [number, number] {
+    while (p0 > 0 && wordChar(chars[p0 - 1].ch) && wordChar(chars[p0]?.ch)) p0--;
+    while (p1 < chars.length && wordChar(chars[p1].ch) && wordChar(chars[p1 - 1]?.ch)) p1++;
+    for (let changed = true; changed;) {
+        changed = false;
+        if (p0 > 0 && chars[p0].link >= 0 && chars[p0 - 1].link === chars[p0].link) { p0--; changed = true; }
+        if (p1 < chars.length && p1 > 0 && chars[p1 - 1].link >= 0 && chars[p1].link === chars[p1 - 1].link) { p1++; changed = true; }
+    }
+    return [p0, p1];
+}
+
+/** What one line of a Ctrl+B / I / U / T asks for: the characters to mark,
+ *  or an empty pair at the caret (`pair`), or nothing. */
+type LinePlan =
+    | { kind: 'range'; model: LineModel; p0: number; p1: number; caret: number | null }
+    | { kind: 'pair'; at: number }
+    | { kind: 'none' };
+
+function planLine(line: string, s: number, e: number, kind: FormatKind, caretMode: boolean): LinePlan {
     const { open, close } = WRAP[kind];
-    const wrap = (from: number, to: number) =>
-        line.slice(0, from) + open + line.slice(from, to) + close + line.slice(to);
+    if (caretMode && emptyPairAt(line, s, open, close)) return { kind: 'pair', at: s };
+    const model = lineModel(line);
+    const chars = model.chars;
     if (caretMode) {
-        const caret = s;
-        if (emptyPairAt(line, caret, open, close)) {
-            return { line: line.slice(0, caret - open.length) + line.slice(caret + close.length), s: caret - open.length, e: caret - open.length };
+        // The word the caret is on, or touches — a marked one included,
+        // whose marks are not characters (`**hello**|` is at "hello").
+        const p = plainAt(chars, s);
+        let p0 = p;
+        let p1 = p;
+        if (wordChar(chars[p - 1]?.ch) || wordChar(chars[p]?.ch)) {
+            while (p0 > 0 && wordChar(chars[p0 - 1].ch)) p0--;
+            while (p1 < chars.length && wordChar(chars[p1].ch)) p1++;
+        } else if ((chars[p]?.link ?? -1) >= 0 || (chars[p - 1]?.link ?? -1) >= 0) {
+            p0 = p1 = (chars[p]?.link ?? -1) >= 0 ? p : p - 1;
+            p1++;
         }
-        const spans = spansOf(line);
-        // In, or at the edge of, a pair of this kind: that pair comes off.
-        const own = spans
-            .filter(sp => sp.delim.adds.includes(kind) && caret >= sp.open && caret <= outerEnd(sp))
-            .sort((x, y) => (outerEnd(x) - x.open) - (outerEnd(y) - y.open))[0];
-        if (own) {
-            const u = unwrapSpan(line, own, kind);
-            const at = u.map(caret);
-            return { line: u.line, s: at, e: at };
-        }
-        // At the edge of another kind's pair: around it, so the two read
-        // together (`**x**` and Ctrl+I is `***x***`, not a stray `*`).
-        const edge = spans
-            .filter(sp => caret === sp.open || caret === outerEnd(sp))
-            .sort((x, y) => (outerEnd(y) - y.open) - (outerEnd(x) - x.open))[0];
-        let from = caret;
-        let to = caret;
-        if (edge) {
-            from = edge.open;
-            to = outerEnd(edge);
-        } else if (isWordish(line[caret - 1]) || isWordish(line[caret])) {
-            while (from > 0 && isWordish(line[from - 1])) from--;
-            while (to < line.length && isWordish(line[to])) to++;
-        }
-        if (from === to) {
-            // Off any word: the marks go in around the caret, and what is
-            // typed next is inside them.
-            return { line: wrap(caret, caret), s: caret + open.length, e: caret + open.length };
-        }
-        return { line: wrap(from, to), s: caret + open.length, e: caret + open.length };
+        if (p0 === p1) return { kind: 'pair', at: s };
+        [p0, p1] = widen(chars, p0, p1);
+        return { kind: 'range', model, p0, p1, caret: p };
     }
-    // The selection's own edges are kept clear of spaces: `** x**` is not bold.
-    while (s < e && SPACE.test(line[s])) s++;
-    while (e > s && SPACE.test(line[e - 1])) e--;
-    if (s === e) return { line, s, e };
-    while (s > 0 && isWordish(line[s - 1]) && isWordish(line[s])) s--;
-    while (e < line.length && isWordish(line[e]) && isWordish(line[e - 1])) e++;
-    // Already marked: the innermost pair of this kind that holds the
-    // selection (or that the selection takes in whole) comes off — and only
-    // a pair that really reads as one, so the `*` of a `**` is never taken
-    // for an italic.
-    const holding = spansOf(line)
-        .filter(sp => sp.delim.adds.includes(kind))
-        .filter(sp => {
-            const innerFrom = sp.open + sp.delim.open.length;
-            return (s >= innerFrom && e <= sp.close) || (s <= sp.open && e >= outerEnd(sp));
-        })
-        .sort((a, b) => (a.close - a.open) - (b.close - b.open))[0];
-    if (holding) {
-        const u = unwrapSpan(line, holding, kind);
-        return { line: u.line, s: u.map(s), e: u.map(e) };
+    let p0 = plainAt(chars, s);
+    let p1 = plainAt(chars, e);
+    while (p0 < p1 && SPACE.test(chars[p0].ch)) p0++;
+    while (p1 > p0 && SPACE.test(chars[p1 - 1].ch)) p1--;
+    if (p0 === p1) return { kind: 'none' };
+    [p0, p1] = widen(chars, p0, p1);
+    return { kind: 'range', model, p0, p1, caret: null };
+}
+
+/** Does every character the plan covers (spaces aside) carry `kind`? */
+function planHas(plan: LinePlan, kind: FormatKind): boolean {
+    if (plan.kind !== 'range') return true;
+    return plan.model.chars.slice(plan.p0, plan.p1).every(c => SPACE.test(c.ch) || c.marks[kind]);
+}
+
+/** The line with the plan applied, `add`ing or taking off `kind`, and where
+ *  the selection goes; the line unchanged when no edit reads back right. */
+function applyLine(line: string, plan: LinePlan, kind: FormatKind, add: boolean, s: number, e: number): { line: string; s: number; e: number } {
+    const { open, close } = WRAP[kind];
+    if (plan.kind === 'none') return { line, s, e };
+    if (plan.kind === 'pair') {
+        if (emptyPairAt(line, plan.at, open, close)) {
+            // Pressed twice with nothing typed between: the pair comes out.
+            const at = plan.at - open.length;
+            return { line: line.slice(0, at) + line.slice(plan.at + close.length), s: at, e: at };
+        }
+        // Off any word: an empty pair, for what is typed next to go in.
+        const out = line.slice(0, plan.at) + open + close + line.slice(plan.at);
+        return { line: out, s: plan.at + open.length, e: plan.at + open.length };
     }
-    return { line: wrap(s, e), s: s + open.length, e: e + open.length };
+    const { model, p0, p1, caret } = plan;
+    const want = model.chars.map((c, i) => (i >= p0 && i < p1 && !SPACE.test(c.ch) ? { ch: c.ch, marks: { ...c.marks, [kind]: add } } : c));
+    const tries: string[] = [];
+    // The smallest edit first: the pair put around the words, or the pair
+    // they are in taken off. Kept only if it reads exactly as wanted.
+    if (add) {
+        const from = model.chars[p0].src;
+        const to = model.chars[p1 - 1].src + 1;
+        tries.push(line.slice(0, from) + open + line.slice(from, to) + close + line.slice(to));
+    } else {
+        const a = model.chars[p0].src;
+        const b = model.chars[p1 - 1].src + 1;
+        const holding = spansOf(line)
+            .filter(sp => sp.delim.adds.includes(kind) && a >= sp.open && b <= sp.close + sp.delim.close.length)
+            .sort((x, y) => (x.close - x.open) - (y.close - y.open))[0];
+        if (holding) {
+            const d = holding.delim;
+            const keep = without(d, kind);
+            tries.push(line.slice(0, holding.open) + keep.open + line.slice(holding.open + d.open.length, holding.close) + keep.close
+                + line.slice(holding.close + d.close.length));
+        }
+    }
+    // Otherwise the line written out afresh from what each character should
+    // carry: a word in a bold phrase made italic splits the phrase rather
+    // than gluing `*` to `**`, which would read as nothing at all.
+    tries.push(serialize(model.prefix, want));
+    const out = tries.find(t => readsAs(t, model.prefix, want));
+    // Nothing that reads right: leave the words as they are rather than
+    // write marks that would show as stray characters.
+    if (out === undefined) return { line, s, e };
+    const after = lineModel(out).chars;
+    const startOf = (i: number) => (i < after.length ? after[i].src : out.length);
+    const endOf = (i: number) => (i > 0 ? after[i - 1].src + 1 : startOf(0));
+    if (caret !== null) {
+        // The caret stays on its letter; at the end of the word, inside its
+        // marks, so what is typed next carries on the word as it now is.
+        const at = caret === p1 ? endOf(caret) : startOf(caret);
+        return { line: out, s: at, e: at };
+    }
+    return { line: out, s: startOf(p0), e: endOf(p1) };
 }
 
 /**
- * Ctrl+B / I / U / T: put the mark around the selection, or take it off
- * when it is already there. A selection over several lines is marked line by
- * line (a mark never spans a line). The selection comes back around the same
- * words.
+ * Ctrl+B / I / U / T: put the mark on the selected words, or take it off
+ * when they all have it already (decided once, across every line the
+ * selection holds words of). A mark only counts at word edges, so the edit
+ * goes there: a selection inside a word takes the whole word, an address is
+ * taken whole, and with nothing selected it is the word the caret is on.
+ * Off any word, an empty pair goes in for what is typed next, and a second
+ * press takes it out.
+ *
+ * Every edit is checked by READING it back (readNoteFormat): the smallest
+ * one that reads as intended, else the line written out afresh in one
+ * canonical form, else no change at all — never marks that show as stray
+ * characters. A mark never spans a line. The selection comes back around
+ * the same words.
  */
 export function toggleMark(text: string, selStart: number, selEnd: number, kind: FormatKind): TextEdit {
     const a = Math.max(0, Math.min(selStart, selEnd, text.length));
     const b = Math.min(text.length, Math.max(selStart, selEnd));
     const lines = text.split('\n');
+    const caretMode = a === b;
+    const starts: number[] = [];
     let from = 0;
+    for (const line of lines) { starts.push(from); from += line.length + 1; }
+    const plans = lines.map((line, i) => {
+        const lf = starts[i];
+        const to = lf + line.length;
+        const s = Math.max(a, lf) - lf;
+        const e = Math.min(b, to) - lf;
+        // A line is touched when the selection holds some of its words: not
+        // the line a selection merely starts at the end of, or ends at the
+        // start of.
+        const touches = caretMode ? a >= lf && a <= to : s < e && line.slice(s, e).trim() !== '';
+        return touches ? { plan: planLine(line, s, e, kind, caretMode), s, e } : null;
+    });
+    const add = !plans.every(p => p === null || planHas(p.plan, kind));
     let newStart = a;
     let newEnd = b;
     let delta = 0;
-    const out: string[] = [];
-    const caretMode = a === b;
-    for (const line of lines) {
-        const to = from + line.length;
-        const s = Math.max(a, from) - from;
-        const e = Math.min(b, to) - from;
-        // A line is marked when the selection holds some of its words: not
-        // the line a selection merely starts at the end of, or ends at the
-        // start of (that line keeps nothing of it).
-        const touches = caretMode ? a >= from && a <= to : s < e && line.slice(s, e).trim() !== '';
-        if (!touches) {
-            if (a >= from && a <= to) newStart = from + delta + (a - from);
-            if (b >= from && b <= to) newEnd = from + delta + (b - from);
-            out.push(line);
-        } else {
-            const r = toggleOnLine(line, s, e, kind, caretMode);
-            if (a >= from && a <= to) newStart = from + delta + r.s;
-            if (b >= from && b <= to) newEnd = from + delta + r.e;
-            delta += r.line.length - line.length;
-            out.push(r.line);
+    const out = lines.map((line, i) => {
+        const lf = starts[i];
+        const to = lf + line.length;
+        const p = plans[i];
+        if (!p) {
+            if (a >= lf && a <= to) newStart = lf + delta + (a - lf);
+            if (b >= lf && b <= to) newEnd = lf + delta + (b - lf);
+            return line;
         }
-        from = to + 1;
-    }
+        const r = applyLine(line, p.plan, kind, add, p.s, p.e);
+        if (a >= lf && a <= to) newStart = lf + delta + r.s;
+        if (b >= lf && b <= to) newEnd = lf + delta + r.e;
+        delta += r.line.length - line.length;
+        return r.line;
+    });
     const next = out.join('\n');
-    if (a !== b && newEnd < newStart) newEnd = newStart;
-    return { text: next, selStart: Math.min(newStart, next.length), selEnd: Math.min(Math.max(newEnd, newStart), next.length) };
+    if (newEnd < newStart) newEnd = newStart;
+    return { text: next, selStart: Math.min(newStart, next.length), selEnd: Math.min(newEnd, next.length) };
 }
 
 /**
@@ -442,29 +566,35 @@ export function toggleBullets(text: string, selStart: number, selEnd: number): T
         return { text: lines.join('\n'), selStart: at + 2, selEnd: at + 2 };
     }
     const all = touched.every(i => BULLET_RE.test(lines[i]) || /^[ \t]*[-*•] $/.test(lines[i]));
-    let shiftStart = 0;
-    let shiftEnd = 0;
     from = 0;
     const starts = lines.map(l => { const s = from; from += l.length + 1; return s; });
+    // Each change, as where on its line it happens and how much it moves what
+    // follows: a marker put in moves a caret at the line's start past it; one
+    // taken out pulls a caret that was on it back to where it stood.
+    const changes: Array<{ at: number; delta: number }> = [];
     for (const i of touched) {
         const line = lines[i];
         const indent = /^[ \t]*/.exec(line)?.[0] ?? '';
-        let change: number;
         if (all) {
             lines[i] = indent + line.slice(indent.length + 2);
-            change = -2;
-        } else if (BULLET_RE.test(line)) {
-            continue;
-        } else {
+            changes.push({ at: starts[i] + indent.length, delta: -2 });
+        } else if (!BULLET_RE.test(line)) {
             lines[i] = `${indent}- ${line.slice(indent.length)}`;
-            change = 2;
+            changes.push({ at: starts[i] + indent.length, delta: 2 });
         }
-        if (starts[i] < a) shiftStart += change;
-        if (starts[i] < b || (starts[i] === b && a === b)) shiftEnd += change;
     }
+    const move = (pos: number) => {
+        let out = pos;
+        for (const c of changes) {
+            if (c.delta > 0) { if (pos >= c.at) out += c.delta; }
+            else if (pos >= c.at - c.delta) out += c.delta;
+            else if (pos > c.at) out -= pos - c.at;
+        }
+        return out;
+    };
     const next = lines.join('\n');
-    const s = Math.max(0, Math.min(next.length, a + shiftStart));
-    const e = Math.max(s, Math.min(next.length, b + shiftEnd));
+    const s = Math.max(0, Math.min(next.length, move(a)));
+    const e = Math.max(s, Math.min(next.length, move(b)));
     return { text: next, selStart: s, selEnd: e };
 }
 

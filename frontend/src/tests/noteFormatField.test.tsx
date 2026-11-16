@@ -96,6 +96,19 @@ describe('the formatting keys in a note’s text', () => {
         expect(area().value).toBe('plain');
     });
 
+    it('a press that changes nothing leaves no selection waiting to land on the next keystroke', () => {
+        mount('a   b');
+        const el = area();
+        el.focus();
+        el.setSelectionRange(1, 4);
+        press(el, { key: 'b', ctrlKey: true });
+        expect(area().value).toBe('a   b');
+        // Typing next: the caret is where the typing left it, not the old range.
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area(), 'a   bx'); area().setSelectionRange(6, 6); area().dispatchEvent(new Event('input', { bubbles: true })); });
+        expect([area().selectionStart, area().selectionEnd]).toEqual([6, 6]);
+    });
+
     it('CONTROL: read-only text takes no mark', () => {
         mount('buy milk', { readOnly: true });
         const el = area();
@@ -143,6 +156,15 @@ describe('where a click on formatted text lands in the TEXT', () => {
         // The bullet's dot stands for the "- " it replaced.
         const dot = container.querySelector('.nf-bullet')!;
         expect(offsetOfNode(dot.firstChild!, 0)).toBe('buy **milk** now\n'.length + 2);
+    });
+
+    it('a click on a blank line lands on that line, not at the end of the note', () => {
+        act(() => root.render(<p><NoteFormattedText text={'**one**\n\nthree'} /></p>));
+        const breaks = [...container.querySelectorAll('span[data-at]')].filter(s => s.textContent === '\n');
+        expect(breaks).toHaveLength(2);
+        // After the first break: the start of the blank line (8); after the second, of "three" (9).
+        expect(offsetOfNode(breaks[0].firstChild!, 1)).toBe(8);
+        expect(offsetOfNode(breaks[1].firstChild!, 1)).toBe(9);
     });
 });
 

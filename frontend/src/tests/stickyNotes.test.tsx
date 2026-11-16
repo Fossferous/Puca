@@ -459,6 +459,8 @@ describe('a new sticky note', () => {
         act(() => { area.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true })); });
         await flush(1);
         expect(doc.querySelector('[role="alertdialog"]')).not.toBeNull();
+        // Nothing reached the server: the question says so, not "the trash".
+        expect(doc.querySelector('.sticky-confirm p')?.textContent).toContain('has not been saved');
         act(() => { (doc.querySelector('.sticky-confirm .danger') as HTMLButtonElement).click(); });
         await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 100)); });
         await flush();

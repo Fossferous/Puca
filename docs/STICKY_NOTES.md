@@ -206,8 +206,20 @@ So the keys put their marks at word edges too: a selection that starts or
 ends inside a word takes the whole word, and with nothing selected the word
 the caret is on is the one marked (Word's own rule). Off a word, the key puts
 an empty pair in for what is typed next, and pressing it again takes the
-pair out. Enter on a bullet starts the next one; Enter on an empty bullet
-ends the list.
+pair out. A bullet's marker is never marked, and an address is marked whole.
+
+**Every edit a key makes is read back before it is kept**, by the same
+reader that draws the note: the smallest edit that reads as exactly the
+words asked for (and every other word as it was); else that line written out
+afresh in one canonical form (a word of a bold phrase made italic splits the
+phrase, `**big** ***deal***`, where gluing `*` to `**` would read as
+nothing); else no change at all. A key never leaves marks that show as stray
+characters. `src/tests/noteFormatEdits.test.ts` sweeps every selection of a
+set of awkward lines (bullets, nested marks, an address, Devanagari, an
+emoji) for every mark and holds each edit to that.
+
+Enter on a bullet starts the next one; Enter on an empty bullet ends the
+list.
 
 ### The global shortcut
 

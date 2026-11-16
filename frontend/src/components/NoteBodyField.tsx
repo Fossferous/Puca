@@ -429,6 +429,14 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
     /** A formatting edit: the text as the key or button left it, the
      *  selection back around the same words, and a save on its way. */
     const applyEdit = (edit: TextEdit) => {
+        // A press that changes nothing (spaces selected, a mark that would
+        // not read): only the selection, now. Left for the layout effect, it
+        // would wait for the next keystroke's render and select over what
+        // that keystroke typed.
+        if (edit.text === latest.current.draft) {
+            areaRef.current?.setSelectionRange(edit.selStart, edit.selEnd);
+            return;
+        }
         awaitingChoice.current = false;
         setEditing(true);
         markDirty(true);

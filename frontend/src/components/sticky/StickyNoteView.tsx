@@ -371,7 +371,11 @@ export function StickyNoteView(props: StickyNoteViewProps) {
 
             {confirming && (
                 <div className="sticky-confirm" role="alertdialog" aria-label="Delete this note?">
-                    <p>Delete this note? It goes to the trash in Púca Notes{actions.content.trashEnabled ? ', where it can be restored' : ''}.</p>
+                    <p>
+                        {ref || created.current
+                            ? `Delete this note? It goes to the trash in Púca Notes${actions.content.trashEnabled ? ', where it can be restored' : ''}.`
+                            : 'Delete this note? What you typed has not been saved, and goes with it.'}
+                    </p>
                     <label className="sticky-confirm-ask">
                         <input type="checkbox" checked={dontAsk} onChange={e => setDontAsk(e.target.checked)} /> Don’t ask again
                     </label>
