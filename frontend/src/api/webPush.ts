@@ -3,7 +3,9 @@
  *
  * WHO THIS IS FOR. The iPhone/iPad Home Screen app (iOS 16.4+), Android Chrome
  * on the web, and desktop Chrome, Edge and Firefox — a browser tab or an
- * installed web app that is CLOSED, which until now heard nothing at all. The
+ * installed web app that is CLOSED, which until now heard nothing at all, or,
+ * on a phone, in the BACKGROUND, where the page is frozen with its socket
+ * still up (api/webPushAway.ts tells the server so). The
  * desktop app (Tauri) and the Android app (Capacitor) have their own paths
  * (the tray, the native delivery socket and its FCM doorbell), and an
  * embedding host (Púca for Steam Deck) shows notifications itself: all three

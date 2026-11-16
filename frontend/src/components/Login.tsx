@@ -493,7 +493,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
                     </p>
                 )}
 
-                {successMessage && <div className="success-message" style={{ color: '#43b581', marginBottom: '15px', padding: '10px', background: 'rgba(67, 181, 129, 0.1)', borderRadius: '4px' }}>{successMessage}</div>}
+                {successMessage && <div className="success-message" style={{ color: '#6ee7a8', marginBottom: '15px', padding: '10px', background: 'rgba(67, 181, 129, 0.1)', borderRadius: '4px' }}>{successMessage}</div>}
 
                 <form onSubmit={handleSubmit} className="login-form">
                     <div className="form-group">

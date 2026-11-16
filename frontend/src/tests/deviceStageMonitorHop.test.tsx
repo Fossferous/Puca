@@ -179,6 +179,80 @@ describe('the monitor-hop offer', () => {
         expect(labels, 'the neighbour must be named, not just pointed at').toEqual(['Show Main display']);
         // ...and only that way. There is no third screen to the right.
         expect(labels.some(l => l === 'Show Side display')).toBe(false);
+        // The desktop keeps the named pill: no compact arrow here, and the
+        // title carries a name the pill cuts short.
+        expect(chips()[0].classList.contains('device-stage-hop-compact')).toBe(false);
+        expect(chips()[0].getAttribute('title')).toBe('Show Main display');
+    });
+
+    /**
+     * ON A TOUCH SCREEN the offer is a small round arrow (the owner,
+     * 2026-11-14: "This button is too big" — the named pill grew to 42% of a
+     * 390 pt phone's width over the picture). The size is the stylesheet's,
+     * measured in a real browser by e2e/device-stage-real-browser.mjs; what is
+     * pinned here is the markup it hangs on: the touch layout's class, and
+     * the screen's name kept as the button's accessible name now that no
+     * words are drawn. No title there: nothing hovers on a touch screen, and
+     * a title equal to the name can be read out a second time as a hint.
+     */
+    it('on a touch screen the offer is the compact arrow, still naming the screen, and a tap still only switches', async () => {
+        window.matchMedia = ((q: string) => ({
+            matches: q === '(pointer: coarse)', media: q, onchange: null,
+            addEventListener() { /* noop */ }, removeEventListener() { /* noop */ },
+            addListener() { /* noop */ }, removeListener() { /* noop */ }, dispatchEvent() { return false; },
+        })) as unknown as typeof window.matchMedia;
+        await mount(1);
+        await zoomToEdge('left');
+        expect(chips().length, 'precondition: an offer is on screen').toBe(1);
+        const chip = chips()[0];
+        expect(chip.classList.contains('device-stage-hop-compact'), 'the touch layout draws the arrow alone').toBe(true);
+        expect(chip.classList.contains('device-stage-hop-left')).toBe(true);
+        expect(chip.getAttribute('aria-label')).toBe('Show Main display');
+        expect(chip.getAttribute('title'), 'no hover on a touch screen; the name is the accessible name').toBeNull();
+        expect(chip.querySelector('.device-stage-hop-icon svg'), 'the arrow is drawn').not.toBeNull();
+
+        h.sendInput.mockClear();
+        await act(async () => {
+            for (const type of ['pointerdown', 'pointerup'] as const) {
+                chip.dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, cancelable: true, pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 300,
+                }));
+            }
+            chip.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        });
+        expect(h.requestMonitor).toHaveBeenCalledTimes(1);
+        expect(h.requestMonitor.mock.calls[0][1]).toBe(0);
+        expect(
+            h.sendInput.mock.calls.map(c => (c[1] as { t?: string })?.t),
+            'tapping the arrow must not also press on the remote machine',
+        ).toEqual([]);
+    });
+
+    it('POSITIVE CONTROL (touch layout): the same touch on the PICTURE does press on the remote machine', async () => {
+        // The touch layout routes a press through the trackpad's gesture
+        // machine, not the desktop path the control above exercises; without
+        // this, "nothing sent" above could mean the path sends nothing at all.
+        window.matchMedia = ((q: string) => ({
+            matches: q === '(pointer: coarse)', media: q, onchange: null,
+            addEventListener() { /* noop */ }, removeEventListener() { /* noop */ },
+            addListener() { /* noop */ }, removeListener() { /* noop */ }, dispatchEvent() { return false; },
+        })) as unknown as typeof window.matchMedia;
+        await mount(1);
+        await zoomToEdge('left');
+        expect(chips()[0]?.classList.contains('device-stage-hop-compact'), 'precondition: the touch layout').toBe(true);
+        h.sendInput.mockClear();
+        await act(async () => {
+            for (const type of ['pointerdown', 'pointerup'] as const) {
+                surface().dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, cancelable: true, pointerId: 1, pointerType: 'touch', clientX: 400, clientY: 300,
+                }));
+            }
+        });
+        await act(async () => { await new Promise(r => setTimeout(r, 400)); });
+        expect(
+            h.sendInput.mock.calls.map(c => (c[1] as { t?: string })?.t),
+            'if this is empty the touch-layout arrow test above proves nothing',
+        ).toContain('down');
     });
 
     it('the offer does NOTHING until it is tapped — the whole point', async () => {

@@ -353,7 +353,7 @@
 }
 
 .scm-item.scm-danger:hover {
-    background: #ed4245;
+    background: #cc3336; /* white on #ed4245 was 3.84:1 */
     color: #fff;
 }
 

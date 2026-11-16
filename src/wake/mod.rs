@@ -30,7 +30,9 @@
 //! shows the same content-free title the Android app would. It is judged PER
 //! BROWSER, not per user: a browser has no delivery socket of its own, so
 //! "nobody home" would let the desktop app in the tray silence the phone for
-//! good (sender.rs).
+//! good (sender.rs). And a browser is home only while a page of it can show a
+//! notification itself: the web app on a phone in the background says it
+//! cannot (`SetPushAway`), because iOS freezes it while its socket lingers.
 
 pub mod fcm;
 pub mod sender;

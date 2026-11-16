@@ -1227,7 +1227,10 @@ cannot follow the app's eight themes or `[data-contrast="high"]`.
 **Voice notes, and the microphone.** *Voice note* in the composer and in an
 open note records on this device: the recorder asks with a prominent
 disclosure first, then takes the microphone, shows the elapsed time and a
-level, and stops at five minutes. The APK declares `RECORD_AUDIO` and
+level, and stops at five minutes. It asks for auto gain as Púca's
+**Settings > Voice & Video > Auto Gain Control** has it: off by default in a
+browser, where it could lower the computer's own microphone level, and on in
+the apps (docs/VOICE_SETTINGS.md, *On or off by default*). The APK declares `RECORD_AUDIO` and
 `MODIFY_AUDIO_SETTINGS` — Capacitor's WebView bridge asks for the pair
 together, and an undeclared one denies the whole request. **Foreground only**:
 there is no service and no `FOREGROUND_SERVICE_MICROPHONE` type, and the

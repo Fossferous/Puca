@@ -102,6 +102,8 @@
 .notes-draw-foot .notes-textbtn:hover { background: var(--bg-modifier-hover); }
 .notes-draw-foot .notes-textbtn:disabled { opacity: 0.5; cursor: default; }
 .notes-draw-foot .notes-textbtn.primary { background: none; color: var(--brand-text); }
+/* notes.css's filled .notes-textbtn.primary:hover (Notes open) put these words on the brand: 1.09:1. */
+.notes-draw-foot .notes-textbtn.primary:hover { background: var(--bg-modifier-hover); }
 
 @media (pointer: coarse) and (max-width: 1024px) {
     .notes-draw-foot .notes-textbtn { min-height: 44px; }

@@ -322,6 +322,30 @@ pub enum ClientMessage {
         inactive_secs: Option<u32>,
     },
 
+    /// Web Push (capability `push_away`, see `crate::presence::ClientCaps`):
+    /// `away: true` = the page on this connection cannot show a notification
+    /// by itself right now — the web app on an iPhone, iPad or Android phone
+    /// gone to the background (iOS freezes it within seconds; its socket
+    /// stays up until the idle reaper, 75 s), or a page being left — so its
+    /// browser counts as AWAY for Web Push (`AppState::sid_is_present`), as
+    /// if this socket had closed, and a message wakes it. `away: false` = it
+    /// is on screen again. Sent by the web app only, only on a transition,
+    /// and only on a socket whose server confirmed `push_away` in
+    /// `ServerFeatures` (an older server answers an unknown variant with an
+    /// Error). Read by nothing but Web Push; never answered, never an Error.
+    /// `carried: true` (with `away: true`, the first report on a NEW socket
+    /// of a page that has been away without a break since it last said so,
+    /// e.g. a phone in the background whose network changed): no return and
+    /// no new departure — its browser's away mark stays where it was, and
+    /// what arrived since is still named (`carry_conn_push_away`, which
+    /// honours it only as a connection's first report).
+    SetPushAway {
+        #[serde(default)]
+        away: bool,
+        #[serde(default)]
+        carried: bool,
+    },
+
     // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
     // the pieces are in crate::games_wire). Sent ONLY on a socket whose server
     // confirmed `games` in ServerFeatures — an older server answers an unknown
@@ -429,12 +453,18 @@ pub enum ServerMessage {
     /// `"mobile"`, `"browser"`) when that device said. Absent otherwise, so
     /// the frame stays byte-identical to the one every client already parses;
     /// an old client ignores the two fields and tears down exactly as before.
+    /// `by_form` is `"tablet"` when `by` is `"mobile"` and that device said it
+    /// is a tablet (`?form=tablet`, `crate::ws::kind_on_wire`), absent
+    /// otherwise: a client that predates it reads `by` alone and says "your
+    /// phone", as it always did.
     RoomLeft {
         room_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_form: Option<String>,
     },
 
     /// This ACCOUNT's voice state, as THIS connection should see it - so a
@@ -461,6 +491,12 @@ pub enum ServerMessage {
     /// ping (the roster state everyone in the room is already told), so a
     /// device pressing Move here starts the call as it was. Null when the
     /// call has reported nothing yet; always present.
+    ///
+    /// `device_form`: `"tablet"` when `device` is `"mobile"` and that device
+    /// said it is a tablet (`?form=tablet`: a touch screen whose short side is
+    /// 600 CSS px or more), else null; always present. `device` stays
+    /// `"mobile"` for a tablet, so a client that predates this key says "on
+    /// your phone", as it always did.
     OwnVoiceState {
         room_id: Option<String>,
         channel_id: Option<i64>,
@@ -469,6 +505,7 @@ pub enum ServerMessage {
         server_name: Option<String>,
         here: bool,
         device: Option<String>,
+        device_form: Option<String>,
         self_muted: Option<bool>,
         deafened: Option<bool>,
     },
@@ -1515,18 +1552,19 @@ mod own_voice_wire_tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../frontend/src/tests/fixtures/ownVoiceState.json"))
                 .expect("the fixture is JSON");
-        let elsewhere = serde_json::to_value(ServerMessage::OwnVoiceState {
+        let lounge = |here: bool, device: &str, form: Option<&str>| ServerMessage::OwnVoiceState {
             room_id: Some("voice_42".into()),
             channel_id: Some(42),
             server_id: Some("5f1d2c3e-0000-4000-8000-000000000042".into()),
             channel_name: Some("Lounge".into()),
             server_name: Some("Friends".into()),
-            here: false,
-            device: Some("desktop".into()),
+            here,
+            device: Some(device.into()),
+            device_form: form.map(str::to_string),
             self_muted: Some(true),
             deafened: Some(false),
-        })
-        .unwrap();
+        };
+        let elsewhere = serde_json::to_value(lounge(false, "desktop", None)).unwrap();
         let none = serde_json::to_value(ServerMessage::OwnVoiceState {
             room_id: None,
             channel_id: None,
@@ -1535,6 +1573,7 @@ mod own_voice_wire_tests {
             server_name: None,
             here: false,
             device: None,
+            device_form: None,
             self_muted: None,
             deafened: None,
         })
@@ -1543,34 +1582,47 @@ mod own_voice_wire_tests {
             room_id: "voice_42".into(),
             reason: Some("moved".into()),
             by: Some("mobile".into()),
+            by_form: None,
         })
         .unwrap();
-        let plain = serde_json::to_value(ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None }).unwrap();
+        let plain = serde_json::to_value(ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None, by_form: None }).unwrap();
+        // A tablet: `mobile` (what every client already reads) plus the form.
+        let on_tablet = serde_json::to_value(lounge(false, "mobile", Some("tablet"))).unwrap();
+        let by_tablet = serde_json::to_value(ServerMessage::RoomLeft {
+            room_id: "voice_42".into(),
+            reason: Some("moved".into()),
+            by: Some("mobile".into()),
+            by_form: Some("tablet".into()),
+        })
+        .unwrap();
         assert_eq!(fixture[0], elsewhere);
         assert_eq!(fixture[1], none, "every key present, as null: one shape for the client to read");
         assert_eq!(fixture[2], displaced);
         assert_eq!(fixture[3], plain);
-        // The plain RoomLeft is EXACTLY the pre-feature bytes.
+        assert_eq!(fixture[4], on_tablet);
+        assert_eq!(fixture[5], by_tablet);
+        // The plain RoomLeft is EXACTLY the pre-feature bytes, and the
+        // displaced one from a phone exactly the 0.9.832 bytes.
         assert_eq!(
-            serde_json::to_string(&ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None }).unwrap(),
+            serde_json::to_string(&ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None, by_form: None }).unwrap(),
             r#"{"type":"RoomLeft","payload":{"room_id":"voice_42"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::RoomLeft {
+                room_id: "voice_42".into(),
+                reason: Some("moved".into()),
+                by: Some("mobile".into()),
+                by_form: None
+            })
+            .unwrap(),
+            r#"{"type":"RoomLeft","payload":{"room_id":"voice_42","reason":"moved","by":"mobile"}}"#
         );
         // Not vacuous: `here` and the channel id really are what the fixture says.
         assert_eq!(fixture[0]["payload"]["here"], false);
         assert_eq!(fixture[0]["payload"]["channel_id"].as_i64(), Some(42));
-        let here = serde_json::to_value(ServerMessage::OwnVoiceState {
-            room_id: Some("voice_42".into()),
-            channel_id: Some(42),
-            server_id: Some("5f1d2c3e-0000-4000-8000-000000000042".into()),
-            channel_name: Some("Lounge".into()),
-            server_name: Some("Friends".into()),
-            here: true,
-            device: Some("desktop".into()),
-            self_muted: Some(true),
-            deafened: Some(false),
-        })
-        .unwrap();
-        assert_ne!(here, fixture[0]);
+        assert_eq!(fixture[4]["payload"]["device"], "mobile", "a tablet is still `mobile` to an older client");
+        assert_ne!(serde_json::to_value(lounge(true, "desktop", None)).unwrap(), fixture[0]);
+        assert_ne!(on_tablet, serde_json::to_value(lounge(false, "mobile", None)).unwrap());
     }
 
     /// Old servers ignored unknown JoinRoom fields; THIS server reads the two
@@ -1630,6 +1682,22 @@ mod presence_frame_tests {
         // A negative or fractional number is refused, not wrapped.
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":-1}}"#).is_err());
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":1.5}}"#).is_err());
+    }
+
+    /// The two frames the web app sends (api/webPushAway.ts), from the file
+    /// its own test (webPushAway.test.ts) checks it sends.
+    #[test]
+    fn set_push_away_parses_the_client_shapes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/pushAway.json")).expect("JSON");
+        let away: ClientMessage = serde_json::from_value(fixture["away"].clone()).expect("away");
+        assert!(matches!(away, ClientMessage::SetPushAway { away: true, carried: false }));
+        let back: ClientMessage = serde_json::from_value(fixture["back"].clone()).expect("back");
+        assert!(matches!(back, ClientMessage::SetPushAway { away: false, carried: false }));
+        let carried: ClientMessage = serde_json::from_value(fixture["carried"].clone()).expect("carried");
+        assert!(matches!(carried, ClientMessage::SetPushAway { away: true, carried: true }));
+        // Anything but a boolean is refused rather than guessed at.
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetPushAway","payload":{"away":"yes"}}"#).is_err());
     }
 }
 

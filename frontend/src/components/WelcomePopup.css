@@ -86,7 +86,7 @@
     font-size: 24px;
     font-weight: 700;
     margin: 0 0 8px 0;
-    background: linear-gradient(135deg, #5865f2, #eb459e);
+    background: linear-gradient(135deg, #9aa5ff, #f47fbf); /* the words' own colours: #5865f2 was 2.99:1 here */
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;

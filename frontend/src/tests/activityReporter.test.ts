@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { wsClient } from '../api/websocket';
-import { startActivityReporter, decideReport, REPORT_AFTER_SECS } from '../api/activityReporter';
+import { startActivityReporter, decideReport, REPORT_AFTER_SECS, IDLE_POLL_MS } from '../api/activityReporter';
 import { setUserSpeaking, clearSpeaking } from '../components/voiceState';
 import { resetEmbedHostForTest } from '../api/embedHost';
 
@@ -210,6 +210,86 @@ describe('startActivityReporter', () => {
         setHidden(true);
         window.dispatchEvent(new Event('keydown'));
         await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(activity()).toEqual([]);
+    });
+});
+
+describe('coming back after being idle: the fast poll (IDLE_POLL_MS)', () => {
+    // The owner's report (0.9.832 follow-up): back from a game, the dot took
+    // up to 15 s to turn green. Input in the game never reaches the page, so
+    // the OS probe is the only way back, and it was asked every 15 s.
+    it('desktop: input anywhere on the PC turns it active within ~3 s, with nothing typed in the page', async () => {
+        osIdle = 700;
+        start(true);
+        await openSocket(true);
+        expect(activity()).toEqual([700]); // told at once: away from the PC
+        osIdle = 0; // a key pressed in the game
+        await vi.advanceTimersByTimeAsync(IDLE_POLL_MS);
+        expect(activity()).toEqual([700, null]);
+    });
+
+    it('the fast poll starts the moment it goes idle, not after the slow poll it was waiting on', async () => {
+        osIdle = 2;
+        start(true);
+        await openSocket(true);
+        await vi.advanceTimersByTimeAsync(15_500); // just after a slow poll: the next is ~15 s away
+        expect(activity()).toEqual([null]);
+        osIdle = 700;
+        // Hidden: the reporter looks at once (not a poll), and finds the PC idle.
+        setHidden(true);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(activity()).toEqual([null, 700]);
+        await vi.advanceTimersByTimeAsync(500);
+        osIdle = 0;
+        await vi.advanceTimersByTimeAsync(IDLE_POLL_MS);
+        expect(activity()).toEqual([null, 700, null]);
+    });
+
+    it('fast ONLY while idle: the probe is asked every 15 s while active, every 3 s while idle, every 15 s again once back', async () => {
+        let calls = 0;
+        osIdle = 2;
+        stop = startActivityReporter({ userId: 1, probe: async () => { calls++; return osIdle; }, pollMs: 15_000 });
+        await openSocket(true);
+        calls = 0;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(calls, 'active: the slow poll').toBe(4);
+
+        osIdle = 700;
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(activity().at(-1)).toBe(700);
+        calls = 0;
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(calls, 'idle: every 3 s').toBe(10);
+        expect(activity().filter(x => x !== null), 'still one frame for the transition').toHaveLength(1);
+
+        osIdle = 1;
+        await vi.advanceTimersByTimeAsync(IDLE_POLL_MS);
+        expect(activity().at(-1)).toBeNull();
+        calls = 0;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(calls, 'back: the slow poll again').toBe(4);
+    });
+
+    it('web/Android (no probe): no fast poll while hidden; showing the page is what brings it back', async () => {
+        let calls = 0;
+        stop = startActivityReporter({ userId: 1, probe: async () => { calls++; return null; }, pollMs: 15_000 });
+        await openSocket(true);
+        setHidden(true);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(activity().at(-1)).not.toBeNull();
+        calls = 0;
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(calls).toBe(2);
+    });
+
+    it('no fast poll against a server without presence (it was never told idle)', async () => {
+        let calls = 0;
+        osIdle = 900;
+        stop = startActivityReporter({ userId: 1, probe: async () => { calls++; return osIdle; }, pollMs: 15_000 });
+        await openSocket(false);
+        calls = 0;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(calls).toBe(4);
         expect(activity()).toEqual([]);
     });
 });

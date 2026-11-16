@@ -93,7 +93,7 @@
     cursor: pointer;
 }
 .safety-btn.primary { background: #3b7d3b; color: #fff; }
-.safety-btn.primary:hover { background: #46944a; }
+.safety-btn.primary:hover { background: #2f7a33; } /* white on #46944a was 3.75:1 */
 .safety-btn.primary:disabled { opacity: 0.5; cursor: default; }
 .safety-btn.ghost { background: #2a2f38; color: #cfd5dd; }
 .safety-btn.ghost:hover { background: #333a44; }

@@ -59,23 +59,49 @@
 //              as an iPhone they do (no menu: selection is how it copies). The box keeps its own.
 //   faint      --text-faint is 4.5:1 on every surface it rests on, and an offline member's name
 //              (the row was at half opacity: 1.8:1) too, on all eight themes x contrast.
+//   stick      (2026-11-16, the owner's "when typing in an active conversation on mobile, the latest
+//              message doesn't stay at the bottom") As an iPhone in WEBKIT (Safari's engine), as an
+//              Android phone in Chromium, at 390x844, and on a 1280x800 desktop: the newest message
+//              stays at the message box with the keyboard up, after EVERY keystroke while the box
+//              grows to its 200 px ceiling, with the other side's typing indicator up, as a message
+//              and one with a link card arrive, after your own send and with the keyboard down
+//              again. The keyboard is simulated as each app gets it (stickWalk's softKeyboard: the
+//              Android app's WebView resized, an iPhone's visual viewport shrunk, read by
+//              keyboardUp.ts itself). CONTROLS: a reader scrolled 400 px up keeps their exact
+//              scrollTop (and Jump to latest) through all of it, and the desktop has no keyboard
+//              handling and keeps the newest message at rest, on receiving and on sending. The bundle
+//              from before the fix fails 8 checks: as Android (desktop Chromium, which does not pin
+//              a list by itself; the real Android WebView does, e2e/android-phone-sweep-live.mjs)
+//              270 px under the box with the keyboard up, 424 px typing, 455 px with the indicator;
+//              as an iPhone 154 px typing, 185 px with the indicator, 60 px with the keyboard down;
+//              on the desktop 64 px typing, 95 px with the indicator. A second CONTROL, from the
+//              review of the fix: a reader ONE NOTCH (100 px) up, inside the slop that still counts
+//              as "at the bottom" for a new message, is not pulled down by the other side's typing
+//              indicator coming and going or by the keyboard (a fix that pins every list in the slop
+//              when the list's own height changes fails it). It CANNOT see what a real iPhone does
+//              besides shrinking the visual viewport: iOS also pans the page to show the focused
+//              box (the layout does not move, so the list's place against the box is what this
+//              measures), and Safari's own keyboard animation. Needs WebKit
+//              (npx playwright install webkit). Its own channel, at 390x844 only, about 4 minutes.
 //
 // All at 390x844 and 360x800 with real touches (a tap is what elementFromPoint hits, never
-// locator.click(), which scrolls first and false-passes a covered control).
+// locator.click(), which scrolls first and false-passes a covered control). `stick` scrolls the
+// iPhone's list from the page: Playwright's mobile WebKit takes no wheel and no touch drag.
 //
 // Each check prints PASS/FAIL; the exit code is the number of failures. Screenshots go to OUT.
 //
 // Prereqs: a THROWAWAY backend (APP_ENV=development, raised AUTH_RATE_LIMIT_PER_SECOND / _BURST, its
 // own fresh database, never a real one) at API, and a build against it served at APP (header of
 // sidebar-toggles-walk.mjs). It refuses to start unless both are loopback: it creates accounts.
-// Silent: --mute-audio. About 2 minutes.
+// Silent: --mute-audio, and WebKit through muteWebkit. About 5 minutes.
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5472 API=http://127.0.0.1:5471 OUT=<dir> node e2e/mobile-ui-sweep-walk.mjs
 //   ONLY=fields,...  runs some sections.
-import { chromium } from '@playwright/test';
+import { chromium, webkit, devices } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { muteWebkit } from './muted.mjs';
 
 const APP = (process.env.APP || '').replace(/\/$/, '');
 const API = (process.env.API || '').replace(/\/$/, '');
@@ -192,6 +218,279 @@ async function say(page, text) {
     return !!await until(async () => (await rowCount(page)) > before && await acked(page), 15000);
 }
 const fontPx = (loc) => loc.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+
+// ── stick: the newest message stays at the message box while the phone types (header: `stick`).
+let wk = null;
+const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 16; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36';
+/** Where the newest message is: `fromBottom` 0 is a list at its newest message, `toBox` what lies
+ *  between its bottom edge and the message box's top (negative: under the box). */
+const stickRead = (page) => page.evaluate(() => {
+    const sc = document.querySelector('.messages-container');
+    const rows = sc.querySelectorAll(':scope > .message');
+    const last = rows[rows.length - 1];
+    const box = document.querySelector('form.message-form');
+    const ta = box.querySelector('textarea');
+    return {
+        fromBottom: Math.round(sc.scrollHeight - sc.scrollTop - sc.clientHeight),
+        toBox: Math.round(box.getBoundingClientRect().top - last.getBoundingClientRect().bottom),
+        scrollTop: Math.round(sc.scrollTop),
+        list: sc.clientHeight,
+        boxPx: Math.round(ta.getBoundingClientRect().height),
+        typing: !!document.querySelector('.typing-indicator'),
+        pill: !!document.querySelector('.jump-latest-pill'),
+        keyboardUp: 'keyboardUp' in document.documentElement.dataset,
+        nav: (() => { const n = document.querySelector('.mobile-bottom-nav'); return n ? getComputedStyle(n).display : 'absent'; })(),
+        vh: innerHeight,
+    };
+});
+/** Two frames: the list's ResizeObserver has run and the frame is painted. */
+const twoFrames = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+/** The soft keyboard, as each app sees it (a headless browser has none):
+ *  - Android: the app's WebView is RESIZED to above the keyboard (the real APK: innerHeight 473 with
+ *    it up, e2e/android-phone-sweep-live.mjs), then the app's own keyboard event raises
+ *    <html data-keyboard-up>, held as long as the keyboard is up as the native answer holds it
+ *    (keyboardUp.ts's focus listeners would otherwise read the resized page as "no keyboard");
+ *  - iPhone: the layout keeps its height and only the VISUAL viewport shrinks, by the keyboard's
+ *    336 px: window.visualViewport answers with that height and the real visual viewport's resize
+ *    event is fired, so the app's own keyboardUp.ts sees it and raises the attribute itself. */
+async function softKeyboard(page, engine, up) {
+    if (engine === 'Android') {
+        if (up) {
+            await page.setViewportSize({ width: 390, height: 844 - 330 });
+            await twoFrames(page);
+            await page.evaluate(() => {
+                const root = document.documentElement;
+                window.__stickKb = true;
+                root.dataset.keyboardUp = '';
+                window.__stickKbHold ??= new MutationObserver(() => { if (window.__stickKb && !('keyboardUp' in root.dataset)) root.dataset.keyboardUp = ''; });
+                window.__stickKbHold.observe(root, { attributes: true, attributeFilter: ['data-keyboard-up'] });
+            });
+        } else {
+            await page.setViewportSize({ width: 390, height: 844 });
+            await twoFrames(page);
+            await page.evaluate(() => { window.__stickKb = false; delete document.documentElement.dataset.keyboardUp; });
+        }
+    } else if (engine === 'iPhone') {
+        await page.evaluate((kb) => {
+            const real = window.__stickVV || window.visualViewport;
+            window.__stickVV = real;
+            const shown = kb === 0 ? real : new Proxy(real, {
+                get: (t, k) => (k === 'height' ? innerHeight - kb : k === 'offsetTop' ? kb : (typeof t[k] === 'function' ? t[k].bind(t) : t[k])),
+            });
+            Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => shown });
+            real.dispatchEvent(new Event('resize'));
+        }, up ? 336 : 0);
+    }
+    await twoFrames(page);
+}
+
+/**
+ * The owner's report (2026-11-16): "when typing in an active conversation on mobile, the latest
+ * message doesn't stay at the bottom, it seems to move up." The message list re-pinned to its newest
+ * message only when its CONTENT grew; its own box shrinking from the bottom (the keyboard, the message
+ * box growing a line, the typing indicator) kept scrollTop and slid the newest message under the box,
+ * and on WebKit measuring the box clamped the list's scrollTop on every keystroke
+ * (components/repinOnResize.ts, components/growToFit.ts). As an Android phone (Chromium) and as an
+ * iPhone (WebKit, Safari's engine) at 390x844, each step must leave the newest message at the box;
+ * a reader scrolled up stays exactly where they are (CONTROL); and on a 1280x800 desktop the same
+ * steps, with no keyboard, keep what the desktop did before (CONTROL) and the message box growing or
+ * the typing indicator no longer hide the newest message there either.
+ */
+async function stickWalk(O, srv, phoneName) {
+    const chan = await api(O, 'POST', `/servers/${srv.id}/channels`, { name: 'stick-' + stamp, channel_type: 0 });
+    await O.reload({ waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    await dismiss(O);
+    await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+    await sleep(1000);
+    const chanRow = (page) => page.locator('.sidebar .channel-list .channel').filter({ has: page.locator(`.channel-name:text-is("${chan.name}")`) }).first();
+    await chanRow(O).click();
+    await sleep(1000);
+    for (let i = 0; i < 20; i++) await say(O, `History ${i}: a few words so the list has rows to scroll through ${'and more '.repeat(i % 4)}`);
+    wk = muteWebkit(await webkit.launch());
+    const ENGINES = [
+        ['Android', () => browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2, userAgent: ANDROID_UA })],
+        ['iPhone', () => wk.newContext({ ...devices['iPhone 15'], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 } })],
+        ['desktop', () => browser.newContext({ viewport: { width: 1280, height: 800 } })],
+    ];
+    const words = 'the quick brown fox jumps over the lazy dog and runs on down the road ';
+    for (const [engine, make] of ENGINES) {
+        const phone = engine !== 'desktop';
+        const ctx = await make();
+        const P = await signIn(ctx, phoneName, `stick ${engine}`, false);
+        if (phone) {
+            await nav(P, 'Servers');
+            await tap(P, P.locator(`.server-icon[data-server-id="${srv.id}"]`).first());
+            await sleep(1000);
+            await nav(P, 'Channels');
+            await tap(P, chanRow(P));
+        } else {
+            await P.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+            await sleep(1000);
+            await chanRow(P).click();
+        }
+        await until(async () => (await rowCount(P)) >= 20, 30000);
+        await sleep(1200);
+        const at = (label, r) => check(`${engine} stick: ${label}: the newest message is at the message box`, r.fromBottom <= 1 && r.toBox >= 0, r);
+        const box = P.locator(COMPOSER);
+        const focusBox = async () => { if (phone) await tap(P, box); else await box.click(); await twoFrames(P); };
+        /** Types until the box is `px` tall or more (or stops growing), reading the list after EVERY
+         *  keystroke: on WebKit every keystroke on a box of several lines moved the list. */
+        const typeUntil = async (px) => {
+            const readings = [];
+            let grew = 0, last = (await stickRead(P)).boxPx;
+            for (let i = 0; i < 900; i++) {
+                await P.keyboard.type(words[i % words.length]);
+                await twoFrames(P);
+                const r = { ...(await stickRead(P)), afterKeystroke: i + 1 };
+                readings.push(r);
+                if (r.boxPx !== last) { grew++; last = r.boxPx; }
+                if (r.boxPx >= px && i % words.length === words.length - 1) break;
+            }
+            return { readings, grew, boxPx: last };
+        };
+        /** The reading furthest from the newest message (for "at the box"). */
+        const furthest = (rs) => rs.reduce((w, r) => (r.fromBottom > w.fromBottom || r.toBox < w.toBox ? r : w));
+        /** The reading furthest from where a reader was (for "stays"): any keystroke that moved them. */
+        const drifted = (rs, top) => rs.reduce((w, r) => (Math.abs(r.scrollTop - top) > Math.abs(w.scrollTop - top) || (!r.pill && w.pill) ? r : w));
+
+        // ── at the newest message
+        const rest = await stickRead(P);
+        at('at rest', rest);
+        if (phone) check(`${engine} stick: the phone layout (the bottom bar is there)`, rest.nav !== 'none', rest);
+        else check(`desktop stick: CONTROL - the desktop layout: no keyboard handling, no bottom bar`, !rest.keyboardUp && (rest.nav === 'absent' || rest.nav === 'none'), rest);
+        await focusBox();
+        await softKeyboard(P, engine, true);
+        const kb = await stickRead(P);
+        if (phone) {
+            check(`${engine} stick: the keyboard is up, the bottom bar gone (${engine === 'iPhone' ? 'keyboardUp.ts read the visual viewport' : 'the WebView resized'})`, kb.keyboardUp && kb.nav === 'none', kb);
+            at('the keyboard up', kb);
+            await shot(P, `stick-${engine}-keyboard`);
+        }
+        const typed = await typeUntil(phone ? 190 : 100);
+        check(`${engine} stick: the message box grew line by line as it was typed into`, typed.grew >= 3, { grew: typed.grew, boxPx: typed.boxPx });
+        at(`typing ${typed.grew} lines more, after every keystroke (${typed.readings.length}; the furthest)`, furthest(typed.readings));
+        await shot(P, `stick-${engine}-typed`);
+        // The other side starts typing: the indicator comes up between the list and the box.
+        await O.locator(COMPOSER).click();
+        await O.keyboard.type('typing back');
+        const ind = await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
+        await twoFrames(P);
+        const typingRead = await stickRead(P);
+        check(`${engine} stick: the other side's typing indicator came up`, !!ind, typingRead);
+        at('the typing indicator up', typingRead);
+        await shot(P, `stick-${engine}-typing`);
+        // Their message arrives, then one with an address (its card is built from the address alone).
+        let n = await rowCount(P);
+        await O.keyboard.type(', and a reply');
+        await O.keyboard.press('Enter');
+        await until(async () => (await rowCount(P)) > n, 15000);
+        await sleep(500);
+        at('a message received', await stickRead(P));
+        n = await rowCount(P);
+        await O.locator(COMPOSER).fill(`see https://example.com/stick/${stamp}/a/long/path/that/goes/on/and/on/index.html`);
+        await O.keyboard.press('Enter');
+        await until(async () => (await rowCount(P)) > n, 15000);
+        const card = await until(() => P.evaluate(() => {
+            const rows = document.querySelectorAll('.messages-container > .message');
+            return !!rows[rows.length - 1]?.querySelector('.link-preview-card');
+        }), 8000);
+        await twoFrames(P);
+        const link = await stickRead(P);
+        check(`${engine} stick: the newest message's link card is drawn`, !!card, link);
+        at('a message with a link card received', link);
+        n = await rowCount(P);
+        await P.keyboard.press('Enter');
+        await until(async () => (await rowCount(P)) > n, 15000);
+        await sleep(800);
+        at('your own message sent', await stickRead(P));
+        await softKeyboard(P, engine, false);
+        const down = await stickRead(P);
+        if (phone) {
+            check(`${engine} stick: the keyboard down, the bottom bar back`, !down.keyboardUp && down.nav !== 'none', down);
+            at('the keyboard down', down);
+        }
+        await P.evaluate(() => document.activeElement?.blur?.());
+        await sleep(400);
+
+        // ── CONTROL: a reader 400 px up stays exactly where they are through all of it
+        if (engine === 'iPhone') {
+            // Playwright's mobile WebKit takes no wheel and no touch drag: the list is scrolled from
+            // the page, which fires the same scroll events Chat.tsx reads a reader's scroll from.
+            await P.evaluate(() => document.querySelector('.messages-container').scrollBy(0, -400));
+        } else {
+            const list = await P.locator('.messages-container').boundingBox();
+            await P.mouse.move(list.x + list.width / 2, list.y + list.height / 2);
+            await P.mouse.wheel(0, -400);
+        }
+        await sleep(700);
+        const up0 = await stickRead(P);
+        check(`${engine} stick: CONTROL - scrolled up to read (Jump to latest shown)`, up0.fromBottom >= 300 && up0.pill, up0);
+        const stays = (label, r) => check(`${engine} stick: CONTROL - scrolled up: ${label}: still exactly where they were reading`, Math.abs(r.scrollTop - up0.scrollTop) <= 1 && r.pill, { was: up0.scrollTop, ...r });
+        await focusBox();
+        await softKeyboard(P, engine, true);
+        if (phone) stays('the keyboard up', await stickRead(P));
+        const typedUp = await typeUntil(phone ? 140 : 90);
+        stays(`typing lines, after every keystroke (${typedUp.readings.length}; the one furthest from where they were)`, drifted(typedUp.readings, up0.scrollTop));
+        await O.locator(COMPOSER).click();
+        await O.keyboard.type('more');
+        await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
+        await twoFrames(P);
+        const upTyping = await stickRead(P);
+        check(`${engine} stick: CONTROL - scrolled up: the other side's typing indicator came up`, upTyping.typing, upTyping);
+        stays('the typing indicator up', upTyping);
+        n = await rowCount(P);
+        await O.keyboard.press('Enter');
+        await until(async () => (await rowCount(P)) > n, 15000);
+        await sleep(500);
+        stays('a message received', await stickRead(P));
+        await softKeyboard(P, engine, false);
+        if (phone) stays('the keyboard down', await stickRead(P));
+        await P.locator(COMPOSER).fill('');
+        await P.evaluate(() => document.activeElement?.blur?.());
+        await O.locator(COMPOSER).fill('');
+
+        // ── CONTROL: a reader ONE NOTCH up (100 px, inside the slop Chat.tsx still calls "at the
+        // bottom", so no Jump to latest) is not pulled down by a change that is not theirs: the
+        // other side's typing indicator, the keyboard (the review of this fix: it pinned them).
+        await P.evaluate(() => { const sc = document.querySelector('.messages-container'); sc.scrollTop = sc.scrollHeight; });
+        await sleep(600);
+        await until(() => P.evaluate(() => !document.querySelector('.typing-indicator')), 12000);
+        await twoFrames(P);
+        if (engine === 'iPhone') {
+            await P.evaluate(() => document.querySelector('.messages-container').scrollBy(0, -100));
+        } else {
+            const list = await P.locator('.messages-container').boundingBox();
+            await P.mouse.move(list.x + list.width / 2, list.y + list.height / 2);
+            await P.mouse.wheel(0, -100);
+        }
+        await sleep(700);
+        const notch = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up (inside the slop: no Jump to latest)`, notch.fromBottom >= 60 && notch.fromBottom <= 120 && !notch.pill, notch);
+        const keeps = (label, r) => check(`${engine} stick: CONTROL - one notch up: ${label}: still exactly where they were reading`, Math.abs(r.scrollTop - notch.scrollTop) <= 1, { was: notch.scrollTop, ...r });
+        await O.locator(COMPOSER).click();
+        await O.keyboard.type('typing again');
+        await until(() => P.evaluate(() => !!document.querySelector('.typing-indicator')), 8000);
+        await twoFrames(P);
+        const notchTyping = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up: the other side's typing indicator came up`, notchTyping.typing, notchTyping);
+        keeps('the typing indicator up', notchTyping);
+        await O.locator(COMPOSER).fill('');
+        await until(() => P.evaluate(() => !document.querySelector('.typing-indicator')), 12000);
+        await twoFrames(P);
+        const notchQuiet = await stickRead(P);
+        check(`${engine} stick: CONTROL - one notch up: ...and went again`, !notchQuiet.typing, notchQuiet);
+        keeps('the typing indicator gone again', notchQuiet);
+        if (phone) {
+            await focusBox();
+            await softKeyboard(P, engine, true);
+            keeps('the keyboard up', await stickRead(P));
+            await softKeyboard(P, engine, false);
+            await P.evaluate(() => document.activeElement?.blur?.());
+        }
+        await ctx.close();
+    }
+}
 
 try {
     // ── Fixture: an owner on a desktop, a phone account with a name as long as one can be (32).
@@ -1006,10 +1305,14 @@ try {
 
         await ctx.close();
     }
+
+    // ── stick: the newest message stays at the message box while the phone types
+    if (want('stick')) await stickWalk(O, srv, phoneName);
 } catch (e) {
     check('the walk ran to the end', false, String(e?.stack || e).slice(0, 600));
 } finally {
     await browser.close();
+    await wk?.close();
 }
 console.log(`\n${failures} failure(s)`);
 process.exit(failures);

@@ -227,7 +227,8 @@
     position: absolute;
     top: 10px;
     right: 10px;
-    background: var(--text-danger, #f23f43);
+    /* A fixed red: white on --text-danger is 3.77:1 where a tile gives it the dark palette. */
+    background: #cc3336;
     color: #fff;
     font-size: 0.68rem;
     font-weight: 700;

@@ -579,15 +579,20 @@ conversation, a channel or a byte of a message. Exactly what it does see:
 - **The browser, and through it often a person.** The push address is one the
   service issued to your browser; Apple and Google can usually tie it to the account
   signed into the phone or browser.
-- **The timing.** When your server had something for you while Púca was closed: at
-  most one wake per browser per 30 seconds, a burst being coalesced.
+- **The timing.** When your server had something for you while Púca was closed (or, on
+  a phone, in the background), a burst being coalesced: at most one wake per browser
+  per 30 seconds while it stays away. A browser that came back on screen after a wake
+  and went away again starts a new burst and can be woken sooner (the reply after you
+  answered must not wait) — once your server has heard it come back, over its
+  connection or a new one — so two wakes close together can also say that you looked
+  in between.
 - **Correlations between people.** A channel message wakes every away, subscribed
   member, each after a random delay of up to 3 seconds (`web_push_jitter_ms`). A
   service that serves several members of one server sees them woken by the same
   deployment close together and can infer a shared channel; wakes that alternate
   between two accounts suggest who talks to whom. The delay blurs this; it does not
-  hide it. Notifications while Púca is open, and the Android app's own socket, involve
-  no push service at all.
+  hide it. Notifications while Púca is open (on a phone: on screen), and the Android
+  app's own socket, involve no push service at all.
 
 **What your device shows, and why it is not the message.** Woken, the browser's worker
 (`frontend/public/sw.js`) asks YOUR SERVER, directly over TLS, what arrived, and shows
@@ -636,12 +641,22 @@ encrypted message. Your notification preferences apply as on Android. A clip app
 prompt is never silenced by a mute or a block: it asks whether YOU may be recorded.
 
 **When a push is sent at all.** When something you would be notified about arrives while
-THAT browser has no connection to your server — whatever your other devices are doing,
-just as the Android app is notified while the desktop app is open. A browser that is
-open is told directly and notifies by itself, so it is not pushed to as well. One gap:
-an iPhone app that has just gone to the background can keep its connection for up to
-about 75 seconds before the server sees that it stopped answering, and what arrives in
-that time is not pushed (it is there when you open Púca).
+THAT browser is away — whatever your other devices are doing, just as the Android app is
+notified while the desktop app is open. A browser that is open is told directly and
+notifies by itself, so it is not pushed to as well. Away means it has no connection to
+your server, or its page has said it cannot show a notification by itself: the web app
+on an iPhone, iPad or Android phone says so the moment it goes to the background (iOS
+freezes it within seconds, though its connection can stay up for about 75 seconds more,
+and Android's Chrome cannot show a notification from a page at all), and any page says
+so as it is closed; back on screen it says so again (`SetPushAway`,
+`frontend/src/api/webPushAway.ts`). While it has said so, the page shows none of its own,
+so a message is one notification, not two. What your server learns is when that page went
+to the background and came back, which the same page mostly reports already for idle and
+away (`SetActivity`) — but not while you are talking in a call, when it reports you active
+and this still says the app is in the background. It is held in memory per connection,
+sent only by a browser where the setting is on, and read by nothing but the decision to
+push. A hidden tab of a desktop browser does not say so: that page keeps running and
+notifies by itself.
 
 ## 4. Is voice (and screen share) encrypted?
 
@@ -1784,8 +1799,8 @@ deafened in it (the same status the call's members are already shown) — is
 sent only to your own
 connections that asked for it, never to anyone else and never to the phone's
 background delivery socket. The device kind is whatever that device reported
-about itself (`?kind=`) and labels your devices to each other; nothing
-privilege-bearing reads it. A connection that is not itself in a voice room
+about itself (`?kind=`, and `?form=tablet` for a tablet) and labels your
+devices to each other; nothing privilege-bearing reads it. A connection that is not itself in a voice room
 can no longer stop or start media there on the account's behalf, so a
 displaced device's teardown cannot cut the call that moved. On an SFU
 channel a move removes only the LiveKit sessions minted by the old device's

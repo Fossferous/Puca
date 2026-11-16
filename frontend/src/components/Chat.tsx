@@ -180,6 +180,7 @@ import {
 } from '../hooks/queries';
 import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
+import { startWebPushAwayReporter } from '../api/webPushAway';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm, isRestricted } from '../api/permissionBits';
 import { notifyEmbedChanged, registerEmbedSession } from '../api/embedApi';
@@ -221,7 +222,8 @@ import {
 } from '../api/mobileApp';
 import { setUnreadBadge } from '../api/unreadBadge';
 import { SmartAvatar } from './SmartAvatar';
-import { repinOnGrowth } from './repinOnGrowth';
+import { repinOnResize } from './repinOnResize';
+import { growToFit } from './growToFit';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 import { useUnsentWork } from '../api/workInFlight';
@@ -871,6 +873,13 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         if (!currentUserId) return;
         return startActivityReporter({ userId: currentUserId });
+    }, [currentUserId]);
+    // Web Push: tell the server when this page, on a phone gone to the
+    // background, cannot notify by itself, so it pushes instead. The same
+    // handshake: nothing is sent until this socket's server confirms it.
+    useEffect(() => {
+        if (!currentUserId) return;
+        return startWebPushAwayReporter();
     }, [currentUserId]);
 
     // May this user create invites on the CURRENT server? Server carries no
@@ -3692,18 +3701,25 @@ export function Chat({ onLogout }: ChatProps) {
     // short of the bottom. `load` does not bubble — listen in CAPTURE phase.
     // Content that grows WITHOUT a load event (text-only link-preview cards,
     // decrypted-attachment swaps) is covered by a ResizeObserver over the
-    // container's children. Depends on isLoading because the component
-    // early-returns before the container exists, so a [] dep would bind to a
-    // null ref forever. Only a change that GROWS the list re-pins it
-    // (repinOnGrowth): one that moves nothing must not pull back a reader who
+    // container's children. The same observer watches the container ITSELF:
+    // the soft keyboard, a line more in the message box, the typing indicator
+    // or the reply banner shrink it from the bottom, and the newest message
+    // slid under the box (repinOnResize says what was measured); that change
+    // moves only a list that was at its very end (or Jump to latest's scroll
+    // on its way there, until pinningRef lets go within the slop), never a
+    // reader a notch up. Depends on isLoading because the
+    // component early-returns before the container exists, so a [] dep would
+    // bind to a null ref forever. Only a change that MOVES the list re-pins it
+    // (repinOnResize): one that moves nothing must not pull back a reader who
     // has just scrolled up less than AT_BOTTOM_SLOP.
     useEffect(() => {
         const el = messagesContainerRef.current;
         if (!el || !showingMessageList) return;
-        const repin = repinOnGrowth(el, () => atBottomRef.current);
+        const repin = repinOnResize(el, () => atBottomRef.current, () => pinningRef.current);
         el.addEventListener('load', repin, true);
         el.addEventListener('error', repin, true);
         const ro = new ResizeObserver(repin);
+        ro.observe(el);
         for (const child of el.children) ro.observe(child);
         const mo = new MutationObserver((muts) => {
             for (const m of muts) {
@@ -7274,10 +7290,9 @@ export function Chat({ onLogout }: ChatProps) {
                                 onChange={(e) => {
                                     handleInputChange(e.target.value);
                                     detectAutocomplete(e.target.value, e.target.selectionStart);
-                                    // Auto-grow up to a max height.
-                                    const el = e.target;
-                                    el.style.height = 'auto';
-                                    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+                                    // Auto-grow up to a max height, leaving the
+                                    // message list where it was (growToFit).
+                                    growToFit(e.target, 200, messagesContainerRef.current);
                                 }}
                                 onKeyUp={(e) => detectAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart)}
                                 onClick={(e) => detectAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart)}

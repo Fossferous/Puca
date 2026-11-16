@@ -410,7 +410,7 @@
 
 .user-profile-popup .friend-btn.pending {
     background: #4f545c;
-    color: #8e9297;
+    color: #dcddde; /* #8e9297 was 2.43:1 */
 }
 
 .user-profile-popup .friend-btn:disabled {
@@ -451,3 +451,10 @@
 .user-profile-popup:is([data-theme="light"] *) .profile-info h3 { color: var(--header-primary); }
 .user-profile-popup:is([data-theme="light"] *) .owner-notice p { color: var(--text-warning); }
 .user-profile-popup:is([data-theme="light"] *) .kick-btn { color: #11111b; }
+/* "Idle" and "Away" are words in the presence dot's orange, 3.29:1 as words here. */
+.user-profile-popup:is([data-theme="light"] *) .upp-status.idle,
+.user-profile-popup:is([data-theme="light"] *) .upp-status.away { color: #8f4500; }
+/* "Key changed": pale pink on a light pink wash was 1.26:1. */
+.user-profile-popup:is([data-theme="light"] *) .verify-btn.changed { color: var(--text-danger); }
+/* Ban under the pointer goes darker, not back to the dark palette's red (3.69:1). */
+.user-profile-popup:is([data-theme="light"] *) .ban-btn:hover { background: color-mix(in srgb, var(--color-danger) 85%, #000); }

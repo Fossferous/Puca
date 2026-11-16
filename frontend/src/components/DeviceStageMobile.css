@@ -13,7 +13,7 @@
     bottom: 0;
     left: 0;
     right: 0;
-    background-color: #1e88e5; /* accent blue */
+    background-color: #1565c0; /* accent blue: white on #1e88e5 was 3.68:1 */
     display: flex;
     align-items: center;
     justify-content: space-around;
@@ -38,7 +38,7 @@
     width: 48px;
     height: 48px;
     border-radius: 50%;
-    background-color: #1e88e5;
+    background-color: #1565c0;
     color: white;
     display: flex;
     align-items: center;
@@ -145,7 +145,7 @@
 /* Destructive entries (Shut down…) read as such before they are tapped. */
 .device-stage-mobile-menu-item.danger .label,
 .device-stage-mobile-menu-item.danger .icon {
-    color: var(--color-danger, #ed4245);
+    color: #ff8a8d; /* --color-danger was 3.66:1 on the menu */
 }
 
 /* The in-place confirmation the More menu becomes for Shut down. Same box,
@@ -180,7 +180,7 @@
     cursor: pointer;
 }
 .device-stage-mobile-confirm-btn.danger {
-    background: var(--color-danger, #ed4245);
+    background: #c62828; /* white on --color-danger was 3.77:1 */
     color: #fff;
     font-weight: 600;
 }
@@ -249,12 +249,12 @@
 }
 
 .mouse-mode-btn.active {
-    background-color: #1e88e5;
+    background-color: #1565c0;
     color: white;
 }
 .mouse-mode-btn.inactive {
     background-color: #4f545c;
-    color: #b9bbbe;
+    color: #dcddde; /* #b9bbbe was 3.96:1 */
 }
 
 .mouse-gesture-grid {
@@ -399,7 +399,7 @@
 }
 
 .keyboard-btn.kb-locked {
-    background: #1e88e5;
+    background: #1565c0;
     box-shadow: inset 0 0 0 1px #90caf9;
     color: #fff;
 }
@@ -535,7 +535,7 @@
     position: fixed;
     bottom: 20px;
     right: 20px;
-    background: #007aff;
+    background: #0062cc; /* white on #007aff was 4.02:1 */
     color: white;
     padding: 12px 20px;
     border-radius: 30px;

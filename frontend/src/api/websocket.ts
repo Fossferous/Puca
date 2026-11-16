@@ -1,23 +1,28 @@
 import { WS_URL } from './config';
 import { onPaintResumed } from './pagePainting';
 import { isMobile, isTauri } from './platform';
-import { applyOwnVoiceFrame, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
+import { applyOwnVoiceFrame, currentClientForm, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
 
 /**
- * The socket URL, with what this client can read (`caps=own_voice,presence,games`,
+ * The socket URL, with what this client can read (`caps=own_voice,presence,games,push_away`,
  * one list - see CLIENT_CAPS: the account's voice state, ownVoice.ts,
- * idle/away presence, and the in-call card games, api/games/protocol.ts) and
- * what kind of device it is (`kind=`). A server that predates them ignores
- * both; a server that knows them sends OwnVoiceState / UserStatus / Game*
- * frames ONLY to a socket that asked, so no older client is ever handed a
- * frame it does not know. Never carries a credential (see connect()).
+ * idle/away presence, the in-call card games, api/games/protocol.ts, and the
+ * web app saying when its page cannot notify by itself, api/webPushAway.ts)
+ * and what kind of device it is (`kind=`). A server that predates them
+ * ignores both; a server that knows them sends OwnVoiceState / UserStatus /
+ * Game* frames ONLY to a socket that asked, so no older client is ever handed
+ * a frame it does not know. Never carries a credential (see connect()).
  */
 export function socketUrl(base: string = WS_URL): string {
     const kind = currentClientKind(isTauri(), isMobile());
+    // A tablet says so beside `kind=mobile` (ownVoice.ts DeviceForm): an
+    // older server ignores `form` and records a phone, as before. A phone
+    // sends no form.
+    const form = currentClientForm(kind);
     // Every capability rides ONE `caps=a,b` list (CLIENT_CAPS): the server
     // reads `caps` once, so a second `caps=` would fail the whole upgrade.
     const withCaps = wsUrlWithCaps(base);
-    return `${withCaps}${withCaps.includes('?') ? '&' : '?'}kind=${kind}`;
+    return `${withCaps}${withCaps.includes('?') ? '&' : '?'}kind=${kind}${form ? `&form=${form}` : ''}`;
 }
 
 // The authoritative wire-protocol definition lives in the Rust backend
@@ -52,7 +57,7 @@ export const MEDIA_ANNOUNCE_REFUSALS: readonly string[] = [
  * view shows as an error notice. The server confirms what it supports with
  * `ServerFeatures`, per socket — see `hasServerFeature`.
  */
-export const CLIENT_CAPS: readonly string[] = ['own_voice', 'presence', 'games'];
+export const CLIENT_CAPS: readonly string[] = ['own_voice', 'presence', 'games', 'push_away'];
 
 /** `base` with the capability announcement appended. */
 export function wsUrlWithCaps(base: string): string {

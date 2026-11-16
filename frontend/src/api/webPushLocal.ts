@@ -3,7 +3,8 @@
  * Púca Notes' sign-out can drop it too without pulling Púca in
  * (api/webPush.ts is the rest of the feature).
  *
- * TWO pieces of state, deliberately apart:
+ * TWO pieces of stored state, deliberately apart (and, at the bottom, one
+ * in memory: what this page last told its server, `pageToldAwayForPush`):
  *  - the OPT-IN, kept PER ACCOUNT (by user id) in localStorage. A per-browser
  *    switch carried one person's "notify me" to whoever signed in next on a
  *    shared browser, whose names then reached the lock screen without them
@@ -132,4 +133,25 @@ export async function dropLocalWebPush(): Promise<string | null> {
 export async function signOutWebPush(uid: number | null): Promise<string | null> {
     setWebPushOptIn(uid, false);
     return dropLocalWebPush();
+}
+
+// ---- what this page told its server (in memory, this page only) ----------
+
+let toldAwayForPush = false;
+
+/**
+ * Has this page told its current socket's server that it cannot show a
+ * notification by itself (`SetPushAway`, api/webPushAway.ts)? Then the
+ * server pushes this browser's notifications, the service worker shows them,
+ * and the page raises none of its own (desktopNotify.ts): one from each would
+ * be every message twice. False again the moment the page is back on screen
+ * or its socket closes.
+ */
+export function pageToldAwayForPush(): boolean {
+    return toldAwayForPush;
+}
+
+/** For api/webPushAway.ts only. */
+export function setPageToldAwayForPush(away: boolean): void {
+    toldAwayForPush = away;
 }

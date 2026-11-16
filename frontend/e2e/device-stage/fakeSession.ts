@@ -33,13 +33,18 @@ type Mon = { id: number; label: string; left: number; top: number; width: number
 
 /** A real three-screen desk, in the agent's (DXGI) order: a 1440p primary
  *  with a portrait screen either side, raised above it — the layout whose
- *  composite has empty (black) desktop above and below the primary. */
-const MONITORS: Mon[] = [
+ *  composite has empty (black) desktop above and below the primary.
+ *
+ *  A driver that needs another desk sets it before any page script:
+ *  `addInitScript(m => { window.__stageMonitorsInit = m }, [...])` — the
+ *  monitor-hop walk uses a screen on every side of the main one, so all four
+ *  of its chips can be reached by panning. */
+const MONITORS: Mon[] = (window as unknown as { __stageMonitorsInit?: Mon[] }).__stageMonitorsInit ?? [
     { id: 0, label: 'Main display', left: 0, top: 0, width: 2560, height: 1440 },
     { id: 1, label: 'Display 2', left: 2560, top: -700, width: 1440, height: 2560 },
     { id: 2, label: 'Display 3', left: -1440, top: -707, width: 1440, height: 2560 },
 ];
-const COLOURS = ['#2a6fdb', '#2fa84f', '#c0392b'];
+const COLOURS = ['#2a6fdb', '#2fa84f', '#c0392b', '#8e44ad', '#d35400'];
 
 // --- the agent's geometry, mirrored from crates/puca-agent/src/composite.rs ---
 const MAX_COMPOSITE_W = 3840;
@@ -129,6 +134,9 @@ const state = {
     // pointer shape while this end draws the pointer, and an elevated window.
     remoteCursor: null as string | null,
     inputBlocked: null as string | null,
+    // The host's one-line notice (a display turned off, say), which a phone
+    // shows in its feedback line (the monitor-hop walk).
+    powerNotice: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -154,7 +162,7 @@ function session(): DeviceControlSession {
         // The stand-in's caret channel is open from the start: the shape it
         // says (or, with `sendsShapes` off, does not) rides that.
         remoteCursor: state.remoteCursor, caretOpen: true, inputBlocked: state.inputBlocked, pointerCaptured: false,
-        shareUser: null, viewOnly: false, powerNotice: null,
+        shareUser: null, viewOnly: false, powerNotice: state.powerNotice,
     } as unknown as DeviceControlSession;
 }
 function emit(): void {
