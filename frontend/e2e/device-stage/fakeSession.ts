@@ -97,6 +97,12 @@ const knobs = {
     sendsShapes: true,
     /** Follow the agent's viewer fit at all (false = always native). */
     fit: true,
+    /** Hold every set-monitor until the driver lets it go
+     *  (`__stage.releaseSwitch()`; commitMs runs from then): a host as slow
+     *  as the driver needs it to be, so what the driver does between the
+     *  request and the switch does not race a timer against the machine's
+     *  speed. */
+    holdSwitch: false,
 };
 // A driver that needs a knob from the very first hand-over (an agent too old
 // to send shapes, from the session's start) sets it before any page script:
@@ -260,9 +266,15 @@ export function sendViewSize(_sessionId: string, w: number, h: number): void {
         state.viewSize = w && h ? { w, h } : null;
     }, 300);
 }
+/** Switches parked by `knobs.holdSwitch`, in the order they were asked for. */
+const heldSwitches: Array<() => void> = [];
 export function requestMonitor(_sessionId: string, monitor: number): void {
     monitorRequests.push({ monitor, at: now() });
     log.push({ at: now(), ev: 'set-monitor', monitor });
+    if (knobs.holdSwitch) heldSwitches.push(() => switchTo(monitor));
+    else switchTo(monitor);
+}
+function switchTo(monitor: number): void {
     setTimeout(() => {
         // The capture commits: new frames flow at once over the media path.
         // The FitState is the STREAM's, not the capture's: the step in
@@ -333,6 +345,8 @@ function transform(): { scale: number; x: number; y: number } | null {
         emit();
     },
     emit, pushCaret, transform,
+    /** Let the switches `knobs.holdSwitch` parked go ahead. */
+    releaseSwitch(): void { for (const go of heldSwitches.splice(0)) go(); },
     /** Force a capture as the host would after the passphrase (no confirm lag). */
     setActive(m: number): void { state.activeMonitor = m; state.capturing = m; state.step = null; emit(); },
     video(): { vw: number; vh: number; w: number; h: number } | null {

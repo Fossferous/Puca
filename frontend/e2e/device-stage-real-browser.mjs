@@ -36,6 +36,8 @@
 //
 // Usage: node e2e/device-stage-real-browser.mjs [outdir]
 // Builds the harness itself (vite.stageharness.config.ts); no server needed.
+// CPU_THROTTLE=<n> runs every page n times slower (DevTools' CPU throttling):
+// a busy machine, or a slow phone, on a quiet one. Every check must pass at 6.
 import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -78,6 +80,7 @@ async function open(knobs = null) {
     page.on('pageerror', e => { fail++; console.log('[pageerror]', String(e).slice(0, 300)); });
     if (knobs) await page.addInitScript(k => { window.__stageKnobsInit = k; }, knobs);
     const cdp = await ctx.newCDPSession(page);
+    if (Number(process.env.CPU_THROTTLE) > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.CPU_THROTTLE) });
     await page.goto(base);
     await page.waitForSelector('.device-stage-surface', { timeout: 15000 });
     await page.waitForFunction(() => (window.__stage.video()?.vw ?? 0) > 0, null, { timeout: 10000 });
@@ -125,7 +128,18 @@ const olderBanner = page => page.evaluate(() => {
     };
 });
 
-/** The desktop point under the middle of the stage, from what is on screen. */
+/** The desktop point under the middle of the stage, from what is on screen,
+ *  and `surface`, the capture whose PICTURE is on the stage (255 = All
+ *  Displays), read from that picture's own shape. Not from the host's
+ *  `capturing`: that flips at the commit, a frame or more before the new
+ *  capture's first frame reaches the video element, and in that window the
+ *  composite's fractions were read as Display 2's (2026-11-16: a `before`
+ *  775 desktop px out, which the zoom-follow check reported as the stage
+ *  landing 533 px off; the stage had landed right). Two screens of one shape
+ *  cannot be told apart, so a picture that fits the capture the host is
+ *  producing is that capture's; `surface` is null (and the point unknown)
+ *  for a picture that fits nothing the host could be showing. `w` is that
+ *  surface's width in desktop px. */
 const centreDesktop = page => page.evaluate(() => {
     const S = window.__stage;
     const t = S.transform();
@@ -135,13 +149,32 @@ const centreDesktop = page => page.evaluate(() => {
     const ox = (v.offsetWidth - dw) / 2, oy = (v.offsetHeight - dh) / 2;
     const fx = ((v.offsetWidth / 2 - t.x) / t.scale - ox) / dw;
     const fy = ((v.offsetHeight / 2 - t.y) / t.scale - oy) / dh;
-    // What is ON the stage: the capture producing the frames.
     const M = S.MONITORS;
-    const r = S.state.capturing === 255
-        ? (() => { const l = Math.min(...M.map(m => m.left)), tp = Math.min(...M.map(m => m.top)); return { l, t: tp, w: Math.max(...M.map(m => m.left + m.width)) - l, h: Math.max(...M.map(m => m.top + m.height)) - tp }; })()
-        : (() => { const m = M.find(x => x.id === S.state.capturing); return { l: m.left, t: m.top, w: m.width, h: m.height }; })();
-    return { x: r.l + fx * r.w, y: r.t + fy * r.h, scale: t.scale };
+    const rectOf = id => {
+        if (id !== 255) { const m = M.find(x => x.id === id); return { l: m.left, t: m.top, w: m.width, h: m.height }; }
+        const l = Math.min(...M.map(m => m.left)), tp = Math.min(...M.map(m => m.top));
+        return { l, t: tp, w: Math.max(...M.map(m => m.left + m.width)) - l, h: Math.max(...M.map(m => m.top + m.height)) - tp };
+    };
+    // The stage's own tolerance for "this picture is that capture's"
+    // (deviceZoomFollow.ts, SWITCH_ASPECT_MATCH).
+    const fits = id => { const r = rectOf(id); return Math.abs((v.videoWidth / v.videoHeight) / (r.w / r.h) - 1) <= 0.03; };
+    const fitting = [255, ...M.map(m => m.id)].filter(fits);
+    const surface = fits(S.state.capturing) ? S.state.capturing : fitting.length === 1 ? fitting[0] : null;
+    if (surface === null) return { x: null, y: null, scale: t.scale, surface, w: null };
+    const r = rectOf(surface);
+    return { x: r.l + fx * r.w, y: r.t + fy * r.h, scale: t.scale, surface, w: r.w };
 });
+/** Until the host has confirmed `monitor` and the stage shows that screen's
+ *  picture at its native size, which is what the host's viewer fit re-encodes
+ *  it to at any zoom the follow lands on (the first frames after a switch
+ *  keep the old step), plus two frames for the stage to take the resize.
+ *  Resolves whether it came (true) or not (false) within 8 s. */
+const confirmedAndRefitted = (page, monitor) => page.waitForFunction(m => {
+    const S = window.__stage, v = S.video(), mon = S.MONITORS.find(x => x.id === m);
+    return S.state.activeMonitor === m && v.vw === mon.width && v.vh === mon.height;
+}, monitor, { timeout: 8000 })
+    .then(() => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))))
+    .then(() => true, () => false);
 /** Client point of a desktop point on the composite picture. */
 const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     const M = window.__stage.MONITORS;
@@ -195,19 +228,22 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     // The trigger fires 120 ms after the pinch rests; sample until the new
     // screen's picture is on the stage, give the stage two animation frames
     // to react to it (NOT the same frame: the view follows a render after the
-    // picture), and look — while the confirmation is still in flight.
-    let before = await centreDesktop(page);
+    // picture), and look — while the confirmation is still in flight. Each
+    // sample reads the picture and the view in ONE step: `before` is the view
+    // over the composite's picture as long as that picture is on the stage.
+    let before = null;
     let onNew = null;
-    for (let i = 0; i < 120 && !onNew; i++) {
-        const st = await page.evaluate(() => ({ cap: window.__stage.state.capturing, vw: window.__stage.video().vw, vh: window.__stage.video().vh }));
-        if (st.cap === 255) before = await centreDesktop(page);
-        if (st.cap === 1 && st.vh > st.vw) {
+    for (const until = Date.now() + 5000; !onNew && Date.now() < until;) {
+        const now = await centreDesktop(page);
+        if (now.surface === 255) before = now;
+        else if (now.surface === 1) {
             await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
             onNew = { active: await page.evaluate(() => window.__stage.state.activeMonitor), centre: await centreDesktop(page) };
         }
         await page.waitForTimeout(5);
     }
-    ck('precondition: zooming over Display 2 followed it', !!onNew);
+    ck('precondition: the view over All Displays was read before the switch', !!before);
+    ck('precondition: zooming over Display 2 followed it', !!onNew && onNew.centre.surface === 1);
     // Where the landing SHOULD put the middle: the point that was there,
     // pulled in only as far as the pan clamp needs to keep Display 2 filling
     // the stage (there is nothing beyond its edge in the single-screen view).
@@ -217,18 +253,20 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
         const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
         return { x: cl(before.x, 2560 + halfW, 4000 - halfW), y: cl(before.y, -700 + halfH, 1860 - halfH) };
     };
-    if (onNew) {
+    if (before && onNew?.centre.surface === 1) {
         const e = expected(onNew.centre);
         const d = Math.hypot(onNew.centre.x - e.x, onNew.centre.y - e.y);
         ck('precondition: the confirmation has not arrived yet', onNew.active !== 1, String(onNew.active));
         ck('the new screen is framed in place as soon as its picture arrives, not when the confirmation does',
             d < 20, `${Math.round(d)} desktop px off`);
     }
-    await page.waitForTimeout(1500);
+    ck('precondition: the host confirmed Display 2 and re-fitted its picture', await confirmedAndRefitted(page, 1));
     const settled = await centreDesktop(page);
-    const e2 = expected(settled);
-    const d2 = Math.hypot(settled.x - e2.x, settled.y - e2.y);
-    ck('…and stays there once confirmed and re-fitted', d2 < 20, `${Math.round(d2)} desktop px off`);
+    if (before && settled.surface === 1) {
+        const e2 = expected(settled);
+        const d2 = Math.hypot(settled.x - e2.x, settled.y - e2.y);
+        ck('…and stays there once confirmed and re-fitted', d2 < 20, `${Math.round(d2)} desktop px off`);
+    } else ck('…and stays there once confirmed and re-fitted', false, `the picture on the stage is ${settled.surface ?? 'no capture'}'s`);
     await page.screenshot({ path: `${outdir}/02-followed-display-2.png` });
     await ctx.close();
 }
@@ -236,20 +274,29 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
 // ---- 3b: a pinch that carries on across the switch ---------------------------
 {
     const { ctx, page, pinch } = await open();
-    // A slow host: the switch takes long enough for the fingers to carry on.
-    await page.evaluate(() => { window.__stage.knobs.commitMs = 700; window.__stage.knobs.confirmMs = 300; });
+    // A slow host: it switches only once the fingers have carried on. Held by
+    // the stand-in until the second pinch is over, not timed: a 700 ms commit
+    // raced the pinch's own speed, and on a busy machine the picture landed
+    // before the pinch ended, so `before` was read on Display 2 as if it were
+    // the composite (2026-11-16, "magnification ratio 3.78": 5440 / 1440).
+    await page.evaluate(() => { window.__stage.knobs.holdSwitch = true; window.__stage.knobs.confirmMs = 300; });
     const c = await clientOnComposite(page, 2560 + 720, -700 + 900);
     await pinch(c, 60, 360);
-    await page.waitForTimeout(250);                       // the follow has asked
+    // The follow has asked (the trigger fires 120 ms after the pinch rests).
+    await page.waitForFunction(() => window.__stage.monitorRequests.length > 0, null, { timeout: 5000 }).catch(() => {});
     const asked = await page.evaluate(() => window.__stage.monitorRequests.length);
     await pinch(c, 100, 260);                             // and the zoom goes on
     const before = await centreDesktop(page);
-    await page.waitForTimeout(1800);
+    await page.evaluate(() => window.__stage.releaseSwitch());
+    const landed = await confirmedAndRefitted(page, 1);
     const after = await centreDesktop(page);
     ck('precondition: the follow asked before the second pinch', asked === 1, String(asked));
-    // One desktop pixel's size on screen, before and after.
-    const px = (st, w) => st.scale * 390 / w;            // picture 390 css wide in both
-    const ratio = px(after, 1440) / px(before, 5440);
+    ck('precondition: the second pinch ended over All Displays, and the follow then landed on Display 2',
+        before.surface === 255 && landed && after.surface === 1, `before on ${before.surface}, after on ${after.surface}, landed ${landed}`);
+    // One desktop pixel's size on screen, before and after (the picture is
+    // 390 css wide in both).
+    const px = st => st.scale * 390 / st.w;
+    const ratio = px(after) / px(before);
     ck('a pinch that carried on while the host switched is kept, not undone', ratio > 0.85 && ratio < 1.15,
         `magnification ratio ${ratio.toFixed(2)}`);
     await ctx.close();
