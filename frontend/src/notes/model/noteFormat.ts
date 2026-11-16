@@ -68,7 +68,9 @@ const DELIMS: Delim[] = [
 
 const MAX_DEPTH = 6;
 const BULLET_RE = /^([ \t]*)([-*•]) (?=\S)/;
-const WORDISH = /[\p{L}\p{N}]/u;
+// Letters, numbers and the marks that combine with them (an accent typed
+// as its own character, a Devanagari vowel sign): one word, never two.
+const WORDISH = /[\p{L}\p{N}\p{M}]/u;
 const SPACE = /\s/;
 
 function isWordish(ch: string | undefined): boolean {
@@ -277,31 +279,80 @@ function emptyPairAt(line: string, at: number, open: string, close: string): boo
     return line[at - open.length - 1] !== ch && line[at + close.length] !== ch;
 }
 
-function toggleOnLine(line: string, s: number, e: number, kind: FormatKind): { line: string; s: number; e: number } {
+const outerEnd = (sp: MarkSpan) => sp.close + sp.delim.close.length;
+
+/** Take `kind` off the pair `sp` (or the `**` out of a `***`): the line and
+ *  where `x` lands in it. */
+function unwrapSpan(line: string, sp: MarkSpan, kind: FormatKind): { line: string; map: (x: number) => number } {
+    const d = sp.delim;
+    const keep = without(d, kind);
+    const outerTo = outerEnd(sp);
+    const inner = line.slice(sp.open + d.open.length, sp.close);
+    const out = line.slice(0, sp.open) + keep.open + inner + keep.close + line.slice(outerTo);
+    const shift = d.open.length - keep.open.length;
+    const innerFrom = sp.open + d.open.length;
+    const map = (x: number) => (x <= sp.open ? x
+        : x <= innerFrom ? sp.open + keep.open.length
+            : x <= sp.close ? x - shift
+                : x <= outerTo ? sp.open + keep.open.length + inner.length
+                    : x - shift - (d.close.length - keep.close.length));
+    return { line: out, map };
+}
+
+/**
+ * One line's part of Ctrl+B / I / U / T. A mark only counts at the edge of
+ * a word (readInline), so it always goes there: a selection that starts or
+ * ends inside a word takes the whole word (`ab**cd**ef` would read as
+ * typed), and with nothing selected (`caretMode`) it is the word the caret
+ * is on, or the marked words the caret is at the edge of. Off any word, an
+ * empty pair goes in for what is typed next, and a second press takes it out.
+ */
+function toggleOnLine(line: string, s: number, e: number, kind: FormatKind, caretMode: boolean): { line: string; s: number; e: number } {
     const { open, close } = WRAP[kind];
-    // Pressed twice with nothing typed between: the pair it put in comes out.
-    if (s === e && emptyPairAt(line, s, open, close)) {
-        return { line: line.slice(0, s - open.length) + line.slice(s + close.length), s: s - open.length, e: s - open.length };
+    const wrap = (from: number, to: number) =>
+        line.slice(0, from) + open + line.slice(from, to) + close + line.slice(to);
+    if (caretMode) {
+        const caret = s;
+        if (emptyPairAt(line, caret, open, close)) {
+            return { line: line.slice(0, caret - open.length) + line.slice(caret + close.length), s: caret - open.length, e: caret - open.length };
+        }
+        const spans = spansOf(line);
+        // In, or at the edge of, a pair of this kind: that pair comes off.
+        const own = spans
+            .filter(sp => sp.delim.adds.includes(kind) && caret >= sp.open && caret <= outerEnd(sp))
+            .sort((x, y) => (outerEnd(x) - x.open) - (outerEnd(y) - y.open))[0];
+        if (own) {
+            const u = unwrapSpan(line, own, kind);
+            const at = u.map(caret);
+            return { line: u.line, s: at, e: at };
+        }
+        // At the edge of another kind's pair: around it, so the two read
+        // together (`**x**` and Ctrl+I is `***x***`, not a stray `*`).
+        const edge = spans
+            .filter(sp => caret === sp.open || caret === outerEnd(sp))
+            .sort((x, y) => (outerEnd(y) - y.open) - (outerEnd(x) - x.open))[0];
+        let from = caret;
+        let to = caret;
+        if (edge) {
+            from = edge.open;
+            to = outerEnd(edge);
+        } else if (isWordish(line[caret - 1]) || isWordish(line[caret])) {
+            while (from > 0 && isWordish(line[from - 1])) from--;
+            while (to < line.length && isWordish(line[to])) to++;
+        }
+        if (from === to) {
+            // Off any word: the marks go in around the caret, and what is
+            // typed next is inside them.
+            return { line: wrap(caret, caret), s: caret + open.length, e: caret + open.length };
+        }
+        return { line: wrap(from, to), s: caret + open.length, e: caret + open.length };
     }
     // The selection's own edges are kept clear of spaces: `** x**` is not bold.
     while (s < e && SPACE.test(line[s])) s++;
     while (e > s && SPACE.test(line[e - 1])) e--;
-    // A mark only counts at the edge of a word (readInline), so it goes
-    // there: a selection that starts or ends inside a word takes the whole
-    // word, and with nothing selected the caret's word is the one marked —
-    // `ab**cd**ef` would read as typed, never as bold.
-    const caret = s === e ? s : null;
-    if (caret !== null) {
-        if (isWordish(line[s - 1]) || isWordish(line[s])) {
-            while (s > 0 && isWordish(line[s - 1])) s--;
-            while (e < line.length && isWordish(line[e])) e++;
-        }
-    } else {
-        while (s > 0 && isWordish(line[s - 1]) && isWordish(line[s])) s--;
-        while (e < line.length && isWordish(line[e]) && isWordish(line[e - 1])) e++;
-    }
-    const keepCaret = (r: { line: string; s: number; e: number }, shift: number) =>
-        (caret === null ? r : { line: r.line, s: caret + shift, e: caret + shift });
+    if (s === e) return { line, s, e };
+    while (s > 0 && isWordish(line[s - 1]) && isWordish(line[s])) s--;
+    while (e < line.length && isWordish(line[e]) && isWordish(line[e - 1])) e++;
     // Already marked: the innermost pair of this kind that holds the
     // selection (or that the selection takes in whole) comes off — and only
     // a pair that really reads as one, so the `*` of a `**` is never taken
@@ -310,33 +361,14 @@ function toggleOnLine(line: string, s: number, e: number, kind: FormatKind): { l
         .filter(sp => sp.delim.adds.includes(kind))
         .filter(sp => {
             const innerFrom = sp.open + sp.delim.open.length;
-            const innerTo = sp.close;
-            const outerTo = sp.close + sp.delim.close.length;
-            return (s >= innerFrom && e <= innerTo) || (s <= sp.open && e >= outerTo);
+            return (s >= innerFrom && e <= sp.close) || (s <= sp.open && e >= outerEnd(sp));
         })
         .sort((a, b) => (a.close - a.open) - (b.close - b.open))[0];
     if (holding) {
-        const d = holding.delim;
-        const keep = without(d, kind);
-        const outerTo = holding.close + d.close.length;
-        const inner = line.slice(holding.open + d.open.length, holding.close);
-        const out = line.slice(0, holding.open) + keep.open + inner + keep.close + line.slice(outerTo);
-        const shift = d.open.length - keep.open.length;
-        const innerFrom = holding.open + d.open.length;
-        const map = (x: number) => (x <= holding.open ? x
-            : x <= innerFrom ? holding.open + keep.open.length
-                : x <= holding.close ? x - shift
-                    : x <= outerTo ? holding.open + keep.open.length + inner.length
-                        : x - shift - (d.close.length - keep.close.length));
-        return keepCaret({ line: out, s: map(s), e: map(e) }, caret === null ? 0 : map(caret) - caret);
+        const u = unwrapSpan(line, holding, kind);
+        return { line: u.line, s: u.map(s), e: u.map(e) };
     }
-    if (s === e) {
-        // Nothing selected: the marks go in around the caret, and what is
-        // typed next is inside them.
-        return { line: line.slice(0, s) + open + close + line.slice(s), s: s + open.length, e: s + open.length };
-    }
-    const out = line.slice(0, s) + open + line.slice(s, e) + close + line.slice(e);
-    return keepCaret({ line: out, s: s + open.length, e: e + open.length }, open.length);
+    return { line: wrap(s, e), s: s + open.length, e: e + open.length };
 }
 
 /**
@@ -354,15 +386,21 @@ export function toggleMark(text: string, selStart: number, selEnd: number, kind:
     let newEnd = b;
     let delta = 0;
     const out: string[] = [];
+    const caretMode = a === b;
     for (const line of lines) {
         const to = from + line.length;
-        const touches = a === b ? a >= from && a <= to : a < to + 1 && b > from;
-        if (!touches || (a !== b && line.trim() === '')) {
+        const s = Math.max(a, from) - from;
+        const e = Math.min(b, to) - from;
+        // A line is marked when the selection holds some of its words: not
+        // the line a selection merely starts at the end of, or ends at the
+        // start of (that line keeps nothing of it).
+        const touches = caretMode ? a >= from && a <= to : s < e && line.slice(s, e).trim() !== '';
+        if (!touches) {
+            if (a >= from && a <= to) newStart = from + delta + (a - from);
+            if (b >= from && b <= to) newEnd = from + delta + (b - from);
             out.push(line);
         } else {
-            const s = Math.max(a, from) - from;
-            const e = Math.min(b, to) - from;
-            const r = toggleOnLine(line, s, e, kind);
+            const r = toggleOnLine(line, s, e, kind, caretMode);
             if (a >= from && a <= to) newStart = from + delta + r.s;
             if (b >= from && b <= to) newEnd = from + delta + r.e;
             delta += r.line.length - line.length;
@@ -388,7 +426,10 @@ export function toggleBullets(text: string, selStart: number, selEnd: number): T
     let from = 0;
     lines.forEach((line, i) => {
         const to = from + line.length;
-        if ((a <= to && b >= from) && line.trim() !== '') touched.push(i);
+        // The caret's line; or the lines a selection holds something of, not
+        // the next line a selection ends at the very start of.
+        const hit = a === b ? a >= from && a <= to : Math.max(a, from) < Math.min(b, to);
+        if (hit && line.trim() !== '') touched.push(i);
         from = to + 1;
     });
     if (touched.length === 0) {

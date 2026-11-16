@@ -429,6 +429,64 @@ describe('a new sticky note', () => {
         expect((win(0).document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Shopping\n');
     });
 
+    it('the same words are never sent twice at once when the draft becomes a note (no false clash)', async () => {
+        const actions = fakeActions();
+        // The follow-up save is a real round trip, as on a network.
+        actions.content.setBody.mockImplementation(async () => { await new Promise(r => setTimeout(r, 60)); return { rev: 4 }; });
+        await render({ cards: [], ready: true, actions });
+        act(() => { store.requestNewSticky(); });
+        await flush();
+        const area = win(0).document.querySelector('textarea') as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'Shopping\n'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 200)); });
+        await flush();
+        const sends = actions.content.setBody.mock.calls.filter(c => c[1] === 'Shopping\n');
+        expect(sends).toHaveLength(1);
+        expect(win(0).document.querySelector('[data-conflict]')).toBeNull();
+    });
+
+    it('Delete inside the save pause asks, deletes, and makes no note as the window closes', async () => {
+        const actions = fakeActions();
+        await render({ cards: [], ready: true, actions });
+        act(() => { store.requestNewSticky(); });
+        await flush();
+        const doc = win(0).document;
+        const area = doc.querySelector('textarea') as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'never mind'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        // Before the pause ends: no save has started.
+        act(() => { area.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true })); });
+        await flush(1);
+        expect(doc.querySelector('[role="alertdialog"]')).not.toBeNull();
+        act(() => { (doc.querySelector('.sticky-confirm .danger') as HTMLButtonElement).click(); });
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 100)); });
+        await flush();
+        expect(calls('sticky_close')).toHaveLength(1);
+        expect(actions.createNote).not.toHaveBeenCalled();
+    });
+
+    it('a note this window made that Notes never shows (deleted meanwhile) leaves after fresh fetches a minute apart', async () => {
+        const actions = fakeActions();
+        await render({ cards: [], ready: true, actions, gens: fresh() });
+        act(() => { store.requestNewSticky(); });
+        await flush();
+        const area = win(0).document.querySelector('textarea') as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+        act(() => { setter.call(area, 'short-lived'); area.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => { await new Promise(r => setTimeout(r, BODY_SAVE_DELAY_MS + 80)); });
+        await flush();
+        expect(store.readStoredStickies(7)).toEqual(['list:501']);
+        const t0 = Date.now();
+        await render({ cards: [], ready: true, actions, gens: { list: t0 + 2000, channel: t0 + 2000, channelOldest: t0 + 2000 } });
+        expect(store.readStoredStickies(7)).toEqual(['list:501']);
+        const later = vi.spyOn(Date, 'now').mockReturnValue(t0 + 65_000);
+        await render({ cards: [], ready: true, actions, gens: { list: t0 + 64_000, channel: t0 + 64_000, channelOldest: t0 + 64_000 } });
+        later.mockRestore();
+        expect(store.readStoredStickies(7)).toEqual([]);
+        expect(calls('sticky_close')).toHaveLength(1);
+    });
+
     it('a note whose key moves under its window (made offline, now saved) keeps its words and makes no new note', async () => {
         const actions = fakeActions();
         await render({ cards: [card(-5, 'made offline')], ready: true, actions });

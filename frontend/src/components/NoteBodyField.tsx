@@ -121,6 +121,8 @@ export interface NoteBodyHandle {
      * text. Nothing happens to read-only or unreadable text.
      */
     format: (kind: FormatKind | 'bullets') => void;
+    /** What is in the field now, saved or not. */
+    text: () => string;
 }
 
 /** The edit a formatting key makes, or null for a key that is not one. */
@@ -317,6 +319,7 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
             const end = inField && el ? el.selectionEnd : text.length;
             applyEditRef.current(kind === 'bullets' ? toggleBullets(text, s, end) : toggleMark(text, s, end, kind));
         },
+        text: () => latest.current.draft,
         focusEnd: () => {
             const end = latest.current.draft.length;
             const el = areaRef.current;

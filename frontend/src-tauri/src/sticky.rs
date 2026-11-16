@@ -183,7 +183,7 @@ pub struct Record {
 /// afresh by every page, and the next one would inherit a stranger's pin.
 pub fn parse_store(raw: &str) -> HashMap<String, Record> {
     let parsed: HashMap<String, Record> = serde_json::from_str(raw).unwrap_or_default();
-    parsed.into_iter().filter(|(k, _)| valid_place(k) && !k.contains("/new:")).collect()
+    parsed.into_iter().filter(|(k, _)| valid_place(k) && !is_draft_place(k)).collect()
 }
 
 fn render_store(map: &HashMap<String, Record>) -> String {
@@ -516,6 +516,18 @@ pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
             let _ = w.destroy();
         }
     }
+    // The next page numbers its drafts afresh: a draft's place from this one
+    // would be inherited by a stranger (parse_store does the same at load).
+    if let Some(state) = app.try_state::<StickyState>() {
+        if let Ok(mut m) = state.records.lock() {
+            m.retain(|k, _| !is_draft_place(k));
+        }
+    }
+}
+
+/// A new sticky note's place (`<user>/new:<n>`), which lasts one page.
+pub fn is_draft_place(place: &str) -> bool {
+    place.contains("/new:")
 }
 
 /// The window `label` is being closed by a close REQUEST (lib.rs's window
@@ -1017,6 +1029,7 @@ mod tests {
         assert!(parse_store("not json").is_empty());
         assert!(parse_store("{\"list:1\":{},\"x\":{}}").is_empty(), "a place with no account is refused");
         assert!(parse_store("{\"1/new:2\":{\"on_top\":true}}").is_empty(), "a draft's place does not outlive its session");
+        assert!(is_draft_place("1/new:2") && !is_draft_place("1/list:2") && !is_draft_place("1/temp:2"));
         let m = parse_store("{\"1/list:2\":{\"on_top\":true,\"used\":4},\"1/channel:3\":{\"rect\":{\"x\":1,\"y\":2,\"w\":3,\"h\":4},\"dock\":{\"side\":\"left\"}}}");
         assert!(m["1/list:2"].on_top);
         assert!(!m["1/channel:3"].on_top, "a note with no pin recorded is not on top");

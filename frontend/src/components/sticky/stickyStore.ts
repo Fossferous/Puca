@@ -195,9 +195,12 @@ export function promoteMade(isPresent: (key: string) => boolean): void {
     emit();
 }
 
-/** The ordinary notes out on the desktop, by key (what a prune weighs). */
+/** The notes out on the desktop, by key (what a prune weighs). A `made`
+ *  note is weighed too: one that is real appears in the next fresh fetch and
+ *  is never struck twice, and one deleted before Notes caught up with it
+ *  would otherwise keep a window that can save nothing, for good. */
 export function stickyNoteKeys(): Set<string> {
-    return new Set(entries.filter(e => e.state === 'note').map(e => e.key));
+    return new Set(entries.filter(e => e.state !== 'draft').map(e => e.key));
 }
 
 /**
@@ -207,7 +210,7 @@ export function stickyNoteKeys(): Set<string> {
  */
 export function forgetStickies(keys: readonly string[]): void {
     const gone = new Set(keys);
-    const keep = entries.filter(e => !(e.state === 'note' && gone.has(e.key)));
+    const keep = entries.filter(e => !(e.state !== 'draft' && gone.has(e.key)));
     if (keep.length === entries.length) return;
     entries = keep;
     persist();

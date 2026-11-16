@@ -97,6 +97,16 @@ export function StickyNoteView(props: StickyNoteViewProps) {
     // What the draft saved, so the field keeps showing it until the note's
     // card arrives from the cache.
     const [savedDraft, setSavedDraft] = useState('');
+    // The save on its way, by its words. The same words asked for again
+    // while it is out get the same answer, not a second request: when the
+    // draft becomes a note the field's registration moves to it, and moving
+    // re-sends what the field holds — a second PATCH naming the same base,
+    // which the server refuses as a clash with the person's own words.
+    const sending = useRef<{ text: string; done: Promise<BodySaveOutcome> } | null>(null);
+    // Deleted from here: nothing more is written for it, the field's last
+    // flush as the window closes included (it would make, or write into, the
+    // note just deleted).
+    const discarded = useRef(false);
     const ref = card?.ref ?? null;
     const isList = ref === null || ref.kind === 'list';
     const features = actions.content.features;
@@ -145,7 +155,16 @@ export function StickyNoteView(props: StickyNoteViewProps) {
         return created.current;
     }, [actions, props, setNotice]);
 
-    const saveText = async (text: string, baseRev?: number): Promise<BodySaveOutcome> => {
+    const saveText = (text: string, baseRev?: number): Promise<BodySaveOutcome> => {
+        if (discarded.current) return Promise.resolve(true);
+        const out = sending.current;
+        if (out && out.text === text) return out.done;
+        const done = saveTextNow(text, baseRev);
+        sending.current = { text, done };
+        void done.finally(() => { if (sending.current?.done === done) sending.current = null; });
+        return done;
+    };
+    const saveTextNow = async (text: string, baseRev?: number): Promise<BodySaveOutcome> => {
         if (ref && ref.kind === 'list') return actions.content.setBody(ref.id, text, baseRev);
         if (ref) return false;
         // A draft. Its first words make the note — named after its first
@@ -207,14 +226,17 @@ export function StickyNoteView(props: StickyNoteViewProps) {
         // A draft whose first words are making (or have made) a note: that
         // note is what is deleted, not just the window.
         const target = ref ?? (created.current ? await created.current : null);
-        if (!target) { props.onDeleted(); return; }
-        if (await actions.deleteNote(target)) props.onDeleted();
+        if (!target) { discarded.current = true; props.onDeleted(); return; }
+        if (await actions.deleteNote(target)) { discarded.current = true; props.onDeleted(); }
         else setNotice({ text: 'This note couldn’t be deleted', tone: 'error' });
     };
     const askDelete = () => {
         setMenu(false);
         if (!canDelete) return;
-        if (props.confirmDelete && (ref || created.current)) setConfirming(true);
+        // Ask whenever there is something to lose: a note, or words typed
+        // into a draft that no save has reached yet.
+        const hasWords = (bodyRef.current?.text() ?? '').trim() !== '';
+        if (props.confirmDelete && (ref || created.current || hasWords)) setConfirming(true);
         else void doDelete();
     };
 

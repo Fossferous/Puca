@@ -151,6 +151,29 @@ describe('Ctrl+B / I / U / T', () => {
         }
     });
 
+    it('a selection that starts at the end of a line, or ends at the start of one, leaves that line alone', () => {
+        expect(toggleMark('hello\nworld', 5, 11, 'bold').text).toBe('hello\n**world**');
+        expect(toggleMark('one\ntwo', 0, 4, 'bold').text).toBe('**one**\ntwo');
+        expect(toggleMark('end. \nnext', 4, 10, 'italic').text).toBe('end. \n*next*');
+    });
+
+    it('at the edge of a marked word: the same mark comes off, another goes around it', () => {
+        expect(toggleMark('**hello**', 9, 9, 'bold')).toEqual({ text: 'hello', selStart: 5, selEnd: 5 });
+        expect(toggleMark('**hello**', 0, 0, 'bold').text).toBe('hello');
+        const bi = toggleMark('**hello**', 9, 9, 'italic');
+        expect(bi.text).toBe('***hello***');
+        expect(runs(bi.text)).toEqual(['hello[bi]']);
+        const ub = toggleMark('<u>hi</u> x', 9, 9, 'bold');
+        expect(runs(ub.text)[0]).toBe('hi[bu]');
+    });
+
+    it('a word with combining marks is one word', () => {
+        const hindi = toggleMark('नमस्ते', 2, 2, 'bold');
+        expect(hindi.text).toBe('**नमस्ते**');
+        const decomposed = 'caf\u0065\u0301 ok';
+        expect(toggleMark(decomposed, 2, 2, 'bold').text).toBe('**caf\u0065\u0301** ok');
+    });
+
     it('marks a selection over several lines line by line', () => {
         const r = toggleMark('one\n\ntwo', 0, 8, 'bold');
         expect(r.text).toBe('**one**\n\n**two**');
@@ -164,6 +187,11 @@ describe('Ctrl+Shift+L and Enter on a bullet', () => {
         expect(on.text).toBe('- milk\n- eggs\n\nbread');
         const off = toggleBullets(on.text, on.selStart, on.selEnd);
         expect(off.text).toBe('milk\neggs\n\nbread');
+    });
+
+    it('a selection ending at the very start of the next line does not take that line in', () => {
+        expect(toggleBullets('one\ntwo', 0, 4).text).toBe('- one\ntwo');
+        expect(toggleBullets('one\ntwo\nthree', 0, 8).text).toBe('- one\n- two\nthree');
     });
 
     it('a bullet on the caret line only, the caret kept on its word', () => {
