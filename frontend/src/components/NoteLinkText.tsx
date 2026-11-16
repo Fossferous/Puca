@@ -1,7 +1,10 @@
 /**
  * A note's text (or an item's), with its web addresses shown as links. The
  * ONE renderer both front doors use — Púca Notes' editor and cards, and
- * Púca's Tasks view — so a note reads the same through either.
+ * Púca's Tasks view — so a note reads the same through either. A note's own
+ * TEXT, where it is read rather than typed in, goes through
+ * NoteFormattedText, which draws its formatting too and makes the same
+ * anchor; an item's text comes here.
  *
  * Nothing is fetched to render a link: `linkSegments` works out where it goes
  * from the text this device already decrypted (see that module's header for

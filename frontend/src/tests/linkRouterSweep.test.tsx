@@ -50,6 +50,7 @@ import { isExternalHref } from '../api/openExternal';
 import { MessageContent } from '../components/MessageContent';
 import { LinkPreview } from '../components/LinkPreview';
 import { NoteLinkText } from '../components/NoteLinkText';
+import { NoteFormattedText } from '../components/NoteFormattedText';
 import { PrivacyDisclosure } from '../components/PrivacyDisclosure';
 import { privacyDocUrl, safeRepositoryUrl } from '../components/privacyDisclosure.utils';
 
@@ -107,6 +108,9 @@ const INVENTORY: Covered[] = [
     { file: 'components/LinkPreview.tsx', count: 1, how: 'router' },
     { file: 'components/MessageContent.tsx', count: 2, how: 'router' },
     { file: 'components/NoteLinkText.tsx', count: 1, how: 'router' },
+    // A note's text as it reads, formatted (docs/STICKY_NOTES.md): the same
+    // anchor NoteLinkText draws, in the read view, a card and a sticky note.
+    { file: 'components/NoteFormattedText.tsx', count: 1, how: 'router' },
     { file: 'components/PrivacyDisclosure.tsx', count: 1, how: 'router' },
     { file: 'components/SettingsModal.tsx', count: 1, how: 'router' },
     { file: 'components/Login.tsx', count: 1, how: 'web', guard: '{!isTauri() && !isMobile() && (' },
@@ -135,7 +139,7 @@ describe('the inventory: every target="_blank" anchor, and why the router covers
         for (const a of blankAnchors) found[a.file] = (found[a.file] ?? 0) + 1;
         const listed = Object.fromEntries(INVENTORY.map(c => [c.file, c.count]));
         expect(found).toEqual(listed);
-        expect(blankAnchors).toHaveLength(12);         // 11, plus the web invite page's download link
+        expect(blankAnchors).toHaveLength(13);         // 11, the web invite page's download link, a note's formatted text
     });
 
     it('no anchor opens itself: the router already has, in the capture phase', () => {
@@ -174,7 +178,14 @@ describe('the inventory: every target="_blank" anchor, and why the router covers
         // streamOsWindows.ts: the desktop shell's stream pop-out windows —
         // the one request the shell's new-window handler accepts, and only
         // ever with an about:blank pop-out URL (popout.rs requested_slot).
-        expect(callers).toEqual(['api/openExternal.ts', 'components/streamOsWindows.ts', 'notes/components/NotesShell.tsx']);
+        // sticky/stickyShell.ts: the desktop shell's sticky note windows, the
+        // same engine, only ever with an about:blank sticky URL (sticky.rs
+        // requested_slot).
+        expect(callers).toEqual(['api/openExternal.ts', 'components/sticky/stickyShell.ts', 'components/streamOsWindows.ts', 'notes/components/NotesShell.tsx']);
+        const sticky = code(readFileSync(join(SRC, 'components/sticky/stickyShell.ts'), 'utf8'));
+        expect(sticky.match(/\bwindow\.open\(/g)).toHaveLength(1);
+        expect(sticky).toMatch(/window\.open\(stickyWindowUrl\(slot\), stickyWindowName\(slot\)\)/);
+        expect(readFileSync(join(SRC, 'components/sticky/stickyShell.ts'), 'utf8')).toMatch(/return `about:blank#puca-sticky-\$\{slot\}`;/);
         const pop = code(readFileSync(join(SRC, 'components/streamOsWindows.ts'), 'utf8'));
         expect(pop.match(/\bwindow\.open\(/g)).toHaveLength(1);
         expect(pop).toMatch(/window\.open\(popoutWindowUrl\(slot\), popoutWindowName\(slot\)\)/);
@@ -272,6 +283,14 @@ describe('in the desktop app, each shell-rendered anchor opens once through open
         await mount(<div onClick={row}><NoteLinkText text="read https://example.org/n" /></div>);
         await clickEach('a.note-link');
         expect(opened()).toEqual(['https://example.org/n']);
+        expect(row).not.toHaveBeenCalled();
+    });
+
+    it('NoteFormattedText: once, formatted or not, and not the row', async () => {
+        const row = vi.fn();
+        await mount(<div onClick={row}><NoteFormattedText text={'**read https://example.org/f**\n- and https://example.org/g'} /></div>);
+        await clickEach('a.note-link');
+        expect(opened()).toEqual(['https://example.org/f', 'https://example.org/g']);
         expect(row).not.toHaveBeenCalled();
     });
 

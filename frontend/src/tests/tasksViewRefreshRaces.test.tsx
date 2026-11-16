@@ -69,7 +69,7 @@ vi.mock('../components/calendar/TasksCalendar', async () => {
 
 import { ApiError } from '../api/client';
 import { createListTask } from '../api/tasks';
-import { flushBodySave } from '../api/listContent';
+import { __resetBodyFlushesForTests, flushBodySave } from '../api/listContent';
 import { TasksView } from '../components/TasksView';
 import { setActiveIdentity } from '../api/e2ee';
 import { setMessageToastSink } from '../components/messageToastBus';
@@ -258,6 +258,10 @@ beforeEach(() => {
 });
 afterEach(() => {
     act(() => { root.unmount(); });
+    // A text save a test left behind its gate stays registered until it
+    // answers, and a delete or a Refresh waits for it (api/listContent.ts):
+    // it must not reach into the next test.
+    __resetBodyFlushesForTests();
     container.remove();
     document.body.innerHTML = '';
     setMessageToastSink(null);

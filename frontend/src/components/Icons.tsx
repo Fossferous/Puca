@@ -519,6 +519,56 @@ export const HeadingIcon = makeIcon('HeadingIcon', <>
     <path d="M6.25 12h11.5" />
 </>);
 
+/** A Púca Notes note as a STICKY NOTE on the desktop (docs/STICKY_NOTES.md):
+ *  a square sheet with its corner folded. No legacy glyph: nothing shipped
+ *  this control before. */
+export const StickyNoteIcon = makeIcon('StickyNoteIcon', <>
+    <path d="M4.75 4.75h14.5v9.5l-5 5h-9.5Z" />
+    <path d="M14.25 19.25v-5h5" />
+</>);
+
+/** Dock a sticky note to the side of the screen: a screen with its right
+ *  column taken. No legacy glyph. */
+export const DockIcon = makeIcon('DockIcon', <>
+    <rect x="3.25" y="4.75" width="17.5" height="14.5" rx="1.75" />
+    <path d="M14.75 4.75v14.5" />
+</>);
+
+/** The note-text formatting bar (notes/model/noteFormat.ts): bold. A
+ *  drawn capital B, not a font's — a font glyph is the host's. No legacy
+ *  glyph: nothing shipped these controls before. */
+export const BoldIcon = makeIcon('BoldIcon', <>
+    <path d="M7.25 4.75h5.5a3.5 3.5 0 0 1 0 7h-5.5Z" />
+    <path d="M7.25 11.75h6.5a3.75 3.75 0 0 1 0 7.5h-6.5Z" />
+</>);
+
+export const ItalicIcon = makeIcon('ItalicIcon', <>
+    <path d="M10.25 4.75h7" />
+    <path d="M6.75 19.25h7" />
+    <path d="M14.25 4.75l-4.5 14.5" />
+</>);
+
+export const UnderlineIcon = makeIcon('UnderlineIcon', <>
+    <path d="M7.25 4.25v6.5a4.75 4.75 0 0 0 9.5 0v-6.5" />
+    <path d="M5.75 20h12.5" />
+</>);
+
+export const StrikethroughIcon = makeIcon('StrikethroughIcon', <>
+    <path d="M16.5 7.25c-.6-1.6-2.3-2.5-4.5-2.5-2.6 0-4.25 1.35-4.25 3.15 0 1.4.95 2.35 2.6 2.85" />
+    <path d="M4.75 12h14.5" />
+    <path d="M15.75 14.5c.4.5.6 1.05.6 1.7 0 1.85-1.85 3.05-4.35 3.05-2.4 0-4.15-1-4.75-2.75" />
+</>);
+
+/** Bulleted lines (Ctrl+Shift+L). */
+export const BulletListIcon = makeIcon('BulletListIcon', <>
+    <path d="M9.75 6.5h10" />
+    <path d="M9.75 12h10" />
+    <path d="M9.75 17.5h10" />
+    <path d="M4.75 6.5v0" />
+    <path d="M4.75 12v0" />
+    <path d="M4.75 17.5v0" />
+</>);
+
 /** Open the navigation drawer (Notes on a phone). Three full-width lines —
  *  the rail's own rows, not ChannelsIcon's dotted channel list. No legacy
  *  glyph: nothing shipped this control before. */
@@ -1279,6 +1329,8 @@ export const ICONS = {
     chat: ChatIcon,
     message: MessageIcon,
     note: NoteIcon,
+    sticky: StickyNoteIcon,
+    dock: DockIcon,
     members: MembersIcon,
     user: UserIcon,
     'user-add': UserAddIcon,

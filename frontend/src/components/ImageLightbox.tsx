@@ -83,6 +83,9 @@ interface DownInfo { x: number; y: number; onPicture: boolean; moved: boolean }
 
 export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageLightboxProps) {
     const portalTarget = usePortalTarget();
+    // The window the viewer is drawn in: the app's, or a sticky note's
+    // (components/sticky/), whose keys and size are its own.
+    const hostWindow = portalTarget.ownerDocument.defaultView ?? window;
     const onScreen = useLayerOnScreen();
     useBackClose(onClose, onScreen);
     const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
@@ -142,9 +145,9 @@ export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageL
             e.stopPropagation();
             onClose();
         };
-        window.addEventListener('keydown', onKey, true);
-        return () => window.removeEventListener('keydown', onKey, true);
-    }, [onClose, onScreen]);
+        hostWindow.addEventListener('keydown', onKey, true);
+        return () => hostWindow.removeEventListener('keydown', onKey, true);
+    }, [onClose, onScreen, hostWindow]);
 
     // ctrl+wheel zoom. NATIVE and non-passive on purpose (see the header).
     useEffect(() => {
@@ -177,9 +180,9 @@ export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageL
             const { box, pict } = geom();
             setT(cur => (cur.scale === 1 ? cur : clampPanTo(box, pict, cur.scale, cur.x, cur.y)));
         };
-        window.addEventListener('resize', onResize);
-        return () => window.removeEventListener('resize', onResize);
-    }, [geom]);
+        hostWindow.addEventListener('resize', onResize);
+        return () => hostWindow.removeEventListener('resize', onResize);
+    }, [geom, hostWindow]);
 
     /** (Re)measure the pinch baseline from the CURRENT two contacts. Called
      *  whenever the contact set becomes exactly two — on the second finger's

@@ -21,7 +21,15 @@ export type KeyBinding = {
     alt: boolean;
     shift: boolean;
     label: string;
+    /** The Windows key. Only the sticky-note shortcut uses it (a system hot
+     *  key, src-tauri/src/sticky.rs); every other binding leaves it out. */
+    win?: boolean;
 };
+
+/** Win+Shift+N: the shipped "new sticky note" shortcut (docs/STICKY_NOTES.md
+ *  says why this one — Win+Alt+S is Microsoft's own Sticky Notes, Win+Alt+N
+ *  OneNote's Quick Note, and Ctrl+Alt is AltGr on many keyboards). */
+export const DEFAULT_STICKY_HOTKEY: KeyBinding = { keyCode: 0x4E, ctrl: false, alt: false, shift: true, win: true, label: 'N' };
 
 // Default settings
 export const defaultSettings = {
@@ -409,6 +417,15 @@ export const defaultSettings = {
      * menu, so this can never trap someone in an app they cannot exit.
      */
     closeToTray: true,
+    /**
+     * Sticky notes (docs/STICKY_NOTES.md), desktop app only, this device only.
+     * The global "new sticky note" shortcut (null = none); whether the notes
+     * that were open come back when Púca starts; whether deleting one from
+     * its window asks first (Microsoft's "Confirm before deleting").
+     */
+    stickyHotkey: DEFAULT_STICKY_HOTKEY as KeyBinding | null,
+    stickyReopen: true,
+    stickyConfirmDelete: true,
     /**
      * Install a newer desktop release automatically at startup — BEFORE the
      * app loads (UpdateGate reads this pre-render via loadSettings()), never

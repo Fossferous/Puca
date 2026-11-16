@@ -15,7 +15,7 @@ import { parseParkedRef } from '../../api/parkedMedia';
 import { parkedObjectUrl } from '../../api/parkedPreview';
 import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
 import { AttachmentImg } from '../../components/AttachmentImg';
-import { NoteLinkText } from '../../components/NoteLinkText';
+import { NoteFormattedText } from '../../components/NoteFormattedText';
 import { findRanges, snippetAround } from '../model/noteSearch';
 import { Highlight } from './Highlight';
 import '../noteContent.css';
@@ -69,14 +69,17 @@ export function NoteBodyPreview({ body, terms = [] }: { body: string | null | un
     if (isUndecryptable(body)) return <p className="notes-card-body unreadable">{body}</p>;
     // Links are marked, not tappable: the card's own tap opens the note, and a
     // 44px tap target cannot live inside a line-clamped preview at 390px.
+    // Formatted as it reads (notes/model/noteFormat.ts): bold, bullets and
+    // the rest drawn, their marks taken off.
     if (terms.length === 0) {
-        return <p className="notes-card-body"><NoteLinkText text={body} interactive={false} /></p>;
+        return <p className="notes-card-body"><NoteFormattedText text={body} interactive={false} /></p>;
     }
     // Searching: the window moves to the first hit, and the hits are marked
-    // inside the link renderer's plain stretches, so a card keeps both.
+    // inside each run of plain words, so a card keeps its links, its
+    // formatting and its marks.
     const snippet = snippetAround(body, findRanges(body, terms));
     return <p className="notes-card-body">
-        <NoteLinkText
+        <NoteFormattedText
             text={snippet.text}
             interactive={false}
             renderText={v => <Highlight text={v} ranges={findRanges(v, terms)} />}

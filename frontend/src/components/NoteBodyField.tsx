@@ -65,14 +65,26 @@
  * there is anything to go back to. The history holds DECRYPTED note text and
  * lives in React state only — it is never written to the offline cache and
  * goes when the note closes.
+ *
+ * FORMATTING (notes/model/noteFormat.ts; docs/STICKY_NOTES.md): Ctrl+B,
+ * Ctrl+I, Ctrl+U and Ctrl+T put bold, italic, underline and strikethrough
+ * marks around the selection (or take them off), Ctrl+Shift+L makes the
+ * lines bullets, and Enter on a bullet starts the next one. The marks are
+ * written into the text, which is what is saved; text holding any swaps to
+ * the read view when it is not being edited, exactly as text holding a link
+ * does, and there it reads formatted. `format` on the handle is the same edit
+ * for a button (the sticky note's formatting bar). Each edit is its own Undo
+ * step.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isUndecryptable } from '../api/decryptMarkers';
 import { BODY_SAVE_DELAY_MS, MAX_BODY_BYTES, bodyBytes, registerBodyFlush } from '../api/listContent';
 import { appendTranscript } from '../notes/model/audioNote';
 import { LockIcon, RedoIcon, UndoIcon, WarningIcon } from './Icons';
-import { NoteLinkText } from './NoteLinkText';
+import { NoteFormattedText } from './NoteFormattedText';
+import { textOffsetAt } from './noteTextOffset';
 import { hasLink } from '../utils/linkSegments';
+import { type FormatKind, type TextEdit, continueBullet, hasNoteFormatting, toggleBullets, toggleMark } from '../notes/model/noteFormat';
 import {
     type TextHistory, canRedoText, canUndoText, newTextHistory, pushText, redoText, undoText,
 } from './textHistory';
@@ -101,6 +113,23 @@ export interface NoteBodyHandle {
      * changed or saved.
      */
     focusEnd: () => void;
+    /**
+     * Bold, italic, underline or strikethrough on the selection, or bullets
+     * on its lines — Ctrl+B, I, U, T and Shift+L as a button would press
+     * them. A button that keeps the focus in the field (its mousedown
+     * prevented) acts on the selection there; otherwise on the end of the
+     * text. Nothing happens to read-only or unreadable text.
+     */
+    format: (kind: FormatKind | 'bullets') => void;
+}
+
+/** The edit a formatting key makes, or null for a key that is not one. */
+function formatKeyEdit(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }, text: string, s: number, end: number): TextEdit | null {
+    if (e.altKey || !(e.ctrlKey || e.metaKey)) return null;
+    const key = e.key.toLowerCase();
+    if (e.shiftKey) return key === 'l' ? toggleBullets(text, s, end) : null;
+    const kind: FormatKind | null = key === 'b' ? 'bold' : key === 'i' ? 'italic' : key === 'u' ? 'underline' : key === 't' ? 'strike' : null;
+    return kind ? toggleMark(text, s, end, kind) : null;
 }
 
 /** What `onSave` answers: `true` (or `{ rev }`, naming the note's new
@@ -147,36 +176,6 @@ interface Conflict {
     rev?: number;
 }
 
-/** The character offset in `root`'s text under (x, y), or null when this
- *  browser cannot say (older WebViews) — the caller then keeps the caret at
- *  the end. The rendered view's text content IS the draft, so a walk of its
- *  text nodes maps a DOM position straight onto a string offset. */
-function caretOffsetAt(root: HTMLElement | null, x: number, y: number): number | null {
-    if (!root) return null;
-    const doc = root.ownerDocument;
-    const api = doc as Document & {
-        caretRangeFromPoint?: (x: number, y: number) => Range | null;
-        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
-    };
-    let node: Node | null = null;
-    let offset = 0;
-    if (typeof api.caretRangeFromPoint === 'function') {
-        const r = api.caretRangeFromPoint(x, y);
-        if (r) { node = r.startContainer; offset = r.startOffset; }
-    } else if (typeof api.caretPositionFromPoint === 'function') {
-        const p = api.caretPositionFromPoint(x, y);
-        if (p) { node = p.offsetNode; offset = p.offset; }
-    }
-    if (!node || !root.contains(node)) return null;
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let total = 0;
-    while (walker.nextNode()) {
-        if (walker.currentNode === node) return total + offset;
-        total += walker.currentNode.textContent?.length ?? 0;
-    }
-    return null;
-}
-
 export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(function NoteBodyField(
     { value, contentRev, onSave, readOnly = false, placeholder = 'Note', autoFocus = false, listId }: NoteBodyFieldProps,
     handle,
@@ -215,6 +214,12 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
     // Where the click that started this edit landed, so the caret goes there
     // rather than to the end of the note.
     const pendingCaret = useRef<number | null>(null);
+    // The selection a formatting edit leaves, put back once the field has
+    // rendered the edited text (a controlled value moves the caret to the end).
+    const pendingSelection = useRef<[number, number] | null>(null);
+    // The formatting edit, for the handle (defined below, with the field's
+    // other edits; a ref so the handle need not be rebuilt for it).
+    const applyEditRef = useRef<(edit: TextEdit) => void>(() => { /* set below */ });
     // A body that changed elsewhere (another device, a refetch) replaces the
     // draft while nothing is being typed here. Mid-edit, the typed text stays
     // — and is no longer the end of the story: the save that follows names
@@ -303,6 +308,15 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
             setState('idle');
             return await flush() ? 'ok' : 'failed';
         },
+        format: (kind: FormatKind | 'bullets') => {
+            if (readOnly || isUndecryptable(latest.current.current)) return;
+            const text = latest.current.draft;
+            const el = areaRef.current;
+            const inField = !!el && el.ownerDocument.activeElement === el;
+            const s = inField && el ? el.selectionStart : text.length;
+            const end = inField && el ? el.selectionEnd : text.length;
+            applyEditRef.current(kind === 'bullets' ? toggleBullets(text, s, end) : toggleMark(text, s, end, kind));
+        },
         focusEnd: () => {
             const end = latest.current.draft.length;
             const el = areaRef.current;
@@ -317,7 +331,7 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
             el.setSelectionRange(end, end);
             setEditing(true);
         },
-    }), [flush, markDirty]);
+    }), [flush, markDirty, readOnly]);
 
     // Everything typed, saved: the pending pause cut short, and whatever is
     // already on its way awaited.
@@ -353,7 +367,8 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
 
     // Computed HERE, above the effects, because the auto-height below has to
     // depend on it: the swap remounts the textarea without changing `draft`.
-    const showRead = !editing && hasLink(draft);
+    const formatted = useMemo(() => hasNoteFormatting(draft), [draft]);
+    const showRead = !editing && (hasLink(draft) || formatted);
 
     // The field is as tall as its text. `showRead` is a dependency, not
     // decoration: the read/edit swap mounts a FRESH textarea at its rows={2}
@@ -408,6 +423,29 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
         areaRef.current?.focus();
     }, [history, markDirty, scheduleSave]);
 
+    /** A formatting edit: the text as the key or button left it, the
+     *  selection back around the same words, and a save on its way. */
+    const applyEdit = (edit: TextEdit) => {
+        awaitingChoice.current = false;
+        setEditing(true);
+        markDirty(true);
+        setDraft(edit.text);
+        setHistory(h => pushText(h, edit.text, Date.now()));
+        setState('idle');
+        scheduleSave();
+        pendingSelection.current = [edit.selStart, edit.selEnd];
+    };
+    useLayoutEffect(() => { applyEditRef.current = applyEdit; });
+    // Put the selection back once the edited text is in the field.
+    useLayoutEffect(() => {
+        const sel = pendingSelection.current;
+        const el = areaRef.current;
+        if (!sel || !el || el.value !== draft) return;
+        pendingSelection.current = null;
+        el.focus();
+        el.setSelectionRange(sel[0], sel[1]);
+    }, [draft, editing]);
+
     if (isUndecryptable(current)) {
         return <div className="nb-locked"><LockIcon /> This note’s text can’t be read yet: {current}</div>;
     }
@@ -440,11 +478,11 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                         // A tap on a link belongs to the link (NoteLinkText
                         // already stopped it), not to the editor.
                         if ((e.target as Element).closest('a')) return;
-                        pendingCaret.current = caretOffsetAt(readRef.current, e.clientX, e.clientY);
+                        pendingCaret.current = textOffsetAt(readRef.current, e.clientX, e.clientY);
                         setEditing(true);
                     }}
                 >
-                    <NoteLinkText text={draft} />
+                    <NoteFormattedText text={draft} />
                 </div>
             ) : (
             <textarea
@@ -475,10 +513,22 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                     scheduleSave();
                 }}
                 onKeyDown={e => {
+                    if (readOnly) return;
+                    const el = e.currentTarget;
+                    // Enter on a bullet starts the next bullet, and on an
+                    // empty one ends the list. Not mid-composition: an IME's
+                    // Enter commits its word.
+                    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.nativeEvent.isComposing) {
+                        const next = continueBullet(el.value, el.selectionStart, el.selectionEnd);
+                        if (next) { e.preventDefault(); applyEdit(next); }
+                        return;
+                    }
+                    const formatted = formatKeyEdit(e, el.value, el.selectionStart, el.selectionEnd);
+                    if (formatted) { e.preventDefault(); applyEdit(formatted); return; }
                     // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (Ctrl+Y as well). Taken
                     // from the browser on purpose: its own stack is gone the
                     // moment a sync writes the value.
-                    if (readOnly || e.altKey || !(e.ctrlKey || e.metaKey)) return;
+                    if (e.altKey || !(e.ctrlKey || e.metaKey)) return;
                     const key = e.key.toLowerCase();
                     if (key === 'z' && !e.shiftKey) { e.preventDefault(); step(undoText(history)); }
                     else if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); step(redoText(history)); }

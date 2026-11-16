@@ -29,7 +29,7 @@ import { TaskTree } from '../../components/TaskTree';
 import { NoteLinkText } from '../../components/NoteLinkText';
 import {
     ArchiveIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
-    RefreshIcon, SearchIcon, SendIcon, TagIcon, WarningIcon,
+    RefreshIcon, SearchIcon, SendIcon, StickyNoteIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
@@ -83,9 +83,12 @@ interface NoteEditorProps {
      *  (NoteContentSection's typeSignal): today's note, opened by New note. */
     typeSignal?: number;
     onTyped?: () => void;
+    /** Put this note out on the desktop as a sticky note (the desktop app
+     *  only; docs/STICKY_NOTES.md). Absent = no button. */
+    onOpenSticky?: () => void;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, acceptKey, flashTaskId = null, query, typeSignal = 0, onTyped }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, acceptKey, flashTaskId = null, query, typeSignal = 0, onTyped, onOpenSticky }: NoteEditorProps) {
     const portalTarget = usePortalTarget();
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
@@ -481,6 +484,9 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         on a personal note. */}
                     <ListActionsMenu note={ref} actions={actions} tasks={tasks} />
                     <button type="button" className="notes-iconbtn" aria-label="Send to Púca" title="Send to Púca…" onClick={onSendToPuca}><SendIcon /></button>
+                    {onOpenSticky && (
+                        <button type="button" className="notes-iconbtn" aria-label="Open as sticky note" title="Open as sticky note" onClick={onOpenSticky}><StickyNoteIcon /></button>
+                    )}
                     {pucaHref && (
                         <a className="notes-iconbtn notes-open-puca" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}

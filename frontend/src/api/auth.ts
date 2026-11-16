@@ -1467,7 +1467,9 @@ export function logout(): void {
     // Púca tab must scrub what the Notes tab wrote.
     try {
         for (const k of Object.keys(localStorage)) {
-            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaNotesPrefs') || k.startsWith(NOTES_UNSYNCED_PREFIX)) {
+            // pucaSticky: which notes are out on the desktop as sticky
+            // notes (components/sticky/stickyStore.ts) — keys, no content.
+            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaNotesPrefs') || k.startsWith(NOTES_UNSYNCED_PREFIX) || k.startsWith('pucaSticky')) {
                 localStorage.removeItem(k);
             }
         }

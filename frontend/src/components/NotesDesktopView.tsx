@@ -37,15 +37,25 @@
  *
  * Lazy-loaded by Chat and only under Tauri, so the web app and the phone apps
  * never fetch this chunk, Notes' tree or its stylesheet.
+ *
+ * STICKY NOTES (docs/STICKY_NOTES.md) are drawn from in here too: a shell
+ * that has sticky windows gets the sticky layer (components/sticky/) handed
+ * to NotesShell, which draws it with Notes' own data. Chat mounts this view
+ * for them before the rail's button is ever pressed — when there are notes
+ * to bring back at start, or a new one is asked for — and it stays hidden
+ * until the person opens Notes.
  */
-import { StrictMode, useCallback, useLayoutEffect, useRef } from 'react';
+import { StrictMode, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ErrorBoundary } from './ErrorBoundary';
 import { LayerOnScreenContext, PortalTargetContext } from './portalTarget';
 import { notesOwnsKey, retireQueryClient, whenIdentityReady } from './notesDesktopView.utils';
-import { NotesShell } from '../notes/components/NotesShell';
+import { NotesShell, type NotesStickyEmbedding } from '../notes/components/NotesShell';
+import { StickyNotesLayer } from './sticky/StickyNotesLayer';
+import { noteKeyMoved, openStickyNote } from './sticky/stickyStore';
+import { showMainWindow, stickySupported } from './sticky/stickyShell';
 import { makeNotesQueryClient, notesKeys } from '../notes/model/notesQueries';
 import { hydrateNotesCache } from '../notes/model/notesCache';
 import notesCss from '../notes/notes.css?inline';
@@ -98,6 +108,17 @@ export function NotesDesktopView({ active, onSignOut }: NotesDesktopViewProps) {
     useLayoutEffect(() => { signOutRef.current = onSignOut; });
     const signOut = useCallback(() => signOutRef.current(), []);
     const ownsKey = useCallback((e: KeyboardEvent) => notesOwnsKey(e, hostRef.current), []);
+    // Decided once: the shell answered the probe before Chat mounted this.
+    const sticky = useMemo<NotesStickyEmbedding | undefined>(() => (stickySupported() ? {
+        render: ctx => <StickyNotesLayer {...ctx} />,
+        open: key => { openStickyNote(key); },
+        moved: noteKeyMoved,
+        // Púca's window, on the Notes view (Chat listens).
+        show: () => {
+            showMainWindow();
+            window.dispatchEvent(new CustomEvent('sovereign:open-notes'));
+        },
+    } : undefined), []);
 
     useLayoutEffect(() => {
         const host = hostRef.current;
@@ -142,7 +163,7 @@ export function NotesDesktopView({ active, onSignOut }: NotesDesktopViewProps) {
                             <LayerOnScreenContext.Provider value={active}>
                                 <MemoryRouter>
                                     <Routes>
-                                        <Route path="/*" element={<NotesShell onSignOut={signOut} embedded={{ active, ownsKey }} />} />
+                                        <Route path="/*" element={<NotesShell onSignOut={signOut} embedded={{ active, ownsKey, sticky }} />} />
                                     </Routes>
                                 </MemoryRouter>
                             </LayerOnScreenContext.Provider>
@@ -151,7 +172,7 @@ export function NotesDesktopView({ active, onSignOut }: NotesDesktopViewProps) {
                 </ErrorBoundary>
             </StrictMode>,
         );
-    }, [active, signOut, ownsKey]);
+    }, [active, signOut, ownsKey, sticky]);
 
     // Switched away from: a voice note someone was listening to stops with
     // the view rather than playing on with no control on screen to stop it.
