@@ -9,12 +9,11 @@
  * The box gets its height back at once, the list its old height, but not its
  * scrollTop: a list that was at the newest message is left that many px short
  * of it. Measured 2026-11-16 in Playwright's WebKit at 390x844, the box at
- * four lines: 90 px of the newest message hidden after every keystroke, and
- * nothing re-pins it, because no height has changed by the time anything
- * looks (repinOnResize). From six lines on it is more than Chat.tsx's
- * AT_BOTTOM_SLOP, and the list took the keystroke for a reader scrolling up:
- * the next message stopped following and "Jump to latest" came up. Chromium
- * does not clamp there; there this changes nothing.
+ * four lines: 90 px of the newest message hidden after every keystroke (154
+ * px with the box at its 200 px ceiling), and nothing re-pins it, because no
+ * height has changed by the time anything looks (repinOnResize); it stayed
+ * hidden until the next message arrived. Chromium does not clamp there;
+ * there this changes nothing.
  *
  * So the list's scrollTop is put back to what it was before the measuring.
  * If the box really did grow or shrink, the list's height has changed and

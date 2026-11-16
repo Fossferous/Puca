@@ -20,7 +20,7 @@ function column(textLines: number, boxPx: number, scrollHeight: number, column: 
         lines: textLines,
         get scrollHeight() {
             // Reading it lays the page out with the box at its current style (WebKit's clamp).
-            list.scrollTop = list.scrollTop;
+            list.relayout();
             return ONE_LINE + (box.lines - 1) * LINE;
         },
     };
@@ -31,6 +31,8 @@ function column(textLines: number, boxPx: number, scrollHeight: number, column: 
         get scrollTop() { return top; },
         set scrollTop(v: number) { top = Math.max(0, Math.min(v, list.scrollHeight - list.clientHeight)); },
         get fromBottom() { return list.scrollHeight - list.clientHeight - top; },
+        /** A layout: scrollTop is clamped to the list's bottom at its height of the moment. */
+        relayout() { top = Math.max(0, Math.min(top, list.scrollHeight - list.clientHeight)); },
     };
     list.scrollTop = scrollHeight; // at the newest message
     return { box, list };
