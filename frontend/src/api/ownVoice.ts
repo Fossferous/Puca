@@ -253,3 +253,15 @@ export function currentClientForm(kind: DeviceKind): DeviceForm | null {
     if (kind !== 'mobile' || embedHost()) return null;
     return screenShortSide() >= TABLET_MIN_SHORT_SIDE ? 'tablet' : null;
 }
+
+/**
+ * What THIS device is as a picture (the own-voice banner's Move here): a
+ * tablet by what it tells the server (socketUrl's `form=tablet`, so the
+ * account's other devices call it "your tablet"), whichever layout it shows;
+ * otherwise a phone in the phone layout (`phoneLayout`, Chat's) and a
+ * computer in any other, as before.
+ */
+export function thisDeviceShape(phoneLayout: boolean, isTauri: boolean, isNativeMobile: boolean): 'computer' | 'phone' | 'tablet' {
+    if (currentClientForm(currentClientKind(isTauri, isNativeMobile)) === 'tablet') return 'tablet';
+    return phoneLayout ? 'phone' : 'computer';
+}

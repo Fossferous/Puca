@@ -7,7 +7,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
-import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
+import { carriedFromOtherDevice, roomLeftNotice, thisDeviceShape, type OwnVoiceState } from '../api/ownVoice';
 import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, clearAllStreams, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
 import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
 import { useStreamStore } from '../stores/streamStore';
@@ -6300,7 +6300,7 @@ export function Chat({ onLogout }: ChatProps) {
                             inCallHere={!!currentVoiceChannel}
                             onLeave={leaveOwnCallElsewhere}
                             onMoveHere={moveOwnCallHere}
-                            hereIsPhone={isMobile}
+                            here={thisDeviceShape(isMobile, isTauri(), isNativeMobile())}
                         />
                     );
                     return isMobile ? createPortal(banner, document.body) : banner;

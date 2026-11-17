@@ -481,6 +481,14 @@ export const PhoneIcon = makeIcon('PhoneIcon', <>
     <path d="M10.75 18.5h2.5" />
 </>);
 
+/** A tablet ("your tablet", ownVoice.ts DeviceForm): the phone's own form,
+ *  as tall, about 3:4 instead of the phone's narrow slab, so the two tell
+ *  apart at 14px by width alone. No classic glyph: there was none before. */
+export const TabletIcon = makeIcon('TabletIcon', <>
+    <rect x="4.5" y="2.25" width="15" height="19.5" rx="2.5" />
+    <path d="M10.75 18.5h2.5" />
+</>);
+
 export const TerminalIcon = makeIcon('TerminalIcon', <>
     <rect x="2.5" y="3.75" width="19" height="16.5" rx="2" />
     <path d="m6.75 9.5 2.75 2.75-2.75 2.75" />
@@ -1319,6 +1327,7 @@ export const ICONS = {
     'pop-out': PopOutIcon,
     laptop: LaptopIcon,
     phone: PhoneIcon,
+    tablet: TabletIcon,
     terminal: TerminalIcon,
     globe: GlobeIcon,
     grid: GridIcon,

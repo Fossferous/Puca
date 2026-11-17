@@ -29,6 +29,7 @@ import {
     resetOwnVoice,
     roomLeftNotice,
     shouldTakeOver,
+    thisDeviceShape,
     whereDevice,
 } from '../api/ownVoice';
 
@@ -236,6 +237,23 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
             const c = await params();
             expect(c.get('kind')).toBe('mobile');
             expect(c.get('form')).toBe('tablet');
+        });
+
+        it('this device as a picture (Move here): a tablet whichever layout it shows, else the layout\'s', () => {
+            be(true, 820, 1180);
+            expect(thisDeviceShape(true, false, false)).toBe('tablet');
+            // Held sideways the window is 1180 wide and Chat shows the desktop
+            // layout; it is still the tablet the other devices name.
+            be(true, 1180, 820);
+            expect(thisDeviceShape(false, false, false)).toBe('tablet');
+            // CONTROLS: a phone is a phone, a computer a computer, and the
+            // desktop app on a big touch screen is no tablet.
+            be(true, 390, 844);
+            expect(thisDeviceShape(true, false, false)).toBe('phone');
+            be(false, 1920, 1080);
+            expect(thisDeviceShape(false, false, false)).toBe('computer');
+            be(true, 1280, 800);
+            expect(thisDeviceShape(false, true, false)).toBe('computer');
         });
 
         it('CONTROL: a 390x844 phone sends kind=mobile and no form; a desktop browser neither', async () => {
