@@ -873,8 +873,9 @@ for (const [name, options, sheetName, url] of [
 }
 
 // 7. The other seven themes, where (4) does not reach: on them the same sweep still finds a hundred
-//    places and more below the bar (80 on AMOLED to 247 on Green before these were held, 77 to 185
-//    after, measured 2026-11-17; the rest is not held here yet). These are
+//    places and more below the bar (62 on AMOLED at rest to 178 on Green under the pointer before
+//    these were held, 32 to 115 after, by file and classes, measured 2026-11-17; the rest is not
+//    held here yet). These are
 //    held there, wherever the sweep draws them, on all eight themes with and without High Contrast,
 //    at rest and hovered at 1280x800, and at rest and tapped at 390x844 on a touchscreen:
 //      - a message link's words, at rest and under the pointer (--brand-primary: 3.82:1 on Dark's
@@ -1078,6 +1079,11 @@ const OLD_OTHER = `
                 const held = themes.filter(theme => !failing.has(theme));
                 check(held.length === 0, `CONTROL (${name}): ${kind}, as it was, fails on ${themes.join(' ')}`, held.length ? `these still pass: ${held.join(' ')}` : '');
             }
+            // A gradient is read through its stops: Create Channel's, through the lavender, fails on
+            // all seven (on Pink nothing else of the old fills does).
+            const lavender = new Set(then.filter(([, rows]) => below(rows).some(row => row.cls.split(' ').includes('create-btn'))).map(([look]) => look.split('/')[0]));
+            const heldGradient = ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'].filter(theme => !lavender.has(theme));
+            check(heldGradient.length === 0, `CONTROL (${name}): a gradient fill is read on every stop: Create Channel's through the lavender, as it was, fails on all seven`, heldGradient.length ? `these still pass: ${heldGradient.join(' ')}` : '');
         }
         if (name === '1280x800 hovered and focused') {
             // CONTROL: a filter is read. The card table's and the activities' primary buttons under

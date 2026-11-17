@@ -72,7 +72,8 @@
 
 /* Send and Create Channel run on the brand's fills to its hover shade on the other themes, where
    white words on the lavender were 1.5 to 2.7:1; here they keep the lavender, which holds them. */
-[data-theme="light"] .create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)); }
+[data-theme="light"] .create-btn,
+[data-theme="light"] .create-btn:hover:not(:disabled) { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)); }
 [data-theme="light"] .message-form button[type="submit"] { background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary)); }
 
 /* A revealed spoiler keeps its pale blurple wash here: dark words hold on it. */
