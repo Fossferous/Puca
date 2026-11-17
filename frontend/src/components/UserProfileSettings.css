@@ -105,7 +105,7 @@
     width: 80px;
     height: 80px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-text));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -140,7 +140,7 @@
     display: inline-block;
     padding: 8px 16px;
     background: var(--brand-primary);
-    color: var(--bg-primary);
+    color: #fff;
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -259,7 +259,7 @@
 .save-display-name-btn {
     padding: 10px 16px;
     background: var(--brand-primary);
-    color: var(--bg-primary);
+    color: #fff;
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -326,7 +326,7 @@
 
 .sound-btn:hover {
     background: var(--brand-primary);
-    color: var(--bg-primary);
+    color: #fff;
 }
 
 .sound-btn:disabled,

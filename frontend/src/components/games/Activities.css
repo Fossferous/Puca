@@ -143,7 +143,7 @@
 
 .activity-picker-head { display: flex; align-items: center; gap: 10px; }
 
-.activity-picker-icon { display: inline-flex; font-size: 1.3rem; color: var(--brand-primary, #5865f2); }
+.activity-picker-icon { display: inline-flex; font-size: 1.3rem; color: var(--brand-text); }
 
 .activity-picker-titles { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 
@@ -301,7 +301,7 @@
 
 /* Full opacity: .voice-status-icon's 0.7 left this mark under 3:1 against
    the sidebar in every theme (as .buffering already overrides). */
-.voice-status-icon.playing { color: var(--brand-primary, #5865f2); opacity: 1; }
+.voice-status-icon.playing { color: var(--brand-text); opacity: 1; }
 
 /* ---- Phone: 390x844, coarse pointer (mirrors mobile.css's gate) ----------- */
 /* Every target at least 44 px; nothing hover-only. */

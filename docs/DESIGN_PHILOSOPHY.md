@@ -217,9 +217,13 @@ chrome; it is wired into `npm run lint`.
   add it to the list at the top of `styles/theme.css`, which gives everything
   inside it the dark palette. A colour no token can reach goes in
   `styles/lightTheme.css`. The brand colour as words is `--brand-text`:
-  `--brand-primary` is under 4.5:1 on a surface on every theme, and white on it
-  is under 4.5:1 on most, where `--brand-active` holds.
-  `e2e/light-surfaces-real-browser.mjs` reads every component back on Light.
+  `--brand-primary` is under 4.5:1 on a surface on every theme. `--brand-primary`
+  is a fill under white words, on every theme held to the rule a server mode's
+  accent is (4.5:1 for the words, 3:1 on the surfaces); a red fill under white
+  words is `--danger-fill`, since `--color-danger` is words too and is 3.77:1
+  under white on the dark palette.
+  `e2e/light-surfaces-real-browser.mjs` reads every component back on Light, and
+  these on every theme.
 
 ## 7. Definition of done for UI work
 

@@ -96,17 +96,9 @@
 [data-theme="light"] .voice-e2ee-blocked { background: var(--color-danger-bg); color: var(--text-danger); }
 [data-theme="light"] .voice-e2ee-warning { background: var(--color-warning-bg); }
 
-/* The brand colour as words: --brand-primary is 3.2 to 4.3:1 on Light's surfaces. */
-[data-theme="light"] .reply-preview-banner .replying-to strong,
-[data-theme="light"] .channel-perms-role-flag,
-[data-theme="light"] .typing-dots,
-[data-theme="light"] .note-link,
-[data-theme="light"] .nb-conflict-actions button,
-[data-theme="light"] .nb-retry,
-[data-theme="light"] .app-version { color: var(--brand-text); }
-[data-theme="light"] .message-author,
-[data-theme="light"] .message-reply-ref .reply-author,
-[data-theme="light"] .message-link { color: var(--mode-brand-text, var(--brand-text)); }
+/* The brand colour as words: --brand-primary is 3.2 to 4.3:1 on Light's surfaces. (The words
+   that named it outright take --brand-text on every theme now, a message link among them.) */
+[data-theme="light"] .channel-perms-role-flag { color: var(--brand-text); }
 
 /* A calendar chip's time and length on the chip's grey: --text-muted was 4.42:1 there. */
 [data-theme="light"] .cal-chip-time,
@@ -169,7 +161,6 @@
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { color: var(--text-normal); }
 [data-theme="light"] .permission-dismiss-btn:hover,
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
-[data-theme="light"] .search-result-item strong { color: var(--brand-text); }
 /* Dark words on the pale pink a hover gives these: white on it was 2.32:1. */
 [data-theme="light"] .emoji-delete-btn:hover,
 [data-theme="light"] .action-more:hover,

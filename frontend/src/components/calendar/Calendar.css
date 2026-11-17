@@ -99,7 +99,7 @@
 .cal-timegrid.cols-7 { --cal-cols: 7; }
 .cal-tg-gutter { font-size: 11px; color: var(--text-muted); text-align: right; padding-right: 6px; }
 .cal-tg-dayhead { border: none; background: transparent; color: var(--text-normal); padding: 6px; font: inherit; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border-faint); }
-.cal-tg-dayhead.today { color: var(--brand-primary); font-weight: 600; }
+.cal-tg-dayhead.today { color: var(--brand-text); font-weight: 600; }
 .cal-tg-allday { border-bottom: 1px solid var(--border-faint); }
 .cal-tg-allday .cal-tg-gutter { padding-top: 4px; }
 .cal-tg-allday-cell { min-height: 26px; padding: 2px; display: flex; flex-direction: column; gap: 2px; border-left: 1px solid var(--border-faint); min-width: 0; }

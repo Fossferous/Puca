@@ -163,7 +163,7 @@
 .welcome-option-arrow {
     /* The icon inherits this via currentColor, so it must be the theme's brand,
        not a literal blurple — that stayed blue on the green/orange/pink themes. */
-    color: var(--brand-primary);
+    color: var(--brand-text);
     font-size: 20px;
     opacity: 0;
     transform: translateX(-8px);

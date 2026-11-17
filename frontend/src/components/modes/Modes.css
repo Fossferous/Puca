@@ -46,7 +46,7 @@ button.mode-selector:focus-visible {
 }
 
 .mode-selector-on .mode-selector-icon {
-    color: var(--brand-primary);
+    color: var(--brand-text);
 }
 
 .mode-selector-text {
@@ -85,7 +85,7 @@ button.mode-selector:focus-visible {
 .mode-notice-icon {
     flex: none;
     display: inline-flex;
-    color: var(--brand-primary);
+    color: var(--brand-text);
 }
 
 .mode-notice-text {

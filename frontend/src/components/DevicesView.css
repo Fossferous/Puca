@@ -382,8 +382,10 @@
     cursor: default;
 }
 
+/* White words on a red that carries them on every theme (theme.css, --danger-fill). It fell
+   back to #f04747 on every theme but Light, 3.69:1 under them. */
 .device-btn-danger {
-    background: var(--danger, #f04747);
+    background: var(--danger-fill);
     color: #fff;
 }
 
@@ -441,7 +443,7 @@
     }
 
     .device-btn-danger:hover {
-        background-color: var(--danger, #f04747);
+        background-color: var(--danger-fill);
     }
 
     .device-btn-primary:hover {

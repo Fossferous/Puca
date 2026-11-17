@@ -18,9 +18,8 @@
  *    an active conversation on mobile, the latest message doesn't stay at the
  *    bottom." (The real Android WebView already keeps such a list at its end by
  *    itself.) Only a list that was AT ITS END by the geometry it had until now
- *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, while its
- *    scroll is still more than AT_BOTTOM_SLOP away: pinningRef is let go within
- *    the slop, and a box change in that last stretch can leave it short):
+ *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, until its
+ *    scroll has got there: scrollToEnd below):
  *    a reader who has scrolled up even one wheel notch, inside the slop, keeps
  *    their scrollTop, because none of these changes is theirs (the typing
  *    indicator, a notice over the list).
@@ -56,5 +55,62 @@ export function repinOnResize(
         height = h;
         box = b;
         if (contentChanged ? atBottom() : wasAtEnd || headingToEnd()) el.scrollTop = h;
+    };
+}
+
+type Scroller = Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>;
+
+/** At the newest message. The browser can leave a fraction of a px there. */
+export const atEnd = (el: Scroller): boolean => el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
+
+export interface ScrollToEnd {
+    /** Chat.tsx's own scroll to the newest message begins (Jump to latest, a send, a
+     *  conversation opened), and its clock restarts. */
+    start(): void;
+    /** The reader took the wheel or a finger: the list is theirs again. */
+    cancel(): void;
+    /** Still on its way: repinOnResize's `headingToEnd`. */
+    heading(): boolean;
+    /** For each scroll event: true while the scroll is still this one's own, which the
+     *  caller then ignores (a smooth scroll's steps would read as the reader scrolling
+     *  up). The event that finds the list at its end lets go. */
+    ownScroll(el: Scroller): boolean;
+}
+
+/**
+ * A scroll of Chat.tsx's own to the newest message, from its start until it has
+ * got there. It lets go at the END, not within AT_BOTTOM_SLOP of it: a smooth
+ * scroll's target is the end as it was when it started, so when the list's box
+ * shrank in the last stretch (the other side's typing indicator, a line more in
+ * the message box) the scroll stopped that many px short, and with this already
+ * let go nothing took it on (repinOnResize moves a list on a change of its box
+ * only if it was at its end, or heading there). Measured 2026-11-17 in Chromium
+ * and WebKit, a jump of 900 px with the typing indicator (31 px) coming up 100,
+ * 60 or 20 px from the end: 31 px short every time when let go within the slop,
+ * at the end every time when held to the end. It also lets go when the reader
+ * takes the wheel or a finger (cancel), and after `settleMs` with no arrival: a
+ * scroll that was already at the end makes no event. `onSettle` then squares
+ * the caller's state with where the list really is.
+ */
+export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd {
+    let on = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stop = () => {
+        on = false;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+    };
+    return {
+        start() {
+            stop();
+            on = true;
+            timer = setTimeout(() => { on = false; timer = null; onSettle(); }, settleMs);
+        },
+        cancel: stop,
+        heading: () => on,
+        ownScroll(el) {
+            if (!on) return false;
+            if (atEnd(el)) stop();
+            return true;
+        },
     };
 }

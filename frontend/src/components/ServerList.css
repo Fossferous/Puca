@@ -77,7 +77,7 @@
 .server-icon.active .server-icon-inner {
     border-radius: 16px;
     background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
-    color: var(--bg-primary);
+    color: #fff;
 }
 
 /* Active server indicator (white bar on left) */
@@ -166,13 +166,13 @@
 
 .server-icon.discover-server .server-icon-inner.discover {
     font-size: 1.3rem;
-    color: var(--brand-primary);
+    color: var(--brand-text);
     background: rgba(137, 180, 250, 0.1);
 }
 
 .server-icon.discover-server:hover .server-icon-inner.discover {
     background: var(--brand-primary);
-    color: var(--bg-primary);
+    color: #fff;
 }
 
 /* Add server dropdown menu */
@@ -361,7 +361,7 @@
 
 .server-context-menu .context-submenu .menu-icon {
     width: 16px;
-    color: var(--brand-primary, #5865f2);
+    color: var(--brand-text);
 }
 
 .server-icon[draggable="true"]:active {

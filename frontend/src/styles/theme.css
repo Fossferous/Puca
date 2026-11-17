@@ -98,8 +98,10 @@
     --brand-active: #3c45a5;
     /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
     --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
-    /* A link under the pointer (index.css). */
-    --link-hover: var(--brand-primary);
+    /* A link under the pointer (index.css), and a message link's colour (Chat.css): the brand as
+       words. --brand-primary was 3.5 to 4.07:1 there on Light, and 3.54 (Dark) to 4.23 (Purple) on
+       the message surface and a row under the pointer elsewhere. */
+    --link-hover: var(--brand-text);
 
     /* Status colors */
     --status-online: #23a55a;
@@ -122,6 +124,10 @@
     --color-warning-bg: rgba(240, 178, 50, 0.1);
     --color-danger: #f23f43;
     --color-danger-bg: rgba(242, 63, 67, 0.1);
+    /* Danger as a button's fill under white words (the device list's Revoke and Reset): white on
+       --color-danger, which is words too, is 3.77:1, and on the #f04747 the device list fell back
+       to 3.69. This holds 4.57, and 3:1 on every dark surface. Light's is its own --color-danger. */
+    --danger-fill: #da373c;
     --color-info: #00a8fc;
     --color-info-bg: rgba(0, 168, 252, 0.1);
 
@@ -292,8 +298,6 @@
     --text-muted: #5a5c64;
     /* 5.16:1 on a row a hover greys twice over; the 90% mix was 4.47 there. */
     --brand-text: color-mix(in srgb, var(--brand-hover) 80%, #000);
-    /* --brand-primary was 3.5 to 4.07:1 under a link on Light's surfaces. */
-    --link-hover: var(--brand-text);
     /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
     --text-faint: #62656e;
     --faint-fill: #62656e;
@@ -309,6 +313,7 @@
        Light's surfaces (an unread badge, Add Friend, Settings' Log Out). */
     --color-danger: var(--text-danger);
     --color-success: var(--text-positive);
+    --danger-fill: var(--color-danger);
     /* The avatars' gradient runs from the brand to this, under white initials: #a78bfa was 2.72:1. */
     --accent-lavender: #7a5cd6;
     /* "Offline" in a profile is words in this colour: #80848e was 2.97:1 on --bg-tertiary. */
@@ -396,6 +401,10 @@
        a green or orange brand would clash, so re-derive it as a light tint of
        the theme's own hue. */
     --accent-lavender: hsl(var(--theme-hue) 60% 72%);
+
+    /* The brand as words, from a brand deep enough for white words on it (below): half white
+       keeps it as light as it was from the brighter brand, and so where it held 4.5:1. */
+    --brand-text: color-mix(in srgb, var(--brand-primary) 50%, #fff);
 }
 
 [data-theme="pink"] {
@@ -406,10 +415,16 @@
     --brand-active: #a62867;
 }
 
+/* Each brand is a button's fill under white words, the rule a server mode's accent is held to
+   (api/serverModes.ts, accentTokens: a white label at 4.5:1, and 3:1 on --bg-primary and
+   --bg-secondary). The brand as words is --brand-text. These were brighter: white on them was
+   4.23:1 (purple), 3.18 (green), 3.58 (orange) and 2.93 (yellow), and green's, orange's and
+   yellow's hover under 4.5 too (e2e/light-surfaces-real-browser.mjs, section 7). Each keeps its
+   hue; the hover and pressed shades keep the steps the theme had. */
 [data-theme="purple"] {
     --theme-hue: 265;
     --theme-sat: 30%;
-    --brand-primary: #8b5cf6;
+    --brand-primary: #8452f5;
     --brand-hover: #7a4ce0;
     --brand-active: #6a41c4;
 }
@@ -417,28 +432,28 @@
 [data-theme="green"] {
     --theme-hue: 150;
     --theme-sat: 24%;
-    --brand-primary: #23a55a;
-    --brand-hover: #1f8f4e;
-    --brand-active: #1a7a43;
+    --brand-primary: #1c8348;
+    --brand-hover: #186d3c;
+    --brand-active: #135830;
 }
 
 [data-theme="orange"] {
     --theme-hue: 25;
     --theme-sat: 26%;
-    --brand-primary: #e8590c;
-    --brand-hover: #cf4f0b;
-    --brand-active: #b4450a;
+    --brand-primary: #cb4e0a;
+    --brand-hover: #b24509;
+    --brand-active: #973a08;
 }
 
 /* Yellow runs LOWER saturation than the others: high-sat yellow darks go
-   olive/brown, and the brand is a gold (not pure yellow) so white button
-   text keeps roughly the same contrast ratio as blurple-on-white. */
+   olive/brown, and the brand is a gold (not pure yellow), deep enough that
+   white button text holds 4.5:1 on it, as on the blurple. */
 [data-theme="yellow"] {
     --theme-hue: 42;
     --theme-sat: 20%;
-    --brand-primary: #c28e0e;
-    --brand-hover: #aa7c0c;
-    --brand-active: #926b0b;
+    --brand-primary: #976f0b;
+    --brand-hover: #7f5d09;
+    --brand-active: #674c08;
 }
 
 /* ==================== High Contrast (Accessibility) ==================== */

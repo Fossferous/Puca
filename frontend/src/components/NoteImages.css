@@ -136,7 +136,7 @@
    is fetched to draw this — it is a colour and an underline. `anywhere`, or a
    long URL widens the card past the viewport at 390px. */
 .note-link {
-    color: var(--brand-primary);
+    color: var(--brand-text);
     text-decoration: underline;
     text-underline-offset: 2px;
     overflow-wrap: anywhere;
@@ -166,7 +166,7 @@ a.note-link { cursor: pointer; }
     border: 1px solid var(--border-subtle, currentColor);
     border-radius: 4px;
     background: none;
-    color: var(--brand-primary);
+    color: var(--brand-text);
     font: inherit;
     font-weight: 600;
     cursor: pointer;
@@ -191,7 +191,7 @@ a.note-link { cursor: pointer; }
 .nb-retry {
     border: none;
     background: none;
-    color: var(--brand-primary);
+    color: var(--brand-text);
     font: inherit;
     font-weight: 600;
     cursor: pointer;
