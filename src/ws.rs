@@ -9817,13 +9817,24 @@ mod own_voice_state_tests {
     /// which axum answers with 400 before auth. docs/API_REFERENCE.md says so -
     /// this pins it, so a server that starts accepting (or a client that
     /// starts sending) repeats is a decision, not an accident.
+    ///
+    /// The client's URL is `frontend/src/tests/fixtures/tabletSocketQuery.json`,
+    /// which the client's own test (ownVoice.test.ts) compares with what
+    /// websocket.ts socketUrl builds for a tablet, so the two cannot drift:
+    /// this test pinned `caps=own_voice,presence,games` for a release after
+    /// the client had added `push_away`.
     #[test]
     fn the_upgrade_query_takes_one_caps_list_and_refuses_a_repeated_key() {
         use axum::extract::Query;
         use axum::http::Uri;
         let parse = |q: &str| Query::<super::WsQuery>::try_from_uri(&format!("http://h/ws?{q}").parse::<Uri>().unwrap());
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/tabletSocketQuery.json")).expect("the fixture is JSON");
+        let tablet = fixture["query"].as_str().expect("the fixture holds the tablet's query");
+        // Every kind of client sends the same one list (CLIENT_CAPS).
+        let client_caps = tablet.split('&').find_map(|kv| kv.strip_prefix("caps=")).expect("the client's caps list");
 
-        let Query(q) = parse("caps=own_voice,presence&kind=desktop").expect("the client's own URL parses");
+        let Query(q) = parse(&format!("caps={client_caps}&kind=desktop")).expect("the client's own URL parses");
         assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref(), None), (true, Some("desktop")));
         assert!(crate::presence::ClientCaps::parse(q.caps.as_deref()).presence);
 
@@ -9833,9 +9844,12 @@ mod own_voice_state_tests {
         let dup = parse("caps=own_voice,presence&kind=desktop&kind=mobile").expect_err("a repeated kind= is refused");
         assert!(dup.body_text().contains("duplicate field `kind`"), "{}", dup.body_text());
 
-        // The tablet's URL, exactly as websocket.ts socketUrl builds it.
-        let Query(q) = parse("caps=own_voice,presence,games&kind=mobile&form=tablet").expect("a tablet's URL parses");
+        // The tablet's URL, exactly as websocket.ts socketUrl builds it (the
+        // fixture), and every capability in it this server knows is read.
+        let Query(q) = parse(tablet).expect("a tablet's URL parses");
         assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref(), q.form.as_deref()), (true, Some(super::TABLET)));
+        let caps = crate::presence::ClientCaps::parse(q.caps.as_deref());
+        assert!(caps.presence && caps.games && caps.push_away, "presence, games and push_away from {tablet:?}");
         // Why `form` could be added at all: a parameter this struct does not
         // name is ignored, not refused - which is how a server from before
         // `form` takes a tablet's URL (and records `mobile`).

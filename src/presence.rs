@@ -849,7 +849,7 @@ mod rule_tests {
         assert!(caps.presence && caps.games && caps.push_away);
         assert!(ClientCaps::parse(Some(" PUSH_AWAY ")).push_away);
         assert!(!ClientCaps::parse(Some("push,away,push_aways")).push_away, "whole names only");
-        assert!(!ClientCaps::parse(Some("own_voice,presence,games")).push_away, "today's client list does not have it");
+        assert!(!ClientCaps::parse(Some("own_voice,presence,games")).push_away, "a client from before 0.9.864 does not announce it");
         assert_eq!(caps.features_given(false), vec!["presence".to_string(), "push_away".to_string()]);
         assert_eq!(ClientCaps::parse(Some("push_away")).features(), vec!["push_away".to_string()]);
         // Not announced: never confirmed.
