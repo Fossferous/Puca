@@ -816,7 +816,7 @@ export function Chat({ onLogout }: ChatProps) {
     const scrollToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
         const el = messagesContainerRef.current;
         if (!el) return;
-        pinning.start();
+        pinning.start(el);
         el.scrollTo({ top: el.scrollHeight, behavior });
         atBottomRef.current = true;
         setShowJumpLatest(false);

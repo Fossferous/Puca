@@ -1496,13 +1496,20 @@
     cursor: pointer;
 }
 
+/* Darker under the pointer: brightened, its white words were 4.02:1. */
 .voice-load-offer-btn:hover {
-    filter: brightness(1.1);
+    background: color-mix(in srgb, var(--brand, #5865f2) 85%, #000);
 }
 
 .voice-load-offer-btn.ghost {
     background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.08));
     color: var(--text-secondary, #b9bbbe);
+}
+
+/* Its words go to the normal colour under the pointer; a deeper wash put Light's muted words at
+   4.15:1. */
+.voice-load-offer-btn.ghost:hover {
+    color: var(--text-normal, #dcddde);
 }
 
 /* Share is a split button: the main half goes straight to the picker with

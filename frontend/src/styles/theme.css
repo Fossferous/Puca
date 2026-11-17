@@ -105,6 +105,10 @@
     --brand-fill-hover: var(--brand-hover);
     /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
     --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
+    /* The brand end of an avatar's gradient, under initials in --bg-primary: the brand as words,
+       which holds 4.5:1 against --bg-primary (dark initials on --brand-primary were 3.82:1 on
+       Dark). Light, whose initials are white, keeps the brand itself. */
+    --avatar-brand: var(--brand-text);
     /* A link under the pointer (index.css), and a message link's colour (Chat.css): the brand as
        words. --brand-primary was 3.5 to 4.07:1 there on Light, and 3.54 (Dark) to 4.23 (Purple) on
        the message surface and a row under the pointer elsewhere. */
@@ -321,6 +325,7 @@
     --color-danger: var(--text-danger);
     --color-success: var(--text-positive);
     --danger-fill: var(--color-danger);
+    --avatar-brand: var(--brand-primary);
     /* The avatars' gradient runs from the brand to this, under white initials: #a78bfa was 2.72:1. */
     --accent-lavender: #7a5cd6;
     /* "Offline" in a profile is words in this colour: #80848e was 2.97:1 on --bg-tertiary. */
@@ -420,6 +425,9 @@
     --brand-primary: #d63384;
     --brand-hover: #bf2d76;
     --brand-active: #a62867;
+    /* The darkest brand as words of the colour themes: at 70% a link in a message that mentions
+       you was 4.47:1 under the pointer. */
+    --brand-text: color-mix(in srgb, var(--brand-primary) 60%, #fff);
 }
 
 /* A fill under white words is held to the rule a server mode's accent is (api/serverModes.ts,

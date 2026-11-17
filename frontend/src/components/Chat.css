@@ -185,7 +185,7 @@
 .voice-user-avatar {
     width: 20px;
     height: 20px;
-    background: linear-gradient(135deg, var(--brand-text), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -365,7 +365,7 @@
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-text));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -651,7 +651,7 @@
 .user-avatar {
     width: 28px;
     height: 28px;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-text));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -1531,8 +1531,11 @@ button.message-attachment.error { color: #ffb4b4; }
     background: var(--bg-tertiary);
 }
 
+/* A box of the theme's deepest surface. The blurple wash it had lifted what was under a link in
+   it, over a mention's gold, to 4.38:1 on Dark and 4.12 on Pink (3.77 under the pointer). Light,
+   whose words are dark, keeps the wash (lightTheme.css). */
 .spoiler.revealed {
-    background: rgba(88, 101, 242, 0.2);
+    background: var(--bg-tertiary);
     color: var(--text-normal);
 }
 
@@ -1937,10 +1940,12 @@ button.message-attachment.error { color: #ffb4b4; }
     transform: none;
 }
 
-/* Strikethrough for completed task content */
+/* Strikethrough for completed task content, in the muted colour. It was faded to 0.6, which took
+   every coloured run in it under the bar on the dark themes (a link 1.65 to 2.4:1, a quote 2.5,
+   code 2.65 on Dark); Light had already put it back at full strength this way. */
 .message-content.task-completed {
     text-decoration: line-through;
-    opacity: 0.6;
+    color: var(--text-muted);
 }
 
 .message-form input {
@@ -2200,7 +2205,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .member-item.online .member-avatar {
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-text));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     color: var(--bg-primary);
 }
 
@@ -2414,7 +2419,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-text), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2518,7 +2523,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 56px;
     height: 56px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-text), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     display: flex;
     align-items: center;
     justify-content: center;

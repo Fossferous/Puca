@@ -234,7 +234,7 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
              *  (Chromium takes up to 1.5 s for a long one, measured: 892 ms for 3,000 px, 1,497 ms
              *  for 12,000; WebKit about 210 ms whatever the length). */
             jump(frames = 30, ms = 0) {
-                pin.start();
+                pin.start(el);
                 atBottom = true;
                 smooth = { from: el.scrollTop, to: el.scrollHeight - el.clientHeight, step: 0, frames, ms };
             },
@@ -400,6 +400,19 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
         while (c.frame() && c.el.fromBottom > 300);
         for (let i = 0; i < 4; i++) c.drag(-0.8);
         expect(c.pin.heading()).toBe(false);
+        const top = c.el.scrollTop;
+        c.box(611);
+        expect(c.el.scrollTop).toBe(top);
+    });
+
+    it('a reader who pages up once right after a jump that had nothing to do is let go', () => {
+        // The review's case: at the end already, so the jump makes no event, and the reader's own
+        // PageUp is the first one; it used to be swallowed as the jump's.
+        const c = chat(4000, 642, 0);
+        c.jump(30, 16);
+        c.drag(-560);
+        expect(c.pin.heading()).toBe(false);
+        expect(c.atBottom()).toBe(false);
         const top = c.el.scrollTop;
         c.box(611);
         expect(c.el.scrollTop).toBe(top);

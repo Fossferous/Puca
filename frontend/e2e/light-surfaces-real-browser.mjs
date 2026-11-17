@@ -891,15 +891,12 @@ for (const [name, options, sheetName, url] of [
 //    the card table's primary button brightened under the pointer as it was fails on two.
 const BRAND_FILLS = ['--brand-primary', '--brand-hover', '--brand-active', '--brand-fill', '--brand-fill-hover'];
 const NAMED_ON_EVERY_THEME = ['message-link', 'device-btn-danger'];
-// A class that dims what is in it with opacity, and why a message link it dims is not held here.
-const NOT_ON_EVERY_THEME = [
-    ['task-completed', 'a done task is drawn at 0.6 opacity on the seven themes, and every coloured word in it with it: a link in one was 1.65 to 2.4:1 and is 2.4 to 3.2 in the brand as words, a quote 2.5 and code 2.65 on Dark. That is how a done task is drawn there, not a link\'s colour (Light draws one at full strength in its muted colour, lightTheme.css)'],
-];
 const OLD_OTHER = `
 .message-link, .message-link:not(.__never) { color: var(--mode-brand-text, var(--brand-primary)) !important; }
 :root { --brand-fill: var(--brand-primary) !important; --brand-fill-hover: var(--brand-hover) !important; }
 .create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)) !important; }
 .device-btn-danger, .device-btn-danger:not(.__never) { background: var(--danger, #f04747) !important; }
+.message-content.task-completed { opacity: 0.6 !important; color: inherit !important; }
 `;
 {
     console.log('\non every theme: message links, the words on the brand\'s fills, the device list\'s danger button');
@@ -921,10 +918,9 @@ const OLD_OTHER = `
             probe.remove();
             return colour;
         }).filter(Boolean))];
-        // What is painted with one of the brand's fills (a gradient through one counts), marked on a
-        // look where no other colour is the brand's: on Green the brand is the success green, which
-        // Add Friend and a copied invite are filled with, and on Dark the blurple a few fills name
-        // outright. Yellow's is no other colour's.
+        // What is painted with one of the brand's fills (a gradient through one counts), marked on
+        // looks where no colour of another meaning is the brand's: not Green, whose brand is the
+        // success green Add Friend and a copied invite are filled with.
         // `also`: the places marked at rest, by their order on the page, which is the same on the
         // hovered one: a hover that darkens a fill with color-mix() is no colour of the brand's.
         window.__markFilled = (also = []) => {
@@ -1026,12 +1022,7 @@ const OLD_OTHER = `
         };
     };
     const KINDS = ['a message link', 'words on a brand fill', 'the device list\'s danger button'];
-    // What dims a place here, and why it is not read: each must still be met, or it is stale.
-    const excused = new Set();
     const kindOf = (row) => {
-        // A message link in a done task only: a fill or the danger button in one is read.
-        const dimmer = row.kind === 'message-link' && NOT_ON_EVERY_THEME.find(([name]) => row.dim.split(' ').includes(name));
-        if (dimmer) { excused.add(dimmer[0]); return null; }
         return { 'message-link': KINDS[0], fill: KINDS[1], 'device-btn-danger': KINDS[2] }[row.kind];
     };
     const read = async (page) => {
@@ -1057,10 +1048,13 @@ const OLD_OTHER = `
     ]) {
         const { page, close } = await open(url, options);
         await page.evaluate(themedReader, { named: NAMED_ON_EVERY_THEME, fills: BRAND_FILLS });
-        // What a fill paints is the same on every look: marked once, on Yellow, with what was
-        // marked at rest.
+        // What a fill paints is the same on every look: marked on Dark, where a few fills name its
+        // blurple outright (`var(--brand, #5865f2)`), and on Yellow, whose brand is no other
+        // colour's (on Green it is the success green), with what was marked at rest.
+        await page.evaluate(l => window.__look(l), ['dark', 'normal']);
+        const onDark = await page.evaluate(also => window.__markFilled(also), atRest);
         await page.evaluate(l => window.__look(l), ['yellow', 'normal']);
-        const markedHere = await page.evaluate(also => window.__markFilled(also), atRest);
+        const markedHere = await page.evaluate(also => window.__markFilled(also), onDark);
         if (name === '1280x800') atRest = markedHere;
         const marked = markedHere.length;
         const byLook = await read(page);
@@ -1076,7 +1070,7 @@ const OLD_OTHER = `
             const then = await read(page);
             await page.evaluate(() => window.__old(''));
             for (const [kind, themes] of [
-                [KINDS[0], ['dark', 'pink', 'purple']],
+                [KINDS[0], ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow']],
                 [KINDS[1], ['purple', 'green', 'orange', 'yellow']],
                 [KINDS[2], ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow']],
             ]) {
@@ -1098,8 +1092,6 @@ const OLD_OTHER = `
         }
         await close();
     }
-    const stale = NOT_ON_EVERY_THEME.filter(([name]) => !excused.has(name)).map(([name]) => name);
-    check(stale.length === 0, `and every entry of the list of what is not held here (${NOT_ON_EVERY_THEME.map(([name]) => name).join(' ')}) still dims something`, stale.join(' '));
     const poor = collect(all);
     for (const { worst, looks } of poor) console.log(describe(worst, looks));
     check(poor.length === 0, `a message link, the words on a brand fill and the device list's danger button hold the bar on all eight themes, with and without high contrast, at rest, hovered and tapped, in ${readings} readings`, `${poor.length} below`);

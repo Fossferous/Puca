@@ -66,8 +66,8 @@ export const atEnd = (el: Scroller): boolean => el.scrollHeight - el.scrollTop -
 
 export interface ScrollToEnd {
     /** Chat.tsx's own scroll to the newest message begins (Jump to latest, a send, a
-     *  conversation opened), and its clock restarts. */
-    start(): void;
+     *  conversation opened) from where `el` is, and its clock restarts. */
+    start(el: Scroller): void;
     /** The reader took the wheel or a finger: the list is theirs again. */
     cancel(): void;
     /** Still on its way: repinOnResize's `headingToEnd`. */
@@ -117,9 +117,13 @@ export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd
         timer = setTimeout(() => { stop(); onSettle(); }, settleMs);
     };
     return {
-        start() {
+        start(el) {
             stop();
             on = true;
+            // From where it starts: a jump that has nothing to do makes no event, and the first
+            // one is then the reader's.
+            lastTop = el.scrollTop;
+            nearest = el.scrollHeight - el.scrollTop - el.clientHeight;
             clock();
         },
         cancel: stop,

@@ -70,6 +70,14 @@
 [data-theme="light"] .keybind-inert,
 [data-theme="light"] .search-jump-notice { color: var(--text-warning); }
 
+/* Send and Create Channel run on the brand's fills to its hover shade on the other themes, where
+   white words on the lavender were 1.5 to 2.7:1; here they keep the lavender, which holds them. */
+[data-theme="light"] .create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)); }
+[data-theme="light"] .message-form button[type="submit"] { background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary)); }
+
+/* A revealed spoiler keeps its pale blurple wash here: dark words hold on it. */
+[data-theme="light"] .spoiler.revealed { background: rgba(88, 101, 242, 0.2); }
+
 /* Dark words on a pale fill: --bg-primary is white on this theme. */
 [data-theme="light"] .emoji-save-btn,
 [data-theme="light"] .message-avatar,
@@ -174,10 +182,9 @@
 [data-theme="light"] .notes-send-hash { color: var(--text-muted); }
 
 /* Words dimmed with opacity, made for words that are near white: dimming dark words towards a
-   white page takes them under 4.5:1 (a done task's 3.71:1, an earlier month's days, a calendar
-   chip that is done 2.6:1). Here they keep their full colour, and what marks them is still
+   white page takes them under 4.5:1 (a done task's 3.71:1, which Chat.css now draws in its muted
+   colour on every theme; an earlier month's days, a calendar chip that is done 2.6:1). Here they keep their full colour, and what marks them is still
    there: a line through, the grey a muted colour is, the cell's own tint, the seat's status. */
-[data-theme="light"] .message-content.task-completed { opacity: 1; color: var(--text-muted); }
 [data-theme="light"] .cal-chip.done:not(.dragging),
 [data-theme="light"] .tt-sched.ended,
 [data-theme="light"] .option-hint.option-hint-dim,
