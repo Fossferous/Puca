@@ -49,9 +49,10 @@ file's history.
 
 ## Standing recommendation
 
-Everything above is development-time only and clears itself whenever eslint,
-vite or `@capacitor/cli` are next bumped. Do not pin transitive dependencies to
-chase them — an override that outlives its advisory becomes its own liability.
+Every row this table has carried was development-time only, and each one
+cleared when eslint, vite or `@capacitor/cli` were next updated (2026-11-17
+cleared the last of them). Do not pin transitive dependencies to chase such a
+row — an override that outlives its advisory becomes its own liability.
 
 The one entry that shipped to users — `react-router-dom` in RSC mode
 (GHSA-qwww-vcr4-c8h2) — is gone: the app is on 7.18.3, past the fixed 7.18.2.

@@ -72,13 +72,14 @@ The batch cleared every open Dependabot alert it could reach with a bump (the
 frontend lock, and the Steam Deck plugin's). Three could not be:
 
 **tract 0.19 -> 0.21 (df-wasm: GHSA-x5mv-8wgw-29hg, RUSTSEC-2026-0217, in
-tract-nnef; GHSA-h668-6x6g-f8r5 in tract-onnx).** Both are fixed only in the
-0.21 line. `deep_filter` v0.5.6, still DeepFilterNet's newest release
-(2023-08-31), asks for `tract-* ^0.19.4`; only its unreleased main branch
-(0.5.7-pre) asks for ^0.21.4. Taking it means pinning df-wasm to an
-unreleased upstream commit, rebuilding the committed 14 MB wasm and proving
-the DeepFilter (Max) tier again: a migration, not a bump. Neither advisory is
-reachable meanwhile; `.cargo/audit.toml` says why.
+tract-nnef; GHSA-h668-6x6g-f8r5 in tract-onnx).** No release older than 0.21
+is fixed (the fixes are 0.21.16 and 0.21.17, and in the 0.22 and 0.23 lines).
+`deep_filter` v0.5.6, still DeepFilterNet's newest release (2023-08-31), asks
+for `tract-* ^0.19.4`; only its unreleased main branch (0.5.7-pre) asks for
+^0.21.4. Taking it means pinning df-wasm to an unreleased upstream commit,
+rebuilding the committed 14 MB wasm and proving the DeepFilter (Max) tier
+again: a migration, not a bump. Neither advisory is reachable meanwhile;
+`.cargo/audit.toml` says why.
 
 **glib 0.18 -> 0.20 (frontend/src-tauri: GHSA-wrw7-89jp-8q8g,
 RUSTSEC-2024-0429, an unsound iterator).** glib comes through gtk 0.18 from
