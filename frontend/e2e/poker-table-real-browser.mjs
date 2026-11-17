@@ -61,7 +61,18 @@ const PROBE = () => {
 
 /** WCAG contrast of every text node on the felt against the felt. */
 const FELT_CONTRAST = () => {
-    const rgba = (s) => { const m = s.match(/[\d.]+/g); const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read as
+    // 0 to 255 it is near black. Any other colour function is one this cannot read: it fails.
+    const rgba = (s) => {
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        if (srgb) {
+            const [r, g, b, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+            if (![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+            return [r * 255, g * 255, b * 255, a];
+        }
+        if (/[\d.]/.test(s) && !/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const m = s.match(/[\d.]+/g); const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a];
+    };
     const centre = document.querySelector('.gtable-oval .gcentre');
     const probe = document.createElement('span');
     probe.style.color = getComputedStyle(centre).getPropertyValue('--felt').trim();

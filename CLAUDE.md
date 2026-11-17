@@ -834,6 +834,15 @@ is outside the browser's mute), and one that grants notifications must launch wi
 start no Firefox or WebKit in the same file (their own notifications are not
 switched off).
 
+**An e2e script that reads a colour from the browser reads `color(srgb …)` too.** A
+`color-mix()` computes to `color(srgb r g b / a)` with channels from 0 to 1, not `rgb()`,
+so `s.match(/[\d.]+/g)` reads it as near black. 0.9.865 moved `--brand-text` and
+`--link-hover` to a `color-mix()` on every theme, and games-walk failed the sidebar's
+playing mark at 1.23:1 on Dark (about 6:1 in truth); the same reader passes near black on a
+light surface without measuring anything. A reader scales those channels by 255, picks
+`color(srgb …)` stops out of a gradient, and THROWS on any colour form it cannot read
+(light-surfaces-real-browser.mjs and games-walk.mjs are the pattern).
+
 **Mobile ships with desktop.** Web changes go out as a signed OTA; native
 changes need a new APK. New UI must pass the 390x844 coarse-pointer walk
 (`frontend/e2e/mobile-walk*.mjs`) and `docs/DESIGN_PHILOSOPHY.md`.

@@ -353,10 +353,25 @@ async function themes(browser) {
                 p = await probe(page);
                 if (!p.panel || !p.panel.range?.hit || !p.panel.mute?.hit || !inWindow(p.panel, p)) { lost.push(`${theme}/${hc} panel ${JSON.stringify(p.panel)}`); continue; }
                 const c = await page.evaluate(() => {
+                    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1 (read
+                    // digit by digit as 0 to 255 it is near black); any other space fails the run.
+                    const parts = (s) => {
+                        const m = s.match(/[\d.]+/g);
+                        if (!m) return null;
+                        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+                        if (srgb) {
+                            const [r, g, b, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+                            if (![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+                            return [r * 255, g * 255, b * 255, a];
+                        }
+                        if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+                        const [r, g, b, a = 1] = m.map(Number);
+                        return [r, g, b, a];
+                    };
                     const opaque = (el) => {
                         for (let e = el; e; e = e.parentElement) {
-                            const m = getComputedStyle(e).backgroundColor.match(/[\d.]+/g);
-                            if (m && (m[3] === undefined || Number(m[3]) >= 0.99)) return getComputedStyle(e).backgroundColor;
+                            const fill = parts(getComputedStyle(e).backgroundColor);
+                            if (fill && fill[3] >= 0.99) return getComputedStyle(e).backgroundColor;
                         }
                         return 'rgb(0, 0, 0)';
                     };
@@ -372,8 +387,20 @@ async function themes(browser) {
                         button: ink('.stream-tile .tile-vol', 'rgb(0, 0, 0)'),
                     };
                 });
+                // The same reading here, where the colours arrive as strings (color(srgb ...) scaled
+                // to 0 to 255, any space but rgb() and srgb throwing).
+                const parts = (s) => {
+                    const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+                    if (srgb) {
+                        const [r, g, b, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+                        if (![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+                        return [r * 255, g * 255, b * 255, a];
+                    }
+                    if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+                    return s.match(/[\d.]+/g).map(Number);
+                };
                 const lum = (rgb) => {
-                    const [r, g, b] = rgb.match(/[\d.]+/g).slice(0, 3).map((x) => { const v = Number(x) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+                    const [r, g, b] = parts(rgb).slice(0, 3).map((x) => { const v = x / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
                     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 };
                 const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };

@@ -519,7 +519,18 @@ const hopChip = (page, dir) => page.evaluate(dir => {
         .map(el => ({ cls: String(el.className), q: el.getBoundingClientRect() }))
         .filter(o => o.q.width > 0 && o.q.left < r.right && o.q.right > r.left && o.q.top < r.bottom && o.q.bottom > r.top)
         .map(o => o.cls);
-    const rgba = c => { const m = c.match(/[\d.]+/g).map(Number); return { r: m[0], g: m[1], b: m[2], a: m.length > 3 ? m[3] : 1 }; };
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read as
+    // 0 to 255 it is black. Any other colour this cannot read fails the run.
+    const rgba = c => {
+        const s = /^color\(srgb ([^)]+)\)$/.exec(c);
+        if (s) {
+            const [r, g, b, a = 1, ...rest] = s[1].split(/[ /]+/).filter(Boolean).map(Number);
+            if (rest.length || ![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${c}`);
+            return { r: r * 255, g: g * 255, b: b * 255, a };
+        }
+        if (!/^rgba?\(/.test(c)) throw new Error(`a colour this cannot read: ${c}`);
+        const m = c.match(/[\d.]+/g).map(Number); return { r: m[0], g: m[1], b: m[2], a: m.length > 3 ? m[3] : 1 };
+    };
     const lum = c => { const f = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
     const onWhite = t => ({ r: t.r * t.a + 255 * (1 - t.a), g: t.g * t.a + 255 * (1 - t.a), b: t.b * t.a + 255 * (1 - t.a) });
     const ratio = (x, y) => { const p = lum(x), q = lum(y); return (Math.max(p, q) + 0.05) / (Math.min(p, q) + 0.05); };

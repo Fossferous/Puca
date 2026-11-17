@@ -718,7 +718,12 @@ try {
                     const cs = getComputedStyle(nav);
                     // What the bar paints: its colour, or every stop of a gradient over the page.
                     const page = rgba(getComputedStyle(document.body).backgroundColor);
-                    const stops = (cs.backgroundImage.match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}\b/gi) || []).map(rgba);
+                    // A color-mix() stop computes to color(srgb r g b / a) (channels 0 to 1), which
+                    // the canvas reads; it must be picked out too. A stop in any other space fails.
+                    const stops = (cs.backgroundImage.match(/(?:rgba?|color|lab|lch|oklab|oklch|hsla?|hwb)\([^)]+\)|#[0-9a-f]{3,8}\b/gi) || []).map((s) => {
+                        if (!/^(?:rgba?\(|color\(srgb |#)/i.test(s)) throw new Error(`a gradient stop this cannot read: ${s}`);
+                        return rgba(s);
+                    });
                     const fills = (stops.length ? stops : [rgba(cs.backgroundColor)]).map((s) => over(s, page[3] ? page : [255, 255, 255, 1]));
                     const labels = [...nav.querySelectorAll('.mobile-nav-btn')].map((b) => {
                         const col = rgba(getComputedStyle(b.querySelector('.nav-label')).color);

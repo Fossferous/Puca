@@ -699,7 +699,14 @@ const ring = (page) => page.evaluate(() => {
     ck(!quiet.visible && quiet.outline === 'none', 'mouse: which shows no ring', JSON.stringify(quiet));
     const rowsWearing = await page.evaluate((m) => [...document.querySelectorAll(`${m} button`)].filter((b) => {
         const c = getComputedStyle(b);
-        return c.outlineStyle !== 'none' || c.backgroundColor !== 'rgba(0, 0, 0, 0)';
+        // A color-mix() fill computes to color(srgb r g b / a) with channels from 0 to 1, never to
+        // 'rgba(0, 0, 0, 0)': that one is read by its alpha, and any colour that is neither fails the run.
+        const bg = c.backgroundColor;
+        const s = /^color\(srgb ([^)]+)\)$/.exec(bg);
+        if (!s && !/^rgba?\(/.test(bg)) throw new Error(`a colour this cannot read: ${bg}`);
+        const [r, g, bl, a = 1, ...rest] = s ? s[1].split(/[ /]+/).filter(Boolean).map(Number) : [];
+        if (s && (rest.length || ![r, g, bl, a].every(Number.isFinite))) throw new Error(`a colour this cannot read: ${bg}`);
+        return c.outlineStyle !== 'none' || (s ? a !== 0 : bg !== 'rgba(0, 0, 0, 0)');
     }).map((b) => b.textContent), MM);
     ck(rowsWearing.length === 0, 'mouse: and no item wears a ring or a fill', JSON.stringify(rowsWearing));
     await key(page, 'Enter');

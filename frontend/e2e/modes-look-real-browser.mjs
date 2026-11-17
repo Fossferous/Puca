@@ -401,8 +401,24 @@ const oldLook = (page, source) => page.evaluate(async (source) => {
         if (weight(p) < weight(dark)) dark = p;
         if (weight(p) > weight(light)) light = p;
     }
-    const surface = L.readThemeColor('--bg-primary');
-    const texts = ['--text-normal', '--text-muted', '--text-link'].map(L.readThemeColor);
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1, which the app's
+    // readThemeColor gives up on (null): read it here, to the byte the screen paints (worstOver
+    // looks each channel up in a 256-entry table), and fail the run on any other colour.
+    const read = (token) => {
+        const own = L.readThemeColor(token);
+        if (own) return own;
+        const probe = document.createElement('div');
+        probe.style.color = `var(${token})`;
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        const s = /^color\(srgb ([^)]+)\)$/.exec(value);
+        const [r, g, b, a = 1, ...rest] = s ? s[1].split(/[ /]+/).filter(Boolean).map(Number) : [];
+        if (!s || rest.length || ![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${token} is ${value}`);
+        return [r, g, b].map((v) => Math.round(v * 255));
+    };
+    const surface = read('--bg-primary');
+    const texts = ['--text-normal', '--text-muted', '--text-link'].map(read);
     const mix = (o, u, a) => [o[0] * a + u[0] * (1 - a), o[1] * a + u[1] * (1 - a), o[2] * a + u[2] * (1 - a)];
     const floor = (t) => { const own = L.contrast(t, surface); return own >= 4.5 ? 4.5 : own * 0.9; };
     let alpha = 0.97;
@@ -519,7 +535,20 @@ try {
     const tooFarLight = await worstOver(page, onLight.text);
     check('NEGATIVE CONTROL: and on Light', Object.values(tooFarLight.worst).some(c => c < 4.5), tooFarLight.worst);
     await setTheme(page, 'dark');
-    const own = await page.evaluate(() => Object.fromEntries(window.__look.PICTURE_TEXT_TOKENS.map(t => [t, window.__look.readThemeColor(t)])));
+    const own = await page.evaluate(() => Object.fromEntries(window.__look.PICTURE_TEXT_TOKENS.map(t => {
+        // A color-mix() is color(srgb r g b / a), 0 to 1, and readThemeColor's null: as oldLook reads it.
+        const known = window.__look.readThemeColor(t);
+        if (known) return [t, known];
+        const probe = document.createElement('div');
+        probe.style.color = `var(${t})`;
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        const s = /^color\(srgb ([^)]+)\)$/.exec(value);
+        const [r, g, b, a = 1, ...rest] = s ? s[1].split(/[ /]+/).filter(Boolean).map(Number) : [];
+        if (!s || rest.length || ![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${t} is ${value}`);
+        return [t, [r, g, b].map((v) => Math.round(v * 255))];
+    })));
     await show(page, daylight.css);
     await drawn(page);
     await pixelsOf(page, await page.screenshot());
@@ -656,7 +685,11 @@ try {
     const paintedOn = async (selector) => {
         const fill = await shotOf(selector);
         return chat.evaluate((fill) => {
-            const [r, g, b] = fill.match(/[\d.]+/g).map(Number);
+            // A color-mix() fill is color(srgb r g b / a), 0 to 1; anything else but rgb() fails the run.
+            const s = /^color\(srgb ([^)]+)\)$/.exec(fill);
+            const parts = s ? s[1].split(/[ /]+/).filter(Boolean).map(Number) : /^rgba?\(/.test(fill) ? fill.match(/[\d.]+/g).map(Number) : [];
+            if (parts.length < 3 || parts.length > 4 || !parts.every(Number.isFinite)) throw new Error(`a colour this cannot read: ${fill}`);
+            const [r, g, b] = s ? parts.map((v) => v * 255) : parts;
             const d = window.__shot;
             let painted = 0;
             for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - r) > 2 || Math.abs(d[i + 1] - g) > 2 || Math.abs(d[i + 2] - b) > 2) painted++;
@@ -727,6 +760,17 @@ try {
     const putBackHidingRule = () => chat.evaluate(() => {
         for (const [sheet, text, i] of window.__taken) sheet.insertRule(text, i);
     });
+    /** Whether a computed colour paints nothing. A color-mix() computes to color(srgb r g b / a)
+     *  with channels from 0 to 1, which an rgba() pattern never matches: that one is read by its
+     *  alpha, an rgb() or rgba() by the check's own pattern as before, and any other colour fails
+     *  the run. */
+    const seeThrough = (colour, rgbRule) => {
+        if (/^rgba?\(/.test(colour)) return rgbRule.test(colour);
+        const s = /^color\(srgb ([^)]+)\)$/.exec(colour);
+        const [r, g, b, a = 1, ...rest] = s ? s[1].split(/[ /]+/).filter(Boolean).map(Number) : [];
+        if (!s || rest.length || ![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${colour}`);
+        return a === 0;
+    };
     for (const theme of THEMES) {
         await chat.evaluate(async ({ theme, source }) => {
             document.documentElement.setAttribute('data-theme', theme);
@@ -756,7 +800,7 @@ try {
             const el = document.querySelector('.spoiler.revealed');
             return el && { shadow: getComputedStyle(el).textShadow, colour: getComputedStyle(el).color };
         });
-        check(`spoiler on ${theme}: revealed, it has the halo like the words around it`, revealed?.shadow === halo && !/, 0\)$/.test(revealed.colour), revealed);
+        check(`spoiler on ${theme}: revealed, it has the halo like the words around it`, revealed?.shadow === halo && !seeThrough(revealed.colour, /, 0\)$/), revealed);
         await chat.mouse.click(...await centreOf('.spoiler'));
         // The colour's own transition ends a little inside `settled`, and on a busy machine a
         // little after it: once the rest of the words were counted on their way out.
@@ -860,7 +904,7 @@ try {
                 outside: read(document.querySelector(`#open ${s}`)),
             }]));
         });
-        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !/^rgba\(.*, 0\)$/.test(l.revealed.colour)), looks);
+        check(`revealed on ${theme}: each looks as it does outside a spoiler`, Object.values(looks).every((l) => JSON.stringify(l.revealed) === JSON.stringify(l.outside) && l.revealed.visibility === 'visible' && !seeThrough(l.revealed.colour, /^rgba\(.*, 0\)$/)), looks);
         const painted = {};
         for (const kind of OWN_LOOK) {
             const clip = await chat.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, inKind(kind));

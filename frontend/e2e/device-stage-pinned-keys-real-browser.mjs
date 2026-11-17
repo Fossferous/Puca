@@ -377,7 +377,21 @@ async function themes(page, where) {
 }
 
 function measure(roots) {
-    const rgba = s => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read digit by
+    // digit as 0 to 255 it is near black. A colour in any other space fails the run.
+    const rgba = s => {
+        const m = s.match(/[\d.]+/g);
+        if (!m) return null;
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        if (srgb) {
+            const [r, g, b, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+            if (![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+            return [r * 255, g * 255, b * 255, a];
+        }
+        if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const [r, g, b, a = 1] = m.map(Number);
+        return [r, g, b, a];
+    };
     const over = (top, under) => [0, 1, 2].map(i => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
     const lum = c => { const v = c.slice(0, 3).map(x => x / 255).map(x => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4)); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
     const out = [];

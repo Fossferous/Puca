@@ -376,7 +376,12 @@ async function hoveredBackground(page, selector) {
         hoverNone: matchMedia('(hover: none)').matches,
     }), selector);
     await page.mouse.move(2, 2);
-    const m = r.bg.match(/[\d.]+/g) || [];
+    // A color-mix() computes to color(srgb r g b / a), channels from 0 to 1, its alpha
+    // after the slash. Any other colour function would be misread here (display-p3's
+    // "3" taken for a number), so it fails the run instead.
+    const srgb = r.bg.match(/^color\(srgb ([^)]+)\)$/);
+    if (r.bg && r.bg !== 'transparent' && !srgb && !/^rgba?\(/.test(r.bg)) throw new Error(`a colour this cannot read: ${r.bg}`);
+    const m = srgb ? srgb[1].split(/[ /]+/).filter(Boolean) : r.bg.match(/[\d.]+/g) || [];
     return { ...r, alpha: r.bg === 'transparent' ? 0 : m.length >= 4 ? Number(m[3]) : 1 };
 }
 
@@ -660,7 +665,19 @@ try {
             await sleep(400);
             for (const [tag, page] of [['phone', P], ['desktop', D]]) {
                 const r = await page.evaluate(() => {
-                    const rgba = (s) => { const m = s && s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+                    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1:
+                    // read as 0 to 255 it is near black. Any other colour function fails the run.
+                    const rgba = (s) => {
+                        const srgb = s && s.match(/^color\(srgb ([^)]+)\)$/);
+                        if (srgb) {
+                            const [r, g, b, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+                            if (![r, g, b, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+                            return [r * 255, g * 255, b * 255, a];
+                        }
+                        const m = s && s.match(/[\d.]+/g); if (!m) return null;
+                        if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+                        const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a];
+                    };
                     const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
                     const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
                     // What an element is painted on: translucent layers down to the

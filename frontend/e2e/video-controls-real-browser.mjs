@@ -226,6 +226,15 @@ const ck = (cond, label, extra = '') => {
     else { fail++; console.log('FAIL', label, extra); }
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A colour as [r, g, b, a], channels 0 to 255. A color-mix() computes to color(srgb r g b / a) with
+// channels from 0 to 1: read as 0 to 255 it is near black. Any other colour this cannot read fails the run.
+const channels = (colour) => {
+    const srgb = colour.match(/^color\(srgb ([^)]+)\)$/);
+    const m = srgb ? srgb[1].split(/[ /]+/).map(Number) : colour.match(/[\d.]+/g)?.map(Number);
+    if (!m || (srgb ? m.length < 3 || m.length > 4 || m.some(Number.isNaN) : !/^rgba?\(/.test(colour))) throw new Error(`a colour this cannot read: ${colour}`);
+    const [r, g, b, a = 1] = m;
+    return srgb ? [r * 255, g * 255, b * 255, a] : [r, g, b, a];
+};
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const browser = await chromium.launch({ headless: true, ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }), args: ['--mute-audio'] });
 let shots = 0;
@@ -514,7 +523,7 @@ function checkLayout(tag, L, { coarse, expectSize }) {
 
     // ---- 8. themes x contrast: the panels' text on their surface, the bar's ink.
     const lum = (rgb) => {
-        const [r, g, b] = rgb.match(/[\d.]+/g).slice(0, 3).map((x) => { const c = Number(x) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+        const [r, g, b] = channels(rgb).slice(0, 3).map((x) => { const c = x / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
         return 0.2126 * r + 0.7152 * g + 0.0722 * b;
     };
     const contrast = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
@@ -537,7 +546,11 @@ function checkLayout(tag, L, { coarse, expectSize }) {
                 const opaque = (el) => {
                     for (let e = el; e; e = e.parentElement) {
                         const bg = getComputedStyle(e).backgroundColor;
-                        const m = bg.match(/[\d.]+/g);
+                        // color(srgb r g b / a), what color-mix() computes to, has its alpha after the
+                        // slash; any other colour this cannot read fails the run (channels() reads it).
+                        const srgb = bg.match(/^color\(srgb ([^)]+)\)$/);
+                        const m = srgb ? srgb[1].split(/[ /]+/) : bg.match(/[\d.]+/g);
+                        if (srgb ? m.length < 3 || m.length > 4 || m.some((v) => Number.isNaN(Number(v))) : m && !/^rgba?\(/.test(bg)) throw new Error(`a colour this cannot read: ${bg}`);
                         if (m && (m[3] === undefined || Number(m[3]) >= 0.99)) return bg;
                     }
                     return 'rgb(0, 0, 0)';
@@ -704,8 +717,10 @@ function checkLayout(tag, L, { coarse, expectSize }) {
         const v = getComputedStyle(document.querySelector('[data-msg="m-portrait"] .vpl video'));
         return { bg: b.backgroundColor, videoTap: v.webkitTapHighlightColor };
     });
-    ck(/rgba\(0, 0, 0, 0\)/.test(tapLook.bg), 'touch: a tapped button keeps no hover fill (no sticky hover)', JSON.stringify(tapLook));
-    ck(/rgba\(0, 0, 0, 0\)/.test(tapLook.videoTap), 'touch: a tap on the picture flashes nothing over it', JSON.stringify(tapLook));
+    // A see-through color(srgb r g b / 0), what color-mix() computes to, is no fill either.
+    const clear = (c) => (/^rgba?\(/.test(c) ? /rgba\(0, 0, 0, 0\)/.test(c) : channels(c)[3] === 0);
+    ck(clear(tapLook.bg), 'touch: a tapped button keeps no hover fill (no sticky hover)', JSON.stringify(tapLook));
+    ck(clear(tapLook.videoTap), 'touch: a tap on the picture flashes nothing over it', JSON.stringify(tapLook));
     const item15 = await page.evaluate(() => { const b = [...document.querySelectorAll('.vpl-panel-speed [role="menuitemradio"]')].find((x) => x.textContent === '1.5×').getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; });
     await page.touchscreen.tap(...item15);
     ck((await media(page, 'm-portrait')).rate === 1.5, 'touch: tapping 1.5× sets it');
@@ -916,7 +931,9 @@ for (const [tag, ctxOpts, touch] of [
         const c = document.querySelector(chip);
         return { revealed: document.querySelector(sp).classList.contains('revealed'), visibility: getComputedStyle(c).visibility, colour: getComputedStyle(c).color, phase: c.className };
     }, [CHIP, SP]);
-    ck(revealed.revealed && revealed.visibility === 'visible' && !/, 0\)$/.test(revealed.colour) && downloads.length === 0, `spoilered file, ${tag}: the first press only reveals it, saving nothing`, JSON.stringify({ revealed, downloads }));
+    // Painted: rgb() not ending in an alpha of 0, or a color(srgb r g b / a) (color-mix()'s) with some alpha.
+    const painted = /^rgba?\(/.test(revealed.colour) ? !/, 0\)$/.test(revealed.colour) : channels(revealed.colour)[3] > 0;
+    ck(revealed.revealed && revealed.visibility === 'visible' && painted && downloads.length === 0, `spoilered file, ${tag}: the first press only reveals it, saving nothing`, JSON.stringify({ revealed, downloads }));
     const chipBox = await page.locator(CHIP).boundingBox();
     ck(chipBox.width > 0 && chipBox.x >= 0 && chipBox.x + chipBox.width <= ctxOpts.viewport.width, `spoilered file, ${tag}: revealed, the chip fits`, JSON.stringify(chipBox));
     await shot(page, `60-spoilered-file-revealed-${tag}`);

@@ -426,7 +426,14 @@ async function themes(page, where) {
         let bg = 'rgb(0,0,0)';
         for (let e = line; e; e = e.parentElement) {
             const c = getComputedStyle(e).backgroundColor;
-            if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) { bg = c; break; }
+            if (!c || /rgba\(0, 0, 0, 0\)|transparent/.test(c)) continue;
+            // A color-mix() computes to color(srgb r g b / a): see-through at / 0, not rgba(0, 0, 0, 0).
+            // Any other colour this cannot read fails the run.
+            const srgb = c.match(/^color\(srgb ([^)]+)\)$/);
+            const alpha = srgb ? Number(srgb[1].split(/[ /]+/)[3] ?? 1) : null;
+            if (srgb ? Number.isNaN(alpha) : !/^rgba?\(/.test(c)) throw new Error(`a colour this cannot read: ${c}`);
+            if (alpha === 0) continue;
+            bg = c; break;
         }
         s.textContent = `.device-power-status { color: ${bg} !important; }`;
     });
@@ -437,7 +444,16 @@ async function themes(page, where) {
 }
 
 function measure(roots) {
-    const rgba = s => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read as 0 to 255 it
+    // is near black. Any other colour this cannot read fails the run.
+    const rgba = s => {
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        const m = srgb ? srgb[1].split(/[ /]+/).map(Number) : s.match(/[\d.]+/g)?.map(Number);
+        if (!m) return null;
+        if (srgb ? m.length < 3 || m.length > 4 || m.some(Number.isNaN) : !/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const [r, g, b, a = 1] = m;
+        return srgb ? [r * 255, g * 255, b * 255, a] : [r, g, b, a];
+    };
     const over = (top, under) => [0, 1, 2].map(i => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
     const lum = c => { const v = c.slice(0, 3).map(x => x / 255).map(x => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4)); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
     const out = [];

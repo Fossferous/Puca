@@ -176,7 +176,16 @@ const attempt = (page, fn, args = []) => page.evaluate(async ({ fn, args }) => {
  * Disabled controls and aria-hidden decoration are exempt, as WCAG 1.4.3 exempts them.
  */
 const illegibleText = (page, roots) => page.evaluate((roots) => {
-    const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+    // A color-mix() computes to color(srgb r g b / a) with channels from 0 to 1: read as 0 to 255 it
+    // is near black. Any other colour this cannot read fails the run.
+    const rgba = (s) => {
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        const m = srgb ? srgb[1].split(/[ /]+/).map(Number) : s.match(/[\d.]+/g)?.map(Number);
+        if (!m) return null;
+        if (srgb ? m.length < 3 || m.length > 4 || m.some(Number.isNaN) : !/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const [r, g, b, a = 1] = m;
+        return srgb ? [r * 255, g * 255, b * 255, a] : [r, g, b, a];
+    };
     const paint = (el) => {
         const layers = [];
         for (let e = el; e; e = e.parentElement) {
@@ -282,9 +291,13 @@ async function measureLook(page) {
             p.style.color = `var(${token})`;
             p.style.display = 'none';
             document.body.appendChild(p);
-            const m = getComputedStyle(p).color.match(/[\d.]+/g).map(Number);
+            const c = getComputedStyle(p).color;
             p.remove();
-            return m.slice(0, 3);
+            // color(srgb r g b / a), what color-mix() computes to, has channels from 0 to 1.
+            const srgb = c.match(/^color\(srgb ([^)]+)\)$/);
+            const m = srgb ? srgb[1].split(/[ /]+/).map(Number) : c.match(/[\d.]+/g).map(Number);
+            if (srgb ? m.length < 3 || m.length > 4 || m.some(Number.isNaN) : !/^rgba?\(/.test(c)) throw new Error(`a colour this cannot read: ${c}`);
+            return srgb ? m.slice(0, 3).map(v => v * 255) : m.slice(0, 3);
         };
         const accent = read('--brand-primary');
         return {
@@ -318,7 +331,15 @@ async function textOverPicture(page) {
     await page.mouse.move(1, 1);
     await settled(page);
     const runs = await page.evaluate(() => {
-        const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b, a = 1] = m.map(Number); return [r, g, b, a]; };
+        // color(srgb r g b / a), what color-mix() computes to, has channels from 0 to 1 (illegibleText's reader).
+        const rgba = (s) => {
+            const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+            const m = srgb ? srgb[1].split(/[ /]+/).map(Number) : s.match(/[\d.]+/g)?.map(Number);
+            if (!m) return null;
+            if (srgb ? m.length < 3 || m.length > 4 || m.some(Number.isNaN) : !/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+            const [r, g, b, a = 1] = m;
+            return srgb ? [r * 255, g * 255, b * 255, a] : [r, g, b, a];
+        };
         const root = document.querySelector('.chat-main');
         const onItsOwnSurface = (el) => {
             for (let e = el; e && e !== root; e = e.parentElement) {
@@ -1157,7 +1178,11 @@ try {
             const onPicture = await textOverPicture(A);
             check(`${label} on ${theme}: every run of real text holds at 4.5:1 over every rendered pixel behind it`, !!m && onPicture.measured >= 8 && onPicture.bad.length === 0, onPicture);
             const chip = await A.locator('.message-attachment').first().evaluate(e => getComputedStyle(e).backgroundColor);
-            check(`${label} on ${theme}: a file's chip, whose colours are fixed, is on a surface of its own`, !/rgba/.test(chip), chip);
+            // A see-through color(srgb r g b / a), what color-mix() computes to, says no rgba.
+            const chipSrgb = chip.match(/^color\(srgb ([^)]+)\)$/);
+            if (!chipSrgb && !/^rgba?\(/.test(chip)) throw new Error(`a colour this cannot read: ${chip}`);
+            const chipOpaque = chipSrgb ? Number(chipSrgb[1].split(/[ /]+/)[3] ?? 1) >= 1 : !/rgba/.test(chip);
+            check(`${label} on ${theme}: a file's chip, whose colours are fixed, is on a surface of its own`, chipOpaque, chip);
             check(`${label} on ${theme}: accent ${m ? `rgb(${m.accent})` : ''} carries a white label (4.5:1) and shows on the surfaces (3:1)`, !!m && m.labelContrast >= 4.5 && m.surfaceContrast >= 3, m && { label: m.labelContrast.toFixed(2), surface: m.surfaceContrast.toFixed(2) });
             const legible = await illegibleText(A, '.mode-notice, .mode-selector');
             check(`${label} on ${theme}: the notice and the selector are legible`, legible.measured >= 3 && legible.bad.length === 0, legible);

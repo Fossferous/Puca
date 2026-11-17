@@ -283,10 +283,19 @@ async function keyboard(page, kb) {
     await sleep(150);
 }
 
-/** WCAG contrast of two computed rgb() colours. */
+/**
+ * WCAG contrast of two computed colours. A color-mix() computes to
+ * color(srgb r g b / a) with channels from 0 to 1, and read as 0 to 255 that
+ * is near black (the playing mark read 1.23:1 on Dark that way); any other
+ * colour function is one this cannot read, and fails the run.
+ */
 function contrast(a, b) {
     const lum = (s) => {
-        const [r, g, bl] = s.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => v / 255).map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        if (!srgb && !/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const channels = srgb ? srgb[1].split(/[ /]+/).filter(Boolean).slice(0, 3).map(v => Number(v) * 255) : s.match(/[\d.]+/g).slice(0, 3).map(Number);
+        if (channels.length < 3 || !channels.every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+        const [r, g, bl] = channels.map(v => v / 255).map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
         return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
     };
     const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
@@ -302,7 +311,19 @@ function contrast(a, b) {
  * sidebar is what a person sees, not its computed colour).
  */
 const activityPairs = (roots) => {
-    const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b2, a = 1] = m.map(Number); return [r, g, b2, a]; };
+    // color(srgb r g b / a), what a color-mix() computes to, has channels from 0 to 1;
+    // any other colour function is one this cannot read (contrast() says why).
+    const rgba = (s) => {
+        const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+        if (srgb) {
+            const [r, g, b2, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+            if (![r, g, b2, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+            return [r * 255, g * 255, b2 * 255, a];
+        }
+        const m = s.match(/[\d.]+/g); if (!m) return null;
+        if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+        const [r, g, b2, a = 1] = m.map(Number); return [r, g, b2, a];
+    };
     const paint = (el) => {
         const layers = [];
         for (let e = el; e; e = e.parentElement) {
@@ -620,12 +641,25 @@ try {
                 // Every enabled button: its text on its own background, or on
                 // the first painted ancestor's for a transparent (ghost) one.
                 // Translucent layers are composited down to the first opaque one.
+                // color(srgb r g b / a), what a color-mix() computes to, has channels
+                // from 0 to 1; any other colour function is one this cannot read.
+                const rgba = (s) => {
+                    const srgb = s.match(/^color\(srgb ([^)]+)\)$/);
+                    if (srgb) {
+                        const [r, g, b2, a = 1] = srgb[1].split(/[ /]+/).filter(Boolean).map(Number);
+                        if (![r, g, b2, a].every(Number.isFinite)) throw new Error(`a colour this cannot read: ${s}`);
+                        return [r * 255, g * 255, b2 * 255, a];
+                    }
+                    const m = s.match(/[\d.]+/g); if (!m) return null;
+                    if (!/^rgba?\(/.test(s)) throw new Error(`a colour this cannot read: ${s}`);
+                    const [r, g, b2, a = 1] = m.map(Number); return [r, g, b2, a];
+                };
                 const paint = (el) => {
                     const layers = [];
                     for (let e = el; e; e = e.parentElement) {
-                        const m = getComputedStyle(e).backgroundColor.match(/[\d.]+/g);
-                        if (!m) continue;
-                        const [r, g, b2, a = 1] = m.map(Number);
+                        const c = rgba(getComputedStyle(e).backgroundColor);
+                        if (!c) continue;
+                        const [r, g, b2, a] = c;
                         if (a === 0) continue;
                         layers.push([r, g, b2, a]);
                         if (a >= 1) break;
@@ -649,7 +683,8 @@ try {
                 return out;
             });
             for (const [k, pair] of Object.entries(c)) {
-                if (!pair || !pair[0] || !pair[1] || /rgba\(0, 0, 0, 0\)/.test(pair[1])) continue;
+                // A transparent background, also as a color-mix() computes one (color(srgb ... / 0)).
+                if (!pair || !pair[0] || !pair[1] || /rgba\(0, 0, 0, 0\)|^color\(srgb [^/)]*\/ 0\)$/.test(pair[1])) continue;
                 const r = contrast(pair[0], pair[1]);
                 if (r < 4.5) poor.push(`${theme}/${hc} ${k} ${r.toFixed(2)} ${pair[0]} on ${pair[1]}${pair[2] ? ' (' + pair[2] + ')' : ''}`);
             }
