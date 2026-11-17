@@ -137,6 +137,10 @@ const state = {
     // The host's one-line notice (a display turned off, say), which a phone
     // shows in its feedback line (the monitor-hop walk).
     powerNotice: null as string | null,
+    // Something the host refused while the session goes on (an input it
+    // could not inject, say): the session's error with the session still
+    // active, red in the phone's feedback line (the monitor-hop walk).
+    hostError: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -151,7 +155,7 @@ function session(): DeviceControlSession {
     return {
         id: SID, role: 'controller', peerDevice: 'dev-host',
         phase: state.endedWith === null ? 'active' : 'ended',
-        stream, captureSize: null, error: state.endedWith,
+        stream, captureSize: null, error: state.endedWith ?? state.hostError,
         peerName: state.peerName, hostScreen: state.hostScreen,
         monitors: MONITORS.map(m => ({ ...m })),
         activeMonitor: state.activeMonitor,

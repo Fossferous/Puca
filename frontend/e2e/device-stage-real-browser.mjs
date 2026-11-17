@@ -37,7 +37,12 @@
 //      touch-layout class (the chip as it was, 164x44 painted) fails;
 //   7. two fingers carry the view all the way into an edge, the far ones too
 //      (2026-11-16: the stage stepped a pan per finger, and toward the right
-//      and bottom edges it stopped short of them, so no chip came there).
+//      and bottom edges it stopped short of them, so no chip came there);
+//   8. on an iPhone (a 34 px home-indicator inset, through DevTools' safe-area
+//      override, so the page's own env() reads it) a host's refusal in the
+//      feedback line is drawn clear of the down arrow's 44 px target, and the
+//      arrow stays put for it (2026-11-16: the line sat a fixed 96 px off the
+//      bottom and covered 35 px of the target; with no inset, 1 px).
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -88,8 +93,11 @@ const browser = await chromium.launch({ channel: 'msedge', headless: true, args:
  *  agent too old to send shapes, say) — fakeSession.ts reads them at load.
  *  `monitors`: another desk for the stand-in host (fakeSession.ts's
  *  MONITORS); `storage`: the stage's remembered settings, set before load;
- *  `viewport`: another phone shape (a phone turned sideways, say). */
-async function open(knobs = null, { monitors = null, storage = null, viewport = { width: 390, height: 844 } } = {}) {
+ *  `viewport`: another phone shape (a phone turned sideways, say);
+ *  `insetBottom`: an iPhone's home-indicator inset, in CSS px, as the page's
+ *  own env(safe-area-inset-bottom) reads it (DevTools' safe-area override;
+ *  Windows reports 0 there otherwise). */
+async function open(knobs = null, { monitors = null, storage = null, viewport = { width: 390, height: 844 }, insetBottom = 0 } = {}) {
     const ctx = await browser.newContext({ viewport, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     page.on('pageerror', e => { fail++; console.log('[pageerror]', String(e).slice(0, 300)); });
@@ -98,6 +106,7 @@ async function open(knobs = null, { monitors = null, storage = null, viewport = 
     if (storage) await page.addInitScript(s => { for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v); }, storage);
     const cdp = await ctx.newCDPSession(page);
     if (Number(process.env.CPU_THROTTLE) > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.CPU_THROTTLE) });
+    if (insetBottom) await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { bottom: insetBottom, bottomMax: insetBottom } });
     await page.goto(base);
     await page.waitForSelector('.device-stage-surface', { timeout: 15000 });
     await page.waitForFunction(() => (window.__stage.video()?.vw ?? 0) > 0, null, { timeout: 10000 });
@@ -640,11 +649,12 @@ async function checkHopChip(page, dir, label, slid = false) {
  *   - 'pointer': one finger walks the pointer to the bottom-right and the
  *     camera follows it (follow-cursor, on by default).
  *  `sideways`: a phone turned sideways (844x390), with a pinned key too — the
- *  shape where the pad's default places cover the middle of both side edges. */
-async function hopStage(route, sideways = false, knobs = null) {
+ *  shape where the pad's default places cover the middle of both side edges.
+ *  `insetBottom`: an iPhone's home-indicator inset (open()). */
+async function hopStage(route, sideways = false, knobs = null, { insetBottom = 0 } = {}) {
     const storage = { 'device-stage-virtual-mouse': 'on' };
     if (sideways) storage['device-stage-pinned-keys'] = JSON.stringify([{ id: 'hoppin', code: 'F5', mods: [] }]);
-    const o = await open(knobs, { monitors: HOP_DESK, storage, viewport: sideways ? { width: 844, height: 390 } : { width: 390, height: 844 } });
+    const o = await open(knobs, { monitors: HOP_DESK, storage, insetBottom, viewport: sideways ? { width: 844, height: 390 } : { width: 390, height: 844 } });
     await o.page.evaluate(() => window.__stage.setActive(0));
     await o.page.waitForTimeout(1500);
     const s = await o.page.evaluate(() => { const r = document.querySelector('.device-stage-surface').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
@@ -738,6 +748,27 @@ async function hopPress(o, dir, monitorId, name) {
         r.sent.join(',') || 'nothing sent');
 }
 
+/** The phone's feedback line, as drawn: its box, whether it carries a host's
+ *  refusal (the red line) and the toolbar's top under it. */
+const feedbackLine = page => page.evaluate(() => {
+    const el = document.querySelector('.device-stage-mobile-error');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const bar = document.querySelector('.device-stage-mobile-toolbar')?.getBoundingClientRect();
+    return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, bad: !!el.querySelector('.dse-bad'), barTop: bar ? bar.top : null };
+});
+
+/** THE FEEDBACK LINE IS DRAWN CLEAR OF THE DOWN ARROW. It paints over the
+ *  arrow (it lets the tap through, and the arrow does not step aside for it:
+ *  see the placement in DeviceStage.tsx), so whatever of the arrow's 44 px
+ *  target is under it is hidden. `tag` names the run in the check. */
+function lineClearOfArrow(tag, line, arrow) {
+    const under = line && arrow ? Math.max(0, Math.min(line.bottom, arrow.bottom) - Math.max(line.top, arrow.top)) : null;
+    ck(`${tag}the feedback line is drawn clear of the down arrow: none of its 44 px target under the line`,
+        !!line && !!arrow && line.bottom <= arrow.top && line.top >= 0 && (line.barTop === null || line.bottom <= line.barTop),
+        line && arrow ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}, arrow ${Math.round(arrow.top)}..${Math.round(arrow.bottom)}: ${Math.round(under)} px of it under the line, toolbar from ${line.barTop === null ? 'none' : Math.round(line.barTop)}` : 'no line or no arrow');
+}
+
 /** CONTROL for the sideways runs: at its centred spot the chip WOULD be under
  *  one of the pad's clusters — what a tap there hits is the cluster. */
 const coveredAtCentre = (page, dir) => page.evaluate(dir => {
@@ -826,6 +857,7 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
         ck('hop down: …the arrow stays where it was, and a tap on it still reaches it',
             !!withNote && withNote.shift === 0 && Math.abs(withNote.x - down.x) < 0.5 && withNote.hitCentre,
             withNote ? `shift ${withNote.shift}, x ${Math.round(withNote.x)} (was ${Math.round(down.x)}), hit ${withNote.hitCentre}` : 'gone');
+        lineClearOfArrow('hop down: …', await feedbackLine(page), withNote);
         await page.evaluate(() => { window.__stage.state.powerNotice = null; window.__stage.emit(); });
         await page.waitForTimeout(200);
 
@@ -875,6 +907,47 @@ for (const sideways of [false, true]) {
     ck(`${sideways ? 'sideways: ' : ''}two fingers carry the view into the bottom-right corner: the right and down hops are offered`,
         dirs === 'down right', dirs || 'none');
     await o.ctx.close();
+}
+// AN IPHONE'S HOME-INDICATOR INSET (2026-11-16). The toolbar grows by the
+// 34 px inset and the picture, and the down arrow on its bottom edge, rise
+// with it; the feedback line sat a fixed 96 px off the bottom, so a host's
+// refusal on an iPhone in portrait was drawn across most of the down arrow
+// (the line paints over it, and the arrow does not step aside for the line,
+// rightly: see the run above). The line now rises with the inset too.
+{
+    const o = await hopStage('pointer', false, null, { insetBottom: 34 });
+    const { ctx, page } = o;
+    const inset = await page.evaluate(() => {
+        const p = document.createElement('div');
+        p.style.cssText = 'position:fixed;left:0;bottom:0;width:1px;height:env(safe-area-inset-bottom, 0px);visibility:hidden';
+        document.body.appendChild(p);
+        const h = p.getBoundingClientRect().height;
+        p.remove();
+        const bar = document.querySelector('.device-stage-mobile-toolbar');
+        return { h, barPad: bar ? getComputedStyle(bar).paddingBottom : null };
+    });
+    ck('iPhone inset: precondition: the page reads a 34 px home-indicator inset, and the toolbar takes it', inset.h === 34 && inset.barPad === '38px',
+        `env(safe-area-inset-bottom) ${inset.h} px, toolbar's bottom padding ${inset.barPad}`);
+    const dirs = await page.evaluate(() => [...document.querySelectorAll('.device-stage-hop')].map(b => b.dataset.hopDir).sort().join(' '));
+    ck('iPhone inset: precondition: following the pointer into the bottom-right corner, the right and down hops are offered', dirs === 'down right', dirs || 'none');
+    const down = await checkHopChip(page, 'down', 'Bottom display (2560x1440)');
+    if (down) {
+        await page.evaluate(() => { window.__stage.state.hostError = 'Some typed text did not go over: that PC refused it'; window.__stage.emit(); });
+        await page.waitForTimeout(400);
+        // A placement while the line is up (a finger lifted anywhere makes one).
+        await page.evaluate(() => { window.dispatchEvent(new PointerEvent('pointerup')); });
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const line = await feedbackLine(page);
+        const now = await hopChip(page, 'down');
+        ck('iPhone inset: precondition: the host\'s refusal is up, red, in the feedback line', !!line && line.bad, line ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}` : 'no line');
+        lineClearOfArrow('iPhone inset: ', line, now);
+        ck('iPhone inset: …and the arrow did not move for it, and a tap at its centre reaches it',
+            !!now && now.shift === 0 && Math.abs(now.x - down.x) < 0.5 && Math.abs(now.y - down.y) < 0.5 && now.hitCentre && now.hitCorners,
+            now ? `shift ${now.shift}, at ${Math.round(now.x)},${Math.round(now.y)} (was ${Math.round(down.x)},${Math.round(down.y)}), hit ${now.hitCentre}/${now.hitCorners}` : 'gone');
+        await page.screenshot({ path: join(outdir, 'phone-inset-hop-down-error.png') });
+        await page.evaluate(() => { window.__stage.state.hostError = null; window.__stage.emit(); });
+    }
+    await ctx.close();
 }
 // SIDEWAYS (844x390), the pad at its default places and a pinned key: the
 // L/M/R row covers the middle of the left edge and the scroll column the
