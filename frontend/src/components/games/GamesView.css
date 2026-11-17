@@ -225,7 +225,7 @@
     height: 22px;
     flex-shrink: 0;
     border-radius: 50%;
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
     font-size: 0.72rem;
     font-weight: 700;

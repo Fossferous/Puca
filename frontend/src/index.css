@@ -164,7 +164,7 @@ select:focus {
 
 /* Selection styling */
 ::selection {
-  background: var(--brand-primary);
+  background: var(--brand-fill);
   color: white;
 }
 

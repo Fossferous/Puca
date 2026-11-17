@@ -144,7 +144,7 @@
     cursor: pointer;
 }
 .save-note-cancel { background: transparent; color: var(--text-muted, #b5bac1); }
-.save-note-go { background: var(--brand-primary, #5865f2); color: #fff; }
+.save-note-go { background: var(--brand-fill); color: #fff; }
 .save-note-cancel:disabled, .save-note-go:disabled { opacity: 0.5; cursor: default; }
 
 /* ---- Mobile (coarse pointer) ---- */

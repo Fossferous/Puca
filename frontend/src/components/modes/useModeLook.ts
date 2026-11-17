@@ -27,7 +27,9 @@ export function serverLooksAllowed(): boolean {
     return root.getAttribute('data-contrast') !== 'high' && root.getAttribute('data-server-looks') !== 'off';
 }
 
-const BRAND_TOKENS = ['--brand-primary', '--brand-hover', '--brand-active'] as const;
+// The fills too: a colour theme has fills of its own under white words (styles/theme.css), and an
+// accent is already one white words hold on.
+const BRAND_TOKENS = ['--brand-primary', '--brand-hover', '--brand-active', '--brand-fill', '--brand-fill-hover'] as const;
 
 /** A picture on screen: `.chat-main`'s style, and the band its text has to stay out of. */
 export interface ModeLook {
@@ -62,6 +64,8 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
         root.setProperty('--brand-primary', tokens.primary);
         root.setProperty('--brand-hover', tokens.hover);
         root.setProperty('--brand-active', tokens.active);
+        root.setProperty('--brand-fill', tokens.primary);
+        root.setProperty('--brand-fill-hover', tokens.hover);
         return () => {
             for (const token of BRAND_TOKENS) root.removeProperty(token);
         };

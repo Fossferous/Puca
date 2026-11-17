@@ -137,6 +137,7 @@ describe('repinOnResize, the content and the box changing together', () => {
         const el = list(3000, 611, 2389);
         const repin = repinOnResize(el, () => true);
         change(el, 3064, 642);
+        expect(el.fromBottom).toBe(33); // what the browser leaves
         repin();
         expect(el.fromBottom).toBe(0);
     });
@@ -145,21 +146,25 @@ describe('repinOnResize, the content and the box changing together', () => {
         const el = list(3000, 642, 2358);
         const repin = repinOnResize(el, () => true);
         change(el, 3064, 611);
+        expect(el.fromBottom).toBe(95);
         repin();
         expect(el.fromBottom).toBe(0);
     });
 
-    it('a list at the end: a message deleted as the box gets a line shorter', () => {
+    it('a list at the end: a message deleted as the keyboard comes up', () => {
         const el = list(3000, 620, 2380);
         const repin = repinOnResize(el, () => true);
-        change(el, 2936, 642);
+        change(el, 2936, 352);
+        expect(el.fromBottom).toBe(204);
         repin();
         expect(el.fromBottom).toBe(0);
     });
 
-    it('a list on its way to the end (Jump to latest) gets there', () => {
+    it('a list on its way to the end (Jump to latest) gets there, whichever rule the change falls under', () => {
+        // Not "at the bottom" by the caller's reckoning, only heading there: the content's rule
+        // alone would leave it.
         const el = list(3000, 642, 1800);
-        const repin = repinOnResize(el, () => true, () => true);
+        const repin = repinOnResize(el, () => false, () => true);
         change(el, 3064, 611);
         repin();
         expect(el.fromBottom).toBe(0);
@@ -173,6 +178,7 @@ describe('repinOnResize, the content and the box changing together', () => {
         const el = list(3000, 642, 2258);
         const repin = repinOnResize(el, () => true);
         change(el, 3064, 611);
+        expect(el.fromBottom).toBe(195);
         repin();
         expect(el.fromBottom).toBe(0);
     });
@@ -212,7 +218,7 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
             if (pin.ownScroll(el)) return;
             atBottom = el.fromBottom <= SLOP;
         };
-        let smooth: { from: number; to: number; step: number } | null = null;
+        let smooth: { from: number; to: number; step: number; frames: number; ms: number } | null = null;
         let mine = false;
         const setTop = (v: number) => { mine = true; el.scrollTop = v; mine = false; };
         // Script setting scrollTop (repinOnResize does) stops a smooth scroll on its way.
@@ -224,20 +230,31 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
         return {
             el, pin, repin, scrolled, settled,
             atBottom: () => atBottom,
-            /** The Jump to latest pill: scrollToLatest('smooth'). */
-            jump() {
+            /** The Jump to latest pill: scrollToLatest('smooth'), over `frames` frames of `ms` each
+             *  (Chromium takes up to 1.5 s for a long one, measured: 892 ms for 3,000 px, 1,497 ms
+             *  for 12,000; WebKit about 210 ms whatever the length). */
+            jump(frames = 30, ms = 0) {
                 pin.start();
                 atBottom = true;
-                smooth = { from: el.scrollTop, to: el.scrollHeight - el.clientHeight, step: 0 };
+                smooth = { from: el.scrollTop, to: el.scrollHeight - el.clientHeight, step: 0, frames, ms };
             },
-            /** One frame of the smooth scroll (thirty frames end it) and its scroll event. */
+            /** One frame of the smooth scroll and its scroll event. */
             frame(): boolean {
                 if (!smooth) return false;
+                if (smooth.ms) vi.advanceTimersByTime(smooth.ms);
+                if (!smooth) return false; // a timer of the valve's own may not stop a scroll, but check
                 smooth.step += 1;
-                setTop(smooth.from + (smooth.to - smooth.from) * smooth.step / 30);
-                if (smooth.step >= 30) smooth = null;
+                setTop(smooth.from + (smooth.to - smooth.from) * smooth.step / smooth.frames);
+                if (smooth.step >= smooth.frames) smooth = null;
                 scrolled();
                 return true;
+            },
+            /** The reader's own scroll with nothing that cancels the pin first: a drag of the
+             *  scrollbar, PageUp or an arrow key (only the wheel and a finger call cancel). */
+            drag(dy: number) {
+                smooth = null; // a drag takes the scroll over
+                setTop(el.scrollTop + dy);
+                scrolled();
             },
             /** The list's box changes height (the browser keeps scrollTop), and the ResizeObserver runs. */
             box(h: number) {
@@ -308,6 +325,55 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
         c.box(611);
         expect(c.el.scrollTop).toBe(top);
         expect(c.atBottom()).toBe(false);
+    });
+
+    // The review's finding (2026-11-17): Chromium's smooth scroll outlasts the 800 ms valve on a
+    // long jump, so it let go mid-flight, and the indicator coming up after that left it 31 px
+    // short (reproduced in real Chromium: a 6,000 px jump, 1,281 ms, 31 px short).
+    for (const [distance, frames] of [[3000, 56], [6000, 80], [12000, 94]] as const) {
+        it(`a jump of ${distance} px lasting ${frames * 16} ms, longer than the valve, still ends at the end when the box changes after 800 ms`, () => {
+            const c = chat(distance + 2000, 642, distance);
+            c.jump(frames, 16);
+            let changed = false;
+            for (let elapsed = 16; c.frame(); elapsed += 16) {
+                if (!changed && elapsed > 800) {
+                    expect(c.el.fromBottom).toBeGreaterThan(0); // still on its way
+                    changed = true;
+                    c.box(611);
+                }
+            }
+            expect(changed).toBe(true);
+            expect(c.el.fromBottom).toBe(0);
+            expect(c.settled).not.toHaveBeenCalled(); // it arrived: the valve never had to
+            expect(c.atBottom()).toBe(true);
+        });
+    }
+
+    it('the valve still lets go 800 ms after the last step, when a scroll stops short of the end', () => {
+        const c = chat(4000, 642, 900);
+        c.jump(30, 16);
+        for (let i = 0; i < 20; i++) c.frame();
+        c.drag(0); // the scroll stops where it is (nothing moved: not a step up either)
+        expect(c.pin.heading()).toBe(true);
+        vi.advanceTimersByTime(799);
+        expect(c.pin.heading()).toBe(true);
+        vi.advanceTimersByTime(1);
+        expect(c.pin.heading()).toBe(false);
+        expect(c.settled).toHaveBeenCalledTimes(1);
+    });
+
+    it('a reader who drags the scrollbar up during the jump is let go at once, and the box changing leaves them there', () => {
+        const c = chat(4000, 642, 900);
+        c.jump(30, 16);
+        while (c.frame() && c.el.fromBottom > 100);
+        c.drag(-300);
+        expect(c.pin.heading()).toBe(false);
+        expect(c.atBottom()).toBe(false); // their scroll was read as theirs: Jump to latest is back
+        const top = c.el.scrollTop;
+        c.box(611);
+        expect(c.el.scrollTop).toBe(top);
+        c.box(642);
+        expect(c.el.scrollTop).toBe(top);
     });
 
     it('a jump from the end makes no scroll event: it lets go after 800 ms and squares the state', () => {

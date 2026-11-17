@@ -17,14 +17,14 @@
 /* Home/DM Button - familiar chat-app rail styling */
 .server-icon.home-button .server-icon-inner.home {
     font-size: 1.5rem;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     color: white;
 }
 
 .server-icon.home-button:hover .server-icon-inner.home,
 .server-icon.home-button.active .server-icon-inner.home {
     border-radius: 16px;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     color: white;
 }
 
@@ -76,7 +76,7 @@
 .server-icon:hover .server-icon-inner,
 .server-icon.active .server-icon-inner {
     border-radius: 16px;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     color: #fff;
 }
 
@@ -171,7 +171,7 @@
 }
 
 .server-icon.discover-server:hover .server-icon-inner.discover {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 

@@ -137,7 +137,7 @@
     font-size: 0.7rem;
     font-weight: 600;
     color: #fff;
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     flex-shrink: 0;
 }
 

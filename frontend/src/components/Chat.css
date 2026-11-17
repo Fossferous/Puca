@@ -520,7 +520,7 @@
 
 .create-btn {
     padding: 0.65rem 1.25rem;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--brand-fill), var(--brand-fill-hover));
     border: none;
     border-radius: 6px;
     color: #ffffff;
@@ -535,8 +535,10 @@
     cursor: not-allowed;
 }
 
+/* Darker under the pointer, not fainter: at 0.9 opacity its white words were 4.23:1 on Pink and
+   under 4.5 on every theme but Light, which had undone it (lightTheme.css). */
 .create-btn:hover:not(:disabled) {
-    opacity: 0.9;
+    filter: brightness(0.9);
 }
 
 .channel-list,
@@ -1699,7 +1701,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .load-older-btn:hover:not(:disabled) {
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
 }
 
@@ -1895,7 +1897,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .task-mode-btn.active {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #ffffff;
 }
 
@@ -2009,7 +2011,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .advanced-toggle.active {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 
@@ -2047,12 +2049,13 @@ button.message-attachment.error { color: #ffb4b4; }
    the 0-1-0 class rules of every other button in the form — the emoji and
    task toggles were silently wearing the send gradient and its
    `color: var(--bg-primary)` (near-black on dark themes) instead of their own
-   muted-icon styling. White text, not var(--bg-primary): the gradient is
-   mid-luminance in every theme, and in the dark family bg-primary is
-   near-black on it. */
+   muted-icon styling. White text, not var(--bg-primary), on the brand's
+   fills (theme.css), which hold white words at 4.5:1 on every theme. It ran
+   from --accent-lavender, under white words 2.7:1 on Dark and 1.5 to 2.7:1
+   on the colour themes (Create Channel's .create-btn the same). */
 .message-form button[type="submit"] {
     padding: 0.75rem 1.25rem;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--brand-fill-hover), var(--brand-fill));
     border: none;
     border-radius: 8px;
     color: #ffffff;
@@ -2640,7 +2643,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3171,14 +3174,14 @@ body.voice-drag-active {
     font-size: 0.9rem;
 }
 .autocomplete-item.active {
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
 }
 .ac-avatar {
     width: 22px; height: 22px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 0.7rem; font-weight: 600; color: #fff;
-    background: var(--brand-primary, #5865f2); flex-shrink: 0;
+    background: var(--brand-fill); flex-shrink: 0;
 }
 .ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
 /* A name too long for the row ends in an ellipsis on its own line, never mid-letter under the

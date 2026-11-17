@@ -54,7 +54,8 @@ export function repinOnResize(
         const contentChanged = h !== height;
         height = h;
         box = b;
-        if (contentChanged ? atBottom() : wasAtEnd || headingToEnd()) el.scrollTop = h;
+        // A list on its way to the end gets there whichever of the two changed.
+        if (headingToEnd() || (contentChanged ? atBottom() : wasAtEnd)) el.scrollTop = h;
     };
 }
 
@@ -73,7 +74,8 @@ export interface ScrollToEnd {
     heading(): boolean;
     /** For each scroll event: true while the scroll is still this one's own, which the
      *  caller then ignores (a smooth scroll's steps would read as the reader scrolling
-     *  up). The event that finds the list at its end lets go. */
+     *  up). The event that finds the list at its end lets go; one that finds it moved
+     *  back up lets go and is the reader's (false), for the caller to read as theirs. */
     ownScroll(el: Scroller): boolean;
 }
 
@@ -88,28 +90,43 @@ export interface ScrollToEnd {
  * and WebKit, a jump of 900 px with the typing indicator (31 px) coming up 100,
  * 60 or 20 px from the end: 31 px short every time when let go within the slop,
  * at the end every time when held to the end. It also lets go when the reader
- * takes the wheel or a finger (cancel), and after `settleMs` with no arrival: a
- * scroll that was already at the end makes no event. `onSettle` then squares
- * the caller's state with where the list really is.
+ * takes the wheel or a finger (cancel), or scrolls back up some other way (a
+ * drag of the scrollbar, PageUp: a step up is never this scroll's), and
+ * `settleMs` after its last step with no arrival: a scroll that was already at
+ * the end makes no event. `onSettle` then squares the caller's state with where
+ * the list really is. After its LAST step, not its start: Chromium takes up to
+ * 1.5 s for a long one (measured 892 ms for 3,000 px, 1,281 for 6,000, 1,497
+ * for 12,000; WebKit about 210 ms whatever the length), and a valve counted from
+ * the start let go mid-flight, so the indicator coming up after that left a
+ * 6,000 px jump 31 px short again.
  */
 export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd {
     let on = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let last: number | null = null;
     const stop = () => {
         on = false;
+        last = null;
         if (timer !== null) { clearTimeout(timer); timer = null; }
+    };
+    const clock = () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(() => { stop(); onSettle(); }, settleMs);
     };
     return {
         start() {
             stop();
             on = true;
-            timer = setTimeout(() => { on = false; timer = null; onSettle(); }, settleMs);
+            clock();
         },
         cancel: stop,
         heading: () => on,
         ownScroll(el) {
             if (!on) return false;
-            if (atEnd(el)) stop();
+            if (atEnd(el)) { stop(); return true; }
+            if (last !== null && el.scrollTop < last - 1) { stop(); return false; }
+            last = el.scrollTop;
+            clock();
             return true;
         },
     };

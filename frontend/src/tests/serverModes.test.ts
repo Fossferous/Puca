@@ -367,7 +367,17 @@ function themes(): Record<string, { surfaces: Rgb[]; primary: Rgb; texts: Rgb[];
     const root = block(':root');
     const value = (text: string, name: string): Rgb => parseCssColor(token(text, name) ?? token(root, name) ?? '')!;
     const out: Record<string, { surfaces: Rgb[]; primary: Rgb; texts: Rgb[]; brand: Rgb[] }> = {};
-    const brand = (text: string) => ['--brand-primary', '--brand-hover', '--brand-active'].map(name => value(text, name));
+    // A theme's fills under white words: its own --brand-fill pair where it has one, else the brand
+    // and its hover (styles/theme.css), and the pressed shade, which rules fill with too.
+    const own = (text: string, name: string) => {
+        const t = token(text, name);
+        return t && !t.startsWith('var(') ? parseCssColor(t) : null;
+    };
+    const brand = (text: string) => [
+        own(text, '--brand-fill') ?? value(text, '--brand-primary'),
+        own(text, '--brand-fill-hover') ?? value(text, '--brand-hover'),
+        value(text, '--brand-active'),
+    ];
     for (const [name, text] of [['dark', root], ['light', block('[data-theme="light"]')], ['amoled', block('[data-theme="amoled"]')]] as const) {
         const primary = value(text, '--bg-primary');
         out[name] = {
@@ -470,19 +480,20 @@ describe('an accent on eight themes', () => {
         expect(accentTokens('', [])).toBeNull();
     });
 
-    // A theme's own brand is a button's fill under white words as an accent is (theme.css):
-    // white on Purple's, Green's, Orange's and Yellow's was 4.23, 3.18, 3.58 and 2.93:1.
-    it("holds every theme's own brand, and its hover and pressed shades, to the same rule", () => {
+    // A theme's fills under white words are held to the rule an accent is (theme.css): white on
+    // Purple's, Green's, Orange's and Yellow's brand, which they filled with, was 4.23, 3.18, 3.58
+    // and 2.93:1, and on Green's, Orange's and Yellow's hover 4.12, 4.40 and 3.75.
+    it("holds every theme's fills, under the pointer and pressed too, to the same rule", () => {
         for (const [name, theme] of Object.entries(themes())) {
             theme.brand.forEach((shade, i) => {
-                expect(contrast(shade, WHITE), `${name} brand ${i} under a white label`).toBeGreaterThanOrEqual(ACCENT_MIN_LABEL_CONTRAST);
+                expect(contrast(shade, WHITE), `${name} fill ${i} under a white label`).toBeGreaterThanOrEqual(ACCENT_MIN_LABEL_CONTRAST);
             });
             for (const surface of theme.surfaces) {
-                expect(contrast(theme.brand[0], surface), `${name} brand on its surface`).toBeGreaterThanOrEqual(ACCENT_MIN_SURFACE_CONTRAST);
+                expect(contrast(theme.brand[0], surface), `${name} fill on its surface`).toBeGreaterThanOrEqual(ACCENT_MIN_SURFACE_CONTRAST);
             }
         }
-        // NEGATIVE CONTROL: those four brands as they were fail it.
-        for (const old of ['#8b5cf6', '#23a55a', '#e8590c', '#c28e0e']) {
+        // NEGATIVE CONTROL: those brands and hovers, the fills as they were, fail it.
+        for (const old of ['#8b5cf6', '#23a55a', '#e8590c', '#c28e0e', '#1f8f4e', '#cf4f0b', '#aa7c0c']) {
             expect(contrast(parseCssColor(old)!, WHITE), old).toBeLessThan(ACCENT_MIN_LABEL_CONTRAST);
         }
     });

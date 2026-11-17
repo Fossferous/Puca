@@ -794,11 +794,14 @@ export function Chat({ onLogout }: ChatProps) {
     // list's box takes it to the end (the effect with repinOnResize below).
     // It lasts until the list is AT its end, not within AT_BOTTOM_SLOP: let go
     // there, Jump to latest stopped 31 px short when the typing indicator came
-    // up in its last stretch. Safety valve: if the scroll never lands (or
-    // scrollTo produced no event because we were already at the bottom), it
-    // stops swallowing scrolls after a beat and RECONCILES the state with
-    // where the viewport actually is, because the events that would have
-    // corrected it were swallowed.
+    // up in its last stretch; or until a step goes back UP, which is the
+    // reader's (a scrollbar drag, a key: the wheel and a finger cancel it
+    // below). Safety valve: if the scroll stops short (or scrollTo produced no
+    // event because we were already at the bottom), it stops swallowing
+    // scrolls a beat after its last step, not its start (a long smooth scroll
+    // takes Chromium 1.5 s), and RECONCILES the state with where the viewport
+    // actually is, because the events that would have corrected it were
+    // swallowed.
     const [pinning] = useState(() => scrollToEnd(800, () => {
         const c = messagesContainerRef.current;
         if (!c || !showingMessageListRef.current) return;

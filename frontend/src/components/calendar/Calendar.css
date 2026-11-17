@@ -11,7 +11,7 @@
 .cal-title { margin: 0 0 0 8px; font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-views { display: inline-flex; border: 1px solid var(--border-subtle); border-radius: 8px; overflow: hidden; }
 .cal-viewbtn { border: none; background: transparent; color: var(--text-muted); padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px; }
-.cal-viewbtn.on { background: var(--brand-primary, #5865f2); color: #fff; }
+.cal-viewbtn.on { background: var(--brand-fill); color: #fff; }
 .cal-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--text-muted); }
 .cal-toggles label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .cal-foot { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
@@ -41,13 +41,16 @@
 .cal-month-row .cal-cell:last-child { border-right: none; }
 .cal-month-row:last-child .cal-cell { border-bottom: none; }
 .cal-cell.other { background: var(--bg-modifier-hover); opacity: 0.75; }
+/* Today among another month's days (the grid's first or last week) is not faded: its date's white
+   on the brand's fill was 3.74:1 at 0.75. */
+.cal-cell.other.today { opacity: 1; }
 .cal-cell.selected { box-shadow: inset 0 0 0 2px var(--brand-primary, #5865f2); }
 .cal-cell.drop, .cal-tg-slot.drop, .cal-tg-allday-cell.drop { background: var(--bg-modifier-selected); }
 .cal-daynum {
     align-self: flex-start; min-width: 26px; height: 26px; padding: 0 6px; border: none; border-radius: 13px;
     background: transparent; color: var(--text-normal); font: inherit; font-size: 13px; cursor: pointer;
 }
-.cal-cell.today .cal-daynum { background: var(--brand-primary, #5865f2); color: #fff; font-weight: 600; }
+.cal-cell.today .cal-daynum { background: var(--brand-fill); color: #fff; font-weight: 600; }
 .cal-daynum:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
 .cal-cell-chips { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cal-dots { display: none; }

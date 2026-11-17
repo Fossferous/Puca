@@ -167,7 +167,6 @@
 [data-theme="light"] .action-reject:hover { color: #11111b; }
 [data-theme="light"] .emoji-file-btn:hover { background: var(--bg-modifier-selected); }
 [data-theme="light"] .keybind-clear:hover:not(:disabled) { color: var(--text-danger); }
-[data-theme="light"] .create-btn:hover:not(:disabled) { opacity: 1; }
 [data-theme="light"] .notes-textbtn.danger:hover { color: #9a1b12; }
 /* Faint words on a row a hover greys: --text-faint holds 4.5:1 only on lighter ones. */
 [data-theme="light"] .member-item.offline:hover .member-name,

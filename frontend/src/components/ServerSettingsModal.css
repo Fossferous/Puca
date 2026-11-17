@@ -222,7 +222,7 @@
     width: 100px;
     height: 100px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -245,7 +245,7 @@
 .upload-btn-sm {
     display: inline-block;
     padding: 6px 12px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
     border-radius: 4px;
     font-size: 13px;
@@ -253,7 +253,7 @@
 }
 
 .upload-btn-sm:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .upload-btn-sm input {
@@ -358,7 +358,7 @@
 /* Buttons */
 .primary-btn {
     padding: 10px 20px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     border: none;
     border-radius: 4px;
     color: #fff;
@@ -368,7 +368,7 @@
 }
 
 .primary-btn:hover:not(:disabled) {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .primary-btn:disabled {
@@ -555,7 +555,7 @@
 
 .copy-btn {
     padding: 6px 12px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     border: none;
     border-radius: 4px;
     color: #fff;
@@ -564,7 +564,7 @@
 }
 
 .copy-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .copy-btn.copied {

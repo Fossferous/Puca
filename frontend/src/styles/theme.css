@@ -96,6 +96,13 @@
     --brand-primary: #5865f2;
     --brand-hover: #4752c4;
     --brand-active: #3c45a5;
+    /* The brand as a fill under white words (a filled button, a selected tab, a badge) and that
+       fill under the pointer: here the brand itself. A colour theme whose brand is too bright for
+       white words on it has fills of its own (below), and a server mode's accent sets both
+       (modes/useModeLook.ts). The brand itself stays for what is not under words: a focus ring, a
+       border, a bar. */
+    --brand-fill: var(--brand-primary);
+    --brand-fill-hover: var(--brand-hover);
     /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
     --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
     /* A link under the pointer (index.css), and a message link's colour (Chat.css): the brand as
@@ -396,15 +403,15 @@
     --login-grad-3: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.6) 20%);
     --login-accent: var(--brand-primary);
     --login-accent-2: var(--brand-hover);
+    /* The sign-in button's gradient, under white words (Login.css). */
+    --login-fill: var(--brand-fill);
+    --login-fill-2: var(--brand-fill-hover);
 
     /* Keep the composer/profile gradients on-hue: the :root lavender next to
        a green or orange brand would clash, so re-derive it as a light tint of
        the theme's own hue. */
     --accent-lavender: hsl(var(--theme-hue) 60% 72%);
 
-    /* The brand as words, from a brand deep enough for white words on it (below): half white
-       keeps it as light as it was from the brighter brand, and so where it held 4.5:1. */
-    --brand-text: color-mix(in srgb, var(--brand-primary) 50%, #fff);
 }
 
 [data-theme="pink"] {
@@ -415,45 +422,53 @@
     --brand-active: #a62867;
 }
 
-/* Each brand is a button's fill under white words, the rule a server mode's accent is held to
-   (api/serverModes.ts, accentTokens: a white label at 4.5:1, and 3:1 on --bg-primary and
-   --bg-secondary). The brand as words is --brand-text. These were brighter: white on them was
-   4.23:1 (purple), 3.18 (green), 3.58 (orange) and 2.93 (yellow), and green's, orange's and
-   yellow's hover under 4.5 too (e2e/light-surfaces-real-browser.mjs, section 7). Each keeps its
-   hue; the hover and pressed shades keep the steps the theme had. */
+/* A fill under white words is held to the rule a server mode's accent is (api/serverModes.ts,
+   accentTokens: a white label at 4.5:1, and 3:1 on --bg-primary and --bg-secondary). White on
+   these brands was 4.23:1 (purple), 3.18 (green), 3.58 (orange) and 2.93 (yellow), and on
+   green's, orange's and yellow's hover under 4.5 too (e2e/light-surfaces-real-browser.mjs, section
+   7), so each has fills of its own: its hue, at the nearest lightness that holds, and the hover a
+   step below as the theme had it. The brand itself is kept as it was for what is not under words,
+   where a deeper one would be under 3:1 on a lighter surface (a focus ring, the sign-in page). */
 [data-theme="purple"] {
     --theme-hue: 265;
     --theme-sat: 30%;
-    --brand-primary: #8452f5;
+    --brand-primary: #8b5cf6;
     --brand-hover: #7a4ce0;
     --brand-active: #6a41c4;
+    --brand-fill: #8452f5;
 }
 
 [data-theme="green"] {
     --theme-hue: 150;
     --theme-sat: 24%;
-    --brand-primary: #1c8348;
-    --brand-hover: #186d3c;
-    --brand-active: #135830;
+    --brand-primary: #23a55a;
+    --brand-hover: #1f8f4e;
+    --brand-active: #1a7a43;
+    --brand-fill: #1c8348;
+    --brand-fill-hover: #186d3c;
 }
 
 [data-theme="orange"] {
     --theme-hue: 25;
     --theme-sat: 26%;
-    --brand-primary: #cb4e0a;
-    --brand-hover: #b24509;
-    --brand-active: #973a08;
+    --brand-primary: #e8590c;
+    --brand-hover: #cf4f0b;
+    --brand-active: #b4450a;
+    --brand-fill: #cb4e0a;
+    --brand-fill-hover: #b24509;
 }
 
 /* Yellow runs LOWER saturation than the others: high-sat yellow darks go
-   olive/brown, and the brand is a gold (not pure yellow), deep enough that
-   white button text holds 4.5:1 on it, as on the blurple. */
+   olive/brown, and the brand is a gold (not pure yellow); its fill is a
+   deeper gold, under which white button text holds 4.5:1 as on the blurple. */
 [data-theme="yellow"] {
     --theme-hue: 42;
     --theme-sat: 20%;
-    --brand-primary: #976f0b;
-    --brand-hover: #7f5d09;
-    --brand-active: #674c08;
+    --brand-primary: #c28e0e;
+    --brand-hover: #aa7c0c;
+    --brand-active: #926b0b;
+    --brand-fill: #976f0b;
+    --brand-fill-hover: #7f5d09;
 }
 
 /* ==================== High Contrast (Accessibility) ==================== */

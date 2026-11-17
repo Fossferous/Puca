@@ -134,10 +134,11 @@
 .login-button {
   padding: 0.875rem 1.5rem;
   /* White on the stock cyan end was 1.7:1; these hold it at 5.9:1 or more. A colour theme's own
-     --login-accent pair is its brand, as before. */
+     pair is its brand's fills (theme.css): its --login-accent pair, the brand itself, was 2.9 to
+     4.2:1 under white words, and stays for the words and the field's edge. */
   background: linear-gradient(135deg,
-      var(--login-accent-2, #6d28d9) 0%,
-      var(--login-accent, #0369a1) 100%);
+      var(--login-fill-2, var(--login-accent-2, #6d28d9)) 0%,
+      var(--login-fill, var(--login-accent, #0369a1)) 100%);
   border: none;
   border-radius: 10px;
   color: #fff;

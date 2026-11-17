@@ -99,8 +99,7 @@ const OLD_SHARED = `
 /* #6d6f78: the dark themes' --text-faint until 2026-11-12, now itself 4.5:1 (theme.css). */
 .notes-popover h4, .notes-labels-hint, .nick-edit-modal .settings-hint { color: #6d6f78 !important; }
 .link-preview-site { color: #6c7086 !important; }
-/* #c28e0e: Yellow's brand until 2026-11-17, now one white words hold 4.5:1 on (theme.css). */
-[data-theme="yellow"] :is(.sched-btn.primary, .sched-seg button.on, .notes-update-strip-btn) { background: #c28e0e !important; }
+.sched-btn.primary, .sched-seg button.on, .notes-update-strip-btn { background: var(--brand-primary) !important; }
 .nick-edit-actions .save-btn { background: var(--brand-primary) !important; color: var(--bg-primary) !important; }
 `;
 // In the whole-app sweep, what is not drawn as the skeleton has it: a class, each one read and
@@ -194,6 +193,8 @@ button.ta-file.saved { color: #7fd18b !important; } button.ta-file.error { color
 .role-loading { color: #8e9297 !important; }
 .role-modal-content .cancel-btn { color: var(--text-muted) !important; }
 .invite-preview-icon, .discover-card-icon { background: linear-gradient(135deg, var(--brand-primary), var(--accent-pink)) !important; }
+/* Create Channel's gradient ran to the lavender then (it runs on the brand's fills now, Chat.css). */
+.create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)) !important; }
 .discover-empty-hint, .discover-member-count { color: #72767d !important; }
 .join-error { color: var(--color-danger) !important; }
 .recovery-word-num { color: #6d6f78 !important; }
@@ -427,7 +428,8 @@ const pageReader = () => {
         return answer;
     };
     const hasWords = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map()) => {
+    // `only`, if given, picks which of root and what is in it are read.
+    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map(), only = null) => {
         const rows = [];
         const add = (el, kind, need) => {
             const style = getComputedStyle(el);
@@ -459,6 +461,7 @@ const pageReader = () => {
             });
         };
         for (const el of [root, ...root.querySelectorAll('*')]) {
+            if (only && !only(el)) continue;
             if (el.hasAttribute('data-icon')) continue;
             if (el.tagName === 'OPTION' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
             if (el.matches(':disabled')) continue; // 1.4.3 and 1.4.11 exempt a control that cannot be used
@@ -876,12 +879,14 @@ for (const [name, options, sheetName, url] of [
 //    at rest and hovered at 1280x800, and at rest and tapped at 390x844 on a touchscreen:
 //      - a message link's words, at rest and under the pointer (--brand-primary: 3.82:1 on Dark's
 //        message surface, 3.9 on Pink's, 4.23 on Purple's, 3.54 on a row under the pointer);
-//      - white words on a fill of the brand's own colours, a filled button's (2.93:1 on Yellow,
-//        3.18 on Green, 3.58 on Orange, 4.23 on Purple, at rest; under the pointer too);
+//      - the words on a fill of the brand's own colours, a filled button's (white on it 2.93:1 on
+//        Yellow, 3.18 on Green, 3.58 on Orange, 4.23 on Purple, at rest; under the pointer too;
+//        on Create Channel's gradient through the lavender 1.53 to 2.72 on all seven), read on
+//        every colour its paint has, dimmed as it is drawn, whatever the words' own colour;
 //      - the device list's danger button (white on the dark palette's red, 3.69:1 on all seven).
 //    A fill is found by what it is painted with, not by name, so a new filled button is held too.
 //    NEGATIVE CONTROL: the three as they were, OLD_OTHER, fail on the themes they failed on.
-const BRAND_FILLS = ['--brand-primary', '--brand-hover', '--brand-active'];
+const BRAND_FILLS = ['--brand-primary', '--brand-hover', '--brand-active', '--brand-fill', '--brand-fill-hover'];
 const NAMED_ON_EVERY_THEME = ['message-link', 'device-btn-danger'];
 // A class that dims what is in it with opacity, and why what it dims is not held here.
 const NOT_ON_EVERY_THEME = [
@@ -889,14 +894,12 @@ const NOT_ON_EVERY_THEME = [
 ];
 const OLD_OTHER = `
 .message-link, .message-link:not(.__never) { color: var(--mode-brand-text, var(--brand-primary)) !important; }
-[data-theme="purple"] { --brand-primary: #8b5cf6 !important; }
-[data-theme="green"] { --brand-primary: #23a55a !important; --brand-hover: #1f8f4e !important; --brand-active: #1a7a43 !important; }
-[data-theme="orange"] { --brand-primary: #e8590c !important; --brand-hover: #cf4f0b !important; --brand-active: #b4450a !important; }
-[data-theme="yellow"] { --brand-primary: #c28e0e !important; --brand-hover: #aa7c0c !important; --brand-active: #926b0b !important; }
+:root { --brand-fill: var(--brand-primary) !important; --brand-fill-hover: var(--brand-hover) !important; }
+.create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)) !important; }
 .device-btn-danger, .device-btn-danger:not(.__never) { background: var(--danger, #f04747) !important; }
 `;
 {
-    console.log('\non every theme: message links, white words on the brand\'s fills, the device list\'s danger button');
+    console.log('\non every theme: message links, the words on the brand\'s fills, the device list\'s danger button');
     const themedReader = ({ named, fills }) => {
         const rgb = (colour) => {
             const srgb = colour.match(/^color\(srgb ([^)]+)\)$/);
@@ -928,6 +931,17 @@ const OLD_OTHER = `
             }
             return document.querySelectorAll('[data-brand-filled]').length;
         };
+        // What paints the paper under an element's words: itself, or the nearest one around it
+        // with a colour or a gradient of its own.
+        const painterOf = (el) => {
+            for (let up = el; up; up = up.parentElement) {
+                const style = getComputedStyle(up);
+                if (style.backgroundImage.includes('gradient(')) return up;
+                const [, , , a = 1] = (style.backgroundColor.match(/[\d.]+/g) ?? [0, 0, 0, 0]).map(Number);
+                if (a > 0) return up;
+            }
+            return null;
+        };
         // The words on each of those, and each named place, read as the sweep reads them.
         window.__readThemed = () => {
             const rows = [];
@@ -942,7 +956,11 @@ const OLD_OTHER = `
                 const section = el.closest('section[data-sweep]');
                 for (const row of window.__measure(el, page, memo, dims)) rows.push({ ...row, kind, in: section?.getAttribute('data-in') ?? '' });
             };
-            for (const el of document.querySelectorAll('[data-brand-filled]')) take(el, 'fill');
+            // Every word whose paper the fill is, whatever its colour, on every colour the paint has.
+            for (const fill of document.querySelectorAll('[data-brand-filled]')) {
+                const section = fill.closest('section[data-sweep]');
+                for (const row of window.__measure(fill, page, memo, dims, el => painterOf(el) === fill)) rows.push({ ...row, kind: 'fill', in: section?.getAttribute('data-in') ?? '' });
+            }
             // A message's words are drawn in every arm of MessageContent, some fifteen thousand links:
             // one of each in every place, by the classes around it out to its block of the sweep.
             const seen = new Set();
@@ -959,26 +977,20 @@ const OLD_OTHER = `
             return rows;
         };
     };
-    const near = (a, b) => a.split(',').every((v, i) => Math.abs(Number(v) - Number(b.split(',')[i])) <= 1);
-    const KINDS = ['a message link', 'white words on a brand fill', 'the device list\'s danger button'];
+    const KINDS = ['a message link', 'words on a brand fill', 'the device list\'s danger button'];
     // What dims a place here, and why it is not read: each must still be met, or it is stale.
     const excused = new Set();
-    const kindOf = (row, fillsAt) => {
+    const kindOf = (row) => {
         const dimmer = NOT_ON_EVERY_THEME.find(([name]) => row.dim.split(' ').includes(name));
         if (dimmer) { excused.add(dimmer[0]); return null; }
-        if (row.kind === 'message-link') return KINDS[0];
-        if (row.kind === 'device-btn-danger') return KINDS[2];
-        // On the fill itself, not on something of its own inside it.
-        if (fillsAt.some(fill => near(row.under, fill)) && row.ink.split(',').every(v => Number(v) >= 245)) return KINDS[1];
-        return null;
+        return { 'message-link': KINDS[0], fill: KINDS[1], 'device-btn-danger': KINDS[2] }[row.kind];
     };
     const read = async (page) => {
         const byLook = [];
         for (const look of LOOKS) {
             await page.evaluate(l => window.__look(l), look);
-            const fillsAt = await page.evaluate(() => window.__fillsNow());
             const rows = (await page.evaluate(() => window.__readThemed()))
-                .map(row => ({ ...row, kind: kindOf(row, fillsAt) })).filter(row => row.kind)
+                .map(row => ({ ...row, kind: kindOf(row) })).filter(row => row.kind)
                 .map(row => ({ ...row, surface: `${row.kind}, in ${row.in}` }));
             byLook.push([look.join('/'), rows]);
         }
@@ -1026,7 +1038,7 @@ const OLD_OTHER = `
     check(stale.length === 0, `and every entry of the list of what is not held here (${NOT_ON_EVERY_THEME.map(([name]) => name).join(' ')}) still dims something`, stale.join(' '));
     const poor = collect(all);
     for (const { worst, looks } of poor) console.log(describe(worst, looks));
-    check(poor.length === 0, `a message link, white words on a brand fill and the device list's danger button hold the bar on all eight themes, with and without high contrast, at rest, hovered and tapped, in ${readings} readings`, `${poor.length} below`);
+    check(poor.length === 0, `a message link, the words on a brand fill and the device list's danger button hold the bar on all eight themes, with and without high contrast, at rest, hovered and tapped, in ${readings} readings`, `${poor.length} below`);
 }
 
 // The file of Light's rules cannot reach another theme.

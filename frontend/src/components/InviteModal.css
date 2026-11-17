@@ -141,7 +141,7 @@
 .invite-create-btn {
     width: 100%;
     padding: 12px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     border: none;
     border-radius: 4px;
     color: #fff;
@@ -152,7 +152,7 @@
 }
 
 .invite-create-btn:hover:not(:disabled) {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .invite-create-btn:disabled {
@@ -231,7 +231,7 @@
 
 .invite-copy-btn {
     padding: 6px 12px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     border: none;
     border-radius: 4px;
     color: #fff;
@@ -243,7 +243,7 @@
 }
 
 .invite-copy-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .invite-copy-btn.copied {

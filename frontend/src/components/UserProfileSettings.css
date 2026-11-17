@@ -139,7 +139,7 @@
 .avatar-upload-btn {
     display: inline-block;
     padding: 8px 16px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
     border: none;
     border-radius: 6px;
@@ -150,7 +150,7 @@
 }
 
 .avatar-upload-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 /* Avatar zoom/pan cropper */
@@ -258,7 +258,7 @@
 
 .save-display-name-btn {
     padding: 10px 16px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
     border: none;
     border-radius: 6px;
@@ -269,7 +269,7 @@
 }
 
 .save-display-name-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .save-display-name-btn:disabled {
@@ -325,7 +325,7 @@
 }
 
 .sound-btn:hover {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 
