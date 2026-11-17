@@ -33,6 +33,12 @@
  * the next one is handed: a view any other writer produced (the zoom-follow
  * landing, a wheel, the caret camera) has none, so the step starts from that
  * view as it stands.
+ *
+ * The picture viewer (ImageLightbox) has the same two-finger gesture over the
+ * same kind of view and steps it here too, with its own limits and clamp: it
+ * stopped 140 to 236 px short of an edge at x2.5 on a phone in Edge, and a
+ * sideways slide just above x1 hit the zoom floor half way and came back out
+ * at x1.7. Nothing in this file is the stage's own.
  */
 
 export interface StageView { scale: number; x: number; y: number }
