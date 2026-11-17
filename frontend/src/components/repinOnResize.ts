@@ -91,7 +91,8 @@ export interface ScrollToEnd {
  * 60 or 20 px from the end: 31 px short every time when let go within the slop,
  * at the end every time when held to the end. It also lets go when the reader
  * takes the wheel or a finger (cancel), or scrolls back up some other way (a
- * drag of the scrollbar, PageUp: a step up is never this scroll's), and
+ * drag of the scrollbar, PageUp: a step up, further from the end than it has
+ * been, is never this scroll's), and
  * `settleMs` after its last step with no arrival: a scroll that was already at
  * the end makes no event. `onSettle` then squares the caller's state with where
  * the list really is. After its LAST step, not its start: Chromium takes up to
@@ -103,10 +104,12 @@ export interface ScrollToEnd {
 export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd {
     let on = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let last: number | null = null;
+    let lastTop: number | null = null;
+    let nearest = Infinity;
     const stop = () => {
         on = false;
-        last = null;
+        lastTop = null;
+        nearest = Infinity;
         if (timer !== null) { clearTimeout(timer); timer = null; }
     };
     const clock = () => {
@@ -124,8 +127,14 @@ export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd
         ownScroll(el) {
             if (!on) return false;
             if (atEnd(el)) { stop(); return true; }
-            if (last !== null && el.scrollTop < last - 1) { stop(); return false; }
-            last = el.scrollTop;
+            // The reader's: the list moved up, and is further from the end than this scroll has
+            // been (a slow drag a fraction of a px a step adds up). Content above shrinking moves
+            // it up too, as the browser keeps what is on screen in place (scroll anchoring), but
+            // leaves the distance to the end as it was.
+            const from = el.scrollHeight - el.scrollTop - el.clientHeight;
+            if (lastTop !== null && el.scrollTop < lastTop && from > nearest + 1) { stop(); return false; }
+            lastTop = el.scrollTop;
+            nearest = Math.min(nearest, from);
             clock();
             return true;
         },

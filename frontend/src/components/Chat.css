@@ -535,10 +535,11 @@
     cursor: not-allowed;
 }
 
-/* Darker under the pointer, not fainter: at 0.9 opacity its white words were 4.23:1 on Pink and
-   under 4.5 on every theme but Light, which had undone it (lightTheme.css). */
+/* A darker fill under the pointer, the words kept white: at 0.9 opacity they were 4.23:1 on Pink
+   and under 4.5 on every theme but Light, which had undone it (lightTheme.css), and a
+   brightness(0.9) filter darkens the words with the fill (4.36:1 on Dark and Light). */
 .create-btn:hover:not(:disabled) {
-    filter: brightness(0.9);
+    background: linear-gradient(135deg, var(--brand-fill-hover), var(--brand-fill-hover));
 }
 
 .channel-list,

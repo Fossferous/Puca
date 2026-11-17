@@ -884,11 +884,14 @@ for (const [name, options, sheetName, url] of [
 //        on Create Channel's gradient through the lavender 1.53 to 2.72 on all seven), read on
 //        every colour its paint has, dimmed as it is drawn, whatever the words' own colour;
 //      - the device list's danger button (white on the dark palette's red, 3.69:1 on all seven).
-//    A fill is found by what it is painted with, not by name, so a new filled button is held too.
-//    NEGATIVE CONTROL: the three as they were, OLD_OTHER, fail on the themes they failed on.
+//    A fill is found by what it is painted with, not by name, so a new filled button is held too,
+//    marked at rest and read under the pointer and a tap too whatever the hover paints, with a
+//    brightness() filter counted (any other filter that changes a colour fails the place).
+//    NEGATIVE CONTROLS: the three as they were, OLD_OTHER, fail on the themes they failed on, and
+//    the card table's primary button brightened under the pointer as it was fails on two.
 const BRAND_FILLS = ['--brand-primary', '--brand-hover', '--brand-active', '--brand-fill', '--brand-fill-hover'];
 const NAMED_ON_EVERY_THEME = ['message-link', 'device-btn-danger'];
-// A class that dims what is in it with opacity, and why what it dims is not held here.
+// A class that dims what is in it with opacity, and why a message link it dims is not held here.
 const NOT_ON_EVERY_THEME = [
     ['task-completed', 'a done task is drawn at 0.6 opacity on the seven themes, and every coloured word in it with it: a link in one was 1.65 to 2.4:1 and is 2.4 to 3.2 in the brand as words, a quote 2.5 and code 2.65 on Dark. That is how a done task is drawn there, not a link\'s colour (Light draws one at full strength in its muted colour, lightTheme.css)'],
 ];
@@ -922,14 +925,20 @@ const OLD_OTHER = `
         // look where no other colour is the brand's: on Green the brand is the success green, which
         // Add Friend and a copied invite are filled with, and on Dark the blurple a few fills name
         // outright. Yellow's is no other colour's.
-        window.__markFilled = () => {
+        // `also`: the places marked at rest, by their order on the page, which is the same on the
+        // hovered one: a hover that darkens a fill with color-mix() is no colour of the brand's.
+        window.__markFilled = (also = []) => {
             const now = new Set(window.__fillsNow());
-            for (const el of document.querySelectorAll('section[data-sweep] *')) {
+            const all = [...document.querySelectorAll('section[data-sweep] *')];
+            for (const i of also) all[i].setAttribute('data-brand-filled', '');
+            all.forEach((el, i) => {
                 const style = getComputedStyle(el);
                 const stops = style.backgroundImage.match(/rgba?\([^)]+\)|color\(srgb [^)]+\)/g) ?? [];
                 if (now.has(rgb(style.backgroundColor)) || stops.some(stop => now.has(rgb(stop)))) el.setAttribute('data-brand-filled', '');
-            }
-            return document.querySelectorAll('[data-brand-filled]').length;
+                else if (!el.hasAttribute('data-brand-filled')) return;
+                el.dataset.markedAt = String(i);
+            });
+            return all.filter(el => el.hasAttribute('data-brand-filled')).map(el => Number(el.dataset.markedAt));
         };
         // What paints the paper under an element's words: itself, or the nearest one around it
         // with a colour or a gradient of its own.
@@ -952,14 +961,53 @@ const OLD_OTHER = `
             probe.remove();
             const memo = new Map();
             const dims = new Map();
+            // A filter changes what is painted: brightness() scales the words and what is behind them
+            // inside the element it is on (a hover's brightness(1.12) took white on Yellow's pressed
+            // brand to 4.0:1, and brightness(0.9) darkens white words too). The ones that keep a
+            // colour's lightness, or paint no colour of words, are left; any other is not read, and
+            // fails the place rather than passing it.
+            const KEEPS = ['grayscale', 'blur', 'drop-shadow'];
+            const filterOf = (el) => {
+                let factor = 1;
+                let unread = null;
+                for (let up = el; up && up !== document.documentElement; up = up.parentElement) {
+                    const filter = getComputedStyle(up).filter;
+                    if (!filter || filter === 'none') continue;
+                    for (const [, name, arg] of filter.matchAll(/([a-z-]+)\(((?:[^()]|\([^()]*\))*)\)/g)) {
+                        if (name === 'brightness') factor *= arg.trim().endsWith('%') ? parseFloat(arg) / 100 : parseFloat(arg);
+                        else if (!KEEPS.includes(name)) unread = name;
+                    }
+                }
+                return { factor, unread };
+            };
+            const lum = (c) => {
+                const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+                return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+            };
+            const scaled = (colour, k) => colour.split(',').map(v => Math.min(255, Number(v) * k));
+            const filtered = (row, ink, paper) => {
+                if (ink.unread || paper.unread) return { ...row, ratio: 0, cls: `${row.cls} [filter ${ink.unread || paper.unread} not read]` };
+                if (ink.factor === 1 && paper.factor === 1) return row;
+                const [x, y] = [lum(scaled(row.ink, ink.factor)), lum(scaled(row.under, paper.factor))].sort((p, q) => q - p);
+                return { ...row, ratio: Math.round(((x + 0.05) / (y + 0.05)) * 100) / 100, cls: `${row.cls} [brightness ${ink.factor.toFixed(2)}]` };
+            };
             const take = (el, kind) => {
                 const section = el.closest('section[data-sweep]');
-                for (const row of window.__measure(el, page, memo, dims)) rows.push({ ...row, kind, in: section?.getAttribute('data-in') ?? '' });
+                // Whatever is filtered around a named place is read as if its paper were inside the
+                // filter too: true of every one so far, and a filter there is reported by its name.
+                const around = filterOf(el);
+                for (const row of window.__measure(el, page, memo, dims)) rows.push({ ...filtered(row, around, around), kind, in: section?.getAttribute('data-in') ?? '' });
             };
-            // Every word whose paper the fill is, whatever its colour, on every colour the paint has.
+            // Every word whose paper the fill is, whatever its colour, on every colour the paint has:
+            // one element at a time, for the filter on its words and the one on the fill.
             for (const fill of document.querySelectorAll('[data-brand-filled]')) {
                 const section = fill.closest('section[data-sweep]');
-                for (const row of window.__measure(fill, page, memo, dims, el => painterOf(el) === fill)) rows.push({ ...row, kind: 'fill', in: section?.getAttribute('data-in') ?? '' });
+                const paper = filterOf(fill);
+                for (const el of [fill, ...fill.querySelectorAll('*')]) {
+                    if (painterOf(el) !== fill) continue;
+                    const ink = filterOf(el);
+                    for (const row of window.__measure(el, page, memo, dims, x => x === el)) rows.push({ ...filtered(row, ink, paper), kind: 'fill', in: section?.getAttribute('data-in') ?? '' });
+                }
             }
             // A message's words are drawn in every arm of MessageContent, some fifteen thousand links:
             // one of each in every place, by the classes around it out to its block of the sweep.
@@ -981,7 +1029,8 @@ const OLD_OTHER = `
     // What dims a place here, and why it is not read: each must still be met, or it is stale.
     const excused = new Set();
     const kindOf = (row) => {
-        const dimmer = NOT_ON_EVERY_THEME.find(([name]) => row.dim.split(' ').includes(name));
+        // A message link in a done task only: a fill or the danger button in one is read.
+        const dimmer = row.kind === 'message-link' && NOT_ON_EVERY_THEME.find(([name]) => row.dim.split(' ').includes(name));
         if (dimmer) { excused.add(dimmer[0]); return null; }
         return { 'message-link': KINDS[0], fill: KINDS[1], 'device-btn-danger': KINDS[2] }[row.kind];
     };
@@ -999,6 +1048,7 @@ const OLD_OTHER = `
     const failingOn = (byLook, kind) => new Set(byLook.filter(([, rows]) => below(rows).some(row => row.kind === kind)).map(([look]) => look.split('/')[0]));
     let readings = 0;
     const all = [];
+    let atRest = [];
     for (const [name, url, options] of [
         ['1280x800', sweepUrl, { viewport: { width: 1280, height: 800 } }],
         ['1280x800 hovered and focused', sweepHoveredUrl, { viewport: { width: 1280, height: 800 } }],
@@ -1007,9 +1057,12 @@ const OLD_OTHER = `
     ]) {
         const { page, close } = await open(url, options);
         await page.evaluate(themedReader, { named: NAMED_ON_EVERY_THEME, fills: BRAND_FILLS });
-        // What a fill paints is the same on every look: marked once, on Yellow.
+        // What a fill paints is the same on every look: marked once, on Yellow, with what was
+        // marked at rest.
         await page.evaluate(l => window.__look(l), ['yellow', 'normal']);
-        const marked = await page.evaluate(() => window.__markFilled());
+        const markedHere = await page.evaluate(also => window.__markFilled(also), atRest);
+        if (name === '1280x800') atRest = markedHere;
+        const marked = markedHere.length;
         const byLook = await read(page);
         readings += byLook.reduce((sum, [, rows]) => sum + rows.length, 0);
         all.push(...byLook.map(([look, rows]) => [`${look} ${name}`, rows]));
@@ -1031,6 +1084,17 @@ const OLD_OTHER = `
                 const held = themes.filter(theme => !failing.has(theme));
                 check(held.length === 0, `CONTROL (${name}): ${kind}, as it was, fails on ${themes.join(' ')}`, held.length ? `these still pass: ${held.join(' ')}` : '');
             }
+        }
+        if (name === '1280x800 hovered and focused') {
+            // CONTROL: a filter is read. The card table's and the activities' primary buttons under
+            // the pointer as they were, brightened, which takes white on Yellow's and Green's
+            // pressed brand under the bar; the colours alone would pass them.
+            await page.evaluate(sheet => window.__old(sheet), '.games-btn-primary, .activity-btn-primary { background: var(--brand-active) !important; filter: brightness(1.12) !important; }');
+            const then = await read(page);
+            await page.evaluate(() => window.__old(''));
+            const failing = new Set(then.filter(([, rows]) => below(rows).some(row => /games-btn-primary|activity-btn-primary/.test(row.cls))).map(([look]) => look.split('/')[0]));
+            const held = ['yellow', 'green'].filter(theme => !failing.has(theme));
+            check(held.length === 0, 'CONTROL (1280x800 hovered and focused): a brightness filter is read: the card table\'s and the activities\' primary buttons brightened under the pointer, as they were, fail on yellow green', held.length ? `these still pass: ${held.join(' ')}` : '');
         }
         await close();
     }

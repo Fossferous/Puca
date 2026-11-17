@@ -55,6 +55,8 @@
 
 @media (pointer: fine) {
     .activity-btn:hover { filter: brightness(1.12); }
+    /* As the card table's: brighter, its white words were 4.0:1 on Yellow and 4.46 on Green. */
+    .activity-btn-primary:hover { filter: none; background: color-mix(in srgb, var(--brand-active, #3c45a5) 85%, #000); }
     .activity-icon-btn:hover { background: var(--bg-hover, #1e1f22); color: var(--text-normal, #dbdee1); }
     .activity-card:not(:disabled):hover { border-color: var(--brand-primary, #5865f2); }
 }

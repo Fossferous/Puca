@@ -376,6 +376,35 @@ describe('scrollToEnd: Jump to latest ends at the newest message', () => {
         expect(c.el.scrollTop).toBe(top);
     });
 
+    it('content above shrinking during the jump (scroll anchoring moves it up) does not let it go', () => {
+        // The review's case: a message above deleted mid-jump; the browser keeps what is on screen
+        // in place, so scrollTop falls by the same 200 px and the distance to the end stays.
+        const c = chat(4000, 642, 900);
+        c.jump(30, 16);
+        while (c.frame() && c.el.fromBottom > 300);
+        const from = c.el.fromBottom;
+        // Both at once, then the scroll event the browser's adjustment makes.
+        const top = c.el.scrollTop;
+        c.el.scrollHeight -= 200;
+        c.el.scrollTop = top - 200;
+        c.scrolled();
+        expect(c.el.fromBottom).toBe(from);
+        expect(c.pin.heading()).toBe(true);
+        c.box(611);
+        expect(c.el.fromBottom).toBe(0);
+    });
+
+    it('a reader scrolling back up slowly, under a px a step (middle-click autoscroll), is let go too', () => {
+        const c = chat(4000, 642, 900);
+        c.jump(30, 16);
+        while (c.frame() && c.el.fromBottom > 300);
+        for (let i = 0; i < 4; i++) c.drag(-0.8);
+        expect(c.pin.heading()).toBe(false);
+        const top = c.el.scrollTop;
+        c.box(611);
+        expect(c.el.scrollTop).toBe(top);
+    });
+
     it('a jump from the end makes no scroll event: it lets go after 800 ms and squares the state', () => {
         const c = chat(4000, 642, 0);
         c.jump();
