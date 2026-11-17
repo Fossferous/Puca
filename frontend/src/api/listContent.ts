@@ -621,19 +621,46 @@ export function bodyBytes(text: string): number {
  * save then meets the trashed note's 409 in a component nobody can see. So
  * the editor registers how to finish its save here, per list, and a trash
  * waits on `flushBodySave` before it is sent.
+ *
+ * EVERY field showing the note registers, not only the last one: a note can
+ * be open in Notes' editor and on the desktop as a sticky note at once
+ * (docs/STICKY_NOTES.md), each with words of its own on their way. With one
+ * slot per list, the editor's registration replaced the sticky note's and
+ * closing the editor took it away, so a delete from the sticky note no longer
+ * waited for its last words.
  */
-const bodyFlushes = new Map<number, () => Promise<unknown>>();
+const bodyFlushes = new Map<number, Set<() => Promise<unknown>>>();
 
 /** Register `flush` (finish any pending save now) for a list; returns the
  *  unregister function, which only removes this registration. */
 export function registerBodyFlush(listId: number, flush: () => Promise<unknown>): () => void {
-    bodyFlushes.set(listId, flush);
-    return () => { if (bodyFlushes.get(listId) === flush) bodyFlushes.delete(listId); };
+    let set = bodyFlushes.get(listId);
+    if (!set) { set = new Set(); bodyFlushes.set(listId, set); }
+    // A fresh wrapper per registration, so one function registered twice
+    // (a field remounting) unregisters once each.
+    const entry = () => flush();
+    set.add(entry);
+    return () => {
+        const now = bodyFlushes.get(listId);
+        if (!now) return;
+        now.delete(entry);
+        if (now.size === 0) bodyFlushes.delete(listId);
+    };
 }
 
-/** Finish any pending or in-flight text save for a list. Never throws. */
+/** For tests: forget every registration. A test that leaves a save waiting
+ *  for ever (a gate it never opens) would otherwise hand that wait to the
+ *  next test, since an unmounted field's last save stays registered until it
+ *  answers — which is the point of the registry. */
+export function __resetBodyFlushesForTests(): void {
+    bodyFlushes.clear();
+}
+
+/** Finish every pending or in-flight text save for a list. Never throws. */
 export async function flushBodySave(listId: number): Promise<void> {
-    const flush = bodyFlushes.get(listId);
-    if (!flush) return;
-    try { await flush(); } catch { /* the editor reports its own failure */ }
+    const set = bodyFlushes.get(listId);
+    if (!set || set.size === 0) return;
+    await Promise.all([...set].map(async flush => {
+        try { await flush(); } catch { /* the editor reports its own failure */ }
+    }));
 }

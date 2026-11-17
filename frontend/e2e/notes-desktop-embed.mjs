@@ -58,6 +58,21 @@
 //     server once; an ordinary https link in the same message goes to the
 //     shell as exactly one open_external with its URL; and the same invite
 //     in a note, inside the embedded Notes, opens the same dialog over it.
+//   - sticky notes (docs/STICKY_NOTES.md; components/sticky/): a note put
+//     out as a sticky note from its menu — the shell asked to BIND the slot
+//     to the note before the window is opened at about:blank#puca-sticky-1,
+//     and the note drawn into that popup (a real same-origin window here, as
+//     WebView2's is), dressed in the app's theme and stylesheets, with
+//     nothing of it in Púca's own document; Ctrl+B in it writes the marks,
+//     and the grid's card shows the words in bold (one data layer); Ctrl+N
+//     opens a draft that saves nothing until typed in and then makes exactly
+//     ONE note, in the same window; Ctrl+W closes through the shell; Púca
+//     started again brings the note back WITHOUT Notes being opened; with
+//     none to bring back Notes is not even mounted, and the shell's "new
+//     sticky note" (the shortcut, the tray) mounts it and opens a draft;
+//     Ctrl+D asks in the window and moves the note to the trash; the global
+//     shortcut is registered as Win+Shift+N while signed in and released at
+//     sign-out, which also takes every sticky window and key with it;
 // Negative controls, so none of that can pass vacuously: without the fake
 // shell the SAME rail button opens the Tasks view (the web app's behaviour)
 // and never fetches Notes' chunk; the "Notes is inside the app" check and the
@@ -214,12 +229,46 @@ const FAKE_SHELL = `(() => {
         // asked once at boot. Not under test here; answered as a shell that
         // has none, so the page keeps its in-page pop-outs.
         popout_supported: () => false,
+        // Sticky notes (src-tauri/src/sticky.rs): every call recorded in
+        // order, with the window.open calls (below), so the walk can say the
+        // slot was bound BEFORE its window was asked for. sticky_close closes
+        // the popup itself, as the real shell destroys the window.
+        sticky_supported: () => true,
+        sticky_bind: (a) => { shell.sticky.push(['bind', a]); return null; },
+        sticky_rekey: (a) => { shell.sticky.push(['rekey', a]); return null; },
+        sticky_close: (a) => {
+            shell.sticky.push(['close', a]);
+            const w = shell.windows['puca-sticky-' + (a && a.slot)];
+            if (w && !w.closed) w.close();
+            return null;
+        },
+        sticky_pin: (a) => { shell.sticky.push(['pin', a]); if (a && typeof a.onTop === 'boolean') shell.pins[a.slot] = a.onTop; return !!shell.pins[a && a.slot]; },
+        sticky_drag: (a) => { shell.sticky.push(['drag', a]); return null; },
+        sticky_raise: (a) => { shell.sticky.push(['raise', a]); return null; },
+        sticky_dock: (a) => { shell.sticky.push(['dock', a]); return (a && a.side) || null; },
+        sticky_dock_state: () => null,
+        sticky_set_visible: (a) => { shell.sticky.push(['visible', a]); return null; },
+        sticky_forget: (a) => { shell.sticky.push(['forget', a]); return null; },
+        sticky_show_main: () => { shell.sticky.push(['show-main']); return null; },
+        sticky_hotkey: (a) => { shell.sticky.push(['hotkey', a ? a.binding : null]); return null; },
         // The clip orphan reaper asks once a minute (replayBuffer.ts); a walk
         // that runs past a minute used to meet it unanswered. Nothing native
         // is capturing in this shell.
         clip_capture_status: () => ({ video: null, audio: null }),
     };
     shell.listeners = [];
+    shell.sticky = [];
+    shell.pins = {};
+    shell.windows = {};
+    // The windows the page opens, by name, so sticky_close can close one —
+    // and the order of opens among the sticky calls.
+    const realOpen = window.open.bind(window);
+    window.open = (url, name, features) => {
+        const w = realOpen(url, name, features);
+        if (name) shell.windows[name] = w;
+        if (typeof url === 'string' && url.startsWith('about:blank#puca-sticky-')) shell.sticky.push(['open', url]);
+        return w;
+    };
     /** What the real shell does with a second launch's link: emit it to the
      *  page (deep_link.rs forward_second_instance). Returns how many heard. */
     shell.emit = (event, payload) => {
@@ -229,6 +278,11 @@ const FAKE_SHELL = `(() => {
             if (cb) { cb({ event, id: l.id, payload }); heard++; }
         }
         return heard;
+    };
+    // What Tauri injects beside its internals for the event plugin: an
+    // unlisten (a sign-out stops listening for sticky notes) asks it.
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: (event, id) => { shell.listeners = shell.listeners.filter(l => l.id !== id); },
     };
     window.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main', windowLabel: 'main' } },
@@ -936,6 +990,167 @@ await sleep(300);
 ck('discard: and it left no note behind', await page.locator('.notes-desktop-view').getByText('Asked about', { exact: true }).count() === 0);
 ck('discard: no native dialog on the way', nativeDialogs.length === discardNative && nativeDialogs.length === 0, nativeDialogs.join(' | '));
 
+// =============================================================================
+// 7d. Sticky notes (docs/STICKY_NOTES.md): a note in a window of its own
+//
+// The popups here are real same-origin windows of this headless browser, as
+// WebView2's are of the main page: the main realm draws the note into them.
+// Nothing opens on the desktop.
+const sticky = () => page.evaluate(() => window.__shell.sticky.map(e => JSON.stringify(e)));
+// Ctrl+N and Ctrl+W are THIS browser's own reserved shortcuts: pressed in a
+// headless Chromium popup, Chromium itself opens a window or closes the popup,
+// whatever the page does (a check passed vacuously on that once). WebView2 has
+// no tabs and reserves neither, so in the app they reach the page. They are
+// delivered to the page here as the page would receive them in WebView2.
+const pageKey = (p, key) => p.evaluate(k => {
+    const t = document.activeElement || document.body;
+    t.dispatchEvent(new KeyboardEvent('keydown', { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
+}, key);
+const stickyLog = async () => (await sticky()).map(e => JSON.parse(e));
+const hotkeyAtBoot = (await stickyLog()).filter(e => e[0] === 'hotkey');
+ck('sticky: the shortcut is registered as Win+Shift+N while signed in',
+    hotkeyAtBoot.some(e => e[1] && e[1].keyCode === 0x4E && e[1].win === true && e[1].shift === true && !e[1].ctrl && !e[1].alt),
+    JSON.stringify(hotkeyAtBoot));
+control('"a sticky window exists" answers false before one is asked for', ctx.pages().length > 1, `${ctx.pages().length} page(s)`);
+if (!await notesInsideApp(page)) await page.click('.server-icon.notes-self');
+await until(page, () => !!document.querySelector('.notes-desktop-view .notes-card'), null, 10000);
+await router().click({ button: 'right' });
+const stickyItem = page.locator('.context-menu-item', { hasText: 'Open as sticky note' });
+ck('sticky: the note\'s menu offers Open as sticky note', await stickyItem.count() === 1);
+const firstPopup = ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null);
+await stickyItem.click().catch(() => {});
+const sp1 = await firstPopup;
+ck('sticky: a window opens', !!sp1);
+const log1 = await stickyLog();
+const bindAt = log1.findIndex(e => e[0] === 'bind');
+const openAt = log1.findIndex(e => e[0] === 'open');
+ck('sticky: the shell is asked to bind slot 1 to this note BEFORE the window, at about:blank#puca-sticky-1',
+    bindAt >= 0 && openAt > bindAt && log1[openAt][1] === 'about:blank#puca-sticky-1'
+        && log1[bindAt][1].slot === 1 && /^\d+\/list:\d+$/.test(log1[bindAt][1].place) && log1[bindAt][1].focus === true,
+    JSON.stringify(log1.slice(0, 4)));
+const routerPlace = bindAt >= 0 ? log1[bindAt][1].place : '';
+if (sp1) await sp1.waitForSelector('[data-testid="sticky-note"]', { timeout: 10000 }).catch(() => {});
+ck('sticky: the note is drawn in that window, items and all',
+    !!sp1 && await until(sp1, (items) => items.every(i => document.querySelector('[data-testid="sticky-note"]')?.textContent.includes(i)), CLEAN, 10000),
+    sp1 ? (await sp1.locator('body').innerText().catch(() => '')).slice(0, 200) : 'no window');
+ck('sticky: nothing of it in Púca\'s own document', await page.locator('[data-testid="sticky-note"]').count() === 0);
+const looks = sp1 ? await sp1.evaluate(() => ({
+    theme: document.documentElement.getAttribute('data-theme'),
+    sheets: document.querySelectorAll('style, link[rel="stylesheet"]').length,
+    bg: getComputedStyle(document.querySelector('.sticky-note')).backgroundImage,
+})) : null;
+const mainTheme = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+ck('sticky: dressed as the app — its theme and its stylesheets', !!looks && looks.theme === mainTheme && looks.sheets > 1,
+    JSON.stringify({ looks, mainTheme }));
+ck('sticky: wearing the note\'s colour (mint, set earlier)', !!sp1 && await sp1.locator('.sticky-note[data-color="mint"]').count() === 1);
+
+// Ctrl+B in the sticky note, and the grid's card in bold: one data layer.
+if (sp1) {
+    await sp1.click('.sticky-content textarea').catch(() => {});
+    await sp1.keyboard.type('Remember the spare cable');
+    await sp1.evaluate(() => { const t = document.querySelector('.sticky-content textarea'); t.setSelectionRange(0, 8); });
+    await sp1.keyboard.press('Control+b');
+}
+const marked = sp1 ? await sp1.evaluate(() => document.querySelector('.sticky-content textarea')?.value) : null;
+ck('sticky: Ctrl+B writes the marks around the selection', marked === '**Remember** the spare cable', String(marked));
+await sleep(1500);   // the text saves a pause after typing
+if (sp1) await sp1.click('.sticky-title').catch(() => {});
+ck('sticky: not being typed in, it reads in bold, marks gone',
+    !!sp1 && await sp1.locator('.sticky-content .nb-rendered strong', { hasText: 'Remember' }).count() === 1
+        && !/\*\*/.test(await sp1.locator('.sticky-content .nb-rendered').innerText().catch(() => '**')));
+ck('sticky: and the grid\'s card shows the same words in bold — the same note, the same data',
+    await until(page, () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Set up the new router')
+        && c.querySelector('.notes-card-body strong')?.textContent === 'Remember'), null, 10000));
+
+// Ctrl+N: a draft, nothing saved until typed in, then ONE note.
+const cardsBeforeDraft = await page.locator('.notes-desktop-view .notes-card').count();
+const secondPopup = ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null);
+if (sp1) { await sp1.click('.sticky-content').catch(() => {}); await pageKey(sp1, 'n'); }
+const sp2 = await secondPopup;
+ck('sticky: Ctrl+N opens a new sticky note', !!sp2);
+if (sp2) await sp2.waitForSelector('.sticky-content textarea', { timeout: 10000 }).catch(() => {});
+const draftBind = (await stickyLog()).filter(e => e[0] === 'bind').at(-1);
+ck('sticky: a draft, filed as new', !!draftBind && /^\d+\/new:\d+$/.test(draftBind[1].place) && draftBind[1].slot === 2, JSON.stringify(draftBind));
+await sleep(1200);
+ck('sticky: nothing is saved while it is untouched', await page.locator('.notes-desktop-view .notes-card').count() === cardsBeforeDraft);
+if (sp2) { await sp2.click('.sticky-content textarea').catch(() => {}); await sp2.keyboard.type('Sticky walk draft\nwith a second line'); }
+await sleep(1600);
+if (sp2) await sp2.keyboard.type(' and more');   // typed while the note is being made
+await sleep(1600);
+const draftCards = page.locator('.notes-desktop-view .notes-card', { hasText: 'Sticky walk draft' });
+ck('sticky: its first words make ONE note, named after its first line',
+    await until(page, () => [...document.querySelectorAll('.notes-desktop-view .notes-card-title')].filter(t => t.textContent.trim() === 'Sticky walk draft').length === 1, null, 10000)
+        && await draftCards.count() === 1, `${await draftCards.count()} card(s)`);
+ck('sticky: and the words typed while it was being made reach that note',
+    await until(page, () => [...document.querySelectorAll('.notes-desktop-view .notes-card')].some(c => c.textContent.includes('with a second line and more')), null, 10000));
+const rekey = (await stickyLog()).filter(e => e[0] === 'rekey').at(-1);
+ck('sticky: the same window, now filed under the note', !!rekey && rekey[1].slot === 2 && /^\d+\/list:\d+$/.test(rekey[1].place)
+    && !!sp2 && !sp2.isClosed(), JSON.stringify(rekey));
+ck('sticky: a new sticky note is yellow, in Notes too', await draftCards.getAttribute('data-color').catch(() => null) === 'sand');
+if (sp2 && !sp2.isClosed()) { await sp2.click('.sticky-content').catch(() => {}); await pageKey(sp2, 'w'); }
+const closedByShell = await until(page, () => window.__shell.sticky.some(e => e[0] === 'close' && e[1] && e[1].slot === 2), null, 5000);
+ck('sticky: Ctrl+W closes it through the shell, and the note stays in Notes',
+    closedByShell && !!sp2 && await sp2.waitForEvent('close', { timeout: 5000 }).then(() => true).catch(() => sp2.isClosed()) && await draftCards.count() === 1);
+
+// Púca started again: the note comes back, and Notes is not opened for it.
+// The old page goes first, as quitting would take it; the windows then go,
+// as the shell closes them with their page.
+const storedBefore = await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('pucaSticky')).map(k => localStorage.getItem(k)));
+await page.goto('about:blank');
+for (const p of ctx.pages()) if (p !== page) await p.close().catch(() => {});
+const reopenPopup = ctx.waitForEvent('page', { timeout: 20000 }).catch(() => null);
+await page.goto(`${APP}/chat`);
+const sp3 = await reopenPopup;
+await clearOnboarding(page);
+ck('reopen: Púca started again, and the sticky note came back', !!sp3, JSON.stringify(storedBefore));
+if (sp3) await sp3.waitForSelector('[data-testid="sticky-note"]', { timeout: 10000 }).catch(() => {});
+const reBind = (await stickyLog()).filter(e => e[0] === 'bind');
+ck('reopen: the same note, and it does not take the focus', reBind.length === 1 && reBind[0][1].place === routerPlace && reBind[0][1].focus === false,
+    JSON.stringify(reBind));
+ck('reopen: with its words', !!sp3 && /Remember/.test(await sp3.locator('[data-testid="sticky-note"]').innerText().catch(() => '')));
+ck('reopen: Notes was mounted for it, hidden, and not put on screen', await page.locator('.notes-desktop-view[inert]').count() === 1
+    && !await notesInsideApp(page));
+
+// Ctrl+D asks in the window, then the note goes to the trash and the window with it.
+if (sp3) { await sp3.click('.sticky-content').catch(() => {}); await sp3.keyboard.press('Control+d'); }
+const deleteAsked = !!sp3 && await sp3.waitForSelector('.sticky-confirm[role="alertdialog"]', { timeout: 5000 }).then(() => true).catch(() => false);
+ck('delete: Ctrl+D asks first, in the sticky window, not in Púca\'s', deleteAsked && await page.locator('dialog.app-question').count() === 0);
+ck('delete: nothing deleted while it asks', !(await stickyLog()).some(e => e[0] === 'forget'));
+if (sp3) await sp3.locator('.sticky-confirm .danger').click().catch(() => {});
+await until(page, () => window.__shell.sticky.some(e => e[0] === 'forget'), null, 10000);
+const forgot = (await stickyLog()).filter(e => e[0] === 'forget');
+ck('delete: the note leaves the desktop, and the shell forgets its place', forgot.length === 1 && forgot[0][1].place === routerPlace
+    && !!sp3 && await sp3.waitForEvent('close', { timeout: 5000 }).then(() => true).catch(() => sp3.isClosed()), JSON.stringify(forgot));
+await page.click('.server-icon.notes-self');
+await until(page, () => !!document.querySelector('.notes-desktop-view .notes-card'), null, 10000);
+ck('delete: and it is in the trash, not on the grid', await router().count() === 0);
+
+// None to bring back: Notes is not even mounted, until the shell asks for a new one.
+await page.goto('about:blank');
+await page.goto(`${APP}/chat`);
+await page.waitForSelector('.server-icon.notes-self', { timeout: 20000 }).catch(() => {});
+await clearOnboarding(page);
+await sleep(1500);
+ck('new from the shell: with no sticky notes to bring back, Notes is not mounted', await page.locator('.notes-desktop-view').count() === 0);
+const shellPopup = ctx.waitForEvent('page', { timeout: 15000 }).catch(() => null);
+const heardNew = await page.evaluate(() => window.__shell.emit('sticky://new-note', null));
+const sp4 = await shellPopup;
+ck('new from the shell: the shortcut or the tray opens a new sticky note', heardNew >= 1 && !!sp4, `heard by ${heardNew}`);
+ck('new from the shell: Notes is mounted for it, hidden', await page.locator('.notes-desktop-view[inert]').count() === 1);
+if (sp4) { await sp4.waitForSelector('.sticky-content textarea', { timeout: 10000 }).catch(() => {}); await pageKey(sp4, 'w'); }
+await sleep(800);
+await page.click('.server-icon.notes-self');
+await until(page, () => !!document.querySelector('.notes-desktop-view .notes-card'), null, 10000);
+ck('new from the shell: closed untouched, it made no note', await page.locator('.notes-desktop-view .notes-card-title', { hasText: 'Sticky note' }).count() === 0
+    && await page.locator('.notes-desktop-view .notes-card-title', { hasText: 'Untitled note' }).count() === 0);
+
+// One more out on the desktop, for sign-out to take away.
+await page.locator('.notes-desktop-view .notes-card', { hasText: 'Sticky walk draft' }).click({ button: 'right' }).catch(() => {});
+const lastPopup = ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null);
+await page.locator('.context-menu-item', { hasText: 'Open as sticky note' }).click().catch(() => {});
+const sp5 = await lastPopup;
+ck('setup: a sticky note open for sign-out to close', !!sp5);
+
 // 8. Sign out from Notes: Púca's login, and nothing of Notes left
 // =============================================================================
 const held = await page.evaluate(() => {
@@ -978,6 +1193,13 @@ await sleep(1000);
 const dbsAfter = await cacheDbs();
 ck('sign-out: Notes\' sealed on-device cache is deleted', dbsAfter.length === 0, JSON.stringify(dbsAfter));
 ck('sign-out: no Notes prefs left in storage', await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('pucaNotesPrefs')).length === 0));
+ck('sign-out: no sticky note window left open', ctx.pages().filter(p => p !== page && !p.isClosed()).length === 0,
+    `${ctx.pages().filter(p => p !== page && !p.isClosed()).length} open`);
+ck('sign-out: which notes were out on the desktop is gone from storage', await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('pucaSticky')).length === 0));
+ck('sign-out: the global shortcut is released', await page.evaluate(() => {
+    const h = window.__shell.sticky.filter(e => e[0] === 'hotkey');
+    return h.length > 0 && h[h.length - 1][1] === null;
+}));
 // No conversation's notification outlives the session (api/desktopNotify.ts).
 ck('sign-out: every message notification is taken out of the notification centre',
     await page.evaluate((from) => window.__shell.calls.slice(from).includes('toast_clear_all'), callsBeforeSignOut));

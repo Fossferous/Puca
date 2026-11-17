@@ -382,6 +382,12 @@ export function useNoteCards(): {
     loading: boolean;
     error: unknown;
     tasksPending: boolean;
+    /** The lists AND every server's checklist channels have been read — the
+     *  full set, as a prune needs it (`loading` covers the lists alone). */
+    complete: boolean;
+    /** When each kind was last fetched (notesPrune.ts): a view restored from
+     *  the device cache carries its old fetch times. */
+    gens: PruneGens;
 } {
     const { sources, loading, error, complete, gens } = useNoteSources();
     const prefsQuery = useTabPrefsQuery();
@@ -406,7 +412,7 @@ export function useNoteCards(): {
     // flight (it comes back on rollback; a pruned label does not), or before
     // the trash has been read.
     useSettledAbsencePrune(sources, local, complete && trash.settled, gens, trashKeys);
-    return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
+    return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending, complete, gens };
 }
 
 let prunes: PruneState = newPruneState();

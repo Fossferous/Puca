@@ -1,0 +1,243 @@
+/*
+ * A sticky note window (docs/STICKY_NOTES.md). The whole document is the
+ * note: no page around it. Colours are the note tints Notes already uses
+ * (styles/noteChrome.css), over the theme's own surface, so every one of
+ * the eight themes and high contrast carry over; the bar is the same tint
+ * laid on twice, a step darker, as Microsoft's bar is.
+ */
+body.sticky-doc {
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg-secondary);
+    color: var(--text-normal);
+    font-family: var(--font-primary, system-ui, sans-serif);
+    font-size: 14px;
+}
+
+.sticky-note {
+    --sticky-tint: transparent;
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: linear-gradient(var(--sticky-tint), var(--sticky-tint)), var(--bg-secondary);
+    color: var(--text-normal);
+}
+.sticky-note[data-color="coral"] { --sticky-tint: var(--notes-tint-coral); }
+.sticky-note[data-color="peach"] { --sticky-tint: var(--notes-tint-peach); }
+.sticky-note[data-color="sand"] { --sticky-tint: var(--notes-tint-sand); }
+.sticky-note[data-color="mint"] { --sticky-tint: var(--notes-tint-mint); }
+.sticky-note[data-color="sage"] { --sticky-tint: var(--notes-tint-sage); }
+.sticky-note[data-color="fog"] { --sticky-tint: var(--notes-tint-fog); }
+.sticky-note[data-color="storm"] { --sticky-tint: var(--notes-tint-storm); }
+.sticky-note[data-color="dusk"] { --sticky-tint: var(--notes-tint-dusk); }
+.sticky-note[data-color="blossom"] { --sticky-tint: var(--notes-tint-blossom); }
+.sticky-note[data-color="clay"] { --sticky-tint: var(--notes-tint-clay); }
+.sticky-note[data-color="chalk"] { --sticky-tint: var(--notes-tint-chalk); }
+
+.sticky-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    min-height: 36px;
+    padding: 2px 4px;
+    background: linear-gradient(var(--sticky-tint), var(--sticky-tint)), linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06));
+    border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+    cursor: default;
+    user-select: none;
+}
+.sticky-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0 4px;
+}
+
+.sticky-barbtn,
+.sticky-tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal);
+    cursor: pointer;
+    font-size: 16px;
+}
+.sticky-barbtn:hover,
+.sticky-tool:hover { background: var(--bg-modifier-hover, rgba(127, 127, 127, 0.18)); }
+.sticky-barbtn:focus-visible,
+.sticky-tool:focus-visible,
+.sticky-menuitem:focus-visible,
+.sticky-textbtn:focus-visible,
+.sticky-check:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 1px;
+}
+.sticky-barbtn.is-on { color: var(--brand-primary); background: var(--bg-modifier-selected, rgba(127, 127, 127, 0.24)); }
+.sticky-tool:disabled { opacity: 0.5; cursor: default; }
+
+.sticky-menu {
+    position: absolute;
+    top: 38px;
+    right: 6px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    max-width: calc(100vw - 12px);
+    max-height: calc(100vh - 48px);
+    overflow: auto;
+    padding: 6px;
+    border-radius: 8px;
+    background: var(--bg-floating, var(--bg-primary));
+    color: var(--text-normal);
+    box-shadow: var(--elevation-high, 0 8px 24px rgba(0, 0, 0, 0.35));
+    border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+.sticky-menu-colors { padding: 4px 2px 8px; }
+.sticky-menu-colors .notes-swatches { flex-wrap: wrap; }
+.sticky-menuitem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.sticky-menuitem:hover { background: var(--bg-modifier-hover, rgba(127, 127, 127, 0.18)); }
+.sticky-menuitem.danger { color: var(--text-danger, #d83c3e); }
+
+.sticky-confirm {
+    margin: 6px;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--bg-floating, var(--bg-primary));
+    border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+.sticky-confirm p { margin: 0 0 8px; line-height: 1.35; }
+.sticky-confirm-ask { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-normal); }
+.sticky-confirm-actions { display: flex; gap: 8px; margin-top: 10px; }
+.sticky-textbtn {
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.35));
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal);
+    font: inherit;
+    cursor: pointer;
+}
+.sticky-textbtn.danger { background: var(--button-danger-background, #d83c3e); border-color: transparent; color: #fff; }
+
+.sticky-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 8px 10px;
+}
+/* The note's text field grows with its text; here the window is its frame. */
+.sticky-content .note-body-field .nb-text {
+    width: 100%;
+    min-height: 4em;
+    background: transparent;
+    color: inherit;
+    border: 0;
+    font: inherit;
+    line-height: 1.45;
+}
+.sticky-content .note-body-field textarea.nb-text:focus { outline: none; }
+
+.sticky-items ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.sticky-item { display: flex; align-items: flex-start; gap: 6px; min-height: 30px; }
+.sticky-item.done .sticky-item-text { text-decoration: line-through; color: var(--text-muted); }
+.sticky-item-text { padding-top: 6px; overflow-wrap: anywhere; line-height: 1.35; }
+.sticky-check {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal);
+    cursor: pointer;
+    font-size: 18px;
+}
+.sticky-check:disabled { opacity: 0.55; cursor: default; }
+.sticky-heading { font-weight: 700; margin: 8px 0 2px; }
+.sticky-done-toggle {
+    margin-top: 4px;
+    min-height: 28px;
+    padding: 0 6px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+.sticky-add { display: flex; gap: 4px; margin-top: 6px; }
+.sticky-add input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 30px;
+    padding: 0 6px;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.35));
+    background: transparent;
+    color: inherit;
+    font: inherit;
+}
+.sticky-add button {
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-normal);
+    cursor: pointer;
+}
+.sticky-add button:disabled { opacity: 0.45; cursor: default; }
+.sticky-pictures { margin-top: 8px; }
+
+.sticky-notice {
+    margin: 0 8px 4px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: var(--bg-floating, var(--bg-primary));
+    color: var(--text-normal);
+}
+.sticky-notice.error { color: var(--text-danger, #d83c3e); }
+
+.sticky-tools {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    padding: 2px 4px;
+    border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+.sticky-tools-gap { flex: 1 1 auto; }

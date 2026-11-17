@@ -75,6 +75,7 @@ mod mic_default_watch;
 mod mic_levels;
 // NOT gated: stream pop-out windows are a viewing feature, in Lite too.
 mod popout;
+mod sticky;
 #[cfg(feature = "remote-control")]
 mod tunnel;
 #[cfg(feature = "remote-control")]
@@ -1409,11 +1410,14 @@ pub fn run() {
         // this plugin too, two restorers would fight over the same window.
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_filter(|label| !popout::is_popout_label(label))
+                .with_filter(|label| !popout::is_popout_label(label) && !sticky::is_sticky_label(label))
                 .build(),
         )
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // A sticky note's window closed by the person (Alt+F4): the
+                // page takes the note off the desktop (sticky.rs).
+                sticky::note_close_requested(window.app_handle(), window.label());
                 // MAIN only: a pop-out's X must close the pop-out (popout.rs).
                 if popout::close_hides_to_tray(
                     window.label(),
@@ -1433,6 +1437,7 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 if window.label() == "main" {
                     popout::close_all(window.app_handle());
+                    sticky::close_all(window.app_handle());
                 }
             }
         })
@@ -1444,6 +1449,8 @@ pub fn run() {
             // pop-out window (popout.rs). Everything else stays denied, as it
             // was. Same config entry, so size, args and drag-drop are unchanged.
             app.manage(popout::PopoutState::load(app.handle()));
+            // Sticky notes ride the same new-window handler (sticky.rs).
+            app.manage(sticky::StickyState::load(app.handle()));
             {
                 let main_cfg = app
                     .config()
@@ -1456,13 +1463,21 @@ pub fn run() {
                 let opener = app.handle().clone();
                 let reloader = app.handle().clone();
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &main_cfg)?
-                    .on_new_window(move |url, features| popout::open_requested(&opener, &url, features))
+                    .on_new_window(move |url, features| {
+                        if sticky::requested_slot(url.as_str()).is_some() {
+                            sticky::open_requested(&opener, &url, features)
+                        } else {
+                            popout::open_requested(&opener, &url, features)
+                        }
+                    })
                     // A reload (or any navigation) of the main page orphans
                     // every pop-out: nothing can fill or close them from the
                     // new page. Close them as it starts.
                     .on_page_load(move |_webview, payload| {
                         if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                             popout::close_all(&reloader);
+                            // The page that loads next opens the notes again.
+                            sticky::close_all(&reloader);
                             // The stage that made the window fullscreen is gone
                             // with the page; leave it, or nothing on screen can.
                             #[cfg(feature = "remote-control")]
@@ -1540,11 +1555,17 @@ pub fn run() {
             #[cfg(feature = "remote-control")]
             let stop_files_item =
                 MenuItem::with_id(app, "stop-files", "Stop file access", true, None::<&str>)?;
+            // Sticky notes (sticky.rs): the full app and Lite alike. "New"
+            // asks the page, which owns the notes; Show and Hide act on the
+            // windows directly, so they work while the page is busy.
+            let sticky_new_item = MenuItem::with_id(app, "sticky-new", "New sticky note", true, None::<&str>)?;
+            let sticky_show_item = MenuItem::with_id(app, "sticky-show", "Show sticky notes", true, None::<&str>)?;
+            let sticky_hide_item = MenuItem::with_id(app, "sticky-hide", "Hide sticky notes", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             #[cfg(feature = "remote-control")]
-            let tray_menu = Menu::with_items(app, &[&open_item, &stop_files_item, &quit_item])?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &sticky_new_item, &sticky_show_item, &sticky_hide_item, &stop_files_item, &quit_item])?;
             #[cfg(not(feature = "remote-control"))]
-            let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &sticky_new_item, &sticky_show_item, &sticky_hide_item, &quit_item])?;
 
             let show_main = show_main_window;
 
@@ -1590,6 +1611,12 @@ pub fn run() {
                         use tauri::Emitter;
                         let _ = app.emit("sovereign://revoke-file-access", ());
                     }
+                    "sticky-new" => {
+                        use tauri::Emitter;
+                        let _ = app.emit_to("main", sticky::EVENT_NEW_NOTE, ());
+                    }
+                    "sticky-show" => sticky::set_all_visible(app, true),
+                    "sticky-hide" => sticky::set_all_visible(app, false),
                     // The ONLY way to actually exit once close-to-tray is on.
                     // Without this the app would be unquittable from the UI,
                     // which is worse than not having a tray at all.
@@ -1818,6 +1845,19 @@ pub fn run() {
             popout::popout_supported,
             popout::popout_pin,
             popout::popout_close,
+            sticky::sticky_supported,
+            sticky::sticky_bind,
+            sticky::sticky_rekey,
+            sticky::sticky_close,
+            sticky::sticky_pin,
+            sticky::sticky_drag,
+            sticky::sticky_raise,
+            sticky::sticky_dock,
+            sticky::sticky_dock_state,
+            sticky::sticky_set_visible,
+            sticky::sticky_show_main,
+            sticky::sticky_forget,
+            sticky::sticky_hotkey,
             support_log::read_support_log,
             mic_levels::log_mic_levels,
             #[cfg(feature = "remote-control")]
@@ -1890,6 +1930,7 @@ pub fn run() {
                 // per-window Destroyed: the open pop-outs' size and place for
                 // this session are written out here or never.
                 popout::save_on_exit(handle);
+                sticky::save_on_exit(handle);
                 // Unregister the default-microphone listener (bounded wait).
                 mic_default_watch::stop();
                 #[cfg(feature = "remote-control")]

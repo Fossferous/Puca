@@ -16,7 +16,7 @@
  * while the person is elsewhere in the app, so while it is not `active` —
  * and whenever the host vetoes a key — it takes no keyboard shortcut.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
@@ -64,6 +64,8 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { TrashView } from './TrashView';
 import { NoteMayExistError, type NoteExtras } from '../model/useListContent';
+import type { NoteActions } from '../model/notesQueries';
+import type { PruneGens } from '../model/notesPrune';
 import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
@@ -128,6 +130,39 @@ export interface NotesEmbedding {
      *  the app's own dialogs covers the view, when focus is in the app's
      *  chrome, or for a Púca hotkey. Asked only for keys Notes acts on. */
     ownsKey: (e: KeyboardEvent) => boolean;
+    /** Sticky notes on the desktop (docs/STICKY_NOTES.md; the code is in
+     *  components/sticky/, outside src/notes, so Notes' own page and its
+     *  Android app never load it). Absent = none. */
+    sticky?: NotesStickyEmbedding;
+}
+
+/** What NotesShell hands the sticky layer: Notes' own data and doors. */
+export interface StickyContext {
+    /** Every note, unfiltered. */
+    cards: NoteCard[];
+    /** Every kind of note has been read (the lists and every server's
+     *  checklists), with no error: the set is complete. */
+    ready: boolean;
+    /** When each kind was last fetched (notesPrune.ts): a note is taken off
+     *  the desktop for good only once fresh fetches by this page, a while
+     *  apart, have all gone without it — never on one look, and never on a
+     *  view restored from the device cache. */
+    gens: PruneGens;
+    actions: NoteActions;
+    /** Bring Notes to the screen — at a note (`key`), or with the search box
+     *  ready (`search`). */
+    openInNotes: (key: string | null, search: boolean) => void;
+}
+
+export interface NotesStickyEmbedding {
+    /** Draw the sticky note windows. */
+    render: (ctx: StickyContext) => ReactNode;
+    /** Put this note out on the desktop. */
+    open: (key: string) => void;
+    /** A note's key moved (an offline create replayed). */
+    moved: (from: string, to: string) => void;
+    /** Show Púca's window on the Notes view. */
+    show: () => void;
 }
 
 interface NotesShellProps {
@@ -160,7 +195,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     const [query, setQueryState] = useState('');
     const openKey = params.get('note');
 
-    const { cards: allCards, prefs, prefsReady, loading, error, tasksPending } = useNoteCards();
+    const { cards: allCards, prefs, prefsReady, loading, error, tasksPending, complete: notesComplete, gens: notesGens } = useNoteCards();
     const actions = useNoteActions(allCards, prefs, prefsReady);
     const local = useNotesPrefs();
     const prefsSync = useNotesPrefsSync();
@@ -315,9 +350,11 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
         setParams(p => { p.delete('note'); return p; });
     }, [setParams]);
     // A note created offline replayed: keep it open under its real id.
+    const stickyMoved = embedded?.sticky?.moved;
     const noteMoved = useCallback((from: string, to: string) => {
         setParams(p => { if (p.get('note') === from) p.set('note', to); return p; }, { replace: true });
-    }, [setParams]);
+        stickyMoved?.(from, to);
+    }, [setParams, stickyMoved]);
     useNotesOutbox(noteMoved);
 
     // --- Opening the composer from outside the page -------------------------------------
@@ -595,6 +632,35 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
         setPending(null);
     };
 
+    // --- Sticky notes (embedded in the desktop app) -------------------------------------------
+    // A sticky note's Open in Notes, Ctrl+H and Ctrl+F: Púca's window comes
+    // up on Notes, and then the note opens or the search box takes the
+    // focus — once Notes is on screen, which is a render or two away.
+    const [stickyAsk, setStickyAsk] = useState<{ key: string | null; search: boolean; seq: number } | null>(null);
+    const stickyShow = embedded?.sticky?.show;
+    const openInNotes = useCallback((key: string | null, search: boolean) => {
+        stickyShow?.();
+        setStickyAsk(a => ({ key, search, seq: (a?.seq ?? 0) + 1 }));
+    }, [stickyShow]);
+    useEffect(() => {
+        if (!stickyAsk || !onScreen) return;
+        const ask = stickyAsk;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- the ask is spent the moment Notes is on screen to take it
+        setStickyAsk(null);
+        if (ask.search) {
+            setQueryState('');
+            navigate('/');
+            window.setTimeout(() => searchRef.current?.focus(), 0);
+        } else if (ask.key) {
+            const key = ask.key;
+            setParams(p => { p.set('note', key); return p; });
+        }
+    }, [stickyAsk, onScreen, navigate, setParams]);
+    const stickyContext = useMemo<StickyContext>(
+        () => ({ cards: allCards, ready: notesComplete && !error, gens: notesGens, actions, openInNotes }),
+        [allCards, notesComplete, error, notesGens, actions, openInNotes],
+    );
+
     // --- Card menu -----------------------------------------------------------------------------
     // In the Notes Android shell `/` is this very page, so there is nothing to
     // open; on the web it is Púca, one origin over. Embedded, Notes is IN Púca.
@@ -665,6 +731,8 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
             { id: 'duplicate', label: 'Make a copy', icon: 'file-text', onClick: () => { void duplicate(card); } },
         );
         if (canShareNotes()) items.push({ id: 'share', label: 'Share…', icon: 'upload', onClick: () => { void shareNote(card); } });
+        const sticky = embedded?.sticky;
+        if (sticky) items.push({ id: 'sticky', label: 'Open as sticky note', icon: 'sticky', onClick: () => sticky.open(card.key) });
         if (pucaHref) {
             items.push({ id: 'puca', label: 'Open in Púca', icon: 'pop-out', onClick: () => window.open(pucaHref, '_blank', 'noopener') });
         }
@@ -985,6 +1053,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
                     query={filter.kind === 'search' ? filter.query : undefined}
                     typeSignal={typeTap?.key === openCard.key ? typeTap.seq : 0}
                     onTyped={typeTaken}
+                    onOpenSticky={embedded?.sticky ? () => embedded.sticky?.open(openCard.key) : undefined}
                 />
             )}
 
@@ -1055,6 +1124,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
             {selection.undo}
             {/* Embedded, Chat's MessageToasts is the bus's one sink. */}
             {!isEmbedded && <MessageToasts />}
+            {embedded?.sticky?.render(stickyContext)}
         </div>
     );
 }

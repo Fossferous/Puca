@@ -147,7 +147,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn intersection_area(&self, o: &Rect) -> u64 {
+    pub(crate) fn intersection_area(&self, o: &Rect) -> u64 {
         let l = (self.x as i64).max(o.x as i64);
         let t = (self.y as i64).max(o.y as i64);
         let r = (self.x as i64 + self.w as i64).min(o.x as i64 + o.w as i64);

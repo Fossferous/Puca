@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getProfile, updateProfile } from '../api/profile';
 import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
+import { StickyNotesSettings } from './sticky/StickyNotesSettings';
+import { stickySupported } from './sticky/stickyShell';
 import { discordWindowAvailable } from '../api/discordWindow';
 import { DiscordWindowSettings } from './DiscordWindowSettings';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
@@ -3286,6 +3288,23 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 />
                                             )}
                                         </div>
+                                        {/* Sticky notes (docs/STICKY_NOTES.md): only a shell
+                                            that has sticky windows offers them. */}
+                                        {stickySupported() && (
+                                            <>
+                                                <h3>Sticky notes</h3>
+                                                <div className="settings-card">
+                                                    <StickyNotesSettings
+                                                        hotkey={settings.stickyHotkey}
+                                                        reopen={settings.stickyReopen}
+                                                        confirmDelete={settings.stickyConfirmDelete}
+                                                        onHotkey={(k) => updateSetting('stickyHotkey', k)}
+                                                        onReopen={(on) => updateSetting('stickyReopen', on)}
+                                                        onConfirmDelete={(on) => updateSetting('stickyConfirmDelete', on)}
+                                                    />
+                                                </div>
+                                            </>
+                                        )}
                                     </>
                                 )}
                                 <div className="settings-card">

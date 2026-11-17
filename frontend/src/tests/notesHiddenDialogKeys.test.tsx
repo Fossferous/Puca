@@ -280,10 +280,11 @@ function shellClosure(): string[] {
 }
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 /** A key listener on the window or the document that never asks whether its
- *  layer is on screen. */
+ *  layer is on screen. `hostWindow` is the window a layer is drawn in, which
+ *  is the app's or a sticky note's (ImageLightbox; docs/STICKY_NOTES.md). */
 function ungated(text: string): boolean {
     const code = stripComments(text);
-    return /\b(window|document)\.addEventListener\(\s*['"]keydown['"]/.test(code) && !/\buseLayerOnScreen\(\)/.test(code);
+    return /\b(window|document|hostWindow)\.addEventListener\(\s*['"]keydown['"]/.test(code) && !/\buseLayerOnScreen\(\)/.test(code);
 }
 /** Key listeners gated another way, each with how. */
 const GATED_ELSEWHERE: Record<string, string> = {
@@ -307,7 +308,7 @@ describe('every key listener embedded Notes can reach asks whether it is on scre
 
     it('it swept real listeners: the dialogs above among them, and every exemption still listens', () => {
         const withKeys = shellClosure().map(f => path.relative(SRC, f))
-            .filter(rel => /\b(window|document)\.addEventListener\(\s*['"]keydown['"]/.test(stripComments(fs.readFileSync(path.join(SRC, rel), 'utf8'))));
+            .filter(rel => /\b(window|document|hostWindow)\.addEventListener\(\s*['"]keydown['"]/.test(stripComments(fs.readFileSync(path.join(SRC, rel), 'utf8'))));
         for (const f of ['ImageLightbox.tsx', 'DrawingCanvas.tsx', 'NotesDialog.tsx', 'ScheduleEditor.tsx', 'CalendarAddSheet.tsx', 'SnoozeControl.tsx', 'Popover.tsx', 'Calendar.tsx']) {
             expect(withKeys.some(p => p.endsWith(path.sep + f)), f).toBe(true);
         }

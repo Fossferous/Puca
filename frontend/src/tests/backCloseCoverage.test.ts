@@ -35,6 +35,9 @@ const LEAVES_BACK: Record<string, string> = {
     'FileAccessPrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
     'HostConsentPrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
     'UnattendedPassphrasePrompt.tsx': "a remote-control host's question something waits on: Back must not answer it",
+    // docs/STICKY_NOTES.md: a window on the Windows desktop, which has no Back;
+    // Escape closes its menu and its Delete question.
+    'sticky/StickyNoteView.tsx': 'the desktop app only: a sticky note window on Windows, where Escape closes its menu',
 };
 
 /** Layers that match no LAYER pattern, so the scan cannot find them. */

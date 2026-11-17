@@ -367,6 +367,23 @@ Púca's reminders. Anything you do in one is what you see in the other.
   is not missed just because the app has only just started. This comes with
   the in-app update and needs no new APK
   (`notes/model/dailyNote.ts`).
+- **Bold, italic, underline, strikethrough, bullets** — Ctrl+B, Ctrl+I,
+  Ctrl+U, Ctrl+T and Ctrl+Shift+L in a note's text (here, in Púca's Tasks
+  view and in a sticky note; in a browser tab the browser keeps Ctrl+T for
+  a new tab), and Enter on a bullet starts the next one.
+  They are Markdown marks written into the text itself (`**bold**`,
+  `*italic*`, `<u>underline</u>`, `~~strike~~`, `- `), drawn as formatting
+  wherever the text is read rather than typed in — the open note's read
+  view, a card, a sticky note — and left as typed characters by an older
+  app or an export. A mark counts only at the edges of words, on one line,
+  so ordinary writing such as `2*3*4`, `snake_case` or `__init__` is never
+  read as one, and nothing inside a web address is (*Links in a note*
+  below), and the keys put their marks at word edges: a selection inside a
+  word takes the whole word, and with nothing selected it is the caret's
+  word. `notes/model/noteFormat.ts`; docs/STICKY_NOTES.md, *Formatting*.
+- **Sticky notes** (the desktop app on Windows) — a note in a small
+  coloured window of its own on the desktop, with Microsoft Sticky Notes'
+  keys: docs/STICKY_NOTES.md.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to
@@ -1063,6 +1080,12 @@ Notes feature reaches the desktop in the same commit.
   while one of Púca's dialogs covers Notes (`notesDesktopView.utils.ts`).
 - **Export** opens the Save As dialog and the shell writes the file
   (`api/savePath.ts` `saveTextAs`, which the calendar's `.ics` shares).
+- **Sticky notes** are drawn from in here: a note out on the desktop is a
+  window of its own that this view's tree portals the note into, with the
+  same data layer as the grid (docs/STICKY_NOTES.md). So Chat mounts this
+  view, hidden, as soon as there are sticky notes to bring back at start or
+  a new one is asked for — before *Tasks & notes* is ever pressed — at the
+  cost of an opened Notes: its queries and one live-update stream.
 
 A desktop window narrow and touch-driven enough to take Púca's phone layout
 keeps the Tasks view, and the Tasks view stays on the home dashboard's *Tasks*

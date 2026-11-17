@@ -1,0 +1,3 @@
+/* A note's text as it reads (NoteFormattedText): a bullet's dot, quieter
+   than the words, so a list reads as words first. */
+.nf-bullet { color: var(--text-muted); }

@@ -47,12 +47,12 @@ export function popoutWindowName(slot: number): string {
  * the shell is still destroying that window, and a second window with the
  * same label is refused. Streams past MAX_POPOUT_WINDOWS get no slot.
  */
-export function assignSlots(
-    prev: ReadonlyMap<number, number>,
-    wanted: readonly number[],
+export function assignSlots<K = number>(
+    prev: ReadonlyMap<K, number>,
+    wanted: readonly K[],
     max: number = MAX_POPOUT_WINDOWS,
-): Map<number, number> {
-    const next = new Map<number, number>();
+): Map<K, number> {
+    const next = new Map<K, number>();
     for (const id of wanted) {
         const s = prev.get(id);
         if (s !== undefined && !next.has(id)) next.set(id, s);
@@ -73,7 +73,7 @@ export function assignSlots(
     return next;
 }
 
-export function sameSlots(a: ReadonlyMap<number, number>, b: ReadonlyMap<number, number>): boolean {
+export function sameSlots<K = number>(a: ReadonlyMap<K, number>, b: ReadonlyMap<K, number>): boolean {
     if (a.size !== b.size) return false;
     for (const [k, v] of a) if (b.get(k) !== v) return false;
     return true;

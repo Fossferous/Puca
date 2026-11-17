@@ -141,6 +141,7 @@ import { StreamPopout } from './StreamPopout';
 import { StreamDocPipWindow } from './StreamDocPipWindow';
 import { StreamPopoutWindows } from './StreamPopoutWindows';
 import { MAX_POPOUT_WINDOWS, noteOsWindowRefused, osWindowsSupported, primeOsWindowSupport } from './streamOsWindows';
+import { useStickyDesktop } from './sticky/useStickyDesktop';
 import { StreamAudioHost } from './StreamAudioHost';
 import { docPipSupported, popoutMode, togglePopped, type PopoutMode } from './streamDocPip';
 import { logPipDiag } from '../api/pipDiag';
@@ -925,6 +926,10 @@ export function Chat({ onLogout }: ChatProps) {
     // NotesDesktopView.tsx for what unmounting would cost.
     const [showNotesView, setShowNotesView] = useState(false);
     const [notesOpened, setNotesOpened] = useState(false);
+    // Sticky notes (docs/STICKY_NOTES.md) are drawn from inside Notes, so
+    // Notes is mounted — hidden — as soon as there are any to bring back or
+    // a new one is asked for, before the rail's button is ever pressed.
+    const notesForStickies = useStickyDesktop();
 
     // User profile popup state
     const [selectedMember, setSelectedMember] = useState<MemberWithRoles | null>(null);
@@ -4265,6 +4270,16 @@ export function Chat({ onLogout }: ChatProps) {
         };
     }, []);
 
+    // A sticky note's Open in Notes, Ctrl+H or Ctrl+F (components/sticky/):
+    // the Notes view, in the desktop app. Elsewhere nothing raises it.
+    const openNotesViewRef = useRef(openNotesView);
+    useEffect(() => { openNotesViewRef.current = openNotesView; });
+    useEffect(() => {
+        const onOpenNotes = () => openNotesViewRef.current();
+        window.addEventListener('sovereign:open-notes', onOpenNotes);
+        return () => window.removeEventListener('sovereign:open-notes', onOpenNotes);
+    }, []);
+
     // Open a DM conversation. DMs live in the home/DM view, never inside a
     // server — the sidebar keeps the Friends/Tasks nav + DM list (HomeSidebar)
     // so only the main content swaps to the conversation. Every DM entry
@@ -5610,7 +5625,7 @@ export function Chat({ onLogout }: ChatProps) {
             {/* Púca Notes — desktop only, in the same slot. Mounted on first
                 open and kept, hidden, until Chat itself goes (sign-out,
                 expiry); `active` is whether it is the view on screen. */}
-            {isTauri() && notesOpened && (
+            {isTauri() && (notesOpened || notesForStickies) && (
                 <React.Suspense fallback={null}>
                     <NotesDesktopView active={notesOnScreen} onSignOut={() => onLogout?.()} />
                 </React.Suspense>
