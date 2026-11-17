@@ -34,6 +34,14 @@ ignore = [
     # (git tag v0.5.6), not by this crate. Re-evaluate when df-wasm is rebuilt
     # against a newer DeepFilterNet (the fix comes for free), or if the model
     # is ever loaded from anywhere but the bundle.
+    #
+    # The same lock's tract-onnx 0.19.16 carries GHSA-h668-6x6g-f8r5 (a path
+    # traversal through an ONNX tensor's external_data `location`, on model
+    # load; fixed in 0.21.17). It has no RustSec id, so this scan cannot see it;
+    # GitHub's Dependabot does. Same answer: the embedded model is read from
+    # memory (`model_for_read` over the bundled tar), wasm32-unknown-unknown has
+    # no filesystem for a location to name, and the model loads in production,
+    # so it names none. docs/DEPENDENCY_UPDATES.md has the upgrade path.
     "RUSTSEC-2026-0217",
 
     # RUSTSEC-2026-0387 - timing variability in crypto-bigint 0.5.5 operations meant

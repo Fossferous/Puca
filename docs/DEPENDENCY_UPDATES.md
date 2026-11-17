@@ -65,3 +65,54 @@ during render, setState inside effects, use-before-declare) and
 **eslint-plugin-react-refresh 0.4.24 -> 0.5.6** reports 137 more. Real
 findings, and a real piece of work; both are pinned EXACTLY in package.json,
 because a caret let them straight back in and the lint gate went red again.
+
+## Not cleared by the 2026-11-17 advisory batch
+
+The batch cleared every open Dependabot alert it could reach with a bump (the
+frontend lock, and the Steam Deck plugin's). Three could not be:
+
+**tract 0.19 -> 0.21 (df-wasm: GHSA-x5mv-8wgw-29hg, RUSTSEC-2026-0217, in
+tract-nnef; GHSA-h668-6x6g-f8r5 in tract-onnx).** Both are fixed only in the
+0.21 line. `deep_filter` v0.5.6, still DeepFilterNet's newest release
+(2023-08-31), asks for `tract-* ^0.19.4`; only its unreleased main branch
+(0.5.7-pre) asks for ^0.21.4. Taking it means pinning df-wasm to an
+unreleased upstream commit, rebuilding the committed 14 MB wasm and proving
+the DeepFilter (Max) tier again: a migration, not a bump. Neither advisory is
+reachable meanwhile; `.cargo/audit.toml` says why.
+
+**glib 0.18 -> 0.20 (frontend/src-tauri: GHSA-wrw7-89jp-8q8g,
+RUSTSEC-2024-0429, an unsound iterator).** glib comes through gtk 0.18 from
+tauri, tao, wry, webkit2gtk, muda and tray-icon, and each of them at its
+newest release (tauri 2.12.6, wry 0.57.2 with webkit2gtk =2.0.2, tao 0.37.2,
+checked 2026-11-17) still asks for gtk ^0.18. It moves when Tauri's Linux
+stack does. It is compiled only for Linux (`cargo tree -i glib --target
+x86_64-pc-windows-msvc` prints nothing) and no Linux desktop build is
+published; `cargo audit` lists it as a warning.
+
+**deepmerge (integrations/decky: GHSA-gcqx-w48m-w2h4).** The advisory was
+withdrawn on 2026-11-16 and names no fixed version; 4.3.1, from
+`@rollup/plugin-node-resolve`, is deepmerge's newest.
+
+## The Steam Deck plugin's pins, and when they go
+
+`integrations/decky/package.json` pins every version exactly. Two entries exist
+only because of that batch:
+
+- **`vite` 7.3.7 as a devDependency.** vitest 4.1.12 accepts vite ^6, ^7 or
+  ^8, and npm resolves a fresh vitest to vite 8, the major held back above.
+  Listing it keeps the plugin's test runner on the frontend's vite. It goes
+  with the vite 8 migration.
+- **`overrides` of `@rollup/plugin-commonjs` to 29.0.3.** `@decky/rollup`
+  1.0.2, the newest, asks for ^26, whose glob 10 brings minimatch 9
+  (GHSA-g3hv-75wg-m249, fixed only in 11.0.1), and glob 10 is itself inside
+  GHSA-3g3m-2fjr-6pw4. 28.0.0 replaced glob with fdir. The preset calls
+  `commonjs()` with no options, and `dist/index.js`, its map and
+  `dist/page-shim.js` built byte-identical across the change. Drop the
+  override when `@decky/rollup` asks for ^28 or newer, and compare the bundle
+  again if the plugin ever bundles a CommonJS module (27 made
+  `strictRequires: true` the default).
+
+npm 11.1.0 cannot make the step to vitest 4.1.12 in either tree: it stops with
+`Cannot read properties of null (reading 'edgesOut')` in its peer-set code.
+`npx -y npm@11.21.2 install ...` makes it with the same ranges, and once the
+lock holds vitest 4.1.12, npm 11.1.0 installs, updates and `npm ci`s it.
