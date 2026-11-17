@@ -19,7 +19,7 @@ release, never edit by hand.
 |---|---|---|
 | @bufbuild/protobuf@1.10.1 | (Apache-2.0 AND BSD-3-Clause) | https://github.com/bufbuild/protobuf-es |
 | @capacitor/android@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
-| @capacitor/cli@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
+| @capacitor/cli@8.6.2 | MIT | https://github.com/ionic-team/capacitor |
 | @capacitor/core@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
 | @capacitor/filesystem@8.1.3 | MIT | https://github.com/ionic-team/capacitor-filesystem |
 | @capacitor/ios@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
@@ -34,6 +34,7 @@ release, never edit by hand.
 | @ionic/utils-subprocess@3.0.1 | MIT | https://github.com/ionic-team/ionic-cli |
 | @ionic/utils-terminal@2.3.5 | MIT | https://github.com/ionic-team/ionic-cli |
 | @isaacs/fs-minipass@4.0.1 | ISC | https://github.com/npm/fs-minipass |
+| @isaacs/nonrecursive-glob-match@1.1.0 | BlueOak-1.0.0 |  |
 | @livekit/mutex@1.1.1 | Apache-2.0 | git@github.com:livekit/ts-mutex |
 | @livekit/protocol@1.50.4 | Apache-2.0 | https://github.com/livekit/protocol |
 | @noble/curves@1.9.7 | MIT | https://github.com/paulmillr/noble-curves |
@@ -57,7 +58,7 @@ release, never edit by hand.
 | @types/node@24.10.1 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/react@19.2.18 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/slice-ansi@4.0.0 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @xmldom/xmldom@0.9.10 | MIT | git://github.com/xmldom/xmldom |
+| @xmldom/xmldom@0.9.12 | MIT | git://github.com/xmldom/xmldom |
 | ansi-regex@5.0.1 | MIT | chalk/ansi-regex |
 | ansi-styles@4.3.0 | MIT | chalk/ansi-styles |
 | astral-regex@2.0.0 | MIT | kevva/astral-regex |
@@ -68,7 +69,7 @@ release, never edit by hand.
 | bplist-creator@0.1.0 | MIT | https://github.com/nearinfinity/node-bplist-creator |
 | bplist-parser@0.3.1 | MIT | https://github.com/nearinfinity/node-bplist-parser |
 | bplist-parser@0.3.2 | MIT | https://github.com/nearinfinity/node-bplist-parser |
-| brace-expansion@5.0.12 | MIT | https://github.com/juliangruber/brace-expansion |
+| brace-expansion@5.0.13 | MIT | https://github.com/juliangruber/brace-expansion |
 | buffer-crc32@0.2.13 | MIT | git://github.com/brianloveswords/buffer-crc32 |
 | chownr@3.0.0 | BlueOak-1.0.0 | git://github.com/isaacs/chownr |
 | color-convert@2.0.1 | MIT | Qix-/color-convert |
@@ -86,7 +87,7 @@ release, never edit by hand.
 | fd-slicer@1.1.0 | MIT | git://github.com/andrewrk/node-fd-slicer |
 | fs-extra@11.3.2 | MIT | https://github.com/jprichardson/node-fs-extra |
 | fs-extra@9.1.0 | MIT | https://github.com/jprichardson/node-fs-extra |
-| glob@13.0.0 | BlueOak-1.0.0 | git@github.com:isaacs/node-glob |
+| glob@14.0.6 | BlueOak-1.0.0 | git@github.com:isaacs/node-glob |
 | graceful-fs@4.2.11 | ISC | https://github.com/isaacs/node-graceful-fs |
 | inherits@2.0.4 | ISC | git://github.com/isaacs/inherits |
 | ini@4.1.3 | ISC | https://github.com/npm/ini |
@@ -101,18 +102,18 @@ release, never edit by hand.
 | livekit-client@2.22.3 | Apache-2.0 | git@github.com:livekit/client-sdk-js |
 | lodash-es@4.18.1 | MIT | lodash/lodash |
 | loglevel@1.9.2 | MIT | git://github.com/pimterry/loglevel |
-| lru-cache@11.2.4 | BlueOak-1.0.0 | git://github.com/isaacs/node-lru-cache |
+| lru-cache@11.5.3 | BlueOak-1.0.0 | ssh://git@github.com/isaacs/node-lru-cache |
 | machina@7.0.1 | MIT | git://github.com/ifandelse/machina.js |
 | mediabunny@1.55.7 | MPL-2.0 | https://github.com/Vanilagy/mediabunny |
-| minimatch@10.2.5 | BlueOak-1.0.0 | git@github.com:isaacs/minimatch |
-| minipass@7.1.2 | ISC | https://github.com/isaacs/minipass |
+| minimatch@11.0.9 | BlueOak-1.0.0 | ssh://git@github.com/isaacs/minimatch |
+| minipass@7.1.3 | BlueOak-1.0.0 | https://github.com/isaacs/minipass |
 | minizlib@3.1.0 | MIT | https://github.com/isaacs/minizlib |
 | ms@2.1.3 | MIT | vercel/ms |
 | native-run@2.0.3 | MIT | https://github.com/ionic-team/native-run |
 | open@8.4.2 | MIT | sindresorhus/open |
 | package-json-from-dist@1.0.1 | BlueOak-1.0.0 | https://github.com/isaacs/package-json-from-dist |
 | path-key@3.1.1 | MIT | sindresorhus/path-key |
-| path-scurry@2.0.1 | BlueOak-1.0.0 | https://github.com/isaacs/path-scurry |
+| path-scurry@3.0.0 | BlueOak-1.0.0 | https://github.com/isaacs/path-scurry |
 | pend@1.2.0 | MIT | git://github.com/andrewrk/node-pend |
 | plist@3.1.1 | MIT | git://github.com/TooTallNate/node-plist |
 | prompts@2.4.2 | MIT | terkelg/prompts |
@@ -121,7 +122,7 @@ release, never edit by hand.
 | react-router@7.18.3 | MIT | https://github.com/remix-run/react-router |
 | react@19.2.8 | MIT | https://github.com/react/react |
 | readable-stream@3.6.2 | MIT | git://github.com/nodejs/readable-stream |
-| rimraf@6.1.2 | BlueOak-1.0.0 | git@github.com:isaacs/rimraf |
+| rimraf@6.1.4 | BlueOak-1.0.0 | git@github.com:isaacs/rimraf |
 | rxjs@7.8.2 | Apache-2.0 | https://github.com/reactivex/rxjs |
 | safe-buffer@5.2.1 | MIT | git://github.com/feross/safe-buffer |
 | sax@1.1.4 | ISC | git://github.com/isaacs/sax-js |
@@ -141,7 +142,7 @@ release, never edit by hand.
 | string_decoder@1.3.0 | MIT | git://github.com/nodejs/string_decoder |
 | string-width@4.2.3 | MIT | sindresorhus/string-width |
 | strip-ansi@6.0.1 | MIT | chalk/strip-ansi |
-| tar@7.5.19 | BlueOak-1.0.0 | https://github.com/isaacs/node-tar |
+| tar@7.5.23 | BlueOak-1.0.0 | https://github.com/isaacs/node-tar |
 | through2@4.0.2 | MIT | https://github.com/rvagg/through2 |
 | tree-kill@1.2.2 | MIT | git://github.com/pkrumins/node-tree-kill |
 | tslib@2.8.1 | 0BSD | https://github.com/Microsoft/tslib |
@@ -150,11 +151,10 @@ release, never edit by hand.
 | universalify@2.0.1 | MIT | https://github.com/RyanZim/universalify |
 | untildify@4.0.0 | MIT | sindresorhus/untildify |
 | util-deprecate@1.0.2 | MIT | git://github.com/TooTallNate/util-deprecate |
-| uuid@7.0.3 | MIT | https://github.com/uuidjs/uuid |
 | webrtc-adapter@9.0.6 | BSD-3-Clause | https://github.com/webrtchacks/adapter |
 | which@2.0.2 | ISC | git://github.com/isaacs/node-which |
 | wrap-ansi@7.0.0 | MIT | chalk/wrap-ansi |
-| xcode@3.0.1 | Apache-2.0 | github:apache/cordova-node-xcode |
+| xcode@4.0.0 | Apache-2.0 | github:apache/cordova-node-xcode |
 | xml2js@0.6.2 | MIT | https://github.com/Leonidas-from-XIV/node-xml2js |
 | xmlbuilder@11.0.1 | MIT | git://github.com/oozcitak/xmlbuilder-js |
 | xmlbuilder@15.1.1 | MIT | git://github.com/oozcitak/xmlbuilder-js |
