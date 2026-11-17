@@ -40,9 +40,12 @@
 //      and bottom edges it stopped short of them, so no chip came there);
 //   8. on an iPhone (a 34 px home-indicator inset, through DevTools' safe-area
 //      override, so the page's own env() reads it) a host's refusal in the
-//      feedback line is drawn clear of the down arrow's 44 px target, and the
-//      arrow stays put for it (2026-11-16: the line sat a fixed 96 px off the
-//      bottom and covered 35 px of the target; with no inset, 1 px).
+//      feedback line is drawn clear of the down arrow's 44 px target, and so
+//      it is with no inset and while paused (clear of the paused banner and of
+//      the arrow lifted over it too) (2026-11-16: the line sat a fixed 96 px
+//      off the bottom and covered 35 px of the target; with no inset, 1 px);
+//      the line moved ONTO the arrow does not move it (POSITIVE CONTROL: a
+//      control the placement counts, in that place, does).
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -769,6 +772,34 @@ function lineClearOfArrow(tag, line, arrow) {
         line && arrow ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}, arrow ${Math.round(arrow.top)}..${Math.round(arrow.bottom)}: ${Math.round(under)} px of it under the line, toolbar from ${line.barTop === null ? 'none' : Math.round(line.barTop)}` : 'no line or no arrow');
 }
 
+/** PAUSED, the down arrow is lifted over the paused banner (whose Resume is
+ *  the way back), so a host's refusal in the feedback line goes above both:
+ *  drawn clear of the banner and of the lifted arrow's 44 px target, inside
+ *  the window, and the arrow stays what a tap hits. Leaves the line down. */
+async function pausedLineClear(page, tag) {
+    await page.evaluate(() => { window.__stage.state.hostError = 'Some typed text did not go over: that PC refused it'; window.__stage.emit(); });
+    await page.waitForTimeout(400);
+    const p = await page.evaluate(() => {
+        const line = document.querySelector('.device-stage-mobile-error')?.getBoundingClientRect();
+        const banner = document.querySelector('.device-stage-paused')?.getBoundingClientRect();
+        const b = document.querySelector('.device-stage-hop-down');
+        const a = b?.getBoundingClientRect();
+        if (!line || !banner || !a) return null;
+        const hit = document.elementFromPoint(a.left + a.width / 2, a.top + a.height / 2);
+        const over = q => Math.max(0, Math.min(line.bottom, q.bottom) - Math.max(line.top, q.top));
+        return {
+            top: line.top, bottom: line.bottom, bannerTop: banner.top, arrowTop: a.top, arrowBottom: a.bottom,
+            overBanner: over(banner), overArrow: over(a), hit: !!hit && (hit === b || b.contains(hit)),
+        };
+    });
+    const r = v => Math.round(v);
+    ck(`${tag}paused, a host's refusal in the feedback line is drawn clear of the paused banner and of the lifted arrow`,
+        !!p && p.top >= 0 && p.bottom <= p.bannerTop && p.bottom <= p.arrowTop && p.hit,
+        p ? `line ${r(p.top)}..${r(p.bottom)}, arrow ${r(p.arrowTop)}..${r(p.arrowBottom)} (${r(p.overArrow)} px of it under the line), banner from ${r(p.bannerTop)} (${r(p.overBanner)} px under the line); arrow hit ${p.hit}` : 'no line, banner or arrow');
+    await page.evaluate(() => { window.__stage.state.hostError = null; window.__stage.emit(); });
+    await page.waitForTimeout(200);
+}
+
 /** CONTROL for the sideways runs: at its centred spot the chip WOULD be under
  *  one of the pad's clusters — what a tap there hits is the cluster. */
 const coveredAtCentre = (page, dir) => page.evaluate(dir => {
@@ -842,24 +873,61 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
         // THE FEEDBACK LINE DOES NOT MOVE IT. The line lets touches through
         // and comes and goes on its own (6 s); an arrow that stepped aside for
         // it snapped back as it went, out from under a finger aimed at it.
-        // Here the line's band touches the arrow's target, the case that
-        // moved it.
         await page.evaluate(() => { window.__stage.state.powerNotice = 'Turned off 2 of 2 other displays'; window.__stage.emit(); });
         await page.waitForTimeout(400);
-        // Whatever triggers a placement (a finger lifted anywhere does), the
-        // line must not count: make one happen while it is up.
-        await page.evaluate(() => { window.dispatchEvent(new PointerEvent('pointerup')); });
-        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
-        const line = await page.evaluate(() => { const r = document.querySelector('.device-stage-mobile-error')?.getBoundingClientRect(); return r ? { top: r.top, bottom: r.bottom } : null; });
-        const withNote = await hopChip(page, 'down');
-        ck('hop down: precondition: the feedback line is up, its band within 4 px of the arrow',
-            !!line && !!withNote && line.bottom >= withNote.top - 4, line && withNote ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}, arrow from ${Math.round(withNote.top)}` : 'no line');
+        ck('hop down: precondition: the feedback line is up', !!(await feedbackLine(page)));
+        lineClearOfArrow('hop down: ', await feedbackLine(page), await hopChip(page, 'down'));
+        // Drawn clear of the arrow, the line is out of the arrow's lane by
+        // exactly the placement's 4 px clearance (deviceStageHopPlace.ts),
+        // so it would not move the arrow even if it counted. To show that it
+        // does not count, it is moved ONTO the arrow (where an iPhone drew it
+        // before 2026-11-16), narrow enough that the arrow would have
+        // somewhere to go, and a placement is made (a finger lifted anywhere
+        // makes one). POSITIVE CONTROL: a control the placement does count,
+        // in exactly that place, moves the arrow.
+        const place = () => page.evaluate(async () => {
+            window.dispatchEvent(new PointerEvent('pointerup'));
+            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        });
+        await page.evaluate(() => {
+            const line = document.querySelector('.device-stage-mobile-error');
+            const a = document.querySelector('.device-stage-hop-down').getBoundingClientRect();
+            const box = (line.offsetParent ?? document.documentElement).getBoundingClientRect();
+            line.style.width = '120px';
+            line.style.bottom = `${box.bottom - (a.top + a.height / 2) - 8}px`;
+        });
+        await place();
+        const forced = await feedbackLine(page);
+        const under = await hopChip(page, 'down');
+        ck('hop down: precondition: the line moved onto the arrow, across its centre',
+            !!forced && !!under && forced.top < under.y && forced.bottom > under.y && forced.left < under.x && forced.right > under.x,
+            forced && under ? `line ${Math.round(forced.left)}..${Math.round(forced.right)} x ${Math.round(forced.top)}..${Math.round(forced.bottom)}, arrow centre ${Math.round(under.x)},${Math.round(under.y)}` : 'no line or no arrow');
         ck('hop down: …the arrow stays where it was, and a tap on it still reaches it',
-            !!withNote && withNote.shift === 0 && Math.abs(withNote.x - down.x) < 0.5 && withNote.hitCentre,
-            withNote ? `shift ${withNote.shift}, x ${Math.round(withNote.x)} (was ${Math.round(down.x)}), hit ${withNote.hitCentre}` : 'gone');
-        lineClearOfArrow('hop down: …', await feedbackLine(page), withNote);
+            !!under && under.shift === 0 && Math.abs(under.x - down.x) < 0.5 && under.hitCentre,
+            under ? `shift ${under.shift}, x ${Math.round(under.x)} (was ${Math.round(down.x)}), hit ${under.hitCentre}` : 'gone');
+        await page.evaluate(() => {
+            const r = document.querySelector('.device-stage-mobile-error').getBoundingClientRect();
+            const d = document.createElement('div');
+            d.id = 'hop-obstacle-control';
+            d.className = 'device-stage-mobile-toolbar-toggle';   // one of HOP_ARROW_OBSTACLES
+            d.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;right:auto;bottom:auto;opacity:0;pointer-events:none`;
+            document.body.appendChild(d);
+        });
+        await place();
+        const moved = await hopChip(page, 'down');
+        ck('hop down: POSITIVE CONTROL: a control the placement counts, where the line was, moves the arrow',
+            !!moved && moved.shift !== 0, moved ? `shift ${moved.shift}` : 'gone');
+        await page.evaluate(() => {
+            document.getElementById('hop-obstacle-control')?.remove();
+            const line = document.querySelector('.device-stage-mobile-error');
+            line.style.width = '';
+            line.style.bottom = '';
+        });
         await page.evaluate(() => { window.__stage.state.powerNotice = null; window.__stage.emit(); });
         await page.waitForTimeout(200);
+        await place();
+        const back = await hopChip(page, 'down');
+        ck('…(the arrow back on its centred spot for what follows)', !!back && back.shift === 0, back ? `shift ${back.shift}` : 'gone');
 
         // ABOVE THE PAUSED BANNER: paused by a hardware keyboard's chord, the
         // arrow is clear of the banner (whose Resume is 44 px on a touch
@@ -884,6 +952,7 @@ const coveredAtCentre = (page, dir) => page.evaluate(dir => {
         });
         ck('hop down: paused, the arrow is clear of the paused banner, centred, and what a tap hits',
             !!paused && paused.clear && paused.centred && paused.hit, paused ? `gap ${paused.gap} px, centred ${paused.centred}, hit ${paused.hit}` : 'no banner or no arrow');
+        await pausedLineClear(page, 'hop down: ');
         const resume = await page.locator('.device-stage-paused button').boundingBox();
         if (resume) await tap({ x: resume.x + resume.width / 2, y: resume.y + resume.height / 2 });
         await page.waitForTimeout(300);
@@ -946,6 +1015,14 @@ for (const sideways of [false, true]) {
             now ? `shift ${now.shift}, at ${Math.round(now.x)},${Math.round(now.y)} (was ${Math.round(down.x)},${Math.round(down.y)}), hit ${now.hitCentre}/${now.hitCorners}` : 'gone');
         await page.screenshot({ path: join(outdir, 'phone-inset-hop-down-error.png') });
         await page.evaluate(() => { window.__stage.state.hostError = null; window.__stage.emit(); });
+        await page.waitForTimeout(200);
+        // Paused (a hardware keyboard's chord), on the iPhone too.
+        await page.keyboard.down('Control'); await page.keyboard.down('Alt');
+        await page.keyboard.press('Home');
+        await page.keyboard.up('Alt'); await page.keyboard.up('Control');
+        await page.waitForTimeout(300);
+        ck('iPhone inset: precondition: paused, the banner is up', (await page.locator('.device-stage-paused').count()) === 1);
+        await pausedLineClear(page, 'iPhone inset: ');
     }
     await ctx.close();
 }

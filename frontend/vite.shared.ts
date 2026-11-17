@@ -88,15 +88,20 @@ export const RC_MODULE_PATTERNS: RegExp[] = [
 
 // SHARED DESPITE THE NAME — do not add these to the list above.
 //
-// deviceStageResume.ts and deviceZoomFollow.ts are named for the remote-control
-// stage they were written for, but both are pure leaf modules (zero imports)
-// holding generic logic that preserved features depend on:
+// deviceStageResume.ts, deviceZoomFollow.ts and deviceStagePinch.ts are named
+// for the remote-control stage they were written for, but all three are pure
+// leaf modules (zero imports) holding generic logic that preserved features
+// depend on:
 //   - deviceStageResume: re-plays a <video> that the OS paused when the app was
 //     backgrounded. VoiceStage, StreamStage, StreamPip and StreamDocPipWindow
 //     all use it for ORDINARY voice screen shares.
 //   - deviceZoomFollow: zoom/pan geometry, reused by ImageLightbox and
 //     imageZoom for pinch-zooming a picture in chat.
-// Excluding them broke the lite build here, which is how they were found.
+//   - deviceStagePinch: one two-finger step per touch event, which
+//     ImageLightbox (the picture viewer, Lite and Púca Notes too) steps its
+//     pinch and pan through.
+// Excluding the first two broke the lite build here, which is how they were
+// found; a pattern widened to lowercase deviceStage*.ts would do the same.
 
 /**
  * Fail the lite build if remote-control code entered the module graph.

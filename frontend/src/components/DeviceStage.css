@@ -277,6 +277,15 @@
     pointer-events: none;
 }
 
+/* Paused, the down arrow is lifted over the paused banner (bottom: 84px, so
+   its target reaches 128px up the picture; the banner stands 16..76px), and
+   a line at the place above sat across both: 27px of the arrow's target and
+   the banner's top 20px, Resume's top among them. So paused, the line goes
+   4px above the lifted arrow, which clears the banner too. */
+.device-stage-mobile-error.over-paused {
+    bottom: calc(var(--device-toolbar-h) + 132px);
+}
+
 .device-stage-mobile-error > span {
     padding: 8px 14px;
     border-radius: 6px;

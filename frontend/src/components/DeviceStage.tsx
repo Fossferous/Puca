@@ -4106,9 +4106,11 @@ export function DeviceStage() {
                 host's honest refusal (input-failed / power-failed / a privacy
                 failure, all written to session.error) sat permanently behind
                 "Ctrl+Alt+Del sent". The desktop bar shows all three as
-                separate spans; the phone now does the same. */}
+                separate spans; the phone now does the same.
+                Paused, it goes above the paused banner and the arrow lifted
+                over it (DeviceStage.css, .over-paused). */}
             {isMobile && (session.error || qualityError || clipboardNote || session.powerNotice) && (
-                <div className="device-stage-mobile-error" role="status">
+                <div className={`device-stage-mobile-error${controlEnabled ? '' : ' over-paused'}`} role="status">
                     {qualityError && <span className="dse-bad">{qualityError}</span>}
                     {clipboardNote && <span className="dse-note">{clipboardNote}</span>}
                     {session.powerNotice && <span className="dse-note">{session.powerNotice}</span>}
