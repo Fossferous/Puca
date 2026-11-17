@@ -4,6 +4,85 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.865 — 2026-11-17
+
+Sticky notes on the Windows desktop with formatting in notes, links and buttons that read clearly on every theme, Jump to latest that goes all the way, two fingers that pan a zoomed picture to its edge, and a tablet that looks like one
+### Added
+
+- **Sticky notes on the Windows desktop.** In the desktop app (full and Lite),
+  *Open as sticky note* on a note's menu, or in an open note's footer, puts a
+  Púca Notes note on the desktop in a small coloured window of its own: drag
+  it by its bar, resize it from its edges, keep it on top of other windows
+  with its pin, or dock it to the left or right of the screen. Type in it,
+  tick its items, add pictures (a button, paste or drop); it is the same note
+  as in Notes, end-to-end encrypted and synced like any other. **Win+Shift+N**
+  makes a new sticky note from anywhere (Settings › Desktop App › *Sticky
+  notes* changes or removes it, and says when Windows or another app holds
+  it), as does the tray's *New sticky note*; the tray also shows and hides
+  them all. The notes that were open come back where they were when Púca
+  starts. In a sticky note: Ctrl+N new, Ctrl+W close (the note stays in
+  Notes), Ctrl+D delete (to the trash, asking first unless you said not to),
+  Ctrl+H and Ctrl+F open Notes, Ctrl+Tab goes to the next one. Needs the new
+  desktop app (full or Lite). docs/STICKY_NOTES.md has the whole list against
+  Microsoft's Sticky Notes, and what is not built and why.
+- **Bold, italic, underline, strikethrough and bullets in a note's text.**
+  Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+T (in the desktop app: a browser tab keeps
+  Ctrl+T for itself) and Ctrl+Shift+L, in Púca Notes, Púca's Tasks view and
+  a sticky note (which has the buttons too); Enter on a bullet
+  starts the next one. The note reads formatted wherever it is not being
+  typed in, on the grid's cards too. It is written as Markdown marks in the
+  note's text (`**bold**`, `*italic*`, `<u>underline</u>`, `~~strike~~`,
+  `- `), so an export keeps it and an older app shows the marks; ordinary
+  text such as `2*3*4` or `__init__` is never read as formatting.
+
+### Changed
+
+- **A tablet has a tablet's picture.** "You're in Lounge on your tablet" now
+  shows a tablet beside it instead of a phone, and on a tablet, Move here
+  shows a tablet too, held either way. Arrives as an ordinary update.
+
+### Fixed
+
+- **Jump to latest always ends at the newest message.** When the other side's typing
+  indicator came up, or the message box grew a line, while the jump was in its last
+  stretch, it stopped up to 31 px short and stayed there; on the desktop a long jump (a
+  few screens) could do the same anywhere after its first 0.8 seconds. It now goes all the
+  way, and a reader who scrolls back up during the jump, with the wheel, a finger, the
+  scrollbar or the keyboard, is left where they scrolled to.
+- **Links in messages are readable on every theme.** On Dark, Pink and Purple a link was
+  under the contrast words need, at rest and under the pointer (3.5 to 4.2:1); it is now
+  the theme's brand colour made for words, as on Light. So are the other words drawn in
+  the brand colour (a name with no role colour, who a reply answers, the typing dots, a
+  note's links, a search hit's name) and the initials on avatars. A revealed spoiler's box is
+  the theme's deepest surface, so a link in one holds too (it was a blurple wash).
+- **A done task's words are readable on every theme.** It was faded, which took its links,
+  quotes and code under 4.5:1 on the dark and colour themes (as low as 1.7:1); it is now
+  drawn in the muted colour with its line through, as on Light.
+- **White words on filled buttons are readable on the colour themes.** On Purple, Green,
+  Orange and Yellow the brand colour was too bright for the white words on it (2.9 to 4.2:1):
+  filled buttons, selected tabs and badges now take a deeper shade of the same colour,
+  held to the rule a server mode's accent already follows, and a mode's accent still
+  colours them. The composer's Send and Create Channel no longer fade into a pale lavender
+  under their white words (Light keeps its own), and buttons that brightened or faded under
+  the pointer darken instead. Settings' and the profile's Save and Upload buttons, which had
+  dark words on the brand, have white ones like every other brand button.
+- **The device list's red buttons (Revoke, Sign this device out, Reset) are readable.** Their
+  white words were 3.7:1 on every theme but Light; the red is now one that carries them.
+- **Two fingers pan a zoomed picture all the way to its edge.** In the picture
+  viewer, moving a zoomed picture with two fingers could stop well short of
+  its edge, depending on which finger the phone reported first (up to about
+  240 pixels on a phone), and sliding two fingers sideways over a picture
+  zoomed in only a little could jump it to a much larger zoom. Both now
+  follow your fingers, the way the remote-control screen has since 0.9.864.
+  Arrives as an ordinary update.
+- **A message from the PC you control no longer covers the down arrow.**
+  Controlling a PC from Púca on an iPhone's Home Screen, held upright, a red
+  message from that PC (such as typed text it refused) was drawn across most
+  of the small arrow that goes to the screen below, and on any phone with
+  control paused it covered part of that arrow and the top of the "Control
+  paused" bar with its Resume button. The message now sits above them.
+  Arrives as an ordinary update.
+
 ## 0.9.864 — 2026-11-16
 
 Phone notifications the moment the web app goes to the background, the newest message stays above the box while you type, two fingers pan a controlled screen to every edge with a small arrow to the next one, Light reads clearly, web auto gain off by default, and a tablet is your tablet
