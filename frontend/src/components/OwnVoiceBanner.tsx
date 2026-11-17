@@ -11,7 +11,7 @@
  * no banner, so neither button can send a frame that server would refuse.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { DisconnectIcon, LaptopIcon, PhoneIcon } from './Icons';
+import { DisconnectIcon, LaptopIcon, PhoneIcon, TabletIcon } from './Icons';
 import { callOnOtherDevice, ownVoiceBannerText, useOwnVoice, type OwnVoiceState } from '../api/ownVoice';
 import './OwnVoiceBanner.css';
 
@@ -20,14 +20,17 @@ interface Props {
     inCallHere: boolean;
     onLeave: (call: OwnVoiceState) => void;
     onMoveHere: (call: OwnVoiceState) => void;
-    /** Which icon means "here" on Move here: this device. */
-    hereIsPhone?: boolean;
+    /** What this device is, for the icon on Move here (default a computer). */
+    here?: 'computer' | 'phone' | 'tablet';
 }
+
+/** The picture of a device: a tablet is not a phone ("on your tablet"). */
+const ICON_OF = { computer: LaptopIcon, phone: PhoneIcon, tablet: TabletIcon } as const;
 
 /** How long a pressed button stays busy if no new state arrives to settle it. */
 const PENDING_MS = 6000;
 
-export function OwnVoiceBanner({ inCallHere, onLeave, onMoveHere, hereIsPhone = false }: Props) {
+export function OwnVoiceBanner({ inCallHere, onLeave, onMoveHere, here = 'computer' }: Props) {
     const snap = useOwnVoice();
     const call = inCallHere ? null : callOnOtherDevice(snap);
     // A press is "pending" until the server's next word about the call (any
@@ -70,8 +73,8 @@ export function OwnVoiceBanner({ inCallHere, onLeave, onMoveHere, hereIsPhone = 
         if (action === 'leave') onLeave(call);
         else onMoveHere(call);
     };
-    const DeviceIcon = call.device === 'mobile' ? PhoneIcon : LaptopIcon;
-    const HereIcon = hereIsPhone ? PhoneIcon : LaptopIcon;
+    const DeviceIcon = ICON_OF[call.device !== 'mobile' ? 'computer' : call.deviceForm === 'tablet' ? 'tablet' : 'phone'];
+    const HereIcon = ICON_OF[here];
 
     return (
         <div className="own-voice-banner" role="status" aria-live="polite" ref={barRef}>

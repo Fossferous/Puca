@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { TrashIcon, HomeIcon, SpeakerOffIcon, ClipIcon } from '../components/Icons';
+import { TrashIcon, HomeIcon, SpeakerOffIcon, ClipIcon, TabletIcon } from '../components/Icons';
 import { setIconStyle, getIconStyle } from '../components/iconStyle';
 import { applyAppearance, defaultSettings } from '../components/settingsStore';
 
@@ -45,6 +45,19 @@ describe('icon style toggle', () => {
         act(() => { setIconStyle('classic'); });
         expect(host.querySelector('svg.svrn-icon')).not.toBeNull();
         expect(host.querySelector('.svrn-icon-legacy')).toBeNull();
+        act(() => { setIconStyle('modern'); });
+    });
+
+    it('TabletIcon took the phone\'s place for a tablet, so classic keeps the phone\'s glyph there (modern: its own SVG)', () => {
+        // The own-voice banner drew PhoneIcon for a tablet until the tablet
+        // got its own icon; in classic that slot was the phone emoji, and
+        // Unicode has no tablet, so classic keeps it (docs/ICON_LANGUAGE.md §6a).
+        render(<TabletIcon />);
+        expect(host.querySelector('svg.svrn-icon')).not.toBeNull();
+        expect(host.textContent).toBe('');
+        act(() => { setIconStyle('classic'); });
+        expect(host.querySelector('svg.svrn-icon')).toBeNull();
+        expect(host.querySelector('.svrn-icon-legacy')?.textContent).toBe('\u{1F4F1}'); // mobile phone
         act(() => { setIconStyle('modern'); });
     });
 

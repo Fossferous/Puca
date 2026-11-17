@@ -248,11 +248,23 @@
    THE COLOUR IS PER LINE, NOT PER BAND, and that is the point of the two
    classes below. The band used to be one red alert box carrying everything —
    so "Turned off 2 of 2 other display(s)" and "Ctrl+Alt+Del sent", both of
-   which mean IT WORKED, arrived looking exactly like a refusal. */
+   which mean IT WORKED, arrived looking exactly like a refusal.
+
+   CLEAR OF THE DOWN HOP ARROW, which sits on the picture's bottom edge
+   (8px up, a 44px target; .device-stage-hop-down below), and the picture
+   ends where the toolbar starts. So the line is placed from the toolbar's
+   MEASURED height (DeviceStage sets --device-toolbar-h from it), 4px above
+   the arrow. It was a fixed 96px off the bottom: on an iPhone's Home Screen
+   app in portrait (the one place env() reads an inset: iosStandalone.ts) the
+   toolbar grows by the 34px home-indicator inset and the picture rises with
+   it, so a host's refusal was drawn across 35px of the arrow's 44 (29 of its
+   32px disc; device-stage-real-browser.mjs). The arrow does not step aside
+   for this line (it comes and goes by itself; DeviceStage's placeHopArrows),
+   so the line is what has to keep out of the way. */
 .device-stage-mobile-error {
     position: absolute;
     left: 50%;
-    bottom: 96px;
+    bottom: calc(var(--device-toolbar-h) + 56px);
     transform: translateX(-50%);
     max-width: 90%;
     z-index: 460;
@@ -264,6 +276,15 @@
     /* Feedback, not a control: a band over the remote screen must not eat
        the touches that fall on it (its sibling overlays already say so). */
     pointer-events: none;
+}
+
+/* Paused, the down arrow is lifted over the paused banner (bottom: 84px, so
+   its target reaches 128px up the picture; the banner stands 16..76px), and
+   a line at the place above sat across both: 27px of the arrow's target and
+   the banner's top 20px, Resume's top among them. So paused, the line goes
+   4px above the lifted arrow, which clears the banner too. */
+.device-stage-mobile-error.over-paused {
+    bottom: calc(var(--device-toolbar-h) + 132px);
 }
 
 .device-stage-mobile-error > span {

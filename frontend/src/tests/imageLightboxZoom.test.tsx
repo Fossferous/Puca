@@ -229,6 +229,114 @@ describe('ImageLightbox zoom', () => {
         expect(again.canvas.style.transform).toBe(lines);
     });
 
+    /**
+     * A TOUCH EVENT IS ONE STEP, not one per finger (components/deviceStagePinch.ts,
+     * which the remote-control stage got in 0.9.864). The browser hands one touch
+     * event to the page as a pointermove PER FINGER, all carrying the event's
+     * timeStamp, and the viewer stepped the gesture on each: between the two it
+     * saw a pinch the hand never made, and the zoom floor and the pan clamp acted
+     * on it.
+     */
+    describe('two fingers, one touch event at a time', () => {
+        /** One finger's pointer event, as part of a touch event stamped `at`. */
+        const finger = (target: Element, type: string, id: number, x: number, y: number, at: number) => {
+            const ev = new Event(type, { bubbles: true });
+            Object.defineProperty(ev, 'pointerId', { value: id });
+            Object.defineProperty(ev, 'pointerType', { value: 'touch' });
+            Object.defineProperty(ev, 'clientX', { value: x });
+            Object.defineProperty(ev, 'clientY', { value: y });
+            Object.defineProperty(ev, 'timeStamp', { value: at });
+            target.dispatchEvent(ev);
+        };
+        const view = (canvas: HTMLElement) => {
+            const m = /translate\(([-\d.e]+)px, ([-\d.e]+)px\) scale\(([-\d.e]+)\)/.exec(canvas.style.transform)!;
+            return { x: Number(m[1]), y: Number(m[2]), scale: Number(m[3]) };
+        };
+
+        /** Two fingers 60 px apart, side by side at y 400, carried `steps` x
+         *  `dx` px sideways, each step ONE touch event: `first` (1 the left
+         *  finger, 2 the right) handed over first. One act per event, as a
+         *  frame is. */
+        function slide(surface: HTMLElement, first: 1 | 2, steps: number, dx: number, startAt = 1000) {
+            const p = { 1: 100, 2: 160 };
+            act(() => {
+                finger(surface, 'pointerdown', 1, p[1], 400, startAt);
+                finger(surface, 'pointerdown', 2, p[2], 400, startAt);
+            });
+            for (let i = 1; i <= steps; i++) {
+                const at = startAt + 16 * i;
+                act(() => {
+                    for (const id of first === 1 ? [1, 2] as const : [2, 1] as const) {
+                        finger(surface, 'pointermove', id, p[id] + dx * i, 400, at);
+                    }
+                });
+            }
+            const end = startAt + 16 * (steps + 1);
+            act(() => {
+                finger(surface, 'pointerup', 1, p[1] + dx * steps, 400, end);
+                finger(surface, 'pointerup', 2, p[2] + dx * steps, 400, end);
+            });
+        }
+
+        /** Zoomed x2.5 by a double-tap at (200, 400): x = -300, the picture's
+         *  left edge 300 px off to the left (x 0 puts it on the screen's). */
+        function zoomedIn() {
+            const m = mount();
+            tap(m.img, 200, 400); tap(m.img, 200, 400);
+            expect(m.canvas.style.transform, 'precondition').toBe('translate(-300px, -600px) scale(2.5)');
+            return m;
+        }
+
+        it('a two-finger pan into an edge ENDS on it when the finger closing the gap is handed over first', () => {
+            const { surface, canvas } = zoomedIn();
+            slide(surface, 1, 15, 25);   // 375 px right; the edge is 300 px away
+            const t = view(canvas);
+            expect(t.scale, 'a pan, not a zoom').toBeCloseTo(2.5, 9);
+            expect(t.x, 'the picture\'s left edge on the screen\'s, not short of it').toBe(0);
+            expect(onClose).not.toHaveBeenCalled();
+        });
+
+        it('CONTROL: the far finger handed over first reaches the edge too (it did before as well)', () => {
+            const { surface, canvas } = zoomedIn();
+            slide(surface, 2, 15, 25);
+            expect(view(canvas).x).toBe(0);
+            expect(view(canvas).scale).toBeCloseTo(2.5, 9);
+        });
+
+        it('away from the edge the picture goes with the fingers, whichever is handed over first', () => {
+            const a = zoomedIn();
+            slide(a.surface, 1, 4, 25);
+            const left = view(a.canvas);
+            act(() => root.unmount());
+            root = createRoot(container);
+            const b = zoomedIn();
+            slide(b.surface, 2, 4, 25);
+            const right = view(b.canvas);
+            expect(left.x).toBeCloseTo(-200, 9);
+            expect(right.x).toBeCloseTo(-200, 9);
+            expect(left.scale).toBeCloseTo(2.5, 9);
+        });
+
+        it('a slide of a picture zoomed a little keeps its zoom (the half-step does not hit the floor)', () => {
+            const { surface, canvas } = mount();
+            // Pinch out to x1.05: the right finger 3 px further out.
+            act(() => {
+                finger(surface, 'pointerdown', 1, 100, 400, 500);
+                finger(surface, 'pointerdown', 2, 160, 400, 500);
+            });
+            act(() => finger(surface, 'pointermove', 2, 163, 400, 516));
+            act(() => {
+                finger(surface, 'pointerup', 1, 100, 400, 532);
+                finger(surface, 'pointerup', 2, 163, 400, 532);
+            });
+            expect(view(canvas).scale, 'precondition').toBeCloseTo(1.05, 9);
+            // Two fingers again, 60 px apart, one sideways step, the left finger
+            // first: 35 px apart between its move and the right one's.
+            slide(surface, 1, 1, 25);
+            expect(view(canvas).scale, 'a sideways slide is no zoom').toBeCloseTo(1.05, 9);
+        });
+    });
+
     it('positive control: without a portal barrier, React DOES bubble touch through the tree', () => {
         const outer = vi.fn();
         act(() => root.render(

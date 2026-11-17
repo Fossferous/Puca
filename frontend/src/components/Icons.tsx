@@ -80,6 +80,9 @@ const LEGACY_GLYPHS: Record<string, string> = {
     // video / screen
     CameraIcon: '📹', ScreenShareIcon: '🖥️', MonitorIcon: '🖥️', ScreenIcon: '📺',
     LaptopIcon: '💻', PhoneIcon: '📱', TerminalIcon: '🐧', GlobeIcon: '🌐',
+    // A tablet was drawn with PhoneIcon until it had its own icon, and
+    // Unicode has no tablet: classic keeps what that slot showed.
+    TabletIcon: '📱',
     GridIcon: '🪟', FullscreenIcon: '⛶', StopIcon: '🛑', StopSharingIcon: '⬛',
     LiveDotIcon: '🔴', CrosshairIcon: '🎯', PlayIcon: '▶', PauseIcon: '⏸',
 
@@ -478,6 +481,15 @@ export const LaptopIcon = makeIcon('LaptopIcon', <>
 
 export const PhoneIcon = makeIcon('PhoneIcon', <>
     <rect x="6.25" y="2.25" width="11.5" height="19.5" rx="2.5" />
+    <path d="M10.75 18.5h2.5" />
+</>);
+
+/** A tablet ("your tablet", ownVoice.ts DeviceForm): the phone's own form,
+ *  as tall, about 3:4 instead of the phone's narrow slab, so the two tell
+ *  apart at 14px by width alone. Its classic glyph is the phone's, which is
+ *  what a tablet showed in classic before (LEGACY_GLYPHS). */
+export const TabletIcon = makeIcon('TabletIcon', <>
+    <rect x="4.5" y="2.25" width="15" height="19.5" rx="2.5" />
     <path d="M10.75 18.5h2.5" />
 </>);
 
@@ -1319,6 +1331,7 @@ export const ICONS = {
     'pop-out': PopOutIcon,
     laptop: LaptopIcon,
     phone: PhoneIcon,
+    tablet: TabletIcon,
     terminal: TerminalIcon,
     globe: GlobeIcon,
     grid: GridIcon,

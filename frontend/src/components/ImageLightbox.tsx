@@ -43,9 +43,10 @@ import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment'
 import { appQuestionOpen } from '../api/appDialogs';
 import type { EncRef } from '../api/nativeDownloads';
 import { clampPanTo } from './deviceZoomFollow';
+import { pinchStep } from './deviceStagePinch';
 import {
     zoomAt, isDoubleTap,
-    DOUBLE_TAP_SCALE, TAP_SLOP_PX,
+    DOUBLE_TAP_SCALE, TAP_SLOP_PX, MIN_SCALE, MAX_SCALE,
     type Transform, type Box, type Picture, type TapMark,
 } from './imageZoom';
 import './ImageLightbox.css';
@@ -235,18 +236,27 @@ export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageL
             lastPinch.current = { dist, cx, cy };
             if (lp.dist <= 0) return;
             const { box, pict, ox, oy } = geom();
-            const ratio = dist / lp.dist;
-            const dcx = cx - lp.cx, dcy = cy - lp.cy;
-            const focal = { x: cx - ox, y: cy - oy };
-            // Functional update (see the wheel handler): two fingers emit two
-            // moves per frame, and both must accumulate. Two-finger PAN (the
-            // midpoint moved) then zoom about the new midpoint — algebraically
-            // DeviceStage's focal formula.
-            setT(cur => {
-                const panned: Transform = { scale: cur.scale, x: cur.x + dcx, y: cur.y + dcy };
-                const next = zoomAt(panned, focal, cur.scale * ratio, box, pict);
-                return next.scale === 1 ? FIT : clampPanTo(box, pict, next.scale, next.x, next.y);
-            });
+            // ONE STEP PER TOUCH EVENT, not per finger: the browser hands a
+            // touch event over as a pointermove per finger, all with its
+            // timeStamp, so after the first of them the other finger has not
+            // moved yet. Clamped there, a two-finger pan into an edge stopped
+            // short of it (140 to 236 px at x2.5 on a phone in Edge) and a
+            // sideways slide near x1 hit the zoom floor and jumped
+            // (components/deviceStagePinch.ts, which the stage uses too).
+            // The pan and the zoom about the fingers' midpoint are the formula
+            // this used before; the limits and the clamp apply once per event.
+            const at = e.timeStamp, finger = e.pointerId;
+            // Functional update (see the wheel handler): both fingers' moves
+            // of an event must reach the same step.
+            setT(cur => pinchStep(cur, {
+                at, finger,
+                prevDist: lp.dist, dist,
+                prevCenter: { x: lp.cx - ox, y: lp.cy - oy },
+                center: { x: cx - ox, y: cy - oy },
+            }, {
+                minZoom: MIN_SCALE, maxZoom: MAX_SCALE,
+                clampPan: (scale, x, y) => clampPanTo(box, pict, scale, x, y),
+            }));
             return;
         }
 

@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fixture from './fixtures/ownVoiceState.json';
+import tabletSocketQuery from './fixtures/tabletSocketQuery.json';
 import { wsClient } from '../api/websocket';
 import { resetEmbedHostForTest } from '../api/embedHost';
 import {
@@ -28,6 +29,7 @@ import {
     resetOwnVoice,
     roomLeftNotice,
     shouldTakeOver,
+    thisDeviceShape,
     whereDevice,
 } from '../api/ownVoice';
 
@@ -182,6 +184,15 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
             expect(q.getAll('form')).toEqual(['tablet']);
         });
 
+        it('the tablet\'s whole query is fixtures/tabletSocketQuery.json, the one the server\'s upgrade test parses', async () => {
+            // src/ws.rs the_upgrade_query_takes_one_caps_list_and_refuses_a_repeated_key
+            // reads the same file, so a capability added here (push_away in
+            // 0.9.864) cannot leave that test pinning a URL no client sends.
+            be(true, 820, 1180);
+            const url = new URL((await openSocket()).url);
+            expect(url.search).toBe(`?${tabletSocketQuery.query}`);
+        });
+
         it('a tablet held sideways (window 1180 px wide) is still a tablet, not "a browser"', async () => {
             be(true, 1180, 820);
             const q = await params();
@@ -226,6 +237,23 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
             const c = await params();
             expect(c.get('kind')).toBe('mobile');
             expect(c.get('form')).toBe('tablet');
+        });
+
+        it('this device as a picture (Move here): a tablet whichever layout it shows, else the layout\'s', () => {
+            be(true, 820, 1180);
+            expect(thisDeviceShape(true, false, false)).toBe('tablet');
+            // Held sideways the window is 1180 wide and Chat shows the desktop
+            // layout; it is still the tablet the other devices name.
+            be(true, 1180, 820);
+            expect(thisDeviceShape(false, false, false)).toBe('tablet');
+            // CONTROLS: a phone is a phone, a computer a computer, and the
+            // desktop app on a big touch screen is no tablet.
+            be(true, 390, 844);
+            expect(thisDeviceShape(true, false, false)).toBe('phone');
+            be(false, 1920, 1080);
+            expect(thisDeviceShape(false, false, false)).toBe('computer');
+            be(true, 1280, 800);
+            expect(thisDeviceShape(false, true, false)).toBe('computer');
         });
 
         it('CONTROL: a 390x844 phone sends kind=mobile and no form; a desktop browser neither', async () => {
