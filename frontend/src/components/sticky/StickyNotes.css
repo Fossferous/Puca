@@ -86,7 +86,9 @@ body.sticky-doc {
     outline: 2px solid var(--brand-primary);
     outline-offset: 1px;
 }
-.sticky-barbtn.is-on { color: var(--brand-primary); background: var(--bg-modifier-selected, rgba(127, 127, 127, 0.24)); }
+/* --brand-text, not --brand-primary: the pin on its selected fill was 2.86:1 on Light (2.57:1 on
+   dark, 2.03:1 on a coral note) for an icon-only control that needs 3:1. */
+.sticky-barbtn.is-on { color: var(--brand-text, var(--brand-primary)); background: var(--bg-modifier-selected, rgba(127, 127, 127, 0.24)); }
 .sticky-tool:disabled { opacity: 0.5; cursor: default; }
 
 .sticky-menu {
