@@ -110,10 +110,14 @@ only because of that batch:
   `commonjs()` with no options, and `dist/index.js`, its map and
   `dist/page-shim.js` built byte-identical across the change. Drop the
   override when `@decky/rollup` asks for ^28 or newer, and compare the bundle
-  again if the plugin ever bundles a CommonJS module (27 made
-  `strictRequires: true` the default).
+  again if the plugin ever bundles a CommonJS module: 27 made
+  `strictRequires: true` the default and rewrote a module's top-level `this`,
+  and 29 changed how `node:` builtins are required.
 
 npm 11.1.0 cannot make the step to vitest 4.1.12 in either tree: it stops with
 `Cannot read properties of null (reading 'edgesOut')` in its peer-set code.
-`npx -y npm@11.21.2 install ...` makes it with the same ranges, and once the
-lock holds vitest 4.1.12, npm 11.1.0 installs, updates and `npm ci`s it.
+`npx -y npm@11.21.2 install ...` makes it with the same ranges. Once the lock
+holds vitest 4.1.12, npm 11.1.0 and CI's npm 10 run `npm ci`, `npm install`
+and a named `npm update <package>` on it, but a bare `npm update` stops with
+the same error in both trees (the frontend's already did before the batch);
+`npx -y npm@11.21.2 update` works.

@@ -39,9 +39,10 @@ ignore = [
     # traversal through an ONNX tensor's external_data `location`, on model
     # load; fixed in 0.21.17). It has no RustSec id, so this scan cannot see it;
     # GitHub's Dependabot does. Same answer: the embedded model is read from
-    # memory (`model_for_read` over the bundled tar), wasm32-unknown-unknown has
-    # no filesystem for a location to name, and the model loads in production,
-    # so it names none. docs/DEPENDENCY_UPDATES.md has the upgrade path.
+    # memory (`model_for_read` over the bundled tar), its three .onnx files
+    # carry no external_data `location` at all, and wasm32-unknown-unknown has
+    # no filesystem for one to name. docs/DEPENDENCY_UPDATES.md has the
+    # upgrade path.
     "RUSTSEC-2026-0217",
 
     # RUSTSEC-2026-0387 - timing variability in crypto-bigint 0.5.5 operations meant
