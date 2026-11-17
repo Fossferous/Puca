@@ -254,12 +254,13 @@
    (8px up, a 44px target; .device-stage-hop-down below), and the picture
    ends where the toolbar starts. So the line is placed from the toolbar's
    MEASURED height (DeviceStage sets --device-toolbar-h from it), 4px above
-   the arrow. It was a fixed 96px off the bottom: on an iPhone the toolbar
-   grows by the 34px home-indicator inset and the picture rises with it, so a
-   host's refusal was drawn across 35px of the arrow's 44 (29 of its 32px
-   disc; device-stage-real-browser.mjs). The arrow does not step aside for
-   this line (it comes and goes by itself; DeviceStage's placeHopArrows), so
-   the line is what has to keep out of the way. */
+   the arrow. It was a fixed 96px off the bottom: on an iPhone's Home Screen
+   app in portrait (the one place env() reads an inset: iosStandalone.ts) the
+   toolbar grows by the 34px home-indicator inset and the picture rises with
+   it, so a host's refusal was drawn across 35px of the arrow's 44 (29 of its
+   32px disc; device-stage-real-browser.mjs). The arrow does not step aside
+   for this line (it comes and goes by itself; DeviceStage's placeHopArrows),
+   so the line is what has to keep out of the way. */
 .device-stage-mobile-error {
     position: absolute;
     left: 50%;

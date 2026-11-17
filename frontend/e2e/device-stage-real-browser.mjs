@@ -38,8 +38,9 @@
 //   7. two fingers carry the view all the way into an edge, the far ones too
 //      (2026-11-16: the stage stepped a pan per finger, and toward the right
 //      and bottom edges it stopped short of them, so no chip came there);
-//   8. on an iPhone (a 34 px home-indicator inset, through DevTools' safe-area
-//      override, so the page's own env() reads it) a host's refusal in the
+//   8. as an iPhone Home Screen app (a 34 px home-indicator inset, through
+//      DevTools' safe-area override, so the page's own env() reads it; a
+//      Safari tab reads none, api/iosStandalone.ts) a host's refusal in the
 //      feedback line is drawn clear of the down arrow's 44 px target, and so
 //      it is with no inset and while paused (clear of the paused banner and of
 //      the arrow lifted over it too) (2026-11-16: the line sat a fixed 96 px
@@ -977,10 +978,12 @@ for (const sideways of [false, true]) {
         dirs === 'down right', dirs || 'none');
     await o.ctx.close();
 }
-// AN IPHONE'S HOME-INDICATOR INSET (2026-11-16). The toolbar grows by the
-// 34 px inset and the picture, and the down arrow on its bottom edge, rise
-// with it; the feedback line sat a fixed 96 px off the bottom, so a host's
-// refusal on an iPhone in portrait was drawn across most of the down arrow
+// AN IPHONE'S HOME-INDICATOR INSET (2026-11-16), which the page reads only as
+// a Home Screen app in portrait (api/iosStandalone.ts; a Safari tab reads 0,
+// the run above). The toolbar grows by the 34 px inset and the picture, and
+// the down arrow on its bottom edge, rise with it; the feedback line sat a
+// fixed 96 px off the bottom, so a host's refusal was drawn across most of
+// the down arrow
 // (the line paints over it, and the arrow does not step aside for the line,
 // rightly: see the run above). The line now rises with the inset too.
 {
@@ -1010,7 +1013,10 @@ for (const sideways of [false, true]) {
         const now = await hopChip(page, 'down');
         ck('iPhone inset: precondition: the host\'s refusal is up, red, in the feedback line', !!line && line.bad, line ? `line ${Math.round(line.top)}..${Math.round(line.bottom)}` : 'no line');
         lineClearOfArrow('iPhone inset: ', line, now);
-        ck('iPhone inset: …and the arrow did not move for it, and a tap at its centre reaches it',
+        // Where it was, and taken by a tap (with the line 4 px clear it says
+        // nothing about whether the line counts as an obstacle: the run above
+        // moves the line onto the arrow for that).
+        ck('iPhone inset: …and the arrow is where it was, and a tap at its centre reaches it',
             !!now && now.shift === 0 && Math.abs(now.x - down.x) < 0.5 && Math.abs(now.y - down.y) < 0.5 && now.hitCentre && now.hitCorners,
             now ? `shift ${now.shift}, at ${Math.round(now.x)},${Math.round(now.y)} (was ${Math.round(down.x)},${Math.round(down.y)}), hit ${now.hitCentre}/${now.hitCorners}` : 'gone');
         await page.screenshot({ path: join(outdir, 'phone-inset-hop-down-error.png') });
