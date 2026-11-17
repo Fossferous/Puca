@@ -333,8 +333,8 @@
 
 .save-btn {
     padding: 8px 20px;
-    background: var(--brand-primary);
-    color: var(--bg-primary);
+    background: var(--brand-fill);
+    color: #fff;
     border: none;
     border-radius: 4px;
     font-weight: 600;
@@ -343,7 +343,7 @@
 }
 
 .save-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .save-btn:disabled {
@@ -616,7 +616,7 @@
     border-radius: 4px;
     font-family: monospace;
     font-weight: 600;
-    color: var(--brand-primary);
+    color: var(--brand-text);
 }
 
 /* ==========================================================================
@@ -758,7 +758,7 @@
 .password-change-form button {
     align-self: flex-start;
     padding: 8px 16px;
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
     border: none;
     border-radius: 4px;
@@ -822,7 +822,7 @@
 }
 
 .keybind-activate {
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
     border: none;
     border-radius: 4px;

@@ -34,7 +34,7 @@
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
     font-size: 14px;
     font-weight: 600;

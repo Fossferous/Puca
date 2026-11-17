@@ -177,7 +177,7 @@
 .mode-accent-sample {
     padding: 6px 12px;
     border-radius: 4px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
     font-size: 13px;
     font-weight: 600;

@@ -223,7 +223,7 @@ import {
 } from '../api/mobileApp';
 import { setUnreadBadge } from '../api/unreadBadge';
 import { SmartAvatar } from './SmartAvatar';
-import { repinOnResize } from './repinOnResize';
+import { repinOnResize, scrollToEnd } from './repinOnResize';
 import { growToFit } from './growToFit';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
@@ -787,48 +787,47 @@ export function Chat({ onLogout }: ChatProps) {
     // because the handler is a one-shot useCallback and showingMessageList is
     // computed further down the component.
     const showingMessageListRef = useRef(true);
-    // True while a programmatic scroll-to-bottom is in flight. A smooth scroll
-    // fires intermediate scroll events that would read as "the user scrolled
-    // up", flipping atBottomRef back off and re-showing the pill mid-animation.
-    const pinningRef = useRef(false);
-    const pinningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // A programmatic scroll to the newest message, from its start until it has
+    // got there (repinOnResize.ts, scrollToEnd). A smooth scroll fires
+    // intermediate scroll events that would read as "the user scrolled up",
+    // flipping atBottomRef back off and re-showing the pill mid-animation, so
+    // they are swallowed while it lasts; and while it lasts a change of the
+    // list's box takes it to the end (the effect with repinOnResize below).
+    // It lasts until the list is AT its end, not within AT_BOTTOM_SLOP: let go
+    // there, Jump to latest stopped 31 px short when the typing indicator came
+    // up in its last stretch; or until a step goes back UP, which is the
+    // reader's (a scrollbar drag, a key: the wheel and a finger cancel it
+    // below). Safety valve: if the scroll stops short (or scrollTo produced no
+    // event because we were already at the bottom), it stops swallowing
+    // scrolls a beat after its last step, not its start (a long smooth scroll
+    // takes Chromium 1.5 s), and RECONCILES the state with where the viewport
+    // actually is, because the events that would have corrected it were
+    // swallowed.
+    const [pinning] = useState(() => scrollToEnd(800, () => {
+        const c = messagesContainerRef.current;
+        if (!c || !showingMessageListRef.current) return;
+        const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight <= AT_BOTTOM_SLOP;
+        if (atBottom !== atBottomRef.current) {
+            atBottomRef.current = atBottom;
+            if (atBottom) { setShowJumpLatest(false); setMissedCount(0); }
+            else setShowJumpLatest(true);
+        }
+    }));
 
     const scrollToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
         const el = messagesContainerRef.current;
         if (!el) return;
-        pinningRef.current = true;
-        if (pinningTimerRef.current !== null) clearTimeout(pinningTimerRef.current);
-        // Safety valve: if the scroll never lands (content grew mid-flight and
-        // the animation stopped short, or scrollTo produced no event because
-        // we were already at the bottom), stop swallowing scrolls after a beat
-        // — and RECONCILE the state with where the viewport actually is,
-        // because the events that would have corrected it were swallowed.
-        pinningTimerRef.current = setTimeout(() => {
-            pinningRef.current = false;
-            pinningTimerRef.current = null;
-            const c = messagesContainerRef.current;
-            if (!c || !showingMessageListRef.current) return;
-            const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight <= AT_BOTTOM_SLOP;
-            if (atBottom !== atBottomRef.current) {
-                atBottomRef.current = atBottom;
-                if (atBottom) { setShowJumpLatest(false); setMissedCount(0); }
-                else setShowJumpLatest(true);
-            }
-        }, 800);
+        pinning.start(el);
         el.scrollTo({ top: el.scrollHeight, behavior });
         atBottomRef.current = true;
         setShowJumpLatest(false);
         setMissedCount(0);
-    }, []);
+    }, [pinning]);
 
     // Explicit user input during a pinning animation means the user took the
     // wheel back: stop swallowing scroll events immediately, or their scroll
     // up would be discarded and the next message would yank them down.
-    const cancelPinning = useCallback(() => {
-        if (!pinningRef.current) return;
-        pinningRef.current = false;
-        if (pinningTimerRef.current !== null) { clearTimeout(pinningTimerRef.current); pinningTimerRef.current = null; }
-    }, []);
+    const cancelPinning = pinning.cancel;
 
     const handleMessagesScroll = useCallback(() => {
         const el = messagesContainerRef.current;
@@ -838,23 +837,17 @@ export function Chat({ onLogout }: ChatProps) {
         // atBottomRef already gates on showingMessageList; this makes the
         // writer agree with them).
         if (!showingMessageListRef.current) return;
+        // Intermediate events of our own scroll animation. Only the arrival at
+        // the end is meaningful (it lets go); ignore the rest.
+        if (pinning.ownScroll(el)) return;
         const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_SLOP;
-        if (pinningRef.current) {
-            // Intermediate events of our own scroll animation. Only the
-            // arrival at the bottom is meaningful; ignore the rest.
-            if (atBottom) {
-                pinningRef.current = false;
-                if (pinningTimerRef.current !== null) { clearTimeout(pinningTimerRef.current); pinningTimerRef.current = null; }
-            }
-            return;
-        }
         // Only act on a TRANSITION — setState on every wheel tick would
         // re-render this whole component and visibly stutter the list.
         if (atBottom === atBottomRef.current) return;
         atBottomRef.current = atBottom;
         if (atBottom) { setShowJumpLatest(false); setMissedCount(0); }
         else setShowJumpLatest(true);
-    }, []);
+    }, [pinning]);
 
     // Get current user from JWT
     const token = getToken();
@@ -3711,7 +3704,7 @@ export function Chat({ onLogout }: ChatProps) {
     // or the reply banner shrink it from the bottom, and the newest message
     // slid under the box (repinOnResize says what was measured); that change
     // moves only a list that was at its very end (or Jump to latest's scroll
-    // on its way there, until pinningRef lets go within the slop), never a
+    // on its way there, until it has got there: scrollToEnd), never a
     // reader a notch up. Depends on isLoading because the
     // component early-returns before the container exists, so a [] dep would
     // bind to a null ref forever. Only a change that MOVES the list re-pins it
@@ -3720,7 +3713,7 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         const el = messagesContainerRef.current;
         if (!el || !showingMessageList) return;
-        const repin = repinOnResize(el, () => atBottomRef.current, () => pinningRef.current);
+        const repin = repinOnResize(el, () => atBottomRef.current, pinning.heading);
         el.addEventListener('load', repin, true);
         el.addEventListener('error', repin, true);
         const ro = new ResizeObserver(repin);
@@ -3747,7 +3740,7 @@ export function Chat({ onLogout }: ChatProps) {
         // one fired `load` and slammed those lists to the bottom while the user
         // was reading the top. The observers keep the same gate (plus the
         // atBottomRef check inside repin) for exactly that reason.
-    }, [isLoading, showingMessageList]);
+    }, [isLoading, showingMessageList, pinning]);
 
     // Open/close the pinned-messages panel, decrypting each pin's content.
     // The answer can land after the person has moved on: another channel, or

@@ -32,7 +32,7 @@
 .notes-card:focus-within .notes-card-select,
 .notes-card-select.shown,
 .notes-card-select.on { opacity: 1; }
-.notes-card-select.on { color: var(--brand-primary); }
+.notes-card-select.on { color: var(--brand-text); }
 
 /* Over the top bar while anything is selected (below popovers at 1000). */
 .notes-selectbar {
@@ -62,7 +62,7 @@
     min-width: 0;
     margin: 0 4px;
 }
-.notes-selectbar .notes-iconbtn.active { color: var(--brand-primary); }
+.notes-selectbar .notes-iconbtn.active { color: var(--brand-text); }
 .notes-selectbar .notes-iconbtn.active .svrn-icon { fill: currentColor; }
 
 @media (pointer: coarse) and (max-width: 1024px) {

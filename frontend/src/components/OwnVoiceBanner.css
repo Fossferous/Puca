@@ -85,11 +85,11 @@
 }
 
 .own-voice-banner-btn.move {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
 }
 
 .own-voice-banner-btn.move:hover:not(:disabled) {
-    background: var(--brand-hover, var(--brand-primary));
+    background: var(--brand-fill-hover);
 }
 
 .own-voice-banner-btn:disabled {

@@ -193,6 +193,8 @@ button.ta-file.saved { color: #7fd18b !important; } button.ta-file.error { color
 .role-loading { color: #8e9297 !important; }
 .role-modal-content .cancel-btn { color: var(--text-muted) !important; }
 .invite-preview-icon, .discover-card-icon { background: linear-gradient(135deg, var(--brand-primary), var(--accent-pink)) !important; }
+/* Create Channel's gradient ran to the lavender then (it runs on the brand's fills now, Chat.css). */
+.create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)) !important; }
 .discover-empty-hint, .discover-member-count { color: #72767d !important; }
 .join-error { color: var(--color-danger) !important; }
 .recovery-word-num { color: #6d6f78 !important; }
@@ -426,7 +428,8 @@ const pageReader = () => {
         return answer;
     };
     const hasWords = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map()) => {
+    // `only`, if given, picks which of root and what is in it are read.
+    window.__measure = (root, page = pageColour(), memo = new Map(), dims = new Map(), only = null) => {
         const rows = [];
         const add = (el, kind, need) => {
             const style = getComputedStyle(el);
@@ -458,6 +461,7 @@ const pageReader = () => {
             });
         };
         for (const el of [root, ...root.querySelectorAll('*')]) {
+            if (only && !only(el)) continue;
             if (el.hasAttribute('data-icon')) continue;
             if (el.tagName === 'OPTION' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
             if (el.matches(':disabled')) continue; // 1.4.3 and 1.4.11 exempt a control that cannot be used
@@ -866,6 +870,237 @@ for (const [name, options, sheetName, url] of [
     await header.page.evaluate(() => window.__old(''));
     check(header.errors.length === 0, 'and no page error', header.errors.slice(0, 3).join('; '));
     await header.close();
+}
+
+// 7. The other seven themes, where (4) does not reach: on them the same sweep still finds a hundred
+//    places and more below the bar (62 on AMOLED at rest to 178 on Green under the pointer before
+//    these were held, 32 to 115 after, by file and classes, measured 2026-11-17; the rest is not
+//    held here yet). These are
+//    held there, wherever the sweep draws them, on all eight themes with and without High Contrast,
+//    at rest and hovered at 1280x800, and at rest and tapped at 390x844 on a touchscreen:
+//      - a message link's words, at rest and under the pointer (--brand-primary: 3.82:1 on Dark's
+//        message surface, 3.9 on Pink's, 4.23 on Purple's, 3.54 on a row under the pointer);
+//      - the words on a fill of the brand's own colours, a filled button's (white on it 2.93:1 on
+//        Yellow, 3.18 on Green, 3.58 on Orange, 4.23 on Purple, at rest; under the pointer too;
+//        on Create Channel's gradient through the lavender 1.53 to 2.72 on all seven), read on
+//        every colour its paint has, dimmed as it is drawn, whatever the words' own colour;
+//      - the device list's danger button (white on the dark palette's red, 3.69:1 on all seven).
+//    A fill is found by what it is painted with, not by name, so a new filled button is held too,
+//    marked at rest and read under the pointer and a tap too whatever the hover paints, with a
+//    brightness() filter counted (any other filter that changes a colour fails the place).
+//    NEGATIVE CONTROLS: the three as they were, OLD_OTHER, fail on the themes they failed on, and
+//    the card table's primary button brightened under the pointer as it was fails on two.
+const BRAND_FILLS = ['--brand-primary', '--brand-hover', '--brand-active', '--brand-fill', '--brand-fill-hover'];
+const NAMED_ON_EVERY_THEME = ['message-link', 'device-btn-danger'];
+const OLD_OTHER = `
+.message-link, .message-link:not(.__never) { color: var(--mode-brand-text, var(--brand-primary)) !important; }
+:root { --brand-fill: var(--brand-primary) !important; --brand-fill-hover: var(--brand-hover) !important; }
+.create-btn { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)) !important; }
+.device-btn-danger, .device-btn-danger:not(.__never) { background: var(--danger, #f04747) !important; }
+.message-content.task-completed { opacity: 0.6 !important; color: inherit !important; }
+`;
+{
+    console.log('\non every theme: message links, the words on the brand\'s fills, the device list\'s danger button');
+    const themedReader = ({ named, fills }) => {
+        const rgb = (colour) => {
+            const srgb = colour.match(/^color\(srgb ([^)]+)\)$/);
+            const [r, g, b, a = 1] = srgb
+                ? srgb[1].split(/[ /]+/).filter(Boolean).map((v, i) => (i < 3 ? Number(v) * 255 : Number(v)))
+                : (colour.match(/[\d.]+/g) ?? []).map(Number);
+            return a >= 1 && r !== undefined ? [r, g, b].map(Math.round).join(',') : null;
+        };
+        // The brand's fills on this look, as the stylesheet resolves each token; a token this theme
+        // does not define resolves to nothing and is left out.
+        window.__fillsNow = () => [...new Set(fills.map((token) => {
+            const probe = document.createElement('div');
+            probe.style.backgroundColor = `var(${token})`;
+            document.body.append(probe);
+            const colour = rgb(getComputedStyle(probe).backgroundColor);
+            probe.remove();
+            return colour;
+        }).filter(Boolean))];
+        // What is painted with one of the brand's fills (a gradient through one counts), marked on
+        // looks where no colour of another meaning is the brand's: not Green, whose brand is the
+        // success green Add Friend and a copied invite are filled with.
+        // `also`: the places marked at rest, by their order on the page, which is the same on the
+        // hovered one: a hover that darkens a fill with color-mix() is no colour of the brand's.
+        window.__markFilled = (also = []) => {
+            const now = new Set(window.__fillsNow());
+            const all = [...document.querySelectorAll('section[data-sweep] *')];
+            for (const i of also) all[i].setAttribute('data-brand-filled', '');
+            all.forEach((el, i) => {
+                const style = getComputedStyle(el);
+                const stops = style.backgroundImage.match(/rgba?\([^)]+\)|color\(srgb [^)]+\)/g) ?? [];
+                if (now.has(rgb(style.backgroundColor)) || stops.some(stop => now.has(rgb(stop)))) el.setAttribute('data-brand-filled', '');
+                else if (!el.hasAttribute('data-brand-filled')) return;
+                el.dataset.markedAt = String(i);
+            });
+            return all.filter(el => el.hasAttribute('data-brand-filled')).map(el => Number(el.dataset.markedAt));
+        };
+        // What paints the paper under an element's words: itself, or the nearest one around it
+        // with a colour or a gradient of its own.
+        const painterOf = (el) => {
+            for (let up = el; up; up = up.parentElement) {
+                const style = getComputedStyle(up);
+                if (style.backgroundImage.includes('gradient(')) return up;
+                const [, , , a = 1] = (style.backgroundColor.match(/[\d.]+/g) ?? [0, 0, 0, 0]).map(Number);
+                if (a > 0) return up;
+            }
+            return null;
+        };
+        // The words on each of those, and each named place, read as the sweep reads them.
+        window.__readThemed = () => {
+            const rows = [];
+            const probe = document.createElement('div');
+            probe.style.background = 'var(--bg-primary)';
+            document.body.append(probe);
+            const page = [...rgb(getComputedStyle(probe).backgroundColor).split(',').map(Number), 1];
+            probe.remove();
+            const memo = new Map();
+            const dims = new Map();
+            // A filter changes what is painted: brightness() scales the words and what is behind them
+            // inside the element it is on (a hover's brightness(1.12) took white on Yellow's pressed
+            // brand to 4.0:1, and brightness(0.9) darkens white words too). The ones that keep a
+            // colour's lightness, or paint no colour of words, are left; any other is not read, and
+            // fails the place rather than passing it.
+            const KEEPS = ['grayscale', 'blur', 'drop-shadow'];
+            const filterOf = (el) => {
+                let factor = 1;
+                let unread = null;
+                for (let up = el; up && up !== document.documentElement; up = up.parentElement) {
+                    const filter = getComputedStyle(up).filter;
+                    if (!filter || filter === 'none') continue;
+                    for (const [, name, arg] of filter.matchAll(/([a-z-]+)\(((?:[^()]|\([^()]*\))*)\)/g)) {
+                        if (name === 'brightness') factor *= arg.trim().endsWith('%') ? parseFloat(arg) / 100 : parseFloat(arg);
+                        else if (!KEEPS.includes(name)) unread = name;
+                    }
+                }
+                return { factor, unread };
+            };
+            const lum = (c) => {
+                const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+                return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+            };
+            const scaled = (colour, k) => colour.split(',').map(v => Math.min(255, Number(v) * k));
+            const filtered = (row, ink, paper) => {
+                if (ink.unread || paper.unread) return { ...row, ratio: 0, cls: `${row.cls} [filter ${ink.unread || paper.unread} not read]` };
+                if (ink.factor === 1 && paper.factor === 1) return row;
+                const [x, y] = [lum(scaled(row.ink, ink.factor)), lum(scaled(row.under, paper.factor))].sort((p, q) => q - p);
+                return { ...row, ratio: Math.round(((x + 0.05) / (y + 0.05)) * 100) / 100, cls: `${row.cls} [brightness ${ink.factor.toFixed(2)}]` };
+            };
+            const take = (el, kind) => {
+                const section = el.closest('section[data-sweep]');
+                // Whatever is filtered around a named place is read as if its paper were inside the
+                // filter too: true of every one so far, and a filter there is reported by its name.
+                const around = filterOf(el);
+                for (const row of window.__measure(el, page, memo, dims)) rows.push({ ...filtered(row, around, around), kind, in: section?.getAttribute('data-in') ?? '' });
+            };
+            // Every word whose paper the fill is, whatever its colour, on every colour the paint has:
+            // one element at a time, for the filter on its words and the one on the fill.
+            for (const fill of document.querySelectorAll('[data-brand-filled]')) {
+                const section = fill.closest('section[data-sweep]');
+                const paper = filterOf(fill);
+                for (const el of [fill, ...fill.querySelectorAll('*')]) {
+                    if (painterOf(el) !== fill) continue;
+                    const ink = filterOf(el);
+                    for (const row of window.__measure(el, page, memo, dims, x => x === el)) rows.push({ ...filtered(row, ink, paper), kind: 'fill', in: section?.getAttribute('data-in') ?? '' });
+                }
+            }
+            // A message's words are drawn in every arm of MessageContent, some fifteen thousand links:
+            // one of each in every place, by the classes around it out to its block of the sweep.
+            const seen = new Set();
+            for (const name of named) {
+                for (const el of document.querySelectorAll(`section[data-sweep] .${name}`)) {
+                    const around = [];
+                    for (let up = el; up && up.tagName !== 'SECTION'; up = up.parentElement) around.push(`${up.tagName}.${up.className}`);
+                    const key = `${name} ${el.getAttribute('data-at')} ${el.closest('section[data-sweep]')?.getAttribute('data-in')} ${around.join('<')}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    take(el, name);
+                }
+            }
+            return rows;
+        };
+    };
+    const KINDS = ['a message link', 'words on a brand fill', 'the device list\'s danger button'];
+    const kindOf = (row) => {
+        return { 'message-link': KINDS[0], fill: KINDS[1], 'device-btn-danger': KINDS[2] }[row.kind];
+    };
+    const read = async (page) => {
+        const byLook = [];
+        for (const look of LOOKS) {
+            await page.evaluate(l => window.__look(l), look);
+            const rows = (await page.evaluate(() => window.__readThemed()))
+                .map(row => ({ ...row, kind: kindOf(row) })).filter(row => row.kind)
+                .map(row => ({ ...row, surface: `${row.kind}, in ${row.in}` }));
+            byLook.push([look.join('/'), rows]);
+        }
+        return byLook;
+    };
+    const failingOn = (byLook, kind) => new Set(byLook.filter(([, rows]) => below(rows).some(row => row.kind === kind)).map(([look]) => look.split('/')[0]));
+    let readings = 0;
+    const all = [];
+    let atRest = [];
+    for (const [name, url, options] of [
+        ['1280x800', sweepUrl, { viewport: { width: 1280, height: 800 } }],
+        ['1280x800 hovered and focused', sweepHoveredUrl, { viewport: { width: 1280, height: 800 } }],
+        ['390x844 touch', sweepUrl, { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
+        ['390x844 touch, tapped', sweepHoveredUrl, { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
+    ]) {
+        const { page, close } = await open(url, options);
+        await page.evaluate(themedReader, { named: NAMED_ON_EVERY_THEME, fills: BRAND_FILLS });
+        // What a fill paints is the same on every look: marked on Dark, where a few fills name its
+        // blurple outright (`var(--brand, #5865f2)`), and on Yellow, whose brand is no other
+        // colour's (on Green it is the success green), with what was marked at rest.
+        await page.evaluate(l => window.__look(l), ['dark', 'normal']);
+        const onDark = await page.evaluate(also => window.__markFilled(also), atRest);
+        await page.evaluate(l => window.__look(l), ['yellow', 'normal']);
+        const markedHere = await page.evaluate(also => window.__markFilled(also), onDark);
+        if (name === '1280x800') atRest = markedHere;
+        const marked = markedHere.length;
+        const byLook = await read(page);
+        readings += byLook.reduce((sum, [, rows]) => sum + rows.length, 0);
+        all.push(...byLook.map(([look, rows]) => [`${look} ${name}`, rows]));
+        const places = kind => new Set(byLook.flatMap(([, rows]) => rows.filter(row => row.kind === kind).map(row => `${row.at} ${row.cls}`))).size;
+        const counts = Object.fromEntries(KINDS.map(kind => [kind, places(kind)]));
+        check(counts[KINDS[0]] >= 2 && counts[KINDS[1]] >= 40 && counts[KINDS[2]] >= 4,
+            `CONTROL (${name}): the sweep reaches each of the three (${marked} elements painted with a brand fill)`, KINDS.map(kind => `${kind}: ${counts[kind]} places`).join(', '));
+        if (name === '1280x800' || name === '1280x800 hovered and focused') {
+            // 5. The control: the three as they were.
+            await page.evaluate(sheet => window.__old(sheet), OLD_OTHER);
+            const then = await read(page);
+            await page.evaluate(() => window.__old(''));
+            for (const [kind, themes] of [
+                [KINDS[0], ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow']],
+                [KINDS[1], ['purple', 'green', 'orange', 'yellow']],
+                [KINDS[2], ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow']],
+            ]) {
+                const failing = failingOn(then, kind);
+                const held = themes.filter(theme => !failing.has(theme));
+                check(held.length === 0, `CONTROL (${name}): ${kind}, as it was, fails on ${themes.join(' ')}`, held.length ? `these still pass: ${held.join(' ')}` : '');
+            }
+            // A gradient is read through its stops: Create Channel's, through the lavender, fails on
+            // all seven (on Pink nothing else of the old fills does).
+            const lavender = new Set(then.filter(([, rows]) => below(rows).some(row => row.cls.split(' ').includes('create-btn'))).map(([look]) => look.split('/')[0]));
+            const heldGradient = ['dark', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'].filter(theme => !lavender.has(theme));
+            check(heldGradient.length === 0, `CONTROL (${name}): a gradient fill is read on every stop: Create Channel's through the lavender, as it was, fails on all seven`, heldGradient.length ? `these still pass: ${heldGradient.join(' ')}` : '');
+        }
+        if (name === '1280x800 hovered and focused') {
+            // CONTROL: a filter is read. The card table's and the activities' primary buttons under
+            // the pointer as they were, brightened, which takes white on Yellow's and Green's
+            // pressed brand under the bar; the colours alone would pass them.
+            await page.evaluate(sheet => window.__old(sheet), '.games-btn-primary, .activity-btn-primary { background: var(--brand-active) !important; filter: brightness(1.12) !important; }');
+            const then = await read(page);
+            await page.evaluate(() => window.__old(''));
+            const failing = new Set(then.filter(([, rows]) => below(rows).some(row => /games-btn-primary|activity-btn-primary/.test(row.cls))).map(([look]) => look.split('/')[0]));
+            const held = ['yellow', 'green'].filter(theme => !failing.has(theme));
+            check(held.length === 0, 'CONTROL (1280x800 hovered and focused): a brightness filter is read: the card table\'s and the activities\' primary buttons brightened under the pointer, as they were, fail on yellow green', held.length ? `these still pass: ${held.join(' ')}` : '');
+        }
+        await close();
+    }
+    const poor = collect(all);
+    for (const { worst, looks } of poor) console.log(describe(worst, looks));
+    check(poor.length === 0, `a message link, the words on a brand fill and the device list's danger button hold the bar on all eight themes, with and without high contrast, at rest, hovered and tapped, in ${readings} readings`, `${poor.length} below`);
 }
 
 // The file of Light's rules cannot reach another theme.

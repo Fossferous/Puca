@@ -185,7 +185,7 @@
 .voice-user-avatar {
     width: 20px;
     height: 20px;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -365,7 +365,7 @@
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -520,7 +520,7 @@
 
 .create-btn {
     padding: 0.65rem 1.25rem;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--brand-fill), var(--brand-fill-hover));
     border: none;
     border-radius: 6px;
     color: #ffffff;
@@ -535,8 +535,11 @@
     cursor: not-allowed;
 }
 
+/* A darker fill under the pointer, the words kept white: at 0.9 opacity they were 4.23:1 on Pink
+   and under 4.5 on every theme but Light, which had undone it (lightTheme.css), and a
+   brightness(0.9) filter darkens the words with the fill (4.36:1 on Dark and Light). */
 .create-btn:hover:not(:disabled) {
-    opacity: 0.9;
+    background: linear-gradient(135deg, var(--brand-fill-hover), var(--brand-fill-hover));
 }
 
 .channel-list,
@@ -648,7 +651,7 @@
 .user-avatar {
     width: 28px;
     height: 28px;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -817,7 +820,7 @@
 }
 
 .search-result-item strong {
-    color: var(--brand-primary);
+    color: var(--brand-text);
     margin-right: 8px;
 }
 
@@ -909,7 +912,7 @@
 }
 
 .collection-channel-header .channel-name {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
 }
 
 /* Vertical rhythm of the message list. Rows are separated by their own
@@ -1053,7 +1056,7 @@
 
 .message-author {
     font-weight: 600;
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
     min-width: 0;
     overflow-wrap: anywhere;
 }
@@ -1471,13 +1474,16 @@ button.message-attachment.error { color: #ffb4b4; }
     pointer-events: none;
 }
 
-/* Message Links */
+/* Message Links: the brand as words, the same at rest and under the pointer, where index.css's
+   a:hover would otherwise take it from a mode's picture. --brand-primary was 3.82:1 on the
+   message surface on Dark (3.9 Pink, 4.23 Purple) and 3.54 on a row under the pointer. */
 .message-link {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
     text-decoration: none;
 }
 
 .message-link:hover {
+    color: var(--mode-brand-text, var(--link-hover));
     text-decoration: underline;
 }
 
@@ -1525,8 +1531,11 @@ button.message-attachment.error { color: #ffb4b4; }
     background: var(--bg-tertiary);
 }
 
+/* A box of the theme's deepest surface. The blurple wash it had lifted what was under a link in
+   it, over a mention's gold, to 4.38:1 on Dark and 4.12 on Pink (3.77 under the pointer). Light,
+   whose words are dark, keeps the wash (lightTheme.css). */
 .spoiler.revealed {
-    background: rgba(88, 101, 242, 0.2);
+    background: var(--bg-tertiary);
     color: var(--text-normal);
 }
 
@@ -1696,7 +1705,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .load-older-btn:hover:not(:disabled) {
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
 }
 
@@ -1826,7 +1835,7 @@ button.message-attachment.error { color: #ffb4b4; }
     display: inline-block;
     margin-right: 6px;
     animation: typing-bounce 1.2s infinite;
-    color: var(--brand-primary);
+    color: var(--brand-text);
     font-weight: bold;
 }
 
@@ -1892,7 +1901,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .task-mode-btn.active {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #ffffff;
 }
 
@@ -1912,12 +1921,12 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .task-checkbox:hover {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
     transform: scale(1.1);
 }
 
 .task-checkbox.completed {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
 }
 
 /* Caller lacks COMPLETE_TASKS/MANAGE_TASKS on the channel: still readable,
@@ -1931,10 +1940,12 @@ button.message-attachment.error { color: #ffb4b4; }
     transform: none;
 }
 
-/* Strikethrough for completed task content */
+/* Strikethrough for completed task content, in the muted colour. It was faded to 0.6, which took
+   every coloured run in it under the bar on the dark themes (a link 1.65 to 2.4:1, a quote 2.5,
+   code 2.65 on Dark); Light had already put it back at full strength this way. */
 .message-content.task-completed {
     text-decoration: line-through;
-    opacity: 0.6;
+    color: var(--text-muted);
 }
 
 .message-form input {
@@ -2006,8 +2017,8 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .advanced-toggle.active {
-    background: var(--brand-primary);
-    color: var(--bg-primary);
+    background: var(--brand-fill);
+    color: #fff;
 }
 
 /* Format Context Menu */
@@ -2044,12 +2055,13 @@ button.message-attachment.error { color: #ffb4b4; }
    the 0-1-0 class rules of every other button in the form — the emoji and
    task toggles were silently wearing the send gradient and its
    `color: var(--bg-primary)` (near-black on dark themes) instead of their own
-   muted-icon styling. White text, not var(--bg-primary): the gradient is
-   mid-luminance in every theme, and in the dark family bg-primary is
-   near-black on it. */
+   muted-icon styling. White text, not var(--bg-primary), on the brand's
+   fills (theme.css), which hold white words at 4.5:1 on every theme. It ran
+   from --accent-lavender, under white words 2.7:1 on Dark and 1.5 to 2.7:1
+   on the colour themes (Create Channel's .create-btn the same). */
 .message-form button[type="submit"] {
     padding: 0.75rem 1.25rem;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--brand-fill-hover), var(--brand-fill));
     border: none;
     border-radius: 8px;
     color: #ffffff;
@@ -2193,7 +2205,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .member-item.online .member-avatar {
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     color: var(--bg-primary);
 }
 
@@ -2295,12 +2307,12 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .message-reply-ref .reply-icon {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
     font-size: 0.9rem;
 }
 
 .message-reply-ref .reply-author {
-    color: var(--mode-brand-text, var(--brand-primary));
+    color: var(--mode-brand-text, var(--brand-text));
     font-weight: 500;
 }
 
@@ -2323,7 +2335,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .reply-preview-banner .reply-icon {
-    color: var(--brand-primary);
+    color: var(--brand-text);
     font-size: 1rem;
 }
 
@@ -2332,7 +2344,7 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 
 .reply-preview-banner .replying-to strong {
-    color: var(--brand-primary);
+    color: var(--brand-text);
 }
 
 .reply-preview-banner .reply-content-preview {
@@ -2407,7 +2419,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2511,7 +2523,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 56px;
     height: 56px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    background: linear-gradient(135deg, var(--avatar-brand), var(--accent-lavender));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2637,7 +2649,7 @@ button.message-attachment.error { color: #ffb4b4; }
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    background: linear-gradient(135deg, var(--brand-fill), var(--accent-purple));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3168,14 +3180,14 @@ body.voice-drag-active {
     font-size: 0.9rem;
 }
 .autocomplete-item.active {
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
 }
 .ac-avatar {
     width: 22px; height: 22px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 0.7rem; font-weight: 600; color: #fff;
-    background: var(--brand-primary, #5865f2); flex-shrink: 0;
+    background: var(--brand-fill); flex-shrink: 0;
 }
 .ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
 /* A name too long for the row ends in an ellipsis on its own line, never mid-letter under the

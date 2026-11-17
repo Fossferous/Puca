@@ -96,10 +96,23 @@
     --brand-primary: #5865f2;
     --brand-hover: #4752c4;
     --brand-active: #3c45a5;
+    /* The brand as a fill under white words (a filled button, a selected tab, a badge) and that
+       fill under the pointer: here the brand itself. A colour theme whose brand is too bright for
+       white words on it has fills of its own (below), and a server mode's accent sets both
+       (modes/useModeLook.ts). The brand itself stays for what is not under words: a focus ring, a
+       border, a bar. */
+    --brand-fill: var(--brand-primary);
+    --brand-fill-hover: var(--brand-hover);
     /* The brand colour as words: --brand-primary is 3.65 to 4.3:1 on a surface, on every theme. */
     --brand-text: color-mix(in srgb, var(--brand-primary) 70%, #fff);
-    /* A link under the pointer (index.css). */
-    --link-hover: var(--brand-primary);
+    /* The brand end of an avatar's gradient, under initials in --bg-primary: the brand as words,
+       which holds 4.5:1 against --bg-primary (dark initials on --brand-primary were 3.82:1 on
+       Dark). Light, whose initials are white, keeps the brand itself. */
+    --avatar-brand: var(--brand-text);
+    /* A link under the pointer (index.css), and a message link's colour (Chat.css): the brand as
+       words. --brand-primary was 3.5 to 4.07:1 there on Light, and 3.54 (Dark) to 4.23 (Purple) on
+       the message surface and a row under the pointer elsewhere. */
+    --link-hover: var(--brand-text);
 
     /* Status colors */
     --status-online: #23a55a;
@@ -122,6 +135,10 @@
     --color-warning-bg: rgba(240, 178, 50, 0.1);
     --color-danger: #f23f43;
     --color-danger-bg: rgba(242, 63, 67, 0.1);
+    /* Danger as a button's fill under white words (the device list's Revoke and Reset): white on
+       --color-danger, which is words too, is 3.77:1, and on the #f04747 the device list fell back
+       to 3.69. This holds 4.57, and 3:1 on every dark surface. Light's is its own --color-danger. */
+    --danger-fill: #da373c;
     --color-info: #00a8fc;
     --color-info-bg: rgba(0, 168, 252, 0.1);
 
@@ -292,8 +309,6 @@
     --text-muted: #5a5c64;
     /* 5.16:1 on a row a hover greys twice over; the 90% mix was 4.47 there. */
     --brand-text: color-mix(in srgb, var(--brand-hover) 80%, #000);
-    /* --brand-primary was 3.5 to 4.07:1 under a link on Light's surfaces. */
-    --link-hover: var(--brand-text);
     /* 4.5:1 on --bg-tertiary. It was 2.97:1 there. */
     --text-faint: #62656e;
     --faint-fill: #62656e;
@@ -309,6 +324,8 @@
        Light's surfaces (an unread badge, Add Friend, Settings' Log Out). */
     --color-danger: var(--text-danger);
     --color-success: var(--text-positive);
+    --danger-fill: var(--color-danger);
+    --avatar-brand: var(--brand-primary);
     /* The avatars' gradient runs from the brand to this, under white initials: #a78bfa was 2.72:1. */
     --accent-lavender: #7a5cd6;
     /* "Offline" in a profile is words in this colour: #80848e was 2.97:1 on --bg-tertiary. */
@@ -391,11 +408,15 @@
     --login-grad-3: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.6) 20%);
     --login-accent: var(--brand-primary);
     --login-accent-2: var(--brand-hover);
+    /* The sign-in button's gradient, under white words (Login.css). */
+    --login-fill: var(--brand-fill);
+    --login-fill-2: var(--brand-fill-hover);
 
     /* Keep the composer/profile gradients on-hue: the :root lavender next to
        a green or orange brand would clash, so re-derive it as a light tint of
        the theme's own hue. */
     --accent-lavender: hsl(var(--theme-hue) 60% 72%);
+
 }
 
 [data-theme="pink"] {
@@ -404,14 +425,25 @@
     --brand-primary: #d63384;
     --brand-hover: #bf2d76;
     --brand-active: #a62867;
+    /* The darkest brand as words of the colour themes: at 70% a link in a message that mentions
+       you was 4.47:1 under the pointer. */
+    --brand-text: color-mix(in srgb, var(--brand-primary) 60%, #fff);
 }
 
+/* A fill under white words is held to the rule a server mode's accent is (api/serverModes.ts,
+   accentTokens: a white label at 4.5:1, and 3:1 on --bg-primary and --bg-secondary). White on
+   these brands was 4.23:1 (purple), 3.18 (green), 3.58 (orange) and 2.93 (yellow), and on
+   green's, orange's and yellow's hover under 4.5 too (e2e/light-surfaces-real-browser.mjs, section
+   7), so each has fills of its own: its hue, at the nearest lightness that holds, and the hover a
+   step below as the theme had it. The brand itself is kept as it was for what is not under words,
+   where a deeper one would be under 3:1 on a lighter surface (a focus ring, the sign-in page). */
 [data-theme="purple"] {
     --theme-hue: 265;
     --theme-sat: 30%;
     --brand-primary: #8b5cf6;
     --brand-hover: #7a4ce0;
     --brand-active: #6a41c4;
+    --brand-fill: #8452f5;
 }
 
 [data-theme="green"] {
@@ -420,6 +452,8 @@
     --brand-primary: #23a55a;
     --brand-hover: #1f8f4e;
     --brand-active: #1a7a43;
+    --brand-fill: #1c8348;
+    --brand-fill-hover: #186d3c;
 }
 
 [data-theme="orange"] {
@@ -428,17 +462,21 @@
     --brand-primary: #e8590c;
     --brand-hover: #cf4f0b;
     --brand-active: #b4450a;
+    --brand-fill: #cb4e0a;
+    --brand-fill-hover: #b24509;
 }
 
 /* Yellow runs LOWER saturation than the others: high-sat yellow darks go
-   olive/brown, and the brand is a gold (not pure yellow) so white button
-   text keeps roughly the same contrast ratio as blurple-on-white. */
+   olive/brown, and the brand is a gold (not pure yellow); its fill is a
+   deeper gold, under which white button text holds 4.5:1 as on the blurple. */
 [data-theme="yellow"] {
     --theme-hue: 42;
     --theme-sat: 20%;
     --brand-primary: #c28e0e;
     --brand-hover: #aa7c0c;
     --brand-active: #926b0b;
+    --brand-fill: #976f0b;
+    --brand-fill-hover: #7f5d09;
 }
 
 /* ==================== High Contrast (Accessibility) ==================== */

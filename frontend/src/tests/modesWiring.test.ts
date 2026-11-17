@@ -18,22 +18,29 @@ describe('text in the chat that sets its own colour holds over a picture', () =>
     };
 
     it('what is written in the brand colour on the picture takes the colour made for it', () => {
+        // With no picture, the brand as words (theme.css's --brand-text): --brand-primary is a
+        // fill under white words, under 4.5:1 as words on every theme.
         for (const selector of [
             '.message-author', '.message-link', '.collection-channel-header .channel-name', '.task-checkbox:hover',
             '.task-checkbox.completed', '.message-reply-ref .reply-icon', '.message-reply-ref .reply-author',
         ]) {
-            expect(rule(selector), selector).toContain('color: var(--mode-brand-text, var(--brand-primary))');
+            expect(rule(selector), selector).toContain('color: var(--mode-brand-text, var(--brand-text))');
         }
+        // A link keeps the mode's colour under the pointer too, where index.css's a:hover would
+        // take it to --link-hover.
+        expect(rule('.message-link:hover')).toContain('color: var(--mode-brand-text, var(--link-hover))');
     });
 
     it('and any other brand-coloured text is on a surface of its own, or has to say so here', () => {
-        const rest = [...css.matchAll(/\n([^\n{}]+) \{[^}]*\n\s*color: var\(--brand-primary\);/g)].map(m => m[1]).sort();
+        const rest = [...css.matchAll(/\n([^\n{}]+) \{[^}]*\n\s*color: var\(--brand-(?:primary|text)\);/g)].map(m => m[1]).sort();
         expect(rest).toEqual([
             '.reply-preview-banner .reply-icon',
             '.reply-preview-banner .replying-to strong',
             '.search-result-item strong',
             '.typing-dots',
         ]);
+        // None of it names the fill.
+        expect(css).not.toMatch(/(^|[\s;{])color: var\(--brand-primary/);
     });
 
     it('@everyone reads as a warning on a surface that leans away from it', () => {

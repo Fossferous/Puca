@@ -155,12 +155,12 @@
 }
 
 .report-primary {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 
 .report-primary:hover:not(:disabled) {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .report-primary:disabled {

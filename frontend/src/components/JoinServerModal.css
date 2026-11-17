@@ -107,7 +107,7 @@
 }
 
 .join-tab.active {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 
@@ -174,7 +174,7 @@
 }
 
 .join-btn.primary {
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     color: #fff;
 }
 
@@ -201,7 +201,7 @@
     width: 48px;
     height: 48px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--brand-primary), #c23a8a); /* white on --accent-pink was 3.57:1 */
+    background: linear-gradient(135deg, var(--brand-fill), #c23a8a); /* white on --accent-pink was 3.57:1 */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -273,7 +273,7 @@
     width: 48px;
     height: 48px;
     border-radius: 12px;
-    background: linear-gradient(135deg, var(--brand-primary), #c23a8a); /* white on --accent-pink was 3.57:1 */
+    background: linear-gradient(135deg, var(--brand-fill), #c23a8a); /* white on --accent-pink was 3.57:1 */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -311,7 +311,7 @@
 
 .discover-join-btn {
     padding: 8px 16px;
-    background: var(--brand-primary);
+    background: var(--brand-fill);
     border: none;
     border-radius: 4px;
     color: #fff;

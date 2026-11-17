@@ -105,7 +105,7 @@
     width: 80px;
     height: 80px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    background: linear-gradient(135deg, var(--accent-lavender), var(--avatar-brand));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -139,8 +139,8 @@
 .avatar-upload-btn {
     display: inline-block;
     padding: 8px 16px;
-    background: var(--brand-primary);
-    color: var(--bg-primary);
+    background: var(--brand-fill);
+    color: #fff;
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -150,7 +150,7 @@
 }
 
 .avatar-upload-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 /* Avatar zoom/pan cropper */
@@ -258,8 +258,8 @@
 
 .save-display-name-btn {
     padding: 10px 16px;
-    background: var(--brand-primary);
-    color: var(--bg-primary);
+    background: var(--brand-fill);
+    color: #fff;
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -269,7 +269,7 @@
 }
 
 .save-display-name-btn:hover {
-    background: var(--brand-hover);
+    background: var(--brand-fill-hover);
 }
 
 .save-display-name-btn:disabled {
@@ -325,8 +325,8 @@
 }
 
 .sound-btn:hover {
-    background: var(--brand-primary);
-    color: var(--bg-primary);
+    background: var(--brand-fill);
+    color: #fff;
 }
 
 .sound-btn:disabled,

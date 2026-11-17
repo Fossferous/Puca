@@ -92,6 +92,8 @@
 
 @media (pointer: fine) {
     .games-btn:not(:disabled):hover { filter: brightness(1.12); }
+    /* Brighter, white words on the pressed brand were 4.0:1 on Yellow and 4.46 on Green: darker. */
+    .games-btn-primary:not(:disabled):hover { filter: none; background: color-mix(in srgb, var(--brand-active, #3c45a5) 85%, #000); }
     .games-btn-ghost:not(:disabled):hover { background: rgba(255, 255, 255, 0.06); }
 }
 
@@ -225,7 +227,7 @@
     height: 22px;
     flex-shrink: 0;
     border-radius: 50%;
-    background: var(--brand-primary, #5865f2);
+    background: var(--brand-fill);
     color: #fff;
     font-size: 0.72rem;
     font-weight: 700;

@@ -70,6 +70,15 @@
 [data-theme="light"] .keybind-inert,
 [data-theme="light"] .search-jump-notice { color: var(--text-warning); }
 
+/* Send and Create Channel run on the brand's fills to its hover shade on the other themes, where
+   white words on the lavender were 1.5 to 2.7:1; here they keep the lavender, which holds them. */
+[data-theme="light"] .create-btn,
+[data-theme="light"] .create-btn:hover:not(:disabled) { background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender)); }
+[data-theme="light"] .message-form button[type="submit"] { background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary)); }
+
+/* A revealed spoiler keeps its pale blurple wash here: dark words hold on it. */
+[data-theme="light"] .spoiler.revealed { background: rgba(88, 101, 242, 0.2); }
+
 /* Dark words on a pale fill: --bg-primary is white on this theme. */
 [data-theme="light"] .emoji-save-btn,
 [data-theme="light"] .message-avatar,
@@ -96,17 +105,9 @@
 [data-theme="light"] .voice-e2ee-blocked { background: var(--color-danger-bg); color: var(--text-danger); }
 [data-theme="light"] .voice-e2ee-warning { background: var(--color-warning-bg); }
 
-/* The brand colour as words: --brand-primary is 3.2 to 4.3:1 on Light's surfaces. */
-[data-theme="light"] .reply-preview-banner .replying-to strong,
-[data-theme="light"] .channel-perms-role-flag,
-[data-theme="light"] .typing-dots,
-[data-theme="light"] .note-link,
-[data-theme="light"] .nb-conflict-actions button,
-[data-theme="light"] .nb-retry,
-[data-theme="light"] .app-version { color: var(--brand-text); }
-[data-theme="light"] .message-author,
-[data-theme="light"] .message-reply-ref .reply-author,
-[data-theme="light"] .message-link { color: var(--mode-brand-text, var(--brand-text)); }
+/* The brand colour as words: --brand-primary is 3.2 to 4.3:1 on Light's surfaces. (The words
+   that named it outright take --brand-text on every theme now, a message link among them.) */
+[data-theme="light"] .channel-perms-role-flag { color: var(--brand-text); }
 
 /* A calendar chip's time and length on the chip's grey: --text-muted was 4.42:1 there. */
 [data-theme="light"] .cal-chip-time,
@@ -169,14 +170,12 @@
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { color: var(--text-normal); }
 [data-theme="light"] .permission-dismiss-btn:hover,
 [data-theme="light"] .stream-stage-empty .back-to-chat-btn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
-[data-theme="light"] .search-result-item strong { color: var(--brand-text); }
 /* Dark words on the pale pink a hover gives these: white on it was 2.32:1. */
 [data-theme="light"] .emoji-delete-btn:hover,
 [data-theme="light"] .action-more:hover,
 [data-theme="light"] .action-reject:hover { color: #11111b; }
 [data-theme="light"] .emoji-file-btn:hover { background: var(--bg-modifier-selected); }
 [data-theme="light"] .keybind-clear:hover:not(:disabled) { color: var(--text-danger); }
-[data-theme="light"] .create-btn:hover:not(:disabled) { opacity: 1; }
 [data-theme="light"] .notes-textbtn.danger:hover { color: #9a1b12; }
 /* Faint words on a row a hover greys: --text-faint holds 4.5:1 only on lighter ones. */
 [data-theme="light"] .member-item.offline:hover .member-name,
@@ -184,10 +183,9 @@
 [data-theme="light"] .notes-send-hash { color: var(--text-muted); }
 
 /* Words dimmed with opacity, made for words that are near white: dimming dark words towards a
-   white page takes them under 4.5:1 (a done task's 3.71:1, an earlier month's days, a calendar
-   chip that is done 2.6:1). Here they keep their full colour, and what marks them is still
+   white page takes them under 4.5:1 (a done task's 3.71:1, which Chat.css now draws in its muted
+   colour on every theme; an earlier month's days, a calendar chip that is done 2.6:1). Here they keep their full colour, and what marks them is still
    there: a line through, the grey a muted colour is, the cell's own tint, the seat's status. */
-[data-theme="light"] .message-content.task-completed { opacity: 1; color: var(--text-muted); }
 [data-theme="light"] .cal-chip.done:not(.dragging),
 [data-theme="light"] .tt-sched.ended,
 [data-theme="light"] .option-hint.option-hint-dim,

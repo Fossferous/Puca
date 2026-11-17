@@ -18,9 +18,8 @@
  *    an active conversation on mobile, the latest message doesn't stay at the
  *    bottom." (The real Android WebView already keeps such a list at its end by
  *    itself.) Only a list that was AT ITS END by the geometry it had until now
- *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, while its
- *    scroll is still more than AT_BOTTOM_SLOP away: pinningRef is let go within
- *    the slop, and a box change in that last stretch can leave it short):
+ *    follows, or one `headingToEnd()` (Chat.tsx's Jump to latest, until its
+ *    scroll has got there: scrollToEnd below):
  *    a reader who has scrolled up even one wheel notch, inside the slop, keeps
  *    their scrollTop, because none of these changes is theirs (the typing
  *    indicator, a notice over the list).
@@ -55,6 +54,93 @@ export function repinOnResize(
         const contentChanged = h !== height;
         height = h;
         box = b;
-        if (contentChanged ? atBottom() : wasAtEnd || headingToEnd()) el.scrollTop = h;
+        // A list on its way to the end gets there whichever of the two changed.
+        if (headingToEnd() || (contentChanged ? atBottom() : wasAtEnd)) el.scrollTop = h;
+    };
+}
+
+type Scroller = Pick<HTMLElement, 'scrollHeight' | 'scrollTop' | 'clientHeight'>;
+
+/** At the newest message. The browser can leave a fraction of a px there. */
+export const atEnd = (el: Scroller): boolean => el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
+
+export interface ScrollToEnd {
+    /** Chat.tsx's own scroll to the newest message begins (Jump to latest, a send, a
+     *  conversation opened) from where `el` is, and its clock restarts. */
+    start(el: Scroller): void;
+    /** The reader took the wheel or a finger: the list is theirs again. */
+    cancel(): void;
+    /** Still on its way: repinOnResize's `headingToEnd`. */
+    heading(): boolean;
+    /** For each scroll event: true while the scroll is still this one's own, which the
+     *  caller then ignores (a smooth scroll's steps would read as the reader scrolling
+     *  up). The event that finds the list at its end lets go; one that finds it moved
+     *  back up lets go and is the reader's (false), for the caller to read as theirs. */
+    ownScroll(el: Scroller): boolean;
+}
+
+/**
+ * A scroll of Chat.tsx's own to the newest message, from its start until it has
+ * got there. It lets go at the END, not within AT_BOTTOM_SLOP of it: a smooth
+ * scroll's target is the end as it was when it started, so when the list's box
+ * shrank in the last stretch (the other side's typing indicator, a line more in
+ * the message box) the scroll stopped that many px short, and with this already
+ * let go nothing took it on (repinOnResize moves a list on a change of its box
+ * only if it was at its end, or heading there). Measured 2026-11-17 in Chromium
+ * and WebKit, a jump of 900 px with the typing indicator (31 px) coming up 100,
+ * 60 or 20 px from the end: 31 px short every time when let go within the slop,
+ * at the end every time when held to the end. It also lets go when the reader
+ * takes the wheel or a finger (cancel), or scrolls back up some other way (a
+ * drag of the scrollbar, PageUp: a step up, further from the end than it has
+ * been, is never this scroll's), and
+ * `settleMs` after its last step with no arrival: a scroll that was already at
+ * the end makes no event. `onSettle` then squares the caller's state with where
+ * the list really is. After its LAST step, not its start: Chromium takes up to
+ * 1.5 s for a long one (measured 892 ms for 3,000 px, 1,281 for 6,000, 1,497
+ * for 12,000; WebKit about 210 ms whatever the length), and a valve counted from
+ * the start let go mid-flight, so the indicator coming up after that left a
+ * 6,000 px jump 31 px short again.
+ */
+export function scrollToEnd(settleMs: number, onSettle: () => void): ScrollToEnd {
+    let on = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastTop: number | null = null;
+    let nearest = Infinity;
+    const stop = () => {
+        on = false;
+        lastTop = null;
+        nearest = Infinity;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+    };
+    const clock = () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(() => { stop(); onSettle(); }, settleMs);
+    };
+    return {
+        start(el) {
+            stop();
+            on = true;
+            // From where it starts: a jump that has nothing to do makes no event, and the first
+            // one is then the reader's.
+            lastTop = el.scrollTop;
+            nearest = el.scrollHeight - el.scrollTop - el.clientHeight;
+            clock();
+        },
+        cancel: stop,
+        heading: () => on,
+        ownScroll(el) {
+            if (!on) return false;
+            if (atEnd(el)) { stop(); return true; }
+            // The reader's: the list moved up, and is further from the end than this scroll has
+            // been (a slow drag a fraction of a px a step adds up). Content above shrinking moves
+            // it up too, as the browser keeps what is on screen in place (scroll anchoring), but
+            // leaves the distance to the end as it was.
+            const from = el.scrollHeight - el.scrollTop - el.clientHeight;
+            if (lastTop !== null && el.scrollTop < lastTop && from > nearest + 1) { stop(); return false; }
+            lastTop = el.scrollTop;
+            nearest = Math.min(nearest, from);
+            clock();
+            return true;
+        },
     };
 }
