@@ -610,7 +610,22 @@ function watchForRow(opts: {
             // while a connect is in flight.
             set(cardId, 'connecting', found.connectingMessage);
             try {
-                await connectToDevice(found.row.id);
+                // The PC's rows ride along: a woken or followed PC is reached
+                // at its other row, and a session proved there keeps this
+                // row's remembered passphrase alive (session.ts machineRows).
+                // Its name and whether this is its sign-in row too: a woken
+                // or locked PC answers there, and the passphrase dialog asks
+                // for that screen's own passphrase, naming the PC.
+                await connectToDevice(
+                    found.row.id,
+                    machine
+                        ? {
+                            machineRows: machine.rows.map(r => r.id),
+                            peerName: machine.primary.name,
+                            ...(found.row.id === machine.signInRow?.id ? { signIn: true } : {}),
+                        }
+                        : undefined,
+                );
                 if (!isCurrent(cardId, token)) return;
                 clearTimers(cardId);
                 // The session UI takes over from here; drop our status so

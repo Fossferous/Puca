@@ -160,6 +160,14 @@ const PRESENCE_REFRESH_MS = 15_000;
  *  before it goes with the card as painted. */
 const FRESH_ROW_TIMEOUT_MS = 5_000;
 
+/** The row a card's Power off goes to, decided at the press. `machineRows`:
+ *  every row of that PC (PowerOffTarget's), absent for a friend's PC. */
+interface PowerOffRow {
+    id: string;
+    signIn: boolean;
+    machineRows?: string[];
+}
+
 /** A unix-seconds timestamp as a date in the viewer's own format. */
 function localDate(unixSecs: number): string {
     return new Date(unixSecs * 1000).toLocaleDateString();
@@ -1044,10 +1052,18 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                 return;
             }
             // The name rides along for the messages that name the PC
-            // ("Work Laptop's screen is off…"); display only.
-            await connectToDevice(row.id, filesOnly
-                ? { filesOnly: true, peerName: machine.primary.name }
-                : { peerName: machine.primary.name });
+            // ("Work Laptop's screen is off…"); display only. The PC's rows
+            // too: a session proved with one keeps the other's remembered
+            // passphrase alive (the lock screen is its own row). And whether
+            // this IS the lock screen's row: its passphrase is its own, and
+            // the dialog asks for that one by name.
+            const machineRows = machine.rows.map(r => r.id);
+            const about = {
+                peerName: machine.primary.name,
+                machineRows,
+                ...(row.id === machine.signInRow?.id ? { signIn: true } : {}),
+            };
+            await connectToDevice(row.id, filesOnly ? { filesOnly: true, ...about } : about);
             // The stage takes over the screen from here (it mounts at the app
             // root, above this view); nothing to close.
         } catch (e) {
@@ -1135,7 +1151,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     const startPowerOff = async (
         key: string,
         name: string,
-        resolveRow: () => Promise<{ id: string; signIn: boolean } | null>,
+        resolveRow: () => Promise<PowerOffRow | null>,
         share?: PowerOffTarget['share'],
     ) => {
         // Claimed before the question, in the store: two quick presses both
@@ -1152,7 +1168,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     const runPowerOff = async (
         key: string,
         name: string,
-        resolveRow: () => Promise<{ id: string; signIn: boolean } | null>,
+        resolveRow: () => Promise<PowerOffRow | null>,
         share?: PowerOffTarget['share'],
     ) => {
         if (!(await askConfirm(powerOffQuestion(name)))) return;
@@ -1162,7 +1178,13 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
             const row = await resolveRow();
             outcome = row
                 ? await powerOffDevice(
-                    { hostDevice: row.id, name, signIn: row.signIn, ...(share ? { share } : {}) },
+                    {
+                        hostDevice: row.id,
+                        name,
+                        signIn: row.signIn,
+                        ...(row.machineRows ? { machineRows: row.machineRows } : {}),
+                        ...(share ? { share } : {}),
+                    },
                     text => setPowerOffLine(key, { running: true, kind: null, text }),
                 )
                 : { kind: 'refused', text: powerOffRefusalText(name, 'that device isn\'t online') };
@@ -1524,7 +1546,13 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                         device.name,
                                                         async () => {
                                                             const row = await freshOnlineRow(machine);
-                                                            return row ? { id: row.id, signIn: row.id === machine.signInRow?.id } : null;
+                                                            return row
+                                                                ? {
+                                                                    id: row.id,
+                                                                    signIn: row.id === machine.signInRow?.id,
+                                                                    machineRows: machine.rows.map(r => r.id),
+                                                                }
+                                                                : null;
                                                         },
                                                     )}
                                                     title={`Shut ${device.name} down now, closing its apps without saving`}
@@ -2293,7 +2321,11 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         Nobody is at the computer to approve a connection to
                                         its sign-in screen, so this passphrase takes that
                                         place. You will be asked for it on the device you
-                                        connect FROM, every time.
+                                        connect FROM. The Púca app there remembers it after
+                                        the first time, for as long as you keep reaching this
+                                        computer from it at least once a week; a web browser
+                                        asks every time. It is separate from the unattended
+                                        access passphrase, even if you choose the same words.
                                         <br /><br />
                                         It is not your Windows password and not your Púca
                                         password. It never leaves the device you type it on

@@ -70,6 +70,7 @@ import {
     forgetUaSeed,
     rememberUaSeed,
     rememberedUaSeed,
+    renewSameMachineUaSeeds,
     signUaChallengeSeed,
 } from './unattended';
 import { requestUnattendedPassphrase } from './unattendedPrompt';
@@ -709,6 +710,23 @@ interface Internal extends DeviceControlSession {
      *  produces is the teardown itself, so keeping the seed then would replay
      *  the same refusal promptless forever. */
     uaCache: 'used' | 'confirmed' | null;
+    /** CONTROLLER: the OTHER device rows of the same PC as `peerDevice`, as
+     *  the device list grouped them (machines.ts; `connectToDevice`'s
+     *  `machineRows`), so a proved session here keeps their remembered seeds
+     *  as alive as this one's (`renewSameMachineUaSeeds`). A PC at its lock
+     *  screen is its sign-in row, with its own passphrase record, and is
+     *  reached far less often than its desktop: on its own week it asked for
+     *  the passphrase again by the next time. Never used to OFFER a seed: each
+     *  row is only ever offered its own (see that function). Empty for a host
+     *  session, a share, and any caller that does not know the PC. */
+    machineRows: string[];
+    /** CONTROLLER: `peerDevice` is its PC's SIGN-IN-SCREEN row, as the device
+     *  list grouped it (`connectToDevice`'s `signIn`), so the passphrase
+     *  dialog asks for "Passphrase for the sign-in screen", the record that
+     *  row checks, not the unattended one. Display only: what is offered and
+     *  how the host checks it are the same either way. False for a host
+     *  session, a share, and any caller that did not say. */
+    peerSignIn: boolean;
     /** HOST: this machine cannot capture at all (a phone). Stashed at accept
      *  time because the offer handler needs it later without re-probing: a
      *  screen request against such a host is torn down naming the limitation,
@@ -2106,6 +2124,13 @@ function teardown(
         const wireReason = s.role === 'controller' && s.powerOffOnly ? 'the session ended' : reason;
         wsClient.send({ type: 'DeviceEnd', payload: { session_id: s.id, reason: wireReason } });
     }
+    // A power-off still in flight ends with the session, and HOW it ends is
+    // the card's answer (powerOff.ts words it): the host saying it is going
+    // (or going while it had said so) is the success; a session that never
+    // got as far as sending is a failure with the session's own reason; one
+    // that ended between sending and any answer cannot be called either way.
+    // Settled HERE, before the seed's verdict just below, which reads it.
+    settlePowerOff(s, deliberate ? reason : (s.error ?? reason));
     // A remembered unattended seed this session signed with but the host never
     // demonstrably accepted is dropped. Rejection produces no signal of its
     // own — the host just tears the session down — so "still 'used' at
@@ -2113,9 +2138,27 @@ function teardown(
     // the same refusal promptless on every future connect. The cost of the
     // conservative direction (a session that died before the host's first
     // post-proof frame re-prompts next time) is one typed passphrase.
+    //
+    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY (powerOffUnanswered: the
+    // proof sent, then neither the shutdown nor a refusal, whether the session
+    // ended or the answer deadline ran out on a link that read open).
+    // There is no "first post-proof frame" to wait for there. Both hosts carry
+    // a held power-off out on the proof and refuse a bad one with its reason
+    // (the agent's "unattended access was refused" or its lockout, the app's
+    // "unattended passphrase rejected": heldUnproved knows them, the outcome
+    // is 'failed', and that still forgets). The sign-in-screen agent sends
+    // NOTHING between the proof and the shutdown but its end (power_now), so
+    // a phone whose socket was down for that one relayed frame, or a service
+    // Windows took down before it left, lost the only thing that could
+    // confirm the seed, and forgetting it then made the next Power off of the
+    // locked PC ask again (review of work/poweroff-locked, rounds 2 and 3).
+    // Kept as it was: neither renewed nor forgotten, so its week still runs
+    // from when it was last proved or typed. Wrong after all (a typo whose
+    // refusal was lost too), the next connect offers it, hears the refusal,
+    // and forgets it: one refused try, then the prompt, never a loop.
     if (s.role === 'controller' && s.uaCache === 'used') {
         s.uaCache = null;
-        forgetUaSeed(s.peerDevice);
+        if (!powerOffUnanswered(s)) forgetUaSeed(s.peerDevice);
     }
     // The session is ending for real; a pending transport-grace countdown has
     // nothing left to end. Same for the connect deadline and the
@@ -2208,12 +2251,7 @@ function teardown(
     s.caretChannel = null;
     s.caretOpen = false;
     clearMediaDeadline(s);
-    // A power-off still in flight ends with the session, and HOW it ends is
-    // the card's answer (powerOff.ts words it): the host saying it is going
-    // (or going while it had said so) is the success; a session that never
-    // got as far as sending is a failure with the session's own reason; one
-    // that ended between sending and any answer cannot be called either way.
-    settlePowerOff(s, deliberate ? reason : (s.error ?? reason));
+    // (The power-off was settled above, before the seed's verdict.)
     s.phase = 'ended';
     // A deliberate end must not LEAVE an error either: a transient one latched
     // earlier in the session (a refused monitor switch, a privacy toggle that
@@ -3392,6 +3430,32 @@ function heldUnproved(s: Internal, endReason: string): boolean {
     return /unattended (passphrase|access)|too many wrong/i.test(endReason);
 }
 
+/**
+ * The proof went, and NOTHING came back either way: no verdict on the
+ * passphrase, so teardown neither forgets nor renews the seed it offered.
+ *  - 'unknown': the session ended with neither the shutdown nor a refusal
+ *    (the phone's socket down for the one frame that answers, the PC's
+ *    service gone before it left).
+ *  - 'failed' as too old BY THE ANSWER DEADLINE: no end came at all, on a
+ *    link that read open the whole time — a phone's socket gone zombie
+ *    after a network change (websocket.ts closes one only after 45 to 75 s
+ *    with no pong), a PC's service gone without a FIN and the server's
+ *    DevicePeerReconnecting more than POWER_OFF_ANSWER_TIMEOUT_MS behind.
+ *    The PC may be powering off; this side cannot tell that from a Púca too
+ *    old to answer. Neither is a refusal: a host too old for the power-off
+ *    still checks the proof the way a current one does (the check is far
+ *    older than the power-off) and refuses a bad one the same way, out loud.
+ *    (A host's own power-failed with the too-old code confirms the seed
+ *    before teardown reads this.) Review of work/poweroff-locked, round 3.
+ * Both hosts refuse a bad proof OUT LOUD (heldUnproved knows each way), and
+ * that is 'failed' with the refusal, which still forgets.
+ */
+function powerOffUnanswered(s: Internal): boolean {
+    if (s.uaProofSent !== true) return false;
+    const p = s.powerOff;
+    return p?.state === 'unknown' || (p?.state === 'failed' && p.reason === POWER_OFF_TOO_OLD_REASON);
+}
+
 /** Teardown's half: a power-off still in flight ends with its session. */
 function settlePowerOff(s: Internal, endReason: string): void {
     clearPowerOffTimer(s);
@@ -4412,6 +4476,18 @@ export async function connectToDevice(
         /** The name the person sees for that device, for the messages that
          *  name it ("Work Laptop's screen is off…"). Display only. */
         peerName?: string;
+        /** Every device row of the PC `hostDevice` belongs to, as the device
+         *  list grouped them (machines.ts `Machine.rows`): a PC is its desktop
+         *  app's row and its lock-screen service's row. Housekeeping only — a
+         *  proved session here renews the remembered passphrase of the others
+         *  (`Internal.machineRows`); nothing is ever offered to them. */
+        machineRows?: readonly string[];
+        /** `hostDevice` is its PC's sign-in-screen row (machines.ts
+         *  `signInRow`): the PC is locked, at its sign-in screen, or just
+         *  restarted or woken. The passphrase dialog then asks for that
+         *  screen's own passphrase, by name (`Internal.peerSignIn`). Display
+         *  only. */
+        signIn?: boolean;
     },
 ): Promise<string> {
     const myDevice = thisDeviceId();
@@ -4420,6 +4496,12 @@ export async function connectToDevice(
 
     const id = newId();
     const s: Internal = {
+        // A friend's PC has no remembered passphrase here (the grant stands
+        // in for it), and is in no machine of this account's.
+        machineRows: opts?.share
+            ? []
+            : [...new Set(opts?.machineRows ?? [])].filter(r => r !== hostDevice && r !== myDevice),
+        peerSignIn: opts?.signIn === true && !opts.share,
         // An Audio Hub session IS a files-only session on the wire: no
         // capture on the host, no media deadline here. So is a power-off one.
         filesOnly: opts?.filesOnly === true || opts?.audioHub === true || opts?.powerOff === true,
@@ -5166,6 +5248,8 @@ export function installDeviceSessions(): void {
                 audioHub: false,
                 powerOff: null,
                 powerOffOnly: false,
+                machineRows: [],
+                peerSignIn: false,
                 hostCaptureless: !caps.capture,
                 hostWindows: caps.windows === true,
                 // Set below only after the share verification chain passes;
@@ -6592,6 +6676,11 @@ function uaProofAccepted(s: Internal): void {
     if (s.role !== 'controller' || s.uaCache !== 'used') return;
     s.uaCache = 'confirmed';
     confirmUaSeed(s.peerDevice);
+    // And the same PC's other row: a PC that is locked, at its sign-in
+    // screen, or just restarted or woken answers as its lock-screen row, which
+    // this device reaches far less often than the desktop. Renewed, never
+    // offered: each row is only ever handed the seed proved with it.
+    if (s.machineRows.length > 0) renewSameMachineUaSeeds(s.machineRows);
 }
 
 async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
@@ -6720,7 +6809,12 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     // handler has finished setting the session up.
                     s.awaitingUaPassphrase = true;
                     clearMediaDeadline(s);
-                    const pass = await requestUnattendedPassphrase(s.peerDevice);
+                    // Which of the PC's two passphrases, and its name: a
+                    // locked PC's sign-in row checks its own record.
+                    const pass = await requestUnattendedPassphrase(s.peerDevice, {
+                        peerName: s.peerName,
+                        signIn: s.peerSignIn,
+                    });
                     s.awaitingUaPassphrase = false;
                     if (pass == null) {
                         teardown(s, 'unattended passphrase not entered', true);

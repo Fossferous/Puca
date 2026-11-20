@@ -190,7 +190,7 @@ describe('pressing it', () => {
         await click(buttonNamed('Power off'));
         expect(listDevices.mock.calls.length, 'a fresh list at the press').toBeGreaterThan(listsBefore);
         expect(powerOffDevice).toHaveBeenCalledTimes(1);
-        expect(powerOffDevice.mock.calls[0][0]).toEqual({ hostDevice: 'pc', name: 'Slim-Jim', signIn: false });
+        expect(powerOffDevice.mock.calls[0][0]).toEqual({ hostDevice: 'pc', name: 'Slim-Jim', signIn: false, machineRows: ['pc'] });
         const status = () => cardOf('Slim-Jim')!.querySelector('.device-power-status');
         // In a live region that was there, empty, before the press — one
         // inserted together with its text is usually not announced.
@@ -273,7 +273,16 @@ describe('a locked PC', () => {
         await mount();
         expect(host!.querySelectorAll('.device-card').length, 'one card for the machine').toBe(1);
         await click(buttonNamed('Power off'));
-        expect(powerOffDevice.mock.calls[0][0]).toEqual({ hostDevice: 'pc-signin', name: 'Slim-Jim', signIn: true });
+        expect(powerOffDevice.mock.calls[0][0]).toEqual({
+            hostDevice: 'pc-signin',
+            name: 'Slim-Jim',
+            signIn: true,
+            // Both rows of the PC: a power-off proved at its lock screen keeps
+            // the desktop's remembered passphrase alive, and the desktop's
+            // everyday sessions keep this one's (the owner's report,
+            // 2026-11-20: Power off of a locked PC asked again).
+            machineRows: ['pc', 'pc-signin'],
+        });
     });
 });
 

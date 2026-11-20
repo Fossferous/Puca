@@ -649,6 +649,24 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   agent) and carry it out on the proof; a wrong or missing proof never does.
   The host's answer vouches for a remembered passphrase (as an answer to an
   offer does), so a power-off does not make the next Control ask for it again.
+  No answer at all is no verdict: an `unknown` end (the proof sent, then
+  neither the shutdown nor a refusal arrived) keeps the seed as it was,
+  neither renewed nor forgotten, and so does the 8 s answer clock running
+  out after the proof on a link that read open the whole time (a phone's
+  socket gone dead after a network change, which `websocket.ts` notices only
+  after 45 to 75 s without a pong, or a PC's service gone without a FIN and
+  the server's `DevicePeerReconnecting` later than 8 s): the card then calls
+  the PC's Púca too old, which this side cannot tell from a PC that went
+  before its answer did, but it is no refusal of the passphrase
+  (`powerOffUnanswered` in session.ts). The sign-in-screen agent's only answer to a
+  good proof is its end with the shutdown reason (it sends no ack), so a
+  phone whose socket was down for that one relayed frame, or a service
+  Windows took down before it left, lost the only thing that could confirm
+  the seed, and forgetting it made the next Power off of the locked PC ask
+  again. Both hosts refuse a bad proof out loud, and that still forgets it; a
+  typo whose refusal was lost too costs one refused try next time, then the
+  prompt. (A Control or Files session that dies before the host's first
+  frame after the proof still forgets: that frame follows the proof at once.)
   If somebody signs in at the locked PC first, the lock-screen service hands
   over and the session ends: not powered off, and — unlike a Control session
   — not followed to the desktop, which would open a session nobody asked for.
@@ -659,6 +677,31 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   leaving (the slow passphrase stretch, signing and sealing). The card's line
   is kept outside the Devices view (`setPowerOffLine` in powerOff.ts), so
   leaving the view mid-flight loses nothing.
+- **Which passphrase, and how long it is remembered.** A PC that is locked,
+  at its sign-in screen, or just restarted or woken answers as its
+  lock-screen row, which checks its OWN record (**Passphrase for the sign-in
+  screen**, set separately from **Unattended access**, with its own random
+  salt). So the seed this device remembers for the desktop row is never
+  offered there, and could not verify if it were: the first power-off of a
+  locked PC asks for that screen's passphrase, once, and by that name. The
+  caller says which row it reached (`connectToDevice`'s `signIn`, from
+  `Machine.signInRow`: the card, Control and Files, wake and follow), and
+  `UnattendedPassphrasePrompt` and the card's refusal sentences name **Passphrase for
+  the sign-in screen** then, not the unattended one: a person whose two
+  passphrases differ typed the one the dialog named, was refused, and was
+  asked again every time (review of 2026-11-20). Display only: what is
+  offered and how the host checks it do not change. Each row's remembered
+  seed is renewed by a proved session to EITHER row of the PC
+  (`renewSameMachineUaSeeds` in `api/devices/unattended.ts`, fed the card's
+  `machineRows`): the lock-screen row is reached only when the PC is locked
+  or off, 4 to 26 days apart on the owner's PC, so on its own week it had
+  lapsed by the next time and Power off of a locked PC asked again
+  (2026-11-20). The renewal only slides an expiry; a row is still only ever
+  offered the seed proved with it, and its host still checks it. Offering one
+  row's seed to the other would need one record for both AND a binding only
+  the PC can vouch for: the grouping of rows into a PC (the MAC in their
+  sealed LAN details) is written with the account's keys, and an account in
+  the wrong hands is exactly what the passphrase is for.
 - **The host is the gate.** An unproved controller gets nothing; a share
   without `control` is refused — out loud, with `power-failed`, because the
   card is waiting on an answer (the other power actions keep their silence

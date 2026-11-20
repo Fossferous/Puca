@@ -392,6 +392,7 @@ describe('an armed PC (the passphrase)', () => {
     });
 
     it('the passphrase refused by the PC: a failure', async () => {
+        forgetUaSeed.mockClear();
         const { id, key } = await sentPowerOff();
         requestUnattendedPassphrase.mockResolvedValueOnce('wrong horse');
         await hostSignal(id, key, CHALLENGE);
@@ -399,7 +400,48 @@ describe('an armed PC (the passphrase)', () => {
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'unattended access was refused' } });
         await settle();
         expect(seen.get(id)?.powerOff).toEqual({ state: 'failed', reason: 'unattended access was refused' });
+        expect(forgetUaSeed, 'a refusal said out loud forgets it').toHaveBeenCalledWith('dev-host');
     });
+
+    // Each way a host says no, from both hosts (the agent's lockout and its
+    // catch-all, the desktop app's own words): still forgotten.
+    for (const refusal of [
+        'unattended passphrase rejected',
+        'too many wrong unattended passphrases in a row; try again in 30 seconds',
+    ]) {
+        it(`CONTROL: refused as "${refusal}" still forgets the passphrase`, async () => {
+            forgetUaSeed.mockClear();
+            const { id, key } = await sentPowerOff();
+            requestUnattendedPassphrase.mockResolvedValueOnce('wrong horse');
+            await hostSignal(id, key, CHALLENGE);
+            await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: refusal } });
+            await settle();
+            expect(seen.get(id)?.powerOff?.state).toBe('failed');
+            expect(forgetUaSeed).toHaveBeenCalledWith('dev-host');
+        });
+    }
+
+    // The sign-in-screen agent's only answer to a good proof is its end with
+    // the shutdown reason: a phone that missed that frame (its socket down,
+    // the server dropping it) or a service gone before it left is told
+    // nothing either way, and that is no refusal (review of
+    // work/poweroff-locked, round 2).
+    for (const end of ['that session did not survive the disconnect', 'the other device did not come back']) {
+        it(`the proof sent, then no answer either way ("${end}"): unknown, and the passphrase is NOT forgotten`, async () => {
+            confirmUaSeed.mockClear();
+            forgetUaSeed.mockClear();
+            const { id, key } = await sentPowerOff();
+            requestUnattendedPassphrase.mockResolvedValueOnce('correct horse');
+            await hostSignal(id, key, CHALLENGE);
+            await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: end } });
+            await settle();
+            expect(seen.get(id)?.powerOff).toEqual({ state: 'unknown', reason: end });
+            expect(forgetUaSeed, 'silence is not a refusal').not.toHaveBeenCalled();
+            expect(confirmUaSeed, 'nor a confirmation: nothing renews it').not.toHaveBeenCalled();
+        });
+    }
 
     it('typing the passphrase does not count: the deadline waits, and starts afresh when the proof is sent', async () => {
         const { POWER_OFF_ANSWER_TIMEOUT_MS, POWER_OFF_TOO_OLD_REASON } = await import('../api/devices/session');
@@ -422,6 +464,46 @@ describe('an armed PC (the passphrase)', () => {
         expect(seen.get(id)?.powerOff?.state, 'a full deadline from the proof').toBe('sent');
         await vi.advanceTimersByTimeAsync(200);
         expect(seen.get(id)?.powerOff).toEqual({ state: 'failed', reason: POWER_OFF_TOO_OLD_REASON });
+    });
+
+    // The same silence with the link reading OPEN the whole time: a phone's
+    // socket gone zombie after a network change (websocket.ts closes one only
+    // after 45 to 75 s with no pong), or a PC's service gone without a FIN and
+    // the server's DevicePeerReconnecting more than 8 s behind. The deadline
+    // has nothing to wait on and calls it too old, though the PC may be
+    // powering off. Neither host refuses a proof in silence, so that verdict
+    // says nothing about the passphrase (review of work/poweroff-locked,
+    // round 3).
+    it('the proof sent, then silence past the deadline on a link that reads open: too old, and the passphrase is NOT forgotten', async () => {
+        const { POWER_OFF_ANSWER_TIMEOUT_MS, POWER_OFF_TOO_OLD_REASON } = await import('../api/devices/session');
+        confirmUaSeed.mockClear();
+        forgetUaSeed.mockClear();
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { id, key } = await sentPowerOff();
+        requestUnattendedPassphrase.mockResolvedValueOnce('correct horse');
+        await hostSignal(id, key, CHALLENGE);
+        await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+        await vi.advanceTimersByTimeAsync(POWER_OFF_ANSWER_TIMEOUT_MS + 100);
+        expect(seen.get(id)?.powerOff, 'premise: the deadline called it').toEqual({ state: 'failed', reason: POWER_OFF_TOO_OLD_REASON });
+        expect(seen.get(id)?.phase, 'premise: and ended the session').toBe('ended');
+        expect(forgetUaSeed, 'silence is not a refusal').not.toHaveBeenCalled();
+        expect(confirmUaSeed, 'nor a confirmation: nothing renews it').not.toHaveBeenCalled();
+    });
+
+    it('CONTROL: a refusal heard after the proof, inside that deadline, still forgets it', async () => {
+        const { POWER_OFF_ANSWER_TIMEOUT_MS } = await import('../api/devices/session');
+        forgetUaSeed.mockClear();
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { id, key } = await sentPowerOff();
+        requestUnattendedPassphrase.mockResolvedValueOnce('wrong horse');
+        await hostSignal(id, key, CHALLENGE);
+        await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+        await vi.advanceTimersByTimeAsync(POWER_OFF_ANSWER_TIMEOUT_MS - 100);
+        expect(seen.get(id)?.powerOff?.state, 'premise: no verdict yet').toBe('sent');
+        handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'unattended access was refused' } });
+        await spinUntil('the end', () => seen.get(id)?.phase === 'ended');
+        expect(seen.get(id)?.powerOff).toEqual({ state: 'failed', reason: 'unattended access was refused' });
+        expect(forgetUaSeed).toHaveBeenCalledWith('dev-host');
     });
 
     it('a power-off the PC answered keeps the remembered passphrase (it was right)', async () => {

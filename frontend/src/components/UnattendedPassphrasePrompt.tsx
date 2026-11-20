@@ -1,6 +1,7 @@
 /**
  * The dialog a CONTROLLER sees when the machine it is connecting to is armed
- * for unattended access.
+ * for unattended access, or is locked and reached through its sign-in-screen
+ * service (then it asks for THAT screen's passphrase, by name).
  *
  * Mounted globally beside DeviceStage, because the request arrives from the
  * session layer at connect time and there may be no device UI on screen yet.
@@ -40,12 +41,20 @@ export function UnattendedPassphrasePrompt() {
         setValue('');
     };
 
+    // WHICH passphrase, by the name of the setting it was set under on that
+    // PC (Devices, This device). A locked PC answers as its lock-screen
+    // service, which checks "Passphrase for the sign-in screen", its own
+    // record: asking it for "the unattended passphrase" sent a person whose
+    // two differ to type the wrong one, every time.
+    const pc = request.peerName ?? 'This device';
+    const title = request.signIn ? 'Passphrase for the sign-in screen' : 'Unattended passphrase';
+
     return (
         <div
             className="ua-prompt-backdrop"
             role="dialog"
             aria-modal="true"
-            aria-label="Unattended passphrase"
+            aria-label={title}
             onKeyDown={e => {
                 // Escape refuses rather than dismissing silently: the caller is
                 // waiting on an answer, and "no answer" is not one of its
@@ -54,11 +63,22 @@ export function UnattendedPassphrasePrompt() {
             }}
         >
             <div className="ua-prompt">
-                <h2>Unattended passphrase</h2>
-                <p className="ua-prompt-body">
-                    This device is set up for unattended access, so it needs its passphrase
-                    before it will let you in. This is not your account password.
-                </p>
+                <h2>{title}</h2>
+                {request.signIn ? (
+                    <p className="ua-prompt-body">
+                        {pc} is locked or at its sign-in screen, so it needs the passphrase set
+                        for that screen on it (Devices, This device: Passphrase for the sign-in
+                        screen) before it will let you in. That is not its unattended access
+                        passphrase, unless you chose the same words for both, and it is not your
+                        Windows password or your account password.
+                    </p>
+                ) : (
+                    <p className="ua-prompt-body">
+                        {pc} is set up for unattended access, so it needs its passphrase (the one
+                        set under Unattended access on it) before it will let you in. This is not
+                        your account password.
+                    </p>
+                )}
                 <form
                     onSubmit={e => {
                         e.preventDefault();
@@ -69,8 +89,8 @@ export function UnattendedPassphrasePrompt() {
                         ref={inputRef}
                         type="password"
                         autoComplete="off"
-                        placeholder="Unattended passphrase"
-                        aria-label="Unattended passphrase"
+                        placeholder={title}
+                        aria-label={title}
                         value={value}
                         onChange={e => setValue(e.target.value)}
                     />

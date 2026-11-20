@@ -55,8 +55,17 @@ export interface PowerOffTarget {
     name: string;
     /** The row is the PC's SIGN-IN-SCREEN row (it is locked or signed out):
      *  what answers there is its lock-screen service, which updates apart
-     *  from the app (someone there clicks Update the service). */
+     *  from the app (someone there clicks Update the service) and checks its
+     *  own passphrase, "Passphrase for the sign-in screen": the dialog and
+     *  the card's sentences name that one (connectToDevice's `signIn`). */
     signIn?: boolean;
+    /** Every device row of this PC (the card's machine: its desktop app's
+     *  row and its lock-screen row), so a power-off proved with one keeps the
+     *  passphrase remembered for the other (connectToDevice's `machineRows`).
+     *  A locked PC answers as its lock-screen row, reached far less often
+     *  than the desktop: without this its remembered passphrase lapsed on its
+     *  own week and Power off of a locked PC asked again. */
+    machineRows?: readonly string[];
     /** Set for a friend's PC under an accepted share. */
     share?: {
         inviteId: number;
@@ -170,11 +179,27 @@ export function refusalText(n: string, reason: string, signIn = false): string {
             + `not powered off. Power off works only on a PC set up for unattended access: set it up `
             + `on ${n}.`;
     }
+    // Locked, it is the sign-in screen's passphrase: the lock-screen service
+    // checks its OWN record ("Passphrase for the sign-in screen", set apart
+    // from Unattended access), so a person told "the unattended-access
+    // passphrase" here retried the wrong one.
     if (/passphrase not (entered|provided)/i.test(reason)) {
-        return `${n} was not powered off: its unattended-access passphrase was not entered.`;
+        return signIn
+            ? `${n} was not powered off: it is locked, and the passphrase for its sign-in screen was not entered.`
+            : `${n} was not powered off: its unattended-access passphrase was not entered.`;
     }
     if (/passphrase rejected|unattended access was refused/i.test(reason)) {
-        return `${n} was not powered off: it did not accept the unattended-access passphrase.`;
+        return signIn
+            ? `${n} is locked and did not accept the passphrase for its sign-in screen, so it was not `
+                + `powered off. That is the one set under Passphrase for the sign-in screen on ${n}, not `
+                + `its unattended-access passphrase.`
+            : `${n} was not powered off: it did not accept the unattended-access passphrase.`;
+    }
+    // The host's lockout, in its own words (crates/puca-ua), which say
+    // "unattended" whichever record it guards.
+    const lockout = /^too many wrong unattended passphrases in a row; (.+?)[.\s]*$/i.exec(reason);
+    if (lockout && signIn) {
+        return `${n} was not powered off: too many wrong passphrases for its sign-in screen in a row; ${lockout[1]}.`;
     }
     if (reason === SHUTDOWN_REASON) return `${n} is powering off.`;
     const why = reason.replace(/[.\s]+$/, '');
@@ -235,7 +260,10 @@ export async function powerOffDevice(
             target = await connectToDevice(t.hostDevice, {
                 powerOff: true,
                 peerName: t.name,
+                // The passphrase dialog asks for the sign-in screen's own then.
+                ...(t.signIn === true && !t.share ? { signIn: true } : {}),
                 ...(t.share ? { share: t.share } : {}),
+                ...(t.machineRows && !t.share ? { machineRows: t.machineRows } : {}),
             });
         }
         check();
@@ -247,7 +275,10 @@ export async function powerOffDevice(
         }
         return await result;
     } catch (e) {
-        return { kind: 'refused', text: refusalText(trimmed(t.name), e instanceof Error ? e.message : String(e)) };
+        return {
+            kind: 'refused',
+            text: refusalText(trimmed(t.name), e instanceof Error ? e.message : String(e), t.signIn === true),
+        };
     } finally {
         unsubscribe();
     }

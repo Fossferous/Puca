@@ -128,6 +128,56 @@ describe('unattended passphrase dialog', () => {
         expect(buttonWith('Connect')!.disabled).toBe(true);
     });
 
+    /**
+     * WHICH PASSPHRASE. A PC with lock-screen access has two (Devices, This
+     * device on it): the one under "Unattended access", checked by its desktop
+     * app, and "Passphrase for the sign-in screen", checked by its lock-screen
+     * service, each its own record. A locked PC answers as the second. The
+     * dialog used to say "Unattended passphrase" for both, so someone whose
+     * two passphrases differ typed the wrong one at every locked PC, was
+     * refused, and was asked again next time (review of work/poweroff-locked,
+     * 2026-11-20).
+     */
+    it('THE FINDING: a PC at its sign-in screen asks for THAT passphrase, by its setting\'s name, naming the PC', async () => {
+        await mount();
+        await act(async () => {
+            void requestUnattendedPassphrase('pc-signin', { peerName: 'Desk-PC', signIn: true });
+        });
+        const dialog = q('.ua-prompt-backdrop')!;
+        expect(dialog.getAttribute('aria-label')).toBe('Passphrase for the sign-in screen');
+        expect(q('h2')?.textContent).toBe('Passphrase for the sign-in screen');
+        const input = q<HTMLInputElement>('input')!;
+        expect(input.getAttribute('aria-label')).toBe('Passphrase for the sign-in screen');
+        expect(input.placeholder).toBe('Passphrase for the sign-in screen');
+        const body = q('.ua-prompt-body')?.textContent ?? '';
+        expect(body).toContain('Desk-PC is locked or at its sign-in screen');
+        // Says it is the OTHER one, so a person with two knows which to type.
+        expect(body).toMatch(/not its unattended access passphrase/);
+        expect(body).toMatch(/not your Windows password/);
+        expect(dialog.textContent).not.toMatch(/Unattended passphrase|set up for unattended access/);
+    });
+
+    it('CONTROL: the desktop row asks for the unattended passphrase, naming the PC and the setting', async () => {
+        await mount();
+        await act(async () => {
+            void requestUnattendedPassphrase('pc', { peerName: 'Desk-PC', signIn: false });
+        });
+        expect(q('.ua-prompt-backdrop')!.getAttribute('aria-label')).toBe('Unattended passphrase');
+        expect(q('h2')?.textContent).toBe('Unattended passphrase');
+        expect(q<HTMLInputElement>('input')!.getAttribute('aria-label')).toBe('Unattended passphrase');
+        const body = q('.ua-prompt-body')?.textContent ?? '';
+        expect(body).toContain('Desk-PC is set up for unattended access');
+        expect(body).toContain('Unattended access');
+        expect(body).not.toMatch(/sign-in screen/i);
+    });
+
+    it('a caller that did not name the PC gets "This device", and the unattended wording', async () => {
+        await mount();
+        await act(async () => { void requestUnattendedPassphrase('pc'); });
+        expect(q('h2')?.textContent).toBe('Unattended passphrase');
+        expect(q('.ua-prompt-body')?.textContent ?? '').toContain('This device is set up for unattended access');
+    });
+
     it('unmounting stops it answering, so the bridge refuses instead', async () => {
         await mount();
         act(() => root?.unmount());

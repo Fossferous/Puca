@@ -214,6 +214,12 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
         r.seen.join(' | '));
     const c0 = (await calls(page))[0];
     ck('desktop: the connect went to that PC as a power-off session, naming it', c0?.host === 'pc-going' && c0?.opts?.powerOff === true && c0?.opts?.peerName === 'Slim-Jim', JSON.stringify(c0));
+    // The PC's rows ride along (session.ts machineRows): a session proved with
+    // one keeps the passphrase remembered for its other row (its lock screen).
+    ck('desktop: the rows of the PC ride along with it', Array.isArray(c0?.opts?.machineRows) && c0.opts.machineRows.includes('pc-going'), JSON.stringify(c0?.opts?.machineRows));
+    // A signed-in PC (no sign-in row here): the passphrase dialog asks for the
+    // unattended one, so the connect is not said to reach a sign-in screen.
+    ck('desktop: a signed-in PC is not said to be at its sign-in screen', c0?.opts?.signIn === undefined, JSON.stringify(c0?.opts));
     ck('desktop: Power off is back once it is over', (await page.evaluate(cardParts, 'Slim-Jim')).buttonDisabled === false);
 
     const expectations = [
@@ -243,6 +249,7 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
     const boxCall = (await calls(page)).find(c => c.host === 'their-box');
     ck('desktop: a friend\'s PC with control powers off, the share riding along', r.parts?.line === 'Box is powering off.'
         && boxCall?.opts?.share?.capabilities?.includes('control') && boxCall?.opts?.share?.inviteId === 1, JSON.stringify(boxCall));
+    ck('desktop: a friend PC carries no rows of this account', boxCall?.opts?.machineRows === undefined, JSON.stringify(boxCall?.opts));
     await page.mouse.move(5, 795);
     await sleep(200);
     for (const [name, file] of [['Box', 'desktop-card-box'], ['Slim-Jim', 'desktop-card-slimjim'], ['Old Laptop', 'desktop-card-old']]) {

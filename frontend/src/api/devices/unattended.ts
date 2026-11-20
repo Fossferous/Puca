@@ -184,7 +184,9 @@ export function signUaChallengeSeed(
 // The entry is keyed by host device id and pinned to the host's SALT: re-arm
 // the host with a new passphrase and the salt changes, so the stale seed
 // misses instead of signing garbage. Expiry is sliding — each session the
-// host accepts renews it — and a seed the host REJECTS is forgotten by the
+// host accepts renews it, and so does one the SAME PC's other row accepts
+// (`renewSameMachineUaSeeds`: a PC at its lock screen is a different row, with
+// its own passphrase record) — and a seed the host REJECTS is forgotten by the
 // session layer (see teardown), so one typo cannot wedge the cache. The
 // expiry is client-side housekeeping, not a security bound; the security
 // bounds are the native-shell gate, the logout clear, and re-arming.
@@ -200,6 +202,8 @@ export function signUaChallengeSeed(
  * the expiry SLIDES: every session the host accepts renews it (`confirmUaSeed`).
  * What it does change is the abandoned case — a device nobody has connected
  * from in a week stops holding an unattended capability for that machine.
+ * "That machine" is the PC, not one of its rows: a proved session to either
+ * of its rows renews both (`renewSameMachineUaSeeds`).
  *
  * The worst case for a user is one extra passphrase prompt.
  */
@@ -333,6 +337,57 @@ export function confirmUaSeed(deviceId: string, now: number = Date.now()): void 
     if (!entry) return;
     entry.expires = now + UA_REMEMBER_MS;
     storeRemembered(map);
+}
+
+/**
+ * Keep the OTHER rows of the same PC as alive as the row that just accepted a
+ * proof: slide the expiry of each one's remembered seed, if it has a live one.
+ *
+ * WHY. One Windows PC is two device rows (machines.ts): the desktop app's,
+ * which answers while somebody is signed in, and the lock-screen service's,
+ * which answers while the PC is locked, at its sign-in screen, or just
+ * restarted or woken. Each checks its own passphrase record, so each has its
+ * own seed here, and each used to live on its own week. The sign-in row is
+ * reached only when the PC is locked or off, often more than a week apart (4
+ * to 26 days on the owner's PC, 2026-11-20), so its seed had lapsed by the
+ * next time while everyday use kept the desktop row's fresh — and Power off of
+ * a locked PC asked for its passphrase again. The week is about this device
+ * no longer using that PC (see UA_REMEMBER_MS), so it is the PC's use that
+ * renews it, not one row's.
+ *
+ * WHAT IT DOES NOT DO, and must not: offer a seed to any host but the one it
+ * was proved with. Each row keeps only its own seed, stretched from its own
+ * salt, and only that row's host can accept it. A seed remembered for the
+ * desktop app is never offered to the sign-in screen, even though they are
+ * the same PC and the words may be the same: the two records are set
+ * separately, each with its own random salt, so it would not verify anyway;
+ * and making it verify (one record for both) would still need a binding
+ * between the two rows that only the PC itself can vouch for. The grouping
+ * this is fed (the MAC in the rows' sealed LAN details) is written with the
+ * ACCOUNT's keys, and the unattended passphrase exists precisely for an
+ * account that is not in safe hands: offering a seed on that grouping alone
+ * would hand a signature made from the passphrase, with no prompt, to any row
+ * the account says is this PC — something to grind the passphrase against
+ * offline. Here the grouping can do no such thing: at worst a wrong grouping
+ * keeps a seed this device holds for ITS OWN host alive a little longer (one
+ * it proved there, or one it offered there and heard no refusal of: a
+ * power-off whose answer was lost, session.ts teardown), which the expiry
+ * never was a security bound against, and which that host still checks.
+ *
+ * Never creates an entry, never touches a seed or a salt, and never brings a
+ * lapsed one back (it is dead: `rememberedUaSeed` drops it on the next read).
+ */
+export function renewSameMachineUaSeeds(rowIds: readonly string[], now: number = Date.now()): void {
+    if (rowIds.length === 0) return;
+    const map = loadRemembered();
+    let changed = false;
+    for (const id of rowIds) {
+        const entry = map[id];
+        if (!entry || typeof entry.expires !== 'number' || now >= entry.expires) continue;
+        entry.expires = now + UA_REMEMBER_MS;
+        changed = true;
+    }
+    if (changed) storeRemembered(map);
 }
 
 /** Drop the seed — the host rejected it, or the user is done with the device. */

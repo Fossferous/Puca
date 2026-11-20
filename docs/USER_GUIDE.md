@@ -920,6 +920,23 @@ nobody is connected** on that computer. Its sign-in-screen service is not
 updated this way: Windows asks permission for that, so someone at the
 computer has to click **Update the service** when Púca offers it.
 
+### Passphrases
+
+A computer set up this way has two passphrases, both set on it in **Devices
+→ This device**: the one under **Unattended access**, for while somebody is
+signed in to it, and **Passphrase for the sign-in screen**, for while it is
+locked, at its sign-in screen, or has just restarted or been woken. They are
+separate even if you chose the same words, so the device you connect from
+asks for each one the first time it is needed, and says which: its box is
+titled **Unattended passphrase**, or **Passphrase for the sign-in screen**
+while the computer is locked, and names the computer. The Púca app (on a computer or
+a phone) then remembers each, and does not ask again for as long as you keep
+reaching that computer from it, either way, at least once a week. One the
+computer refuses is forgotten and asked for next time; changing a passphrase
+on the computer makes it ask again too. Losing the connection just as a
+**Power off** goes through does not make it forget. A web browser asks every
+time.
+
 ### Power off
 
 **Power off** on a Windows computer's card in **Devices** shuts that computer
@@ -933,7 +950,9 @@ to save first.
 It works on a computer **set up for unattended access** (**Devices → This
 device** on it): it asks for that computer's unattended passphrase first, as
 **Control** does, and it works while that computer is locked or at its
-sign-in screen too, when it has lock-screen access. A computer without
+sign-in screen too, when it has lock-screen access; it is that screen's
+passphrase then (see *Passphrases*), remembered as **Control** remembers it.
+A computer without
 unattended access refuses it: it still asks whoever is there to let the
 connection in, as it does for **Control**, but even if they do, they agreed to
 a connection, not to losing their unsaved work, so it is not powered off. Use

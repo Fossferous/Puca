@@ -146,6 +146,8 @@ describe('Control on a two-row machine', () => {
 
         expect(connectToDevice).toHaveBeenCalledTimes(1);
         expect(connectToDevice.mock.calls[0][0]).toBe('pc');
+        // The desktop row: the passphrase dialog asks for the unattended one.
+        expect(connectToDevice.mock.calls[0][1]).not.toHaveProperty('signIn');
         // And the card now shows what the click learned.
         expect(host!.textContent).not.toContain('Sign-in screen');
     });
@@ -155,6 +157,10 @@ describe('Control on a two-row machine', () => {
         await mount();
         await click(buttonNamed('Control'));
         expect(connectToDevice.mock.calls[0][0]).toBe('pc-signin');
+        // Said to be the sign-in row, so the passphrase dialog asks for THAT
+        // screen's passphrase, its own record (the review of
+        // work/poweroff-locked, 2026-11-20).
+        expect(connectToDevice.mock.calls[0][1]).toMatchObject({ signIn: true, peerName: 'PC' });
     });
 
     it('a click-time list that never answers does not hold Control: the painted card is used', async () => {
