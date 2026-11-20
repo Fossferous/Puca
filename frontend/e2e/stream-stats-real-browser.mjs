@@ -275,8 +275,11 @@ const fz = await page.evaluate(async () => {
         await pc1.setRemoteDescription(pc2.localDescription);
         const rx = await got;
         // The overlay's sampler, with the endpoint as both managers build it.
+        // Each read's raw counters come from the very report the sampler read
+        // (a second getStats a few ms later could already hold the next frame).
+        let seen = null;
         const sampler = new StreamStatsSampler(() => [{
-            key: rx, direction: 'inbound', kind: 'video', getStats: () => rx.getStats(),
+            key: rx, direction: 'inbound', kind: 'video', getStats: async () => (seen = await rx.getStats()),
             muted: () => rx.track.muted || rx.track.readyState !== 'live',
         }]);
         const reads = [];
@@ -285,9 +288,10 @@ const fz = await page.evaluate(async () => {
         const run = async (phase, seconds) => {
             for (let i = 0; i < seconds; i++) {
                 const started = performance.now();
+                seen = null;
                 const v = await sampler.sample();
                 let raw = null;
-                (await rx.getStats()).forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'video') raw = s; });
+                seen?.forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'video') raw = s; });
                 reads.push({
                     phase, t: Math.round(performance.now() - t0),
                     frozenMs: v?.frozenMs ?? null, fps: v?.fps ?? null, freezes: v?.freezes ?? null, measured: v?.measured ?? false,
