@@ -2,13 +2,18 @@
  * Fullscreen for a LIVE picture — a watched screen share, a camera tile —
  * on every engine Púca runs in, including the one with no element fullscreen.
  *
- * Three routes, tried in order:
+ * The routes, tried in order:
  *
+ *  0. The Android APP goes straight to route 3, the in-app fullscreen, BARE:
+ *     the picture and its own controls fill the app with nothing of Púca's
+ *     over it (no voice bar, no stage header) and Android's status and
+ *     navigation bars hidden (api/systemBars.ts). inAppFullscreenOnly below
+ *     says why the WebView's own fullscreen is not used there.
  *  1. The Fullscreen API on the TILE (the element holding the <video>), so
  *     Púca's own overlay — the name, the controls, the remote-control capture
- *     surface — stays on top of the picture. Browsers, the desktop app, the
- *     Android app and iPad Safari all have it; this is the route those took
- *     before this file existed, unchanged.
+ *     surface — stays on top of the picture. Browsers (Chrome on Android
+ *     too), the desktop app and iPad Safari all have it; this is the route
+ *     those took before this file existed, unchanged.
  *  2. The <video>'s own `webkitEnterFullscreen()`: iPhone Safari. WebKit on
  *     the iPhone has no element fullscreen at all (`requestFullscreen` is
  *     simply absent, which is why the stage's `target?.requestFullscreen?.()`
@@ -29,6 +34,8 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { interceptBack } from '../api/mobileApp';
+import { isAndroidApp } from '../api/platform';
+import { holdSystemBarsHidden } from '../api/systemBars';
 
 type FsDocument = Document & {
     webkitFullscreenEnabled?: boolean;
@@ -58,6 +65,55 @@ export interface MediaFullscreenOptions {
     onUnmuteRequest?: () => void;
     /** How long route 2 may take to begin before the fallback (ms). */
     beginTimeoutMs?: number;
+}
+
+/**
+ * Does this app fill its own view instead of asking the Fullscreen API?
+ * The Android APP: route 0 above.
+ *
+ * WHY NOT THE WEBVIEW'S FULLSCREEN THERE. An Android WebView puts an element
+ * fullscreen by handing the app a view to attach over its window
+ * (WebChromeClient.onShowCustomView); Capacitor's BridgeWebChromeClient
+ * answers "it is over" (onCustomViewHidden) at once and attaches nothing.
+ * What the person then sees is up to the WebView build, not Púca. On the
+ * emulator's WebView 151 (2026-11-20) the tile did fill the WebView, under
+ * the status and navigation bars, with no way out of it: the tile's button
+ * kept saying Fullscreen (the in-app state it reads was never set), and
+ * Android's Back, finding no layer of Púca's to close, closed the app's
+ * activity and the call with it.
+ * Where the request is refused (made to refuse by hand on the same build),
+ * the in-app fullscreen carried the iPhone's takeover look: the voice bar,
+ * and for a stream the stage header, over the picture. VideoPlayer.tsx made
+ * the same choice for a video attachment (elementFullscreen.ts) on
+ * 2026-10-07.
+ */
+export function inAppFullscreenOnly(): boolean {
+    return isAndroidApp();
+}
+
+let bareHolds = 0;
+
+/**
+ * While held (the Android app's in-app fullscreen, by the stream stage or a
+ * camera tile): <html data-fullscreen-bare> for phoneLandscape.css, which
+ * takes the voice bar and the stage header off the picture, and Android's
+ * status and navigation bars hidden. Nothing anywhere else. Several holders
+ * may overlap; releasing twice is harmless.
+ */
+export function holdBareFullscreen(): () => void {
+    if (!inAppFullscreenOnly() || typeof document === 'undefined') return () => {};
+    const root = document.documentElement;
+    bareHolds++;
+    root.dataset.fullscreenBare = 'true';
+    const releaseBars = holdSystemBarsHidden();
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        releaseBars();
+        bareHolds = Math.max(0, bareHolds - 1);
+        if (bareHolds === 0) delete root.dataset.fullscreenBare;
+    };
 }
 
 /** Does the document allow element fullscreen here? Unknown counts as yes:
@@ -93,6 +149,12 @@ export function enterMediaFullscreen(
         fellBack = true;
         opts.fallback();
     };
+
+    // Route 0: the Android app fills its own view (inAppFullscreenOnly).
+    if (inAppFullscreenOnly()) {
+        fallback();
+        return 'app';
+    }
 
     const el = tile as FsElement | null;
     if (el && elementFullscreenEnabled(el.ownerDocument)) {
@@ -187,12 +249,15 @@ export function useAppMediaFullscreen(
         if (key === null) return;
         const root = document.documentElement;
         root.dataset.mediaFullscreen = 'on';
+        // The Android app: the camera alone, and the system bars away.
+        const releaseBare = holdBareFullscreen();
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setKey(null); };
         window.addEventListener('keydown', onKey);
         // Android's BACK leaves it first, as it leaves a video's.
         const releaseBack = interceptBack(() => setKey(null));
         return () => {
             delete root.dataset.mediaFullscreen;
+            releaseBare();
             window.removeEventListener('keydown', onKey);
             releaseBack();
             leaveRef.current?.();

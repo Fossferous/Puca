@@ -37,8 +37,9 @@
 //      the screen in-app, its exit is 44 px and hit-testable, and it leaves.
 //   5. Desktop and Android unchanged: a 1280x800 fine-pointer window asks the
 //      TILE for real fullscreen exactly as before and never takes over, nor
-//      does a short 1000x400 one; a portrait Android phone takes no takeover,
-//      and neither does one typing upright with the keyboard shrinking its
+//      does a short 1000x400 one; a portrait Android phone (a browser: the
+//      Android APP's fullscreen is e2e/android-stream-fullscreen-live.mjs's)
+//      takes no takeover and asks the tile, and neither does one typing upright with the keyboard shrinking its
 //      viewport to 360x278 (the composer keeps its width beside the docked
 //      player; the old viewport-shaped rule as the control that must fail).
 //   6. The controls in reach: a touch on the voice bar (outside the stage)
@@ -403,7 +404,9 @@ async function unchanged(browser) {
         await page.locator('.stream-tile-header button[aria-label="Fullscreen"]').first().tap();
         await sleep(500);
         const calls = await page.evaluate(() => window.__fsCalls);
-        ck('Android: Fullscreen asks the TILE for element fullscreen, as before', calls.length === 1 && /stream-tile/.test(calls[0]), JSON.stringify(calls));
+        // A BROWSER on Android (Chrome's own fullscreen); the Android APP takes
+        // the in-app fullscreen instead (e2e/android-stream-fullscreen-live.mjs).
+        ck('Android browser: Fullscreen asks the TILE for element fullscreen, as before', calls.length === 1 && /stream-tile/.test(calls[0]), JSON.stringify(calls));
         await ctx.close();
     }
 }

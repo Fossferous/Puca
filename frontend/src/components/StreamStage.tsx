@@ -65,7 +65,7 @@ import {
     fmtSens, loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
 } from '../utils/fpsSens';
 import { installBackgroundResumeAll } from './deviceStageResume';
-import { enterMediaFullscreen } from './mediaFullscreen';
+import { enterMediaFullscreen, holdBareFullscreen } from './mediaFullscreen';
 import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
@@ -916,6 +916,10 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // The takeover, on <html> for the stylesheet: before paint, so a phone
     // turned sideways never shows a frame of the squashed chat layout.
     useLayoutEffect(() => publishTakeover(takeover, chromeOff, controllingNow), [takeover, chromeOff, controllingNow]);
+    // The Android app's in-app fullscreen is the stream alone: nothing of
+    // Púca's over it and the system bars away (mediaFullscreen.ts route 0).
+    const inAppFullscreen = appFullscreen !== null;
+    useLayoutEffect(() => (inAppFullscreen ? holdBareFullscreen() : undefined), [inAppFullscreen]);
 
     // The controls hide themselves after a while — never while a menu or the
     // volume panel is open, a control session needs its Stop button in reach,

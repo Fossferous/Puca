@@ -307,3 +307,22 @@ html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn {
     min-height: 44px;
     opacity: 1;
 }
+
+/* ==========================================================================
+   4. The Android app's fullscreen: the picture alone
+   ========================================================================== */
+
+/* mediaFullscreen.ts route 0 (html[data-fullscreen-bare], the Android app
+   only): a stream or a camera in the in-app fullscreen fills the app with
+   its own controls and nothing of Púca's. The takeover above floats the
+   voice bar and the stage header over the picture so mute stays one tap
+   away on an iPhone, whose system player is the usual fullscreen there; on
+   Android this IS the fullscreen, and the owner's report (2026-11-20) was
+   parts of Púca around and over the picture. Leaving (the tile's Exit fullscreen, Android's Back) brings
+   them back. A control session keeps its own layout: Stop controlling must
+   stay in reach. */
+html[data-fullscreen-bare]:not([data-stream-controlling]) .voice-panel-compact,
+html[data-fullscreen-bare]:not([data-stream-controlling]) .stream-stage-header {
+    visibility: hidden;
+    pointer-events: none;
+}

@@ -13,10 +13,21 @@ import { createRoot, type Root } from 'react-dom/client';
 
 // Take the real platform module and override only what would reach a shell
 // that does not exist under jsdom — a hand-written stub of it drifts.
+const cam = vi.hoisted(() => ({ android: false, bars: [] as string[] }));
 vi.mock('../api/platform', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/platform')>()),
     isTauri: () => false,
     isMobile: () => false,
+    // The Android APP, as a switch (mediaFullscreen.ts route 0).
+    isAndroidApp: () => cam.android,
+}));
+vi.mock('../api/systemBars', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/systemBars')>()),
+    holdSystemBarsHidden: () => {
+        cam.bars.push('hide');
+        let done = false;
+        return () => { if (!done) { done = true; cam.bars.push('show'); } };
+    },
 }));
 vi.mock('../components/SmartAvatar', () => ({ SmartAvatar: () => null }));
 
@@ -95,6 +106,33 @@ describe('fullscreening a camera tile', () => {
         (tile as unknown as { requestFullscreen: () => void }).requestFullscreen = requestFullscreen;
         act(() => { btn.click(); });
         expect(requestFullscreen).toHaveBeenCalledTimes(1);
+    });
+
+    it('the Android APP never asks the WebView: the tile fills the app, bare, with the system bars hidden, and leaves again', () => {
+        cam.android = true;
+        cam.bars = [];
+        try {
+            globalCameraUsers.set(7, 'them');
+            globalCameraStreams.set(7, new MediaStream());
+            render();
+            const btn = () => container.querySelector('.vs-fullscreen-btn') as HTMLButtonElement;
+            const tile = btn().parentElement as HTMLElement;
+            const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+            (tile as unknown as { requestFullscreen: () => Promise<void> }).requestFullscreen = requestFullscreen;
+            act(() => { btn().click(); });
+            expect(requestFullscreen).not.toHaveBeenCalled();
+            expect(container.querySelector('.voice-stage-tile.is-app-fullscreen')).not.toBeNull();
+            expect(document.documentElement.dataset.mediaFullscreen).toBe('on');
+            expect(document.documentElement.dataset.fullscreenBare).toBe('true');
+            expect(cam.bars).toEqual(['hide']);
+            expect(btn().getAttribute('aria-label')).toBe('Exit fullscreen');
+            act(() => { btn().click(); });
+            expect(container.querySelector('.is-app-fullscreen')).toBeNull();
+            expect(document.documentElement.dataset.fullscreenBare).toBeUndefined();
+            expect(cam.bars).toEqual(['hide', 'show']);
+        } finally {
+            cam.android = false;
+        }
     });
 
     it('where nothing can go fullscreen (an iPhone without its player for this video), the tile fills the app and leaves again', () => {
