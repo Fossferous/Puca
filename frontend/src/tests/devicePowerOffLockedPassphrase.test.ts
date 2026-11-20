@@ -155,11 +155,18 @@ const verdicts: Array<{ host: string; ok: boolean }> = [];
  *    the service down with it): the server holds the session for it
  *    (DevicePeerReconnecting), then its reaper ends it with "the other device
  *    did not come back".
+ *  - 'zombie': nothing says the link is gone. The phone's socket reads OPEN
+ *    with its transport dead (websocket.ts calls that the usual outcome of a
+ *    mobile network change, and closes one only after 45 to 75 s with no
+ *    pong), or the PC's service went without a FIN and the server's
+ *    DevicePeerReconnecting is more than 8 s behind. The phone's own answer
+ *    deadline (POWER_OFF_ANSWER_TIMEOUT_MS from the proof) is what ends it,
+ *    and calls the PC too old.
  * Either way the answer (the shutdown, or the refusal) never arrives. The
  * attended host's power-ack goes FIRST, before Windows, so a 'service' loss
- * still delivers it; a 'socket' loss takes it with the end.
+ * still delivers it; a 'socket' or 'zombie' loss takes it with the end.
  */
-type Loss = 'socket' | 'service';
+type Loss = 'socket' | 'service' | 'zombie';
 
 /**
  * Press Power off on a card, and play the host that answers. Resolves with
@@ -169,8 +176,15 @@ type Loss = 'socket' | 'service';
  */
 async function pressPowerOff(host: StandIn, machineRows: string[] | undefined, lose?: Loss): Promise<PowerOffOutcome> {
     const { powerOffDevice } = await import('../api/devices/powerOff');
-    const { SHUTDOWN_REASON } = await import('../api/devices/session');
+    const { SHUTDOWN_REASON, POWER_OFF_ANSWER_TIMEOUT_MS } = await import('../api/devices/session');
     const before = sent.length;
+    // The answer deadline has to fall due: the session's timers are faked for
+    // this one press (setImmediate, which spinUntil turns on, never is).
+    if (lose === 'zombie') {
+        const now = Date.now();
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+        vi.setSystemTime(now);
+    }
     const run = powerOffDevice({
         hostDevice: host.id,
         name: 'Desk-PC',
@@ -232,6 +246,10 @@ async function pressPowerOff(host: StandIn, machineRows: string[] | undefined, l
             }
             handlers.get('DevicePeerReconnecting')!({ payload: { session_id: id } });
             handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'the other device did not come back' } });
+        } else if (lose === 'zombie') {
+            // Whatever the PC sends goes nowhere, and nothing else happens:
+            // only the phone's own deadline is left to end it.
+            await vi.advanceTimersByTimeAsync(POWER_OFF_ANSWER_TIMEOUT_MS + 100);
         } else if (!ok) {
             // A wrong proof: the host ends the session with that, and never
             // carries anything out.
@@ -241,7 +259,15 @@ async function pressPowerOff(host: StandIn, machineRows: string[] | undefined, l
             handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: SHUTDOWN_REASON } });
         }
     }
-    return run;
+    try {
+        return await run;
+    } finally {
+        if (lose === 'zombie') {
+            const now = Date.now();
+            vi.useFakeTimers({ toFake: ['Date'] });
+            vi.setSystemTime(now);
+        }
+    }
 }
 
 const promptsFor = (host: string) => prompts.filter(p => p === host).length;
@@ -506,6 +532,49 @@ describe('Power off of a locked PC whose answer never reached the phone', { time
         expect(refused.text).toMatch(/did not accept the passphrase for its sign-in screen/);
         expect(promptsFor(SIGNIN)).toBe(1);
         // That refusal was heard, so it is forgotten: the next press asks.
+        typed[SIGNIN] = 'desk passphrase';
+        vi.setSystemTime(T0 + 2 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(2);
+        expect(verdicts).toEqual([
+            { host: SIGNIN, ok: false }, { host: SIGNIN, ok: false }, { host: SIGNIN, ok: true },
+        ]);
+    });
+
+    // No end arrives at all, and the link reads open: the phone's own answer
+    // deadline ends it and calls the PC too old (it cannot tell that from a
+    // Púca that never answers). Neither host refuses a proof in silence, so
+    // that says nothing about the passphrase (review of this branch, round 3).
+    it('THE FINDING (zombie): the answer deadline after the proof does not forget a remembered sign-in passphrase', async () => {
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        vi.setSystemTime(T0 + 1 * DAY);
+        const lost = await pressPowerOff(signIn, PC_ROWS, 'zombie');
+        expect(lost.kind, 'premise: the deadline called it').toBe('refused');
+        expect(lost.text, 'premise: as too old').toMatch(/too old/);
+        expect(verdicts, 'premise: the PC accepted what was offered').toEqual([
+            { host: SIGNIN, ok: true }, { host: SIGNIN, ok: true },
+        ]);
+        vi.setSystemTime(T0 + 2 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN), 'asked again after an answer that never arrived').toBe(1);
+    });
+
+    it('THE FINDING (zombie, just typed): the first time at the lock screen, its answer never arriving, is still the only time it asks', async () => {
+        expect((await pressPowerOff(signIn, PC_ROWS, 'zombie')).kind).toBe('refused');
+        vi.setSystemTime(T0 + 1 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(1);
+        expect(verdicts).toEqual([{ host: SIGNIN, ok: true }, { host: SIGNIN, ok: true }]);
+    });
+
+    it('THE GATE (zombie): a WRONG passphrase whose refusal never arrived is offered once more, refused out loud, forgotten, and then asked for', async () => {
+        typed[SIGNIN] = 'not it';
+        expect((await pressPowerOff(signIn, PC_ROWS, 'zombie')).kind).toBe('refused');
+        vi.setSystemTime(T0 + 1 * DAY);
+        const refused = await pressPowerOff(signIn, PC_ROWS);
+        expect(refused.kind).toBe('refused');
+        expect(refused.text).toMatch(/did not accept the passphrase for its sign-in screen/);
+        expect(promptsFor(SIGNIN)).toBe(1);
         typed[SIGNIN] = 'desk passphrase';
         vi.setSystemTime(T0 + 2 * DAY);
         expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');

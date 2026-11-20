@@ -435,7 +435,14 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   offer does), so a power-off does not make the next Control ask for it again.
   No answer at all is no verdict: an `unknown` end (the proof sent, then
   neither the shutdown nor a refusal arrived) keeps the seed as it was,
-  neither renewed nor forgotten. The sign-in-screen agent's only answer to a
+  neither renewed nor forgotten, and so does the 8 s answer clock running
+  out after the proof on a link that read open the whole time (a phone's
+  socket gone dead after a network change, which `websocket.ts` notices only
+  after 45 to 75 s without a pong, or a PC's service gone without a FIN and
+  the server's `DevicePeerReconnecting` later than 8 s): the card then calls
+  the PC's Púca too old, which this side cannot tell from a PC that went
+  before its answer did, but it is no refusal of the passphrase
+  (`powerOffUnanswered` in session.ts). The sign-in-screen agent's only answer to a
   good proof is its end with the shutdown reason (it sends no ack), so a
   phone whose socket was down for that one relayed frame, or a service
   Windows took down before it left, lost the only thing that could confirm

@@ -1827,8 +1827,9 @@ function teardown(
     // conservative direction (a session that died before the host's first
     // post-proof frame re-prompts next time) is one typed passphrase.
     //
-    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY ('unknown' with the proof
-    // sent: the session then ended with neither the shutdown nor a refusal).
+    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY (powerOffUnanswered: the
+    // proof sent, then neither the shutdown nor a refusal, whether the session
+    // ended or the answer deadline ran out on a link that read open).
     // There is no "first post-proof frame" to wait for there. Both hosts carry
     // a held power-off out on the proof and refuse a bad one with its reason
     // (the agent's "unattended access was refused" or its lockout, the app's
@@ -1838,15 +1839,14 @@ function teardown(
     // a phone whose socket was down for that one relayed frame, or a service
     // Windows took down before it left, lost the only thing that could
     // confirm the seed, and forgetting it then made the next Power off of the
-    // locked PC ask again (review of work/poweroff-locked, round 2). Kept as
-    // it was: neither renewed nor forgotten, so its week still runs from when
-    // it was last proved or typed. Wrong after all (a typo whose refusal was
-    // lost too), the next connect offers it, hears the refusal, and forgets
-    // it: one refused try, then the prompt, never a loop.
+    // locked PC ask again (review of work/poweroff-locked, rounds 2 and 3).
+    // Kept as it was: neither renewed nor forgotten, so its week still runs
+    // from when it was last proved or typed. Wrong after all (a typo whose
+    // refusal was lost too), the next connect offers it, hears the refusal,
+    // and forgets it: one refused try, then the prompt, never a loop.
     if (s.role === 'controller' && s.uaCache === 'used') {
         s.uaCache = null;
-        const noAnswer = s.powerOff?.state === 'unknown' && s.uaProofSent === true;
-        if (!noAnswer) forgetUaSeed(s.peerDevice);
+        if (!powerOffUnanswered(s)) forgetUaSeed(s.peerDevice);
     }
     // The session is ending for real; a pending transport-grace countdown has
     // nothing left to end. Same for the connect deadline and the
@@ -3051,6 +3051,32 @@ function heldUnproved(s: Internal, endReason: string): boolean {
     // Locked first: the attended host drops whatever it held at the lock.
     if (endReason === POWER_OFF_LOCKED_REASON || /machine is now locked/i.test(endReason)) return true;
     return /unattended (passphrase|access)|too many wrong/i.test(endReason);
+}
+
+/**
+ * The proof went, and NOTHING came back either way: no verdict on the
+ * passphrase, so teardown neither forgets nor renews the seed it offered.
+ *  - 'unknown': the session ended with neither the shutdown nor a refusal
+ *    (the phone's socket down for the one frame that answers, the PC's
+ *    service gone before it left).
+ *  - 'failed' as too old BY THE ANSWER DEADLINE: no end came at all, on a
+ *    link that read open the whole time — a phone's socket gone zombie
+ *    after a network change (websocket.ts closes one only after 45 to 75 s
+ *    with no pong), a PC's service gone without a FIN and the server's
+ *    DevicePeerReconnecting more than POWER_OFF_ANSWER_TIMEOUT_MS behind.
+ *    The PC may be powering off; this side cannot tell that from a Púca too
+ *    old to answer. Neither is a refusal: a host too old for the power-off
+ *    still checks the proof the way a current one does (the check is far
+ *    older than the power-off) and refuses a bad one the same way, out loud.
+ *    (A host's own power-failed with the too-old code confirms the seed
+ *    before teardown reads this.) Review of work/poweroff-locked, round 3.
+ * Both hosts refuse a bad proof OUT LOUD (heldUnproved knows each way), and
+ * that is 'failed' with the refusal, which still forgets.
+ */
+function powerOffUnanswered(s: Internal): boolean {
+    if (s.uaProofSent !== true) return false;
+    const p = s.powerOff;
+    return p?.state === 'unknown' || (p?.state === 'failed' && p.reason === POWER_OFF_TOO_OLD_REASON);
 }
 
 /** Teardown's half: a power-off still in flight ends with its session. */
