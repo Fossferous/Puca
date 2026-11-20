@@ -116,6 +116,16 @@ html[data-stream-takeover="fullscreen"] .stream-tile.is-app-fullscreen {
     opacity: 1;
 }
 
+/* ...in focus view too. Its stage is the grid's height less a filmstrip row
+   (StreamStage.css, .focus-mode.has-strip .is-stage: 0,5,0), which outranked
+   the rule above (0,3,1), and a box with a height and top: 0 ignores its
+   bottom: the tile stopped 112 px short of the window sideways and 76 px
+   upright, the black stage (a camera strip) under it. The same held a
+   control session's tile short of its row (section 1, A CONTROL SESSION). */
+html[data-stream-takeover="fullscreen"] .stream-grid.focus-mode .stream-tile.is-app-fullscreen {
+    height: auto;
+}
+
 /* The voice bar floats over the bottom of the picture: the nav it sat on is
    gone, and mute and hang-up have to stay one tap away. */
 html[data-stream-takeover] .voice-panel-compact,

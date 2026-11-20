@@ -524,4 +524,61 @@ describe('the Android APP: Fullscreen is the stream alone (the owner\'s report, 
             delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
         }
     });
+
+    // The review's second scenario (2026-11-20): focus view with a filmstrip,
+    // and a THUMB put in fullscreen from its menu (a long press). A thumb's
+    // role hid its buttons (Exit fullscreen among them: StreamStage.css,
+    // .is-thumb .stream-tile-controls), drew it at 75%, kept a control
+    // session's capture surface off it and the SFU on its low layer. In the
+    // fullscreen it is the stage; leaving gives the stage back. The geometry
+    // (the stage's filmstrip row) is e2e/iphone-stream-real-browser.mjs's.
+    describe('focus view with a filmstrip', () => {
+        const tile = (id: number) => [...container.querySelectorAll<HTMLElement>('.stream-tile')]
+            .find((t) => t.querySelector('.streamer-name')?.textContent?.includes(id === 1 ? 'alice' : 'bob'))!;
+        const menuFullscreen = (id: number) => {
+            act(() => { tile(id).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+            const item = [...document.querySelectorAll<HTMLButtonElement>('.stream-context-menu .scm-item')]
+                .find((b) => /^\s*(Exit fullscreen|Fullscreen)/.test(b.textContent ?? ''))!;
+            tap(item);
+        };
+        beforeEach(() => {
+            STREAMS.set(2, { username: 'bob', stream: new MediaStream() });
+            selected = [1, 2];
+            streamers.push({ userId: 2, username: 'bob' });
+            act(() => { useStreamStore.getState().setFocusMode(true); useStreamStore.getState().setFocusedStream(1); });
+        });
+
+        it('a thumb put in fullscreen from its menu is the stage there, and leaving gives the stage back', () => {
+            rotate(true);
+            render();
+            expect(container.querySelector('.stream-grid')!.className).toContain('has-strip');
+            expect(tile(1).className).toContain('is-stage');
+            expect(tile(2).className).toContain('is-thumb');
+            setFocusedRemote.mockClear();
+            menuFullscreen(2);
+            expect(html().fullscreenBare).toBe('true');
+            expect(tile(2).className).toContain('is-app-fullscreen');
+            expect(tile(2).className).toContain('is-stage');
+            expect(tile(2).className).not.toContain('is-thumb');
+            expect(tile(2).querySelector('.tile-btn[aria-label="Exit fullscreen"]')).not.toBeNull();
+            // The picture in the fullscreen pulls the SFU's high layer.
+            expect(setFocusedRemote).toHaveBeenLastCalledWith(2);
+            // Leaving: the stage the person chose is back.
+            tap(tile(2).querySelector('.tile-btn[aria-label="Exit fullscreen"]')!);
+            expect(html().fullscreenBare).toBeUndefined();
+            expect(tile(1).className).toContain('is-stage');
+            expect(tile(2).className).toContain('is-thumb');
+            expect(setFocusedRemote).toHaveBeenLastCalledWith(1);
+        });
+
+        it('a control session on a thumb in fullscreen has its capture surface (a thumb never does: CONTROL)', () => {
+            controlState = { controlling: { userId: 2, username: 'bob', status: 'active' }, hosting: null };
+            render();
+            expect(tile(2).className).toContain('is-thumb');
+            expect(tile(2).querySelector('.control-capture')).toBeNull();
+            menuFullscreen(2);
+            expect(tile(2).className).toContain('is-app-fullscreen');
+            expect(tile(2).querySelector('.control-capture')).not.toBeNull();
+        });
+    });
 });

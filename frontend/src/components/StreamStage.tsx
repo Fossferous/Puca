@@ -898,7 +898,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // Who is on the STAGE right now. Focus mode always has one: falling back to
     // the first selected stream matters because `focusedStream` is null until
     // you click a tile, and the layout would otherwise have no stage at all.
-    const stageUser = focusMode ? (focusedStream ?? selectedStreams[0] ?? null) : null;
+    // The stream in the in-app fullscreen is on it while it is there (the
+    // Android app's only fullscreen; its menu can fullscreen a filmstrip
+    // thumb): a thumb's role kept its buttons, Exit fullscreen among them,
+    // hidden, the picture at 75%, a control session's capture surface off it
+    // and the SFU on its low layer. Leaving gives the stage back.
+    const stageUser = focusMode ? (appFullscreen ?? focusedStream ?? selectedStreams[0] ?? null) : null;
 
     // SFU layer hint (§5.2 of the SFU design): the focused stream pulls the HIGH
     // simulcast layer, everything in the grid stays LOW/MEDIUM. No-op on mesh
