@@ -24,19 +24,23 @@
 //     lossy path): the view says frozen within 4 s and counts up, while
 //     Chromium's own freezeCount stays where it was; frames back, the view
 //     clears and Chromium counts ONE freeze and no pause;
+//   - a freeze whose sender then stops for 8 s: frozen, then not once 5 s
+//     pass without a packet (Chromium books it as a pause); its packets back
+//     with still no frame: frozen again, counted from their return;
 //   - CONTROLS: the sender stops drawing for 8 s (no packets: Chromium counts
 //     a pause, not a freeze), the sender's track disabled (black frames at
-//     the full rate), and a share of a still canvas at about 1 fps (a frame
+//     the full rate), a share of a still canvas at about 1 fps (a frame
 //     every 1.25 s, so one second in five or more brings none, whatever the
-//     phase): never frozen, each premise checked from Chromium's counters
-//     first.
+//     phase), and a frame every 2 s with every frame held back 4.5 s (packets
+//     and a read later no frame, but under three of its own frames): never
+//     frozen, each premise checked from Chromium's counters first.
 //
 // SILENT: video only, from the fake camera and a canvas; no audio track
 // exists at all.
 //
 //   cd frontend && node e2e/stream-stats-real-browser.mjs
 //
-// No server and no build needed. ~1.5 min.
+// No server and no build needed. ~2 min.
 import { chromium } from '@playwright/test';
 import { build } from 'esbuild';
 import http from 'node:http';
@@ -205,8 +209,9 @@ const fz = await page.evaluate(async () => {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
     /** A canvas stream to a receiver whose encoded transform can drop every
-     *  frame. `slow`: one frame per requestFrame, every 1.25 s. */
-    async function rig({ slow = false } = {}) {
+     *  frame, or hold them back for a while (hold(ms)). `everyMs`: one frame
+     *  per requestFrame, that far apart; otherwise drawn at 30 fps. */
+    async function rig({ everyMs = 0 } = {}) {
         const canvas = document.createElement('canvas');
         canvas.width = 640; canvas.height = 360;
         document.body.appendChild(canvas);
@@ -220,12 +225,13 @@ const fz = await page.evaluate(async () => {
             ctx.font = '48px sans-serif';
             ctx.fillText(String(n), 40, 120 + (n % 100));
         };
-        const stream = canvas.captureStream(slow ? 0 : 30);
+        const stream = canvas.captureStream(everyMs ? 0 : 30);
         const track = stream.getVideoTracks()[0];
-        const state = { drawing: true, drop: false };
+        const state = { drawing: true, drop: false, holding: false };
         let timer;
-        if (slow) {
-            const tick = () => { draw(); track.requestFrame(); timer = setTimeout(tick, 1250); };
+        let lastFrameAt = 0;
+        if (everyMs) {
+            const tick = () => { draw(); track.requestFrame(); lastFrameAt = performance.now(); timer = setTimeout(tick, everyMs); };
             tick();
         } else {
             timer = setInterval(() => { if (state.drawing) draw(); }, 33);
@@ -235,13 +241,34 @@ const fz = await page.evaluate(async () => {
         pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
         pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
         pc1.addTrack(track, stream);
+        const held = [];
+        let ctl = null;
         const got = new Promise((res) => {
             pc2.ontrack = (e) => {
                 const { readable, writable } = e.receiver.createEncodedStreams();
-                readable.pipeThrough(new TransformStream({ transform(frame, c) { if (!state.drop) c.enqueue(frame); } })).pipeTo(writable);
+                readable.pipeThrough(new TransformStream({
+                    transform(frame, c) {
+                        ctl = c;
+                        if (state.drop) return;
+                        if (state.holding) { held.push(frame); return; }
+                        c.enqueue(frame);
+                    },
+                })).pipeTo(writable);
                 res(e.receiver);
             };
         });
+        /** Hold every frame back (in order) for `ms`, then let them all through:
+         *  late, not lost. */
+        const hold = (ms) => {
+            state.holding = true;
+            setTimeout(() => { state.holding = false; while (held.length) ctl?.enqueue(held.shift()); }, ms);
+        };
+        /** Wait until `ms` after the next requestFrame (a paced rig only). */
+        const afterNextFrame = async (ms) => {
+            const was = lastFrameAt;
+            while (lastFrameAt === was) await sleep(20);
+            await sleep(ms);
+        };
         await pc1.setLocalDescription(await pc1.createOffer());
         await pc2.setRemoteDescription(pc1.localDescription);
         await pc2.setLocalDescription(await pc2.createAnswer());
@@ -265,13 +292,14 @@ const fz = await page.evaluate(async () => {
                     phase, t: Math.round(performance.now() - t0),
                     frozenMs: v?.frozenMs ?? null, fps: v?.fps ?? null, freezes: v?.freezes ?? null, measured: v?.measured ?? false,
                     decoded: raw?.framesDecoded ?? null, bytes: raw?.bytesReceived ?? null,
+                    media: raw ? raw.bytesReceived - (raw.retransmittedBytesReceived ?? 0) : null,
                     freezeCount: raw?.freezeCount ?? null, pauseCount: raw?.pauseCount ?? null, muted: rx.track.muted,
                 });
                 await sleep(Math.max(0, 1000 - (performance.now() - started)));
             }
         };
         const stop = () => { clearInterval(timer); clearTimeout(timer); pc1.close(); pc2.close(); track.stop(); canvas.remove(); };
-        return { state, track, run, reads, stop };
+        return { state, track, run, reads, stop, hold, afterNextFrame };
     }
 
     const a = await rig();
@@ -287,13 +315,36 @@ const fz = await page.evaluate(async () => {
     a.track.enabled = false;
     await a.run('disabled', 6);
     a.track.enabled = true;
-    await a.run('enabled', 2);
+    await a.run('enabled', 4);
+    // A stall that becomes a pause: frames dropped (frozen), then the sender
+    // stops too (no packets for longer than 5 s: a pause), then its packets
+    // come back with still no frame decoding (frozen again, from their
+    // return), then frames.
+    a.state.drop = true;
+    await a.run('stall', 4);
+    a.state.drawing = false;
+    await a.run('stall-quiet', 8);
+    a.state.drawing = true;
+    await a.run('stall-return', 6);
+    a.state.drop = false;
+    await a.run('stall-over', 4);
     a.stop();
 
-    const s = await rig({ slow: true });
+    const s = await rig({ everyMs: 1250 });
     await s.run('one-fps', 18);
     s.stop();
-    return { reads: a.reads, slow: s.reads };
+
+    // The pace threshold on real reports: a frame every 2 s (threshold 6 s),
+    // then every frame held back 4.5 s and let through late. Its packets
+    // arrive and a read later still no frame has come (what a freeze looks
+    // like at 30 fps), but the gap stays under three of this stream's frames.
+    const p = await rig({ everyMs: 2000 });
+    await p.run('paced', 14);
+    await p.afterNextFrame(200);
+    p.hold(4500);
+    await p.run('paced-held', 9);
+    p.stop();
+    return { reads: a.reads, slow: s.reads, paced: p.reads };
 });
 
 const phase = (name, list = fz.reads) => list.filter((x) => x.phase === name);
@@ -335,12 +386,37 @@ const disabled = phase('disabled');
 ck(disabled.slice(1).every((x) => x.fps >= 10), 'premise: a disabled sender track still sends frames (black ones)', JSON.stringify(disabled.map((x) => x.fps)));
 ck(disabled.every((x) => x.frozenMs === null), 'CONTROL: a disabled sender track is never shown as frozen', fmt(disabled));
 
+// Into a pause and out of it, still frozen.
+const stall = phase('stall');
+const quiet = phase('stall-quiet');
+const ret = phase('stall-return');
+const over = phase('stall-over');
+ck(flat(quiet.slice(2), 'media') && flat(quiet.slice(2), 'decoded'), 'premise: the stalled sender then sends nothing', fmt(quiet));
+ck(stall.some((x) => x.frozenMs !== null) && quiet.slice(6).every((x) => x.frozenMs === null),
+    'a freeze whose packets stop for 5 s is a pause: frozen, then not', fmt([...stall, ...quiet]));
+ck(grew(ret, 'media') && flat(ret, 'decoded'), 'premise: its packets come back and still no frame decodes', fmt(ret));
+const retAt = ret.findIndex((x) => x.frozenMs !== null);
+ck(retAt >= 0 && retAt <= 4 && ret[retAt].frozenMs <= 3500,
+    'packets back with no picture: frozen again within 4 s, counted from their return (not from the stall\'s start)', fmt(ret));
+ck(over.slice(2).every((x) => x.frozenMs === null), 'frames back: not frozen', fmt(over));
+ck(over.at(-1).pauseCount === before('stall').pauseCount + 1 && over.at(-1).freezeCount === before('stall').freezeCount,
+    'and Chromium booked the whole stall as one pause, no freeze (its is_paused_ holds until a frame)',
+    `pauseCount ${before('stall').pauseCount} -> ${over.at(-1).pauseCount}, freezeCount ${before('stall').freezeCount} -> ${over.at(-1).freezeCount}`);
+
 // CONTROL: a share of a still canvas at about 1 fps.
 const slow = fz.slow.filter((x) => x.measured);
 const frameless = slow.filter((x) => x.fps === 0).length;
 ck(frameless >= 3, 'premise: a share at a frame every 1.25 s has seconds with no frame (a "no frame this second" rule would fire)', `${frameless} of ${slow.length} reads`);
 ck(fz.slow.every((x) => x.frozenMs === null), 'CONTROL: a share at about 1 fps is never shown as frozen', fmt(fz.slow));
 ck(fz.slow.every((x) => !x.freezeCount), 'and Chromium agrees: no freeze counted', JSON.stringify(fz.slow.map((x) => x.freezeCount)));
+
+// CONTROL: the threshold is the stream's own pace.
+const heldReads = fz.paced.filter((x) => x.phase === 'paced-held');
+const waited = heldReads.some((x, k) => k >= 2 && x.decoded === heldReads[k - 2].decoded && heldReads[k - 1].media > heldReads[k - 2].media);
+ck(waited, 'premise: at a frame every 2 s with frames held back, packets arrive and a read later still no frame (a 1 s rule would call it frozen)', fmt(heldReads));
+ck(fz.paced.every((x) => x.frozenMs === null), 'CONTROL: under three of the stream\'s own frames, it is not frozen', fmt(heldReads));
+ck(fz.paced.every((x) => !x.freezeCount), 'and Chromium agrees: no freeze counted', JSON.stringify(fz.paced.map((x) => x.freezeCount)));
+ck(heldReads.at(-1).decoded > heldReads[0].decoded, 'premise: the held frames did arrive, late', `${heldReads[0].decoded} -> ${heldReads.at(-1).decoded}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 console.log(JSON.stringify({ inbound: i, outbound: o }, null, 1));

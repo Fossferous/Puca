@@ -257,20 +257,26 @@ function watched(seconds: Second[], { interFrameDelay = true } = {}): Row[] {
 }
 const secs = (n: number, s: Second): Second[] => Array.from({ length: n }, () => ({ ...s }));
 
-/** The sampler, read once a second over `rows` (one per read), as the
- *  overlay drives it; each read's view. `muted(i)` / `id(i)`: read i's track
- *  state and inbound-rtp id. */
-async function sampleEach(rows: Row[], opts: { muted?: (i: number) => boolean; id?: (i: number) => string } = {}) {
+/** The sampler, read once a second over `rows` (one per read, read i at
+ *  (i + 1) s), as the overlay drives it; each read's view. `muted(i)` /
+ *  `id(i)`: read i's track state and inbound-rtp id; `absent(i)`: the
+ *  endpoint is not listed for read i; `throws(i)`: its getStats throws. */
+async function sampleEach(rows: Row[], opts: {
+    muted?: (i: number) => boolean; id?: (i: number) => string;
+    absent?: (i: number) => boolean; throws?: (i: number) => boolean;
+} = {}) {
     const vp8 = codec('C1', 'video/VP8');
     let i = 0;
-    const sampler = new StreamStatsSampler(() => [{
+    const sampler = new StreamStatsSampler(() => (opts.absent?.(i) ? [] : [{
         key: KEY, direction: 'inbound' as const, kind: 'video',
-        getStats: async () => report(inbound({ ...rows[i], id: opts.id?.(i) ?? 'IN' }), vp8),
+        getStats: async () => {
+            if (opts.throws?.(i)) throw new Error('detached');
+            return report(inbound({ ...rows[i], id: opts.id?.(i) ?? 'IN' }), vp8);
+        },
         muted: () => opts.muted?.(i) ?? false,
-    }]);
+    }]));
     const views: (StreamStatsView | null)[] = [];
-    let clock = 0;
-    for (; i < rows.length; i++) views.push(await sampler.sample(() => (clock += 1000)));
+    for (; i < rows.length; i++) views.push(await sampler.sample(() => (i + 1) * 1000));
     return views;
 }
 const KEY = {};
@@ -314,13 +320,16 @@ describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
         expect(f.slice(5)).toEqual([null, 2000, 3000, 4000, 5000, 6000, 7000, null, null, null, null]);
     });
 
-    it('a gap that has been a pause stays one until a frame comes, packets or not (WebRTC counts it all as the pause)', async () => {
-        const rows = watched([...secs(5, { frames: 30 }), ...secs(8, { frames: 0, bytes: false }), ...secs(4, { frames: 0, bytes: true }),
+    it('packets back after a pause with still no picture (a reconnect whose keyframe never decodes): frozen, counted from their return', async () => {
+        // 30 fps, 6 s with nothing (WebRTC: a pause), then 2 Mbps and no frame.
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(6, { frames: 0, bytes: false }), ...secs(10, { frames: 0, bytes: true }),
             { frames: 30, endsPause: true }, ...secs(3, { frames: 0, bytes: true })]);
         const f = frozen(await sampleEach(rows));
-        expect(f.slice(5, 18).every((x) => x === null)).toBe(true);
-        // A frame ends the pause; the next gap is judged afresh.
-        expect(f.slice(18)).toEqual([null, 2000, 3000]);
+        expect(f.slice(5, 11).every((x) => x === null)).toBe(true); // the pause itself
+        // Their return is read 11; one read of slack, then the count from it.
+        expect(f.slice(11, 21)).toEqual([null, null, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000]);
+        // A frame ends it; the next gap is judged afresh.
+        expect(f.slice(21)).toEqual([null, null, 2000, 3000]);
     });
 
     it('CONTROL: a muted track\'s still picture is not a freeze, the same reports otherwise are', async () => {
@@ -331,7 +340,9 @@ describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
 
     it('CONTROL: a 1 fps share of a still screen is not frozen when a second goes by without a frame', async () => {
         // Frames 800 and 1200 ms apart (Chromium repeats a still screen's
-        // frame about once a second): every other second has none.
+        // frame about once a second): every other second has none. A guard
+        // against a "no frame this second" rule; packets come only with the
+        // frames here, so the pace threshold is pinned by the next test.
         const rows = watched([{ frames: 1 }, ...Array.from({ length: 20 }, (_, k) => ({ frames: k % 2 ? 2 : 0 }))]);
         const views = await sampleEach(rows);
         expect(views.filter((v) => v?.fps === 0).length).toBeGreaterThan(5); // a "no frame this second" rule would have fired
@@ -360,6 +371,22 @@ describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
         const rows = watched([...secs(120, { frames: 30 }), ...secs(30, { frames: 0, bytes: true })]).slice(125);
         const f = frozen(await sampleEach(rows));
         expect(f.slice(0, 4)).toEqual([null, null, 2000, 3000]);
+    });
+
+    it('opened while the packets had stopped (a pause it cannot measure): counted from their return, not from the opening', async () => {
+        // The sender stopped 20 s before the overlay opened; its packets come
+        // back on the overlay's third read, no frame for 4 s.
+        const rows = watched([...secs(120, { frames: 30 }), ...secs(20, { frames: 0, bytes: false }), ...secs(6, { frames: 0, bytes: true })]).slice(138);
+        expect(frozen(await sampleEach(rows))).toEqual([null, null, null, null, 2000, 3000, 4000, 5000]);
+    });
+
+    it('a read missed mid-freeze (getStats threw, the endpoint unlisted for a moment) does not start the count over', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(10, { frames: 0, bytes: true })]);
+        const thrown = frozen(await sampleEach(rows, { throws: (i) => i === 9 }));
+        const unlisted = frozen(await sampleEach(rows, { absent: (i) => i === 9 || i === 10 }));
+        // The read after a miss has no window ("measuring"); then it goes on.
+        expect(thrown.slice(5)).toEqual([null, 2000, 3000, 4000, null, null, 7000, 8000, 9000, 10000]);
+        expect(unlisted.slice(5)).toEqual([null, 2000, 3000, 4000, null, null, null, 8000, 9000, 10000]);
     });
 
     it('a browser without totalInterFrameDelay still finds it, from the frames per read', async () => {

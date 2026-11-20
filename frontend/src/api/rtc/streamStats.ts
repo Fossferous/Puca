@@ -294,6 +294,8 @@ const FREEZE_MIN_FRAMES = 5;
 /** libwebrtc's kInactiveDuration: no packet for this long and the gap is a
  *  PAUSE (pauseCount), not a freeze. */
 const PAUSE_NO_PACKETS_MS = 5000;
+/** How many reads in a row an endpoint may miss and keep its freeze watch. */
+const FREEZE_KEEP_MISSED_READS = 5;
 
 /** Some frames, and the time between them (ms). */
 interface FrameRun { frames: number; ms: number }
@@ -333,8 +335,13 @@ interface FreezeRead { id: string; at: number; frames: number; bytes: number | n
  *     probes by resending old packets, which carry no new picture (measured:
  *     a 1 fps canvas share's first seconds were mostly these);
  *   - never 5 s without media bytes since the last frame: then the sender
- *     stopped, and WebRTC counts the whole gap as a pause however it ends
- *     (its is_paused_ holds until the next frame), so this does too;
+ *     stopped (or the connection did), a pause as WebRTC counts it. If the
+ *     packets come back and still no frame comes of them, that is a frozen
+ *     picture again, counted from their return. WebRTC books that whole gap
+ *     as the pause (its is_paused_ holds until the next frame), so the
+ *     freezes count will not show it afterwards; but a still picture with the
+ *     stream arriving is exactly what this is here to say (a reconnect whose
+ *     keyframe never decodes, a key that does not open the frames);
  *   - and the track not muted or ended (RtpEndpoint.muted).
  * A sender that turns its camera off (track.enabled = false) sends black
  * frames at the full rate (measured), so its picture moves: not a freeze.
@@ -342,7 +349,9 @@ interface FreezeRead { id: string; at: number; frames: number; bytes: number | n
  * The gap is a LOWER bound, counted from the read that first saw the newest
  * frame (the overlay reads once a second), so it never says longer than it
  * has been. Opened on a stream that is already frozen, it counts from the
- * first read, with the lifetime counters as the stream's pace.
+ * first read, with the lifetime counters as the stream's pace; opened on one
+ * whose packets had stopped (perhaps for longer than 5 s: it cannot know),
+ * from their return.
  */
 export class FreezeWatch {
     private last: FreezeRead | null = null;
@@ -353,9 +362,11 @@ export class FreezeWatch {
     private frameSeen = false;
     /** The last read whose media bytes had grown. */
     private bytesAt: number | null = null;
-    /** This gap has gone PAUSE_NO_PACKETS_MS without media bytes: a pause
-     *  until the next frame. */
+    /** This gap has gone PAUSE_NO_PACKETS_MS without media bytes: a pause,
+     *  until a frame or the packets' return. */
     private paused = false;
+    /** Since start(), and before any frame, a read brought no media bytes. */
+    private quiet = false;
     /** The newest frames' pace, newest last: enough for FREEZE_AVG_FRAMES. */
     private runs: FrameRun[] = [];
 
@@ -380,14 +391,27 @@ export class FreezeWatch {
             return null;
         }
         this.last = { id: row.id, at, frames, bytes, row };
-        if (bytes !== null && prev.bytes !== null && bytes > prev.bytes) this.bytesAt = at;
+        const grew = bytes !== null && prev.bytes !== null && bytes > prev.bytes;
+        if (grew) this.bytesAt = at;
         if (frames > prev.frames) {
             this.addRun(prev, row, frames - prev.frames, at);
             this.frameAt = at;
             this.bytesAtFrame = bytes;
             this.frameSeen = true;
             this.paused = false;
+            this.quiet = false;
             return null;
+        }
+        if (!grew) {
+            if (!this.frameSeen) this.quiet = true;
+        } else if (this.paused || this.quiet) {
+            // The packets are back after a pause (or after a quiet stretch
+            // the overlay opened into, which may have been one), with no
+            // frame of them yet: the clock starts again from their return.
+            this.frameAt = at;
+            this.bytesAtFrame = bytes;
+            this.paused = false;
+            this.quiet = false;
         }
         if (at - Math.max(this.bytesAt ?? -Infinity, this.frameAt) >= PAUSE_NO_PACKETS_MS) this.paused = true;
         const avg = this.averageFrameMs();
@@ -405,6 +429,7 @@ export class FreezeWatch {
         this.frameSeen = false;
         this.bytesAt = null;
         this.paused = false;
+        this.quiet = false;
         this.runs = [];
         // The pace so far is all there is to go on for a stream that is
         // frozen when the overlay opens: its lifetime counters, with the
@@ -471,8 +496,9 @@ export class FreezeWatch {
  */
 export class StreamStatsSampler {
     private prev = new Map<object, { report: RTCStatsReport; at: number }>();
-    /** Each watched video's freeze watch, by endpoint like `prev`. */
-    private freeze = new Map<object, FreezeWatch>();
+    /** Each watched video's freeze watch, by endpoint, and how many reads in
+     *  a row it has missed. */
+    private freeze = new Map<object, { watch: FreezeWatch; missed: number }>();
     private readonly resolve: () => RtpEndpoint[];
 
     constructor(resolve: () => RtpEndpoint[]) {
@@ -489,20 +515,18 @@ export class StreamStatsSampler {
             }
         }));
         const next = new Map<object, { report: RTCStatsReport; at: number }>();
-        const nextFreeze = new Map<object, FreezeWatch>();
+        const nextFreeze = new Map<object, { watch: FreezeWatch; missed: number }>();
         const samples: EndpointSample[] = [];
         for (const r of reads) {
             if (!r) continue;
             const before = this.prev.get(r.e.key);
             let frozenMs: number | null = null;
             if (r.e.direction === 'inbound' && r.e.kind === 'video') {
-                // Only an endpoint with a read last tick keeps its watch: one
-                // that missed a read starts over, as its rates do.
-                const watch = (before && this.freeze.get(r.e.key)) || new FreezeWatch();
+                const watch = this.freeze.get(r.e.key)?.watch ?? new FreezeWatch();
                 let muted = false;
                 try { muted = r.e.muted?.() === true; } catch { /* gone mid-read: not muted */ }
                 frozenMs = watch.observe(r.report, r.at, !muted);
-                nextFreeze.set(r.e.key, watch);
+                nextFreeze.set(r.e.key, { watch, missed: 0 });
             }
             samples.push({
                 direction: r.e.direction,
@@ -517,6 +541,14 @@ export class StreamStatsSampler {
         // Endpoints that went away are forgotten, so a sender replaced by a
         // new one never diffs against a report that is not its own.
         this.prev = next;
+        // Except a freeze watch, for a few reads: a getStats that threw, or a
+        // publication whose receiver was unset for a moment, is most likely
+        // around connection trouble, the very time a long freeze's count must
+        // not start over at "2 s". It is keyed by the receiver itself, and a
+        // new stream on it (another SSRC, counters back) restarts it anyway.
+        for (const [key, e] of this.freeze) {
+            if (!nextFreeze.has(key) && e.missed < FREEZE_KEEP_MISSED_READS) nextFreeze.set(key, { watch: e.watch, missed: e.missed + 1 });
+        }
         this.freeze = nextFreeze;
         return summariseStreamStats(samples);
     }
