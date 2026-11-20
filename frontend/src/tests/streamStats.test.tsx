@@ -302,7 +302,7 @@ describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
         expect(views[18]).toMatchObject({ frozenMs: null, freezes: 0 });
     });
 
-    it('CONTROL: a sender that stops sending (no packets) is a pause, not a freeze', async () => {
+    it('CONTROL: a sender that stops sending (no packets after its last frame) is never frozen (WebRTC: a pause)', async () => {
         const rows = watched([...secs(5, { frames: 30 }), ...secs(12, { frames: 0, bytes: false }), { frames: 30, endsPause: true }]);
         const views = await sampleEach(rows);
         expect(frozen(views).every((f) => f === null)).toBe(true);
@@ -371,6 +371,24 @@ describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
         const rows = watched([...secs(120, { frames: 30 }), ...secs(30, { frames: 0, bytes: true })]).slice(125);
         const f = frozen(await sampleEach(rows));
         expect(f.slice(0, 4)).toEqual([null, null, 2000, 3000]);
+    });
+
+    it('opened on a frozen picture whose packets skip a second: the count goes on, it does not start over', async () => {
+        // The owner's case, opened in the middle of it; one second brings no
+        // media (a Wi-Fi or TURN stall under the same congestion).
+        const seconds = [...secs(120, { frames: 30 }), ...secs(30, { frames: 0, bytes: true })];
+        seconds[131] = { frames: 0, bytes: false };
+        const f = frozen(await sampleEach(watched(seconds).slice(125)));
+        expect(f.slice(0, 10)).toEqual([null, null, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000]);
+    });
+
+    it("the threshold follows a drop to a still screen's pace as libwebrtc's does: the freezes it booked on the way down are in the average", async () => {
+        // 30 fps, then a frame a second; Chromium books the first ten 1 s gaps
+        // as freezes while its 30-frame average catches up. 15 frames later
+        // its threshold is about 2.5 s, so a 2 s gap with packets is not yet one.
+        const rows = watched([...secs(10, { frames: 30 }), ...Array.from({ length: 25 }, (_, k) => ({ frames: 1, endsFreeze: k < 10 })),
+            ...secs(3, { frames: 0, bytes: true })]);
+        expect(frozen(await sampleEach(rows)).slice(-3)).toEqual([null, null, 3000]);
     });
 
     it('opened while the packets had stopped (a pause it cannot measure): counted from their return, not from the opening', async () => {

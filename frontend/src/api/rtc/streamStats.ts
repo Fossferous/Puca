@@ -286,7 +286,8 @@ export function summariseStreamStats(samples: EndpointSample[]): StreamStatsView
 // ---- a freeze in progress ---------------------------------------------------
 
 /** WebRTC's freeze rule (below): a gap of at least max(3 x avg, avg + 150 ms),
- *  avg over the last 30 frames, once there are 5 to average. */
+ *  avg over the last 30 frames (freezes in, pauses out, as libwebrtc keeps
+ *  it), once there are 5 to average. */
 const FREEZE_FACTOR = 3;
 const FREEZE_MIN_INCREASE_MS = 150;
 const FREEZE_AVG_FRAMES = 30;
@@ -365,7 +366,8 @@ export class FreezeWatch {
     /** This gap has gone PAUSE_NO_PACKETS_MS without media bytes: a pause,
      *  until a frame or the packets' return. */
     private paused = false;
-    /** Since start(), and before any frame, a read brought no media bytes. */
+    /** Since start() nothing has arrived: no frame and no media bytes, for
+     *  a read or more. What came before the overlay opened is unknown. */
     private quiet = false;
     /** The newest frames' pace, newest last: enough for FREEZE_AVG_FRAMES. */
     private runs: FrameRun[] = [];
@@ -403,9 +405,11 @@ export class FreezeWatch {
             return null;
         }
         if (!grew) {
-            if (!this.frameSeen) this.quiet = true;
+            // Only before anything has arrived: one quiet second inside a
+            // freeze the overlay opened on is not a stretch it opened into.
+            if (!this.frameSeen && this.bytesAt === null) this.quiet = true;
         } else if (this.paused || this.quiet) {
-            // The packets are back after a pause (or after a quiet stretch
+            // The packets are back after a pause (or after the quiet stretch
             // the overlay opened into, which may have been one), with no
             // frame of them yet: the clock starts again from their return.
             this.frameAt = at;
@@ -433,11 +437,12 @@ export class FreezeWatch {
         this.runs = [];
         // The pace so far is all there is to go on for a stream that is
         // frozen when the overlay opens: its lifetime counters, with the
-        // freezes and pauses taken out (totalInterFrameDelay counts them).
+        // pauses taken out (totalInterFrameDelay counts them; libwebrtc's
+        // average leaves them out and keeps the freezes).
         const total = num(row.totalInterFrameDelay);
         if (total === null) return;
-        const ms = 1000 * (total - (num(row.totalFreezesDuration) ?? 0) - (num(row.totalPausesDuration) ?? 0));
-        const n = frames - 1 - (num(row.freezeCount) ?? 0) - (num(row.pauseCount) ?? 0);
+        const ms = 1000 * (total - (num(row.totalPausesDuration) ?? 0));
+        const n = frames - 1 - (num(row.pauseCount) ?? 0);
         if (n > 0 && ms > 0) this.push({ frames: n, ms });
     }
 
@@ -450,16 +455,18 @@ export class FreezeWatch {
         };
         const delay = d('totalInterFrameDelay');
         if (delay !== null) {
-            // Every gap is in totalInterFrameDelay, freezes and pauses too;
-            // taken out, what is left is the stream's own pace.
-            const ms = 1000 * (delay - (d('totalFreezesDuration') ?? 0) - (d('totalPausesDuration') ?? 0));
-            const n = frames - (d('freezeCount') ?? 0) - (d('pauseCount') ?? 0);
+            // Every gap is in totalInterFrameDelay. libwebrtc's average
+            // (VideoQualityObserver's 30-frame window) takes a freeze's gap in
+            // and a pause's out, so this does: a stream that has just dropped
+            // to a still screen's pace raises its threshold as Chromium does.
+            const ms = 1000 * (delay - (d('totalPausesDuration') ?? 0));
+            const n = frames - (d('pauseCount') ?? 0);
             if (n > 0 && ms > 0) this.push({ frames: n, ms });
             return;
         }
         // A browser without totalInterFrameDelay: the time since the read
-        // that last brought a frame, unless a freeze or pause ended in it.
-        if (this.frameSeen && !((d('freezeCount') ?? 0) > 0) && !((d('pauseCount') ?? 0) > 0)) {
+        // that last brought a frame, unless a pause ended in it.
+        if (this.frameSeen && !((d('pauseCount') ?? 0) > 0)) {
             this.push({ frames, ms: at - this.frameAt });
         }
     }

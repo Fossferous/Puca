@@ -24,7 +24,7 @@
 //     lossy path): the view says frozen within 4 s and counts up, while
 //     Chromium's own freezeCount stays where it was; frames back, the view
 //     clears and Chromium counts ONE freeze and no pause;
-//   - a freeze whose sender then stops for 8 s: frozen, then not once 5 s
+//   - a freeze whose sender then stops for 9 s: frozen, then not once 5 s
 //     pass without a packet (Chromium books it as a pause); its packets back
 //     with still no frame: frozen again, counted from their return;
 //   - CONTROLS: the sender stops drawing for 8 s (no packets: Chromium counts
@@ -307,7 +307,7 @@ const fz = await page.evaluate(async () => {
     a.state.drop = true;
     await a.run('dropped', 8);
     a.state.drop = false;
-    await a.run('back', 5);
+    await a.run('back', 6);
     a.state.drawing = false;
     await a.run('idle', 8);
     a.state.drawing = true;
@@ -323,11 +323,11 @@ const fz = await page.evaluate(async () => {
     a.state.drop = true;
     await a.run('stall', 4);
     a.state.drawing = false;
-    await a.run('stall-quiet', 8);
+    await a.run('stall-quiet', 9);
     a.state.drawing = true;
     await a.run('stall-return', 6);
     a.state.drop = false;
-    await a.run('stall-over', 4);
+    await a.run('stall-over', 6);
     a.stop();
 
     const s = await rig({ everyMs: 1250 });
@@ -365,9 +365,12 @@ ck(frozenAt >= 0 && frozenAt <= 4, 'the overlay says frozen within 4 s of the pi
 const shown = dropped.slice(frozenAt).map((x) => x.frozenMs);
 ck(frozenAt >= 0 && shown.every((ms, k) => ms !== null && (k === 0 || ms > shown[k - 1])) && shown.at(-1) >= 5000,
     'and it counts up, every read, to the freeze\'s length', JSON.stringify(shown));
-const cleared = back.findIndex((x) => x.frozenMs === null && x.decoded > dropped.at(-1).decoded);
-ck(cleared >= 0 && cleared <= 3 && back.slice(cleared).every((x) => x.frozenMs === null),
-    'frames back: the overlay stops saying frozen', fmt(back));
+// The first frame after the drop needs a keyframe, which can take seconds to
+// be asked for and sent; until it decodes the picture IS still frozen.
+const resumed = (xs, was) => xs.findIndex((x) => x.decoded > was);
+const backAt = resumed(back, dropped.at(-1).decoded);
+ck(backAt >= 0 && back.slice(backAt).every((x) => x.frozenMs === null) && back.slice(0, backAt).every((x) => x.frozenMs !== null),
+    'frames back: frozen until the first frame decodes, then not', fmt(back));
 ck(back.at(-1).freezeCount === before('dropped').freezeCount + 1 && back.at(-1).pauseCount === before('dropped').pauseCount,
     'and Chromium then counts it: one freeze, no pause', `freezeCount ${before('dropped').freezeCount} -> ${back.at(-1).freezeCount}, pauseCount ${back.at(-1).pauseCount}`);
 ck(back.some((x) => x.freezes >= 1), 'the window\'s freezes count shows it once frames are back', JSON.stringify(back.map((x) => x.freezes)));
@@ -392,13 +395,18 @@ const quiet = phase('stall-quiet');
 const ret = phase('stall-return');
 const over = phase('stall-over');
 ck(flat(quiet.slice(2), 'media') && flat(quiet.slice(2), 'decoded'), 'premise: the stalled sender then sends nothing', fmt(quiet));
-ck(stall.some((x) => x.frozenMs !== null) && quiet.slice(6).every((x) => x.frozenMs === null),
-    'a freeze whose packets stop for 5 s is a pause: frozen, then not', fmt([...stall, ...quiet]));
+// The reads well past 5 s after the last media bytes arrived (not a fixed
+// index: the last packets may land a read late, and 5 reads can be 5.00 s).
+const lastMedia = [...stall, ...quiet].reduce((t, x, k, all) => (k > 0 && x.media > all[k - 1].media ? x.t : t), stall[0].t);
+const longQuiet = quiet.filter((x) => x.t - lastMedia >= 5500);
+ck(stall.some((x) => x.frozenMs !== null) && longQuiet.length >= 2 && longQuiet.every((x) => x.frozenMs === null),
+    'a freeze whose packets stop for 5 s is a pause: frozen, then not', `${longQuiet.length} reads 5.5 s after the last media; ${fmt([...stall, ...quiet])}`);
 ck(grew(ret, 'media') && flat(ret, 'decoded'), 'premise: its packets come back and still no frame decodes', fmt(ret));
 const retAt = ret.findIndex((x) => x.frozenMs !== null);
 ck(retAt >= 0 && retAt <= 4 && ret[retAt].frozenMs <= 3500,
     'packets back with no picture: frozen again within 4 s, counted from their return (not from the stall\'s start)', fmt(ret));
-ck(over.slice(2).every((x) => x.frozenMs === null), 'frames back: not frozen', fmt(over));
+const overAt = resumed(over, ret.at(-1).decoded);
+ck(overAt >= 0 && over.slice(overAt).every((x) => x.frozenMs === null), 'frames back: not frozen once one decodes', fmt(over));
 ck(over.at(-1).pauseCount === before('stall').pauseCount + 1 && over.at(-1).freezeCount === before('stall').freezeCount,
     'and Chromium booked the whole stall as one pause, no freeze (its is_paused_ holds until a frame)',
     `pauseCount ${before('stall').pauseCount} -> ${over.at(-1).pauseCount}, freezeCount ${before('stall').freezeCount} -> ${over.at(-1).freezeCount}`);
