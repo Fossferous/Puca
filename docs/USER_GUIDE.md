@@ -860,7 +860,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Stop Watching** | Remove it from your view |
 | **Request Control** | Ask the sharer for keyboard and mouse control of their screen (or touch control of their phone, see [Control someone's phone](#control-someones-phone)); they must accept. While waiting, the stream's own button cancels the request; in the right-click menu the row reads **Control Requested…** and cannot be pressed |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
-| **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
+| **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip. While the picture is frozen (no new picture although the stream is still arriving), the dropped-frames row reads **Frozen for** and how long so far. A sharer who stops sending is not called frozen once nothing more is arriving, and a slow share of a still screen is not called frozen at all |
 
 Your own stream has **Stop sharing your screen** and, in the menu, **Stop
 Sharing**, **Stream Quality** (the same panel as the arrow) and **Show Stream

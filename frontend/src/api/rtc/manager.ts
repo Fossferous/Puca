@@ -2825,8 +2825,13 @@ export class WebRTCManager {
         for (const [, peer] of this.peers) {
             const pc = peer.connection;
             for (const r of pc.getReceivers()) {
-                if (r.track && tracks.includes(r.track)) {
-                    out.push({ key: r, direction: 'inbound', kind: r.track.kind, getStats: () => r.getStats() });
+                const t = r.track;
+                if (t && tracks.includes(t)) {
+                    // A muted or ended track's still picture is not a freeze.
+                    out.push({
+                        key: r, direction: 'inbound', kind: t.kind, getStats: () => r.getStats(),
+                        muted: () => t.muted || t.readyState !== 'live',
+                    });
                 }
             }
             for (const s of pc.getSenders()) {

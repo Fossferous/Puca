@@ -2180,7 +2180,12 @@ export class SfuManager {
                 const t = pub.track?.mediaStreamTrack;
                 const receiver = pub.track?.receiver;
                 if (t && receiver && tracks.includes(t)) {
-                    out.push({ key: receiver, direction: 'inbound', kind: t.kind, getStats: () => receiver.getStats() });
+                    // A still picture the sender muted (LiveKit's mute), or
+                    // a muted or ended track's, is not a freeze.
+                    out.push({
+                        key: receiver, direction: 'inbound', kind: t.kind, getStats: () => receiver.getStats(),
+                        muted: () => pub.isMuted || t.muted || t.readyState !== 'live',
+                    });
                 }
             }
         }

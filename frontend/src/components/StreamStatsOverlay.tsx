@@ -2,13 +2,14 @@
  * Stream stats on a tile: right-click a stream → Show Stream Stats. What a
  * streamer or a viewer needs to judge "how is this stream doing" without
  * DevTools: picture, frame rate, bitrate, codec and whether it is hardware,
- * loss and delay — and on your own share, what is limiting it.
+ * loss and delay — and on your own share, what is limiting it. While a
+ * watched picture is frozen, the Dropped row says for how long instead.
  *
  * Samples once a second, and only while shown (streamStats.ts keeps the
  * previous read, so every number after the first is a one-second rate).
  */
 import { useEffect, useRef, useState } from 'react';
-import { formatKbps, type StreamStatsView } from '../api/rtc/streamStats';
+import { formatFrozenFor, formatKbps, type StreamStatsView } from '../api/rtc/streamStats';
 import { streamStatsSampler } from '../api/rtc/streamStatsLive';
 import { CloseIcon } from './Icons';
 
@@ -73,7 +74,11 @@ export function StreamStatsOverlay({ stream, onClose }: Props) {
         } else {
             rows.push(['Loss', pending ?? (view.lossPct === null ? '—' : `${view.lossPct}%`)]);
             if (view.jitterBufferMs !== null) rows.push(['Buffer', `${view.jitterBufferMs} ms`]);
-            if (view.measured) rows.push(['Dropped', `${view.framesDropped ?? 0} frames · ${view.freezes ?? 0} freezes`]);
+            // A freeze counts only once it is over, so all through one the
+            // Dropped row would say "0 freezes" over a picture that is not
+            // moving (2026-11-19, 65 s of it). While it lasts, it says so.
+            if (view.measured && view.frozenMs !== null) rows.push(['Frozen', `for ${formatFrozenFor(view.frozenMs)}`]);
+            else if (view.measured) rows.push(['Dropped', `${view.framesDropped ?? 0} frames · ${view.freezes ?? 0} freezes`]);
         }
         rows.push(['Round trip', view.rttMs === null ? '—' : `${view.rttMs} ms`]);
         if (view.transport) rows.push(['Route', view.transport]);
