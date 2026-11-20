@@ -341,9 +341,12 @@ pub enum MsaaCaret {
     At(CaretRect),
     /// The window HAS a caret object, and it says the caret is hidden: no text
     /// box in that window has the focus. A definitive answer, not a miss: tier 3
-    /// is not asked instead (see `tier2_misses_after`).
+    /// is not asked instead (see `tier2_misses_after`). Only ever a rect with
+    /// a height (Chromium's hidden caret keeps its line); see `msaa_caret`.
     Hidden,
-    /// No usable answer (no caret object, a failed call, an impossible rect).
+    /// No usable answer (no caret object, a failed call, an impossible rect,
+    /// or the all-zero answer of oleacc's standard object for a window with no
+    /// caret).
     Absent,
 }
 
@@ -365,8 +368,22 @@ pub enum MsaaCaret {
 /// or an empty width (what S_FALSE says), is `Hidden`. A shown Chromium caret is
 /// never 0 wide; a Win32 caret, which can be, is tier 1's and never reaches
 /// here.
+///
+/// BUT ONLY ON A LINE: a rect with a height. ALL ZEROES is a miss whatever the
+/// state says, because it is what oleacc's STANDARD caret object answers (all
+/// four zeroed, `STATE_SYSTEM_INVISIBLE`, S_FALSE; measured on a window of the
+/// test thread, `imp::tests`) for any window that answers no `WM_GETOBJECT` of
+/// its own and whose thread has no Win32 caret: a XAML text box, any text box
+/// only UI Automation can see. Read as `Hidden`, as it was for a few hours of
+/// 2026-11-20, tier 3 was never asked for any such window, and a tap into one
+/// raised no keyboard. A Chromium caret never shown since its window opened
+/// answers the same zeroes and is a miss too, as it always was; Hide() keeps the
+/// height, so a caret Chromium has hidden is still told apart.
 pub fn msaa_caret(location: (i32, i32, i32, i32), state: Option<u32>) -> MsaaCaret {
     let (l, t, w, h) = location;
+    if h <= 0 {
+        return MsaaCaret::Absent;
+    }
     if state.is_some_and(|s| s & MSAA_STATE_INVISIBLE != 0) || w == 0 {
         return MsaaCaret::Hidden;
     }
@@ -1138,6 +1155,86 @@ mod imp {
         .join()
         .unwrap_or_else(|_| Err("the scratch thread panicked".to_string()))
     }
+
+    /// Tier 2 against oleacc's OWN caret object, on a real window.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::caret::MSAA_STATE_INVISIBLE;
+        use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WINDOW_EX_STYLE,
+            WNDCLASSW, WS_OVERLAPPEDWINDOW,
+        };
+
+        unsafe extern "system" fn plain_window(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            DefWindowProcW(h, m, w, l)
+        }
+
+        /// What `accLocation` and `get_accState` say, unread by `msaa_caret`:
+        /// the premise, measured, so the assertion after it is about this
+        /// crate's reading and not about a call that failed.
+        fn raw_answer(hwnd: HWND) -> ((i32, i32, i32, i32), u32) {
+            let from_window = oleacc().expect("oleacc.dll from System32");
+            let mut raw: *mut core::ffi::c_void = core::ptr::null_mut();
+            let hr = unsafe { from_window(hwnd, OBJID_CARET.0 as u32, &IAccessible::IID, &mut raw) };
+            assert!(hr.is_ok() && !raw.is_null(), "AccessibleObjectFromWindow(OBJID_CARET): {hr:?}");
+            let acc: IAccessible = unsafe { IAccessible::from_raw(raw) };
+            let (mut l, mut t, mut w, mut h) = (-7i32, -7i32, -7i32, -7i32);
+            let child = windows::core::VARIANT::from(0i32);
+            unsafe { acc.accLocation(&mut l, &mut t, &mut w, &mut h, &child) }
+                .expect("accLocation answers (S_FALSE is Ok in windows-rs)");
+            let state = unsafe { acc.get_accState(&child) }.expect("get_accState");
+            let state = i32::try_from(&state).expect("a VT_I4 state") as u32;
+            ((l, t, w, h), state)
+        }
+
+        /// A window that answers no `WM_GETOBJECT` of its own gets oleacc's
+        /// standard caret object, and when that window's thread has no Win32
+        /// caret (a XAML text box, any text box only UI Automation can see)
+        /// the object answers ALL ZEROES, INVISIBLE. That is no caret object
+        /// saying "hidden": it is the miss tier 3 exists for. Measured here,
+        /// on a window of this thread that is never shown. Read as `Hidden`
+        /// (2026-11-20, the `w == 0` arm alone), tier 3 was never asked for
+        /// any such window.
+        #[test]
+        fn the_standard_caret_object_of_a_window_with_no_caret_sends_the_assist_on_to_tier_three() {
+            let hwnd = unsafe {
+                let inst = GetModuleHandleW(None).expect("this module");
+                let class = w!("PucaCaretTierTwoTest");
+                let wc = WNDCLASSW {
+                    lpfnWndProc: Some(plain_window),
+                    hInstance: inst.into(),
+                    lpszClassName: class,
+                    ..Default::default()
+                };
+                // A second run in the same process finds the class registered.
+                RegisterClassW(&wc);
+                // No WS_VISIBLE: never shown, never activated, takes no focus.
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0), class, w!(""), WS_OVERLAPPEDWINDOW,
+                    0, 0, 400, 300, None, None, inst, None,
+                )
+                .expect("a hidden window")
+            };
+            let (location, state) = raw_answer(hwnd);
+            let tier2 = tier2_caret(hwnd.0 as isize);
+            let mut misses = 0;
+            for _ in 0..ASSIST_AFTER_MISSES {
+                misses = tier2_misses_after(misses, tier2_caret(hwnd.0 as isize));
+            }
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            // THE PREMISE: what the standard object says for "no caret".
+            assert_eq!(location, (0, 0, 0, 0));
+            assert_eq!(state & MSAA_STATE_INVISIBLE, MSAA_STATE_INVISIBLE, "state {state:#x}");
+            // A miss, and misses reach tier 3.
+            assert_eq!(tier2, MsaaCaret::Absent);
+            assert!(misses >= ASSIST_AFTER_MISSES, "tier 3 is never asked for a window with no caret");
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1335,8 +1432,16 @@ mod tests {
         assert_eq!(msaa_caret((300, 60, 1, 17), Some(MSAA_STATE_INVISIBLE)), MsaaCaret::Hidden);
         // Other state bits (focusable, focused) are not "hidden".
         assert_eq!(msaa_caret((300, 60, 1, 17), Some(0x0010_0004)), MsaaCaret::At(rect(300, 60, 1, 17)));
-        // Never shown since the window opened: all zeroes, invisible.
-        assert_eq!(msaa_caret((0, 0, 0, 0), Some(MSAA_STATE_INVISIBLE)), MsaaCaret::Hidden);
+        // ALL ZEROES is a miss, invisible or not: it is what oleacc's standard
+        // caret object says for a window whose thread has no caret (measured
+        // in imp::tests), which is where tier 3 must be asked (a XAML text
+        // box). A Chromium caret never shown since its window opened says the
+        // same, and is a miss too, as it was before the hidden rule.
+        assert_eq!(msaa_caret((0, 0, 0, 0), Some(MSAA_STATE_INVISIBLE)), MsaaCaret::Absent);
+        assert_eq!(msaa_caret((0, 0, 0, 0), None), MsaaCaret::Absent);
+        assert_eq!(tier2_misses_after(1, msaa_caret((0, 0, 0, 0), Some(MSAA_STATE_INVISIBLE))), 2);
+        // No height is no line, so no caret to call hidden either.
+        assert_eq!(msaa_caret((300, 60, 0, 0), None), MsaaCaret::Absent);
         // A rect that is no caret at all is a miss, not an answer.
         assert_eq!(msaa_caret((300, 60, 1, 0), Some(0)), MsaaCaret::Absent);
         assert_eq!(msaa_caret((300, 60, 1, 600), Some(0)), MsaaCaret::Absent);
