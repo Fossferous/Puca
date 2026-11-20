@@ -341,7 +341,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | either@1.18.0 | MIT OR Apache-2.0 | wasm | https://github.com/rayon-rs/either |
 | elliptic-curve@0.13.8 | Apache-2.0 OR MIT | backend | https://github.com/RustCrypto/traits/tree/master/elliptic-curve |
 | email_address@0.2.9 | MIT | backend | https://github.com/johnstonskj/rust-email_address.git |
-| email-encoding@0.4.2 | MIT OR Apache-2.0 | backend | https://github.com/lettre/email-encoding |
+| email-encoding@0.4.3 | MIT OR Apache-2.0 | backend | https://github.com/lettre/email-encoding |
 | embed_plist@1.2.2 | MIT OR Apache-2.0 | desktop | https://github.com/nvzqz/embed-plist-rs |
 | embed-resource@3.0.11 | MIT | desktop, puca-agent, puca-service | https://github.com/nabijaczleweli/rust-embed-resource |
 | encoding_rs@0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | backend, puca-service, puca-waker | https://github.com/hsivonen/encoding_rs |
@@ -490,7 +490,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | keyboard-types@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/pyfisch/keyboard-types |
 | kstring@2.0.2 | MIT OR Apache-2.0 | wasm | https://github.com/cobalt-org/kstring |
 | lazy_static@1.5.0 | MIT OR Apache-2.0 | backend, puca-agent, puca-rtc, puca-spike-fswap, wasm | https://github.com/rust-lang-nursery/lazy-static.rs |
-| lettre@0.11.23 | MIT | backend | https://github.com/lettre/lettre |
+| lettre@0.11.24 | MIT | backend | https://github.com/lettre/lettre |
 | lewton@0.10.2 | MIT OR Apache-2.0 | wasm | https://github.com/RustAudio/lewton |
 | libappindicator-sys@0.9.0 | Apache-2.0 OR MIT | desktop |  |
 | libappindicator@0.9.0 | Apache-2.0 OR MIT | desktop |  |
