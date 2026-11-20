@@ -4,6 +4,82 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.867 — 2026-11-20
+
+Fullscreen in the Android app is the picture alone, a computer you control can show just one window, a locked PC stops asking for its passphrase, and taps on a controlled PC no longer open the keyboard by themselves
+### Added
+
+- **Show one window of a computer you control.** In My Devices, **Screen →
+  Show one window…** (on a phone, **Display → Show one window…**) lists that
+  computer's open windows with their icons and names, searchable from the
+  keyboard, and shows the one you pick on its own: the picture is just that
+  window, sized to it, and your clicks and keys go to it. It is brought to the
+  front, and restored if it was minimised. **Whole screen**, beside the
+  window's name in the bar (above the bottom bar on a phone), goes back. If
+  the window is closed, minimised or hidden there, or moves to a screen that was not
+  shared, the picture goes back to the whole screen and says why; dragged to
+  a screen that was shared, it is followed. Windows on screens the person at
+  that computer did not share are never listed. Not offered at the sign-in
+  screen, while control is paused, or on a computer shared with you to watch
+  only. Needs this version of the Púca desktop app on the computer you
+  control (its agent does the cropping), and this version where you control
+  it from.
+
+### Fixed
+
+- **Fullscreen in the Android app is the picture and nothing else.** A stream
+  or a camera put in fullscreen in the Android app could keep parts of Púca
+  around or over the picture (the voice bar and the stream header), the
+  phone's status and navigation bars stayed, and in some cases its button
+  never turned into an exit, while Android's Back closed the app and the
+  call with it. Now fullscreen fills the whole screen with only that picture
+  and its own buttons, hides Android's bars (a swipe from the edge shows
+  them), and its Exit fullscreen button or Android's Back gives the layout
+  back with the call still going. That holds in Focus view with several
+  streams too, where the picture used to stop short of the bottom of the
+  screen, and for a stream from the row of small ones under it put in
+  fullscreen from its menu, which was dimmed and had no Exit fullscreen
+  button. Controlling a shared screen while it is
+  fullscreen, on any phone, puts Stop controlling above the picture and the
+  call's buttons below it, never over the top or the bottom of the other
+  screen. This comes with the update; no new install is needed.
+- **A locked computer stops asking for its passphrase every time.** Power
+  off, Control or Files on a computer that was locked, at its sign-in screen,
+  or had just restarted or been woken asked for the sign-in screen's
+  passphrase again, even though the app had remembered it, while the same
+  computer signed in did not ask. The app forgot it after a week without a
+  connection to the sign-in screen itself, however often you used that
+  computer otherwise, and it forgot it whenever the connection dropped just
+  as the computer powered off, before the computer's answer arrived. Now
+  using the computer either way keeps both of its passphrases remembered, and
+  losing the connection as a Power off goes through no longer makes it
+  forget. A week of not reaching the computer at all, a passphrase it
+  refuses, or a new one set on it still makes the app ask again. The sign-in
+  screen's passphrase is still its own, so the first time it is needed it is
+  still asked for, once. This comes with the update; no new install is
+  needed.
+- **A locked computer asks for the right passphrase.** When a computer was
+  locked or at its sign-in screen, the box asking for its passphrase said
+  "Unattended passphrase", though what it needs then is the passphrase set
+  for its sign-in screen. If you had chosen different words for the two, you
+  typed the wrong one, and Power off said the unattended-access passphrase
+  was not accepted. The box now asks for the **Passphrase for the sign-in
+  screen** by that name and names the computer, and Power off says which
+  passphrase was not accepted. This comes with the update; no new install is
+  needed.
+- **Controlling a computer from a phone, taps on buttons no longer open the keyboard or zoom the picture.** In My Devices on a phone, a tap on a button beside a text box (Back beside an address bar, Send or emoji beside a message box), a long press, or any tap along the line of the last text box you typed into in Chrome, Edge or another Chromium-based app opened the keyboard, and the computer's picture zoomed in with it. The keyboard now opens by itself only when a tap puts the text cursor where you tapped: in a text box, or elsewhere in its text. A tap on a text box that already has the cursor and leaves it in place opens nothing: open the keyboard with **Keyboard** then. Closed with **Keyboard** or the phone's Back, the keyboard stays closed while your taps move the cursor along the line you closed it on (it came back after five seconds); a tap that puts the cursor on another line, in another text box or in the same text, brings it back, and so does the cursor leaving the text and a text box taking it (the keyboard going down because you switched to another app, locked the phone or turned it is no close: the next tap into the text brings it back); in Chrome, Edge and other Chromium-based apps on a computer whose Púca is not yet updated, a tap along that line still brings it back after five seconds. While you type, the picture follows only the text cursor: a tap on a button, or a button taking the focus, no longer moves or zooms it. Comes with the phone's in-app update; the computer's half (Púca there no longer reports a Chromium app's hidden cursor as a text cursor) comes with its next desktop update.
+
+### Security
+
+- **The server's email library is updated.** Púca's server sends email only
+  where its operator set up SMTP (for address verification and password
+  resets). The library it uses for that, lettre, had six published flaws:
+  among them a message line that could smuggle extra SMTP commands, a
+  STARTTLS reply a machine in the middle could forge, and an address with a
+  quoted local part sent somewhere else. It is now on the fixed version,
+  0.11.24. A server without SMTP set up never used the affected code. This
+  comes with the server update; nothing changes for anyone using Púca.
+
 ## 0.9.866 — 2026-11-20
 
 Profile pictures that failed to load once come back by themselves, a busy server says try again instead of not found, and Show Stream Stats says when a picture is frozen
