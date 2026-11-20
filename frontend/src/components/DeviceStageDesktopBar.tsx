@@ -23,7 +23,7 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-    ALL_DISPLAYS, endSession, requestMonitor, sendInput, sendPowerAction, sendStreamQuality, setPrivacyMode,
+    ALL_DISPLAYS, chooseWindow, endSession, requestMonitor, sendInput, sendPowerAction, sendStreamQuality, setPrivacyMode,
     type DeviceControlSession, type PowerAction,
 } from '../api/devices/session';
 import { sendChord } from '../api/devices/chords';
@@ -37,8 +37,9 @@ import { FPS_SENS_MAX, FPS_SENS_MIN, FPS_SENS_STEP, fmtSens } from '../utils/fps
 import {
     ActivityIcon, ChatIcon, ChevronDownIcon, CopyIcon, CrosshairIcon, DisconnectIcon, FolderIcon, ForwardIcon,
     FullscreenExitIcon, FullscreenIcon, KeyboardIcon, LiveDotIcon, LockIcon, MinusIcon, MonitorIcon,
-    MoreIcon, MouseIcon, PauseIcon, PinIcon, PlayIcon, PlusIcon, PowerIcon, SlidersIcon,
+    MoreIcon, MouseIcon, PauseIcon, PinIcon, PlayIcon, PlusIcon, PopOutIcon, PowerIcon, SlidersIcon,
 } from './Icons';
+import { DesktopWindowChip } from './DeviceStageWindowChip';
 
 type MenuId = 'screen' | 'quality' | 'keys' | 'mouse' | 'more';
 
@@ -76,6 +77,8 @@ export interface DesktopBarProps {
     onTypeClipboard: () => void;
     /** Open the pinned-keys editor (DeviceStagePinnedKeys.tsx). */
     onPinnedKeys: () => void;
+    /** Open the window picker (DeviceStageWindowPicker.tsx). */
+    onPickWindow: () => void;
     /** A moment's feedback for an action, shown in the bar's note slot. */
     onNotice: (message: string) => void;
     /** A menu opened or closed: the stage stops forwarding keys meanwhile. */
@@ -226,20 +229,41 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
                 {menuButton('screen', <MonitorIcon />, 'Screen')}
                 {open === 'screen' && (
                     <div className="dsb-menu" role="menu" aria-label="Screen">
+                        {/* ONE WINDOW, offered only by a host that said it
+                            can (session.windowsSupported) and only while
+                            control is on: bringing a window to the front
+                            acts on that computer. */}
+                        {session.windowsSupported && canControl && (
+                            <>
+                                <Item
+                                    icon={<PopOutIcon />}
+                                    label={session.activeWindow ? 'Show another window…' : 'Show one window…'}
+                                    onClick={act(p.onPickWindow)}
+                                />
+                                {session.activeWindow && (
+                                    <Item
+                                        icon={<MonitorIcon />}
+                                        label="Whole screen"
+                                        onClick={act(() => chooseWindow(session.id, null))}
+                                    />
+                                )}
+                                <Sep />
+                            </>
+                        )}
                         {session.monitors.length > 1 && (
                             <>
                                 {session.monitors.map(m => (
                                     <Item
                                         key={m.id}
                                         label={m.label}
-                                        checked={active === m.id}
+                                        checked={!session.activeWindow && active === m.id}
                                         radio
                                         onClick={act(() => requestMonitor(session.id, m.id))}
                                     />
                                 ))}
                                 <Item
                                     label="All displays"
-                                    checked={active === ALL_DISPLAYS}
+                                    checked={!session.activeWindow && active === ALL_DISPLAYS}
                                     radio
                                     onClick={act(() => requestMonitor(session.id, ALL_DISPLAYS))}
                                 />
@@ -293,6 +317,8 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
                     </div>
                 )}
             </span>
+
+            <DesktopWindowChip session={session} />
 
             <span className="dsb-menu-wrap">
                 {menuButton('quality', <SlidersIcon />, 'Quality')}

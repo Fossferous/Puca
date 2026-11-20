@@ -56,6 +56,7 @@ const DETECTORS = [
     { s: 'DeviceConnectRequested', why: 'incoming device-control session' },
     { s: 'ControlInput', why: 'input frames over the device channel' },
     { s: 'DeviceWake', why: 'Wake-on-LAN request/result frames' },
+    { s: 'list-windows', why: 'one window on its own (the window picker) over the device channel' },
     // User-visible copy
     { s: 'is controlling this device', why: 'host-side control banner' },
     { s: 'Allow remote control with the lid closed', why: 'the lid-closed virtual screen option' },

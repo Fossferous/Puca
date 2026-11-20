@@ -24,6 +24,11 @@ import type { CaretReport, DeviceControlSession } from '../../src/api/devices/se
 // notification, key buttons and all (android-shade-keys-live.mjs). In a
 // browser it is a no-op.
 import { setControlKeepAlive } from '../../src/api/mobileApp';
+// ONE WINDOW: the real module's words and checks, and an icon the AGENT's own
+// PNG writer made (crates/puca-agent window_pick.rs pins these exact bytes),
+// so the walk proves a browser decodes what the agent sends.
+import { windowEndWords, windowId, type RemoteWindow, type WindowEndReason } from '../../src/api/devices/windowPick';
+import iconsRaw from './windowIcons.json?raw';
 
 export const ALL_DISPLAYS = 255;
 export type { CaretReport, DeviceControlSession };
@@ -45,6 +50,30 @@ const MONITORS: Mon[] = (window as unknown as { __stageMonitorsInit?: Mon[] })._
     { id: 2, label: 'Display 3', left: -1440, top: -707, width: 1440, height: 2560 },
 ];
 const COLOURS = ['#2a6fdb', '#2fa84f', '#c0392b', '#8e44ad', '#d35400'];
+
+// --- one window (windowPick.ts) -------------------------------------------
+type Win = RemoteWindow & { rect: { left: number; top: number; width: number; height: number } };
+const BADGE = (JSON.parse(iconsRaw) as { badge: string }).badge;
+const ICONS: Record<string, string> = { ibadge: BADGE };
+/** The PC's open windows, front to back, each on a screen of the desk above:
+ *  some with the agent's icon and some without (the viewer's own glyph), one
+ *  minimised, one elevated, one on each portrait screen, and enough of them
+ *  that the list scrolls and searching helps. */
+const WINDOWS: Win[] = (window as unknown as { __stageWindowsInit?: Win[] }).__stageWindowsInit ?? [
+    { hwnd: 0x10010, pid: 4100, title: 'Quarterly report.docx - Word', app: 'Microsoft Word', icon: 'ibadge', monitor: 0, rect: { left: 200, top: 120, width: 1400, height: 900 } },
+    { hwnd: 0x10020, pid: 4200, title: 'Inbox - Mail', app: 'Mail', monitor: 0, rect: { left: 900, top: 300, width: 1200, height: 800 } },
+    { hwnd: 0x10030, pid: 4300, title: 'notes.txt - Notepad', app: 'Notepad', icon: 'ibadge', monitor: 1, rect: { left: 2660, top: -500, width: 900, height: 1300 } },
+    { hwnd: 0x10040, pid: 4400, title: 'Task Manager', app: 'Task Manager', elevated: true, monitor: 0, rect: { left: 300, top: 300, width: 900, height: 700 } },
+    { hwnd: 0x10050, pid: 4500, title: 'Calculator', app: 'Calculator', minimized: true, monitor: 0, rect: { left: 600, top: 200, width: 400, height: 600 } },
+    { hwnd: 0x10060, pid: 4600, title: 'Púca release checklist — a very long tab title that does not fit on one line of the picker at all - Google Chrome', app: 'Google Chrome', icon: 'ibadge', monitor: 2, rect: { left: -1340, top: -600, width: 1200, height: 1800 } },
+    { hwnd: 0x10070, pid: 4700, title: 'Valheim', app: 'valheim', monitor: 0, rect: { left: 0, top: 0, width: 2560, height: 1440 } },
+    { hwnd: 0x10080, pid: 4800, title: 'Downloads - File Explorer', app: 'Windows Explorer', icon: 'ibadge', monitor: 0, rect: { left: 500, top: 400, width: 1000, height: 700 } },
+    { hwnd: 0x10090, pid: 4900, title: 'Terminal', app: 'Windows Terminal', monitor: 0, rect: { left: 1200, top: 600, width: 1100, height: 650 } },
+    { hwnd: 0x100a0, pid: 5000, title: 'Spotify Premium', app: 'Spotify', icon: 'ibadge', monitor: 1, rect: { left: 2600, top: 900, width: 1300, height: 800 } },
+    { hwnd: 0x100b0, pid: 5100, title: 'Settings', app: 'Settings', monitor: 0, rect: { left: 700, top: 150, width: 1000, height: 760 } },
+    { hwnd: 0x100c0, pid: 5200, title: 'Untitled - Paint', app: 'Paint', icon: 'ibadge', monitor: 0, rect: { left: 250, top: 250, width: 1300, height: 900 } },
+];
+const winById = (id: string) => WINDOWS.find(w => windowId(w) === id) ?? null;
 
 // --- the agent's geometry, mirrored from crates/puca-agent/src/composite.rs ---
 const MAX_COMPOSITE_W = 3840;
@@ -69,8 +98,30 @@ function fitStep(sw: number, sh: number, vw: number, vh: number): number {
     while (step > 1 && (Math.floor(sw / step) < MIN_FIT_EDGE || Math.floor(sh / step) < MIN_FIT_EDGE)) step--;
     return step;
 }
+/** The shown window as the host reports it (`window-active`): its title and
+ *  the part of it on its screen, made even as the agent's crop is. */
+function activeShown() {
+    const w = state.activeWindow ? winById(state.activeWindow) : null;
+    if (!w) return null;
+    const r = shownRect(w);
+    return { hwnd: w.hwnd, pid: w.pid, title: w.title, app: w.app, width: r.width, height: r.height };
+}
+/** The window's part on its own screen, even (window_pick.rs crop_for). */
+function shownRect(w: Win): { left: number; top: number; width: number; height: number } {
+    const m = MONITORS.find(x => x.id === w.monitor)!;
+    const left = Math.max(w.rect.left, m.left), top = Math.max(w.rect.top, m.top);
+    const right = Math.min(w.rect.left + w.rect.width, m.left + m.width);
+    const bottom = Math.min(w.rect.top + w.rect.height, m.top + m.height);
+    return { left, top, width: Math.max(2, (right - left) & ~1), height: Math.max(2, (bottom - top) & ~1) };
+}
+
 /** The capture's native picture size (before the viewer fit). */
 function nativeSize(monitor: number): { w: number; h: number } {
+    const shown = state.activeWindow ? winById(state.activeWindow) : null;
+    if (shown && shown.monitor === monitor) {
+        const r = shownRect(shown);
+        return { w: r.width, h: r.height };
+    }
     if (monitor === ALL_DISPLAYS) {
         const u = unionBox();
         const g = compositeGeometry(u.w, u.h);
@@ -108,6 +159,19 @@ const knobs = {
      *  request and the switch does not race a timer against the machine's
      *  speed. */
     holdSwitch: false,
+    /** The host offers one window on its own (false = a host from before it,
+     *  the sign-in screen or a view-only share: the NEGATIVE CONTROL). */
+    windows: true,
+    /** How the host answers a window list: 'ok', 'fail' (it says why), or
+     *  'silent' (it never answers, as an agent that hung would not). */
+    windowList: 'ok' as 'ok' | 'fail' | 'silent',
+    /** ms from the ask to the list, and from the list to its icons. */
+    windowListMs: 120,
+    iconsMs: 150,
+    /** A choice the host refuses, with this reason (null = it shows it). */
+    windowRefusal: null as string | null,
+    /** ms from a choice to the host's confirmation. */
+    windowMs: 200,
 };
 // A driver that needs a knob from the very first hand-over (an agent too old
 // to send shapes, from the session's start) sets it before any page script:
@@ -141,6 +205,13 @@ const state = {
     // could not inject, say): the session's error with the session still
     // active, red in the phone's feedback line (the monitor-hop walk).
     hostError: null as string | null,
+    // ONE WINDOW: what the host confirmed it shows (a windowId), the list as
+    // the viewer last asked for it, the host's note, and whether the window's
+    // program is in front.
+    activeWindow: null as string | null,
+    windowList: null as null | { rid: string; loading: boolean; windows: RemoteWindow[]; icons: Record<string, string>; error: string | null },
+    windowNotice: null as string | null,
+    windowFront: true,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -167,6 +238,11 @@ function session(): DeviceControlSession {
         // says (or, with `sendsShapes` off, does not) rides that.
         remoteCursor: state.remoteCursor, caretOpen: true, inputBlocked: state.inputBlocked, pointerCaptured: false,
         shareUser: null, viewOnly: false, powerNotice: state.powerNotice,
+        windowsSupported: knobs.windows,
+        activeWindow: activeShown(),
+        windowList: state.windowList,
+        windowNotice: state.windowNotice,
+        windowFront: state.windowFront,
     } as unknown as DeviceControlSession;
 }
 function emit(): void {
@@ -205,6 +281,26 @@ function paint(): void {
     ctx.fillRect(0, 0, w, h);
     // Desktop px -> canvas px for the surface being captured.
     let ox: number, oy: number, sx: number, sy: number;
+    const shownWin = state.activeWindow ? winById(state.activeWindow) : null;
+    if (shownWin && shownWin.monitor === state.capturing) {
+        // ONE WINDOW: the agent sends the window's part of its screen. Drawn
+        // as a window — a dark title bar with its title over a light page —
+        // so a screenshot says which window, and that it is one.
+        const r = shownRect(shownWin);
+        sx = w / r.width; sy = h / r.height;
+        ctx.fillStyle = '#f3f3f3';
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = '#202020';
+        ctx.fillRect(0, 0, w, 44 * sy);
+        ctx.fillStyle = '#fff';
+        ctx.font = `${Math.max(10, Math.round(22 * sy))}px sans-serif`;
+        ctx.fillText(shownWin.title.slice(0, 60), 16 * sx, 30 * sy);
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.lineWidth = Math.max(1, sx);
+        for (let gx = 0; gx <= r.width; gx += 100) { ctx.beginPath(); ctx.moveTo(gx * sx, 44 * sy); ctx.lineTo(gx * sx, h); ctx.stroke(); }
+        for (let gy = 44; gy <= r.height; gy += 100) { ctx.beginPath(); ctx.moveTo(0, gy * sy); ctx.lineTo(w, gy * sy); ctx.stroke(); }
+        return;
+    }
     if (state.capturing === ALL_DISPLAYS) {
         const u = unionBox();
         ox = u.left; oy = u.top; sx = w / u.w; sy = h / u.h;
@@ -283,6 +379,9 @@ const heldSwitches: Array<() => void> = [];
 export function requestMonitor(_sessionId: string, monitor: number): void {
     monitorRequests.push({ monitor, at: now() });
     log.push({ at: now(), ev: 'set-monitor', monitor });
+    // A screen chosen while a window is shown means that screen, whole (the
+    // host app's set-monitor drops the window first).
+    if (state.activeWindow) { state.activeWindow = null; emit(); }
     if (knobs.holdSwitch) heldSwitches.push(() => switchTo(monitor));
     else switchTo(monitor);
 }
@@ -302,6 +401,62 @@ function switchTo(monitor: number): void {
     }, knobs.commitMs);
 }
 export function requestKeyframe(): boolean { return true; }
+
+// --- one window -------------------------------------------------------------
+export const windowRequests: Array<{ at: number; id: string | null }> = [];
+let ridSeq = 0;
+export function requestWindowList(_sessionId: string): void {
+    if (!knobs.windows) return;
+    const rid = `wl${++ridSeq}`;
+    const prev = state.windowList;
+    state.windowList = { rid, loading: true, error: null, windows: prev?.windows ?? [], icons: prev?.icons ?? {} };
+    log.push({ at: now(), ev: 'list-windows', rid });
+    emit();
+    if (knobs.windowList === 'silent') return;
+    setTimeout(() => {
+        if (state.windowList?.rid !== rid) return;
+        if (knobs.windowList === 'fail') {
+            state.windowList = { ...state.windowList, loading: false, error: "Could not list that computer's windows: the agent was busy." };
+            emit();
+            return;
+        }
+        state.windowList = {
+            ...state.windowList, loading: false,
+            windows: WINDOWS.map(({ rect: _rect, ...w }) => w),
+        };
+        emit();
+        setTimeout(() => {
+            if (state.windowList?.rid !== rid) return;
+            state.windowList = { ...state.windowList, icons: { ...ICONS } };
+            emit();
+        }, knobs.iconsMs);
+    }, knobs.windowListMs);
+}
+export function chooseWindow(_sessionId: string, w: { hwnd: number; pid: number } | null): void {
+    const id = w ? windowId(w) : null;
+    windowRequests.push({ at: now(), id });
+    log.push({ at: now(), ev: 'set-window', id });
+    state.windowNotice = null;
+    emit();
+    setTimeout(() => {
+        if (id && knobs.windowRefusal) {
+            state.windowNotice = `Could not show that window: ${knobs.windowRefusal}.`;
+            emit();
+            return;
+        }
+        const target = id ? winById(id) : null;
+        if (target) {
+            // The host switches screens first, then crops.
+            state.capturing = target.monitor ?? 0;
+            state.activeMonitor = target.monitor ?? 0;
+            state.step = null;
+        }
+        state.activeWindow = id;
+        state.windowFront = true;
+        emit();
+    }, knobs.windowMs);
+}
+export function dismissWindowNotice(): void { state.windowNotice = null; emit(); }
 /** The latency probe needs the agent's direct channel; the stand-in has none,
  *  so the chip shows the estimate, as it does against an older agent. */
 export function latencyProbeUsable(): boolean { return false; }
@@ -357,6 +512,17 @@ function transform(): { scale: number; x: number; y: number } | null {
         emit();
     },
     emit, pushCaret, transform,
+    windowRequests, WINDOWS,
+    /** The shown window goes away by itself, as the host says it did (the
+     *  agent's `Gone`): the picture is the whole screen again. */
+    windowGone(reason: WindowEndReason): void {
+        const w = state.activeWindow ? winById(state.activeWindow) : null;
+        state.activeWindow = null;
+        state.windowNotice = windowEndWords(reason, w?.title ?? null);
+        emit();
+    },
+    /** Another program in front of the shown window (keys go there), or not. */
+    setWindowFront(front: boolean): void { state.windowFront = front; emit(); },
     /** Let the switches `knobs.holdSwitch` parked go ahead. */
     releaseSwitch(): void { for (const go of heldSwitches.splice(0)) go(); },
     /** Force a capture as the host would after the passphrase (no confirm lag). */

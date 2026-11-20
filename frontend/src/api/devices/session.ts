@@ -51,7 +51,12 @@ import {
 } from '../e2ee';
 import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
-import { getHostBackend } from './hostBackend';
+import { getHostBackend, type HostSessionStatus } from './hostBackend';
+import {
+    chunkIcons, isWindowEndReason, sanitizeIcons, sanitizeShown, sanitizeWindowList, windowEndWords,
+    windowFailedWords, windowId, windowsWithinConsent, ICON_FRAME_BUDGET, MAX_WINDOWS,
+    type RemoteWindow, type ShownWindow, type WindowEndReason,
+} from './windowPick';
 import { blockedAppName } from './inputReach';
 import { ProbeMatcher, type ProbeResult } from './latencyProbe';
 import { isLanPair } from './lanPath';
@@ -530,6 +535,32 @@ export interface DeviceControlSession {
      *  only, like `secureDesktop`. The stage puts it in place of "Waiting for
      *  the device's screen…" until the picture arrives. */
     hostScreen: 'virtual-starting' | null;
+    /** CONTROLLER: the host can show ONE WINDOW on its own (windowPick.ts):
+     *  its `features` frame said so. False for every host that has not — an
+     *  older one, the sign-in screen, a view-only share — and the stage then
+     *  offers no window choice. */
+    windowsSupported: boolean;
+    /** CONTROLLER: the window the host CONFIRMED its picture shows on its
+     *  own, or null for the whole screen. Never set from the click. */
+    activeWindow: ShownWindow | null;
+    /** CONTROLLER: the host's open windows, as last asked for. */
+    windowList: WindowListState | null;
+    /** CONTROLLER: one line about the window choice: why the picture went
+     *  back to the whole screen by itself, or why a choice was refused. */
+    windowNotice: string | null;
+    /** CONTROLLER: the shown window's program is the one in front on the
+     *  host, so keys reach it. True while nothing says otherwise. */
+    windowFront: boolean;
+}
+
+/** CONTROLLER: one ask for the host's windows and what came back. */
+export interface WindowListState {
+    rid: string;
+    loading: boolean;
+    windows: RemoteWindow[];
+    /** PNG data URLs by `RemoteWindow.icon`; they arrive after the list. */
+    icons: Record<string, string>;
+    error: string | null;
 }
 
 interface Internal extends DeviceControlSession {
@@ -684,6 +715,25 @@ interface Internal extends DeviceControlSession {
      *  and the screen-consent dialog is skipped — there is no screen to
      *  consent to, and the FileAccessPrompt is the consent moment. */
     hostCaptureless: boolean;
+    /** HOST: this host's agent can show one window on its own
+     *  (`Capabilities.windows`). Stashed at accept time with the rest. */
+    hostWindows?: boolean;
+    /** HOST: the windows last listed to the viewer, by windowId. A
+     *  `set-window` may name only one of these: its screen (and so the
+     *  consent check) is read from here, never from the viewer. */
+    windowsListed?: Map<string, RemoteWindow>;
+    /** HOST: the window the picture shows on its own, as told to the viewer,
+     *  and the screen it is shown from. */
+    windowShown?: (RemoteWindow & { width: number; height: number; monitor: number }) | null;
+    /** HOST: a window switch is in flight (one at a time). */
+    windowBusy?: boolean;
+    /** HOST: bumped on every change to `windowShown`, so a status reply read
+     *  across one is not acted on. */
+    windowGen?: number;
+    /** HOST: whether the window's program was last said to be in front. */
+    windowFrontTold?: boolean | null;
+    /** CONTROLLER: the deadline on an unanswered window list. */
+    windowListTimer?: ReturnType<typeof setTimeout> | null;
     /** OUR socket dropped and the reconnect has not reattached yet. Drives the
      *  local grace timer below; `reconnecting` (public) is the OR of this and
      *  `peerReconnecting`, maintained wherever either changes. */
@@ -1035,6 +1085,11 @@ function emit(): void {
         shareUser: s.share ? { id: s.share.peerUser, username: s.share.peerUsername } : null,
         viewOnly: s.share ? !s.share.capabilities.includes('control') : false,
         unattended: s.unattended,
+        windowsSupported: s.windowsSupported,
+        activeWindow: s.activeWindow,
+        windowList: s.windowList,
+        windowNotice: s.windowNotice,
+        windowFront: s.windowFront,
     }));
     listeners.forEach(l => l(snapshot));
     updateTrayIndicator();
@@ -1187,6 +1242,184 @@ async function announceMonitors(s: Internal, opts?: { evenIfSingle?: boolean }):
             });
         }
     } catch { /* a host that cannot enumerate simply offers no switcher */ }
+}
+
+/** HOST: may this session's viewer choose one window? The agent must serve
+ *  it (`hostWindows`), the session must show a screen, the passphrase (when
+ *  asked) must be proved, and a share must carry `control`: bringing a
+ *  window to the front acts on this PC, which a view-only share may not. */
+function canPickWindows(s: Internal): boolean {
+    return s.role === 'host' && s.hostWindows === true && !s.filesOnly
+        && !(s.uaRequired && !s.uaVerified)
+        && (!s.share || s.share.capabilities.includes('control'));
+}
+
+/** HOST: tell the viewer one window can be shown on its own. Said once a
+ *  stream exists (answerOffer) and again after each restart; an older viewer
+ *  ignores a kind it does not know. */
+function announceWindowFeature(s: Internal): void {
+    if (s.phase === 'ended' || sessions.get(s.id) !== s || !canPickWindows(s)) return;
+    void sendSignal(s, { kind: 'features', windows: true }).catch(() => undefined);
+}
+
+/** HOST: the window shown on its own is no longer: tell the viewer why
+ *  (`asked` is silent there). */
+function endHostWindow(s: Internal, reason: WindowEndReason): void {
+    if (!s.windowShown) return;
+    s.windowShown = null;
+    s.windowGen = (s.windowGen ?? 0) + 1;
+    s.windowFrontTold = null;
+    void sendSignal(s, { kind: 'window-active', window: null, reason }).catch(() => undefined);
+}
+
+/** HOST: the window frame the viewer reads (windowPick.ts sanitizeShown). */
+function shownFrame(w: { hwnd: number; pid: number; title: string; app: string; width: number; height: number }) {
+    return { hwnd: w.hwnd, pid: w.pid, title: w.title, app: w.app, width: w.width, height: w.height };
+}
+
+/**
+ * HOST: show `w` on its own, from screen `monitor`: switch the capture there
+ * first when it shows another (the consent check is the caller's), then ask
+ * the agent to crop to the window. Throws with the agent's reason.
+ */
+async function showHostWindow(s: Internal, w: RemoteWindow, monitor: number): Promise<void> {
+    const backend = await getHostBackend();
+    if (!backend.setWindow) throw new Error('this computer cannot show one window');
+    if (monitorShown(s) !== monitor) {
+        await backend.setMonitor(s.id, monitor);
+        s.monitor = monitor;
+        s.shownMonitor = monitor;
+        await tellMonitorActive(s, monitor);
+    }
+    if (s.phase === 'ended' || sessions.get(s.id) !== s) return;
+    const shown = await backend.setWindow(s.id, { hwnd: w.hwnd, pid: w.pid });
+    if (!shown) throw new Error('the window could not be shown');
+    s.windowShown = { ...w, monitor, width: shown.width, height: shown.height };
+    s.windowGen = (s.windowGen ?? 0) + 1;
+    s.windowFrontTold = shown.front;
+    await sendSignal(s, { kind: 'window-active', window: shownFrame(s.windowShown), front: shown.front });
+}
+
+/**
+ * HOST: what the 1 Hz status poll says about the window, acted on.
+ *
+ *  - Still shown: say when its program stops (or starts) being in front, and
+ *    FOLLOW it to another screen that holds most of it — only a screen the
+ *    person here shared. Not shared, it stays cropped to what is left here.
+ *  - Gone back to the whole screen by itself (closed, minimised, the screens
+ *    changed): tell the viewer why. Moved wholly to another screen: follow
+ *    it there when that screen was shared, else say it went somewhere that
+ *    was not.
+ */
+function hostWindowFromStatus(s: Internal, st: Partial<HostSessionStatus>): void {
+    const shown = s.windowShown;
+    if (!shown || s.windowBusy) return;
+    const follow = (monitor: number) => {
+        s.windowBusy = true;
+        void showHostWindow(s, shown, monitor)
+            .catch(() => endHostWindow(s, 'offscreen'))
+            .finally(() => { s.windowBusy = false; });
+    };
+    if (st.window === shown.hwnd) {
+        const front = st.windowFront !== false;
+        if (front !== s.windowFrontTold) {
+            s.windowFrontTold = front;
+            void sendSignal(s, { kind: 'window-front', front }).catch(() => { s.windowFrontTold = null; });
+        }
+        if (typeof st.windowMonitor === 'number' && st.windowMonitor !== shown.monitor
+            && monitorWithinConsent(s.consentedMonitor, st.windowMonitor)) {
+            follow(st.windowMonitor);
+        }
+        return;
+    }
+    if (st.window !== undefined) return;
+    if (st.windowEnd === 'offscreen' && typeof st.windowEndMonitor === 'number') {
+        if (monitorWithinConsent(s.consentedMonitor, st.windowEndMonitor)) follow(st.windowEndMonitor);
+        else endHostWindow(s, 'unshared');
+        return;
+    }
+    if (isWindowEndReason(st.windowEnd)) endHostWindow(s, st.windowEnd);
+}
+
+/** HOST: a stream (re)started: say the window choice is on offer, and carry a
+ *  window shown on its own across a media restart (the new stream starts on
+ *  the whole screen). */
+async function afterWindowStreamStart(s: Internal): Promise<void> {
+    announceWindowFeature(s);
+    const shown = s.windowShown;
+    if (!shown || s.windowBusy || !canPickWindows(s)) return;
+    s.windowBusy = true;
+    try {
+        await showHostWindow(s, shown, shown.monitor);
+    } catch {
+        endHostWindow(s, 'screen');
+    } finally {
+        s.windowBusy = false;
+    }
+}
+
+/** HOST: answer `list-windows`: the windows on screens the person here shared,
+ *  then their icons in frames under the relay's size cap. */
+async function serveWindowList(s: Internal, rid: string): Promise<void> {
+    try {
+        const backend = await getHostBackend();
+        if (!backend.listWindows) throw new Error('this computer cannot list its windows');
+        const list = await backend.listWindows();
+        if (s.phase === 'ended' || sessions.get(s.id) !== s) return;
+        let offered = windowsWithinConsent(list.windows, s.consentedMonitor, ALL_DISPLAYS).slice(0, MAX_WINDOWS);
+        // One frame: a list that would not fit is cut from the back (the
+        // windows furthest behind), never sent in a frame the relay refuses.
+        while (offered.length > 0 && JSON.stringify(offered).length > ICON_FRAME_BUDGET) {
+            offered = offered.slice(0, -1);
+        }
+        s.windowsListed = new Map(offered.map(w => [windowId(w), w]));
+        const icons: Record<string, string> = {};
+        for (const w of offered) if (w.icon && list.icons[w.icon]) icons[w.icon] = list.icons[w.icon];
+        await sendSignal(s, {
+            kind: 'windows', rid, windows: offered,
+            shown: s.windowShown ? windowId(s.windowShown) : null,
+        });
+        for (const frame of chunkIcons(icons)) {
+            await sendSignal(s, { kind: 'window-icons', rid, icons: frame });
+        }
+    } catch (e) {
+        void sendSignal(s, {
+            kind: 'windows-failed', rid,
+            reason: e instanceof Error ? e.message : 'could not list the windows',
+        }).catch(() => undefined);
+    }
+}
+
+/** HOST: answer `set-window`. */
+async function serveSetWindow(s: Internal, data: Record<string, unknown>): Promise<void> {
+    const fail = (reason: string) =>
+        sendSignal(s, { kind: 'window-failed', reason }).catch(() => undefined);
+    if (s.windowBusy) { await fail('the last choice is still being made'); return; }
+    const backend = await getHostBackend();
+    if (!backend.setWindow) { await fail('this computer cannot show one window'); return; }
+    s.windowBusy = true;
+    try {
+        if (data.hwnd === null) {
+            await backend.setWindow(s.id, null);
+            endHostWindow(s, 'asked');
+            return;
+        }
+        const hwnd = typeof data.hwnd === 'number' ? data.hwnd : NaN;
+        const pid = typeof data.pid === 'number' ? data.pid : NaN;
+        const w = s.windowsListed?.get(windowId({ hwnd, pid }));
+        if (!w) { await fail('that window is not in the list: open the list again'); return; }
+        // THE CONSENT BOUNDARY, as for set-monitor: the screen comes from the
+        // list this side made, and must be one the person here shared.
+        if (typeof w.monitor !== 'number' || !monitorWithinConsent(s.consentedMonitor, w.monitor)) {
+            await fail('that window is on a screen that was not shared');
+            return;
+        }
+        await showHostWindow(s, w, w.monitor);
+    } catch (e) {
+        await fail(e instanceof Error ? e.message : 'the window could not be shown');
+    } finally {
+        s.windowBusy = false;
+    }
 }
 
 /** Derive the session key once both ephemerals are known. */
@@ -1482,6 +1715,9 @@ async function answerOffer(
         // assume it: an older host ignores the request and captures, and the
         // controller has no other way to tell.
         await sendSignal(s, { kind: 'answer', sdp: answerSdp, dataOnly: s.filesOnly });
+        // ONE WINDOW: on offer from here (there is a picture to choose in),
+        // and a window shown on its own comes back after a media restart.
+        if (!s.filesOnly && s.role === 'host') void afterWindowStreamStart(s);
         // Drain a file request that was held only because the agent had no
         // stream to grant against (see serveFileAccessRequest); it has one
         // now. The serve re-checks every gate — armed proof, revocation —
@@ -1946,6 +2182,56 @@ export function requestMonitor(sessionId: string, monitor: number): void {
     const s = sessions.get(sessionId);
     if (!s || s.role !== 'controller' || s.phase !== 'active') return;
     void sendSignal(s, { kind: 'set-monitor', monitor });
+}
+
+/** How long a window list may take before the picker says the host did not
+ *  answer. The agent's own budget for asking programs for icons is 400 ms. */
+const WINDOW_LIST_DEADLINE_MS = 10_000;
+
+/**
+ * Ask the host for its open windows (windowPick.ts). The answer lands in
+ * `windowList`; the windows already shown stay while a fresh list loads, so
+ * reopening the picker does not flash empty.
+ */
+export function requestWindowList(sessionId: string): void {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || !s.windowsSupported) return;
+    const rid = 'wl' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    if (s.windowListTimer) clearTimeout(s.windowListTimer);
+    s.windowListTimer = setTimeout(() => {
+        s.windowListTimer = null;
+        if (sessions.get(s.id) !== s || s.windowList?.rid !== rid || !s.windowList.loading) return;
+        s.windowList = { ...s.windowList, loading: false, error: 'That computer did not answer. Try again.' };
+        emit();
+    }, WINDOW_LIST_DEADLINE_MS);
+    s.windowList = {
+        rid, loading: true, error: null,
+        windows: s.windowList?.windows ?? [], icons: s.windowList?.icons ?? {},
+    };
+    emit();
+    void sendSignal(s, { kind: 'list-windows', rid });
+}
+
+/**
+ * Show one window on its own, or (null) the whole screen. Like a screen
+ * switch, nothing changes here until the host CONFIRMS (`window-active`), so
+ * the stage never says it shows a window it does not.
+ */
+export function chooseWindow(sessionId: string, w: { hwnd: number; pid: number } | null): void {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || !s.windowsSupported) return;
+    if (s.share && !s.share.capabilities.includes('control')) return;
+    s.windowNotice = null;
+    emit();
+    void sendSignal(s, w ? { kind: 'set-window', hwnd: w.hwnd, pid: w.pid } : { kind: 'set-window', hwnd: null });
+}
+
+/** Put the window note away. */
+export function dismissWindowNotice(sessionId: string): void {
+    const s = sessions.get(sessionId);
+    if (!s || s.windowNotice === null) return;
+    s.windowNotice = null;
+    emit();
 }
 
 /** One shared budget for every keyframe trigger (foreground return, transport
@@ -2531,6 +2817,8 @@ export async function pollSecureDesktop(): Promise<void> {
             const gen = s.agentStreamGen;
             const started = s.agentOwnsTransport && s.agentStreamStarted;
             const monitorAsked = s.monitor;
+            const windowGenAsked = s.windowGen ?? 0;
+            let windowFields: Partial<HostSessionStatus> = {};
             let streamLive: boolean | undefined;
             let streamEnd: string | undefined;
             let shows: number | undefined;
@@ -2543,6 +2831,10 @@ export async function pollSecureDesktop(): Promise<void> {
                 streamLive = status.streamLive;
                 streamEnd = status.streamEnd;
                 shows = status.monitor;
+                windowFields = {
+                    window: status.window, windowFront: status.windowFront, windowMonitor: status.windowMonitor,
+                    windowEnd: status.windowEnd, windowEndMonitor: status.windowEndMonitor,
+                };
             } catch {
                 // sessionStatus swallows its own errors; this is belt and
                 // braces so one bad tick can never reach the caller.
@@ -2683,6 +2975,14 @@ export async function pollSecureDesktop(): Promise<void> {
                         void announceMonitors(s, { evenIfSingle: true });
                     }
                 }
+            }
+            // ONE WINDOW: what the agent says of the window shown on its own
+            // (hostWindowFromStatus). The same stream gates, and the window
+            // must still be the one the poll asked about.
+            if (streamLive === true && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && (s.windowGen ?? 0) === windowGenAsked) {
+                hostWindowFromStatus(s, windowFields);
             }
             if (up !== s.secureDesktop) {
                 s.secureDesktop = up;
@@ -4063,7 +4363,7 @@ export async function connectToDevice(
         stream: null, captureSize: null, error: null,
         pc: null, eph: generateControlEphemeral(), key: null,
         sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
+        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null, windowsSupported: false, activeWindow: null, windowList: null, windowNotice: null, windowFront: true,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         agentStreamGen: 0, agentQuality: null,
         filesChannel: null,
@@ -4790,6 +5090,7 @@ export function installDeviceSessions(): void {
                 powerOff: null,
                 powerOffOnly: false,
                 hostCaptureless: !caps.capture,
+                hostWindows: caps.windows === true,
                 // Set below only after the share verification chain passes;
                 // the public shareUser/viewOnly are derived from it in emit().
                 share: null, hostArmed: false, shareUser: null, viewOnly: false,
@@ -4797,7 +5098,7 @@ export function installDeviceSessions(): void {
                 stream: null, captureSize: null, error: null,
                 pc: null, eph: generateControlEphemeral(), key: null,
                 sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
+                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, shownMonitor: null, monitorTold: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null, windowsSupported: false, activeWindow: null, windowList: null, windowNotice: null, windowFront: true,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 agentStreamGen: 0, agentQuality: null,
                 filesChannel: null,
@@ -6289,6 +6590,14 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         /** pointer-captured: a game hid and confined the host's pointer.
          *  Validated with typeof at the handler. */
         captured?: unknown;
+        // ONE WINDOW (windowPick.ts): every field checked where it is read.
+        rid?: unknown;
+        windows?: unknown;
+        icons?: unknown;
+        window?: unknown;
+        front?: unknown;
+        hwnd?: unknown;
+        pid?: unknown;
     } | null;
     if (!data) return;
 
@@ -6503,6 +6812,31 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             noteControlActivity(s.id);
             return;
         }
+        if (data.kind === 'list-windows') {
+            // Only a HOST answers; an armed host only a proved controller,
+            // like every request that reads this machine's desktop.
+            if (s.role !== 'host') return;
+            if (s.uaRequired && !s.uaVerified) return;
+            if (typeof data.rid !== 'string' || !/^[A-Za-z0-9-]{1,40}$/.test(data.rid)) return;
+            if (!canPickWindows(s)) {
+                void sendSignal(s, { kind: 'windows-failed', rid: data.rid, reason: 'this computer does not offer it' })
+                    .catch(() => undefined);
+                return;
+            }
+            void serveWindowList(s, data.rid);
+            return;
+        }
+        if (data.kind === 'set-window') {
+            if (s.role !== 'host') return;
+            if (s.uaRequired && !s.uaVerified) return;
+            if (!canPickWindows(s)) {
+                void sendSignal(s, { kind: 'window-failed', reason: 'this computer does not offer it' })
+                    .catch(() => undefined);
+                return;
+            }
+            void serveSetWindow(s, data as Record<string, unknown>);
+            return;
+        }
         if (data.kind === 'set-monitor' && typeof data.monitor === 'number') {
             // Only a HOST acts on this — it changes what is captured.
             if (s.role !== 'host') return;
@@ -6526,6 +6860,13 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             void (async () => {
                 try {
                     const backend = await getHostBackend();
+                    // A screen chosen while one window is shown on its own
+                    // means that screen, whole: the agent keeps a window on
+                    // a switch to the screen it is already on.
+                    if (s.windowShown && backend.setWindow) {
+                        await backend.setWindow(s.id, null).catch(() => undefined);
+                        endHostWindow(s, 'asked');
+                    }
                     await backend.setMonitor(s.id, wanted);
                     s.monitor = wanted;
                     // The agent shows what it was just switched to (a lid can
@@ -7198,6 +7539,65 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 store.clearPendingQuality(s.id);
                 window.dispatchEvent(new CustomEvent('stream-quality-failed', { detail: { sessionId: s.id, code: (data as Record<string, unknown>).code } }));
             }).catch(console.error);
+            return;
+        }
+        if (data.kind === 'features') {
+            // From the host only. Says what it offers beyond what every host
+            // does; an older host never sends it, and the picker stays hidden.
+            if (s.role !== 'controller') return;
+            s.windowsSupported = data.windows === true;
+            emit();
+            return;
+        }
+        if (data.kind === 'windows' || data.kind === 'window-icons' || data.kind === 'windows-failed') {
+            if (s.role !== 'controller') return;
+            const list = s.windowList;
+            // Only the answer to the list asked for last.
+            if (!list || data.rid !== list.rid) return;
+            if (data.kind === 'windows') {
+                if (s.windowListTimer) { clearTimeout(s.windowListTimer); s.windowListTimer = null; }
+                s.windowList = { ...list, loading: false, error: null, windows: sanitizeWindowList(data.windows) };
+            } else if (data.kind === 'window-icons') {
+                const icons = { ...list.icons, ...sanitizeIcons(data.icons) };
+                // Bounded whatever the host sends: one picture per window.
+                const keys = Object.keys(icons).slice(0, MAX_WINDOWS);
+                s.windowList = { ...list, icons: Object.fromEntries(keys.map(k => [k, icons[k]])) };
+            } else {
+                if (s.windowListTimer) { clearTimeout(s.windowListTimer); s.windowListTimer = null; }
+                const why = typeof data.reason === 'string' ? data.reason.slice(0, 200) : '';
+                s.windowList = {
+                    ...list, loading: false,
+                    error: why ? `Could not list that computer's windows: ${why}.` : "Could not list that computer's windows.",
+                };
+            }
+            emit();
+            return;
+        }
+        if (data.kind === 'window-active') {
+            if (s.role !== 'controller') return;
+            const shown = data.window === null ? null : sanitizeShown(data.window);
+            if (data.window !== null && !shown) return;
+            if (!shown) {
+                const reason = isWindowEndReason(data.reason) ? data.reason : 'screen';
+                s.windowNotice = windowEndWords(reason, s.activeWindow?.title ?? null);
+            } else {
+                s.windowNotice = null;
+                s.windowFront = data.front !== false;
+            }
+            s.activeWindow = shown;
+            emit();
+            return;
+        }
+        if (data.kind === 'window-failed') {
+            if (s.role !== 'controller') return;
+            s.windowNotice = windowFailedWords(data.reason);
+            emit();
+            return;
+        }
+        if (data.kind === 'window-front') {
+            if (s.role !== 'controller') return;
+            s.windowFront = data.front !== false;
+            emit();
             return;
         }
         if (data.kind === 'monitor-active' && typeof data.active === 'number') {

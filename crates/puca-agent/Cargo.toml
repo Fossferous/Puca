@@ -79,6 +79,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Shutdown",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    # DwmGetWindowAttribute: a window's frame in PHYSICAL pixels and whether
+    # it is cloaked, for showing one app window on its own (window_pick.rs).
+    "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
     # SetStdHandle, to send the agent's diagnostics to a file. Since
     # CREATE_NO_WINDOW the agent has no console, so every line it prints about

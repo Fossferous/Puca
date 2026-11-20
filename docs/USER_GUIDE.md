@@ -965,7 +965,7 @@ The bar above the picture:
 
 | Control | Action |
 |---------|--------|
-| **Screen** | Pick which screen to see, or **All displays**. **Fit the picture to this window (less lag)** asks for no more pixels than you can see. **Fullscreen** fills your monitor (also **Ctrl+Alt+Enter**). **Zoom** in and out (or **Ctrl**+wheel over the picture), **Fit** to go back; zoomed in, push the pointer against an edge of the picture to move along it. **Show stats** puts the live numbers over the picture. **Privacy mode (blank that computer's screen)**, and the display power actions: **Turn displays off**, **Turn displays off, keep primary**, **Turn displays on**, **Disable other displays**, **Re-enable displays** |
+| **Screen** | **Show one window…** shows one of that computer's windows on its own, and **Whole screen** goes back (see *One window* below). Pick which screen to see, or **All displays**. **Fit the picture to this window (less lag)** asks for no more pixels than you can see. **Fullscreen** fills your monitor (also **Ctrl+Alt+Enter**). **Zoom** in and out (or **Ctrl**+wheel over the picture), **Fit** to go back; zoomed in, push the pointer against an edge of the picture to move along it. **Show stats** puts the live numbers over the picture. **Privacy mode (blank that computer's screen)**, and the display power actions: **Turn displays off**, **Turn displays off, keep primary**, **Turn displays on**, **Disable other displays**, **Re-enable displays** |
 | **Quality** | From **Max (15Mbps, 60fps)** down to **Low (1Mbps, 15fps)**. The tick is what that computer confirmed |
 | **Keyboard** | Keys your own computer would keep for itself: **Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, **Esc**, **Windows key**, **Windows + D (show the desktop)**, **Ctrl + Shift + Esc (Task Manager)**, **Print Screen**. **Pinned keys…** puts keys of your choice on the screen as buttons (see *Pinned keys* below). **Type text…** types what you write or paste there as characters, so an emoji, an accented letter or a password from a manager arrives exactly as it is, whatever keyboard layout that computer uses; new lines press Enter, and invisible control characters (a pasted text can hold some) are left out, with a note saying how many. **Type this computer's clipboard** opens it with your clipboard in it. **Send the clipboard (paste it over there)** puts your clipboard on that computer, for Ctrl+V there |
 | **Mouse** | **Draw the pointer here (no delay)** (on by default): your own mouse pointer is drawn over the picture, so it moves with no delay at all, and it takes that computer's pointer shape — the text cursor over a field, the hand over a link, nothing while a game hides it; a marker shows where it was left while your mouse is off the picture. With an older Púca on that computer, which cannot tell this computer its pointer shape, that computer draws its own pointer as before. **Game mode (send mouse movement, for games)**: click the picture to capture your mouse, Esc lets it go. **Sensitivity** for Game mode |
@@ -1016,8 +1016,8 @@ The picture also tells you when your input cannot land:
   lid closed each have their own message.
 
 ### From a phone
-The bar at the bottom: **Display** (screens, quality, **Scale the picture to
-this screen (less lag)**, **Privacy mode (blank their screen)**), **Keyboard**
+The bar at the bottom: **Display** (**Show one window…**, screens, quality,
+**Scale the picture to this screen (less lag)**, **Privacy mode (blank their screen)**), **Keyboard**
 (the keyboard bar, with Ctrl, Alt, Shift and Win that stay down for the next
 key, Esc, Tab, the arrows and the editing keys), **Mouse** (**Mouse mode** — the
 screen is a trackpad — or **Touch mode** — the pointer goes where you tap;
@@ -1084,6 +1084,40 @@ notification then says what the last press sent (**Last sent: F5**).
   **Remote control keys** notification category hides them too.
 - This needs an Android app from after 0.9.859; with an older one the list
   has no **In the notification** boxes.
+
+### One window
+
+**Show one window…** (in **Screen** on a computer, in **Display** on a phone)
+lists the windows open on that computer — each with its program's icon and
+name — and shows the one you choose on its own: the picture is just that
+window, sized to it, and your clicks and keys go to it. **Whole screen**, at
+the top of the list, beside the window's name in the bar on a computer, and
+above the bottom bar on a phone, goes back to the whole screen.
+
+- On a computer the search box has the keyboard: type part of a title or a
+  program's name, move with the arrow keys, and press **Enter**. **Esc**
+  closes the list. On a phone, tap the window you want.
+- Choosing a window brings it to the front on that computer, and restores it
+  if it was minimised. If Windows keeps another program in front, the stage
+  says so: click into the window to bring it forward, as you would sitting
+  there. Keys go to whatever is in front, as on the whole screen.
+- It is the window's part of the screen, not a separate picture of it: a
+  window that something covers shows the cover (which is also what a click
+  there would hit), and a menu or dialog that opens outside the window is cut
+  off — choose **Whole screen** to see it. A window across two screens shows
+  the part on the screen that holds most of it.
+- Moving the window keeps it in the picture; resizing it changes the
+  picture's shape once you stop. Dragged to another screen, the picture
+  follows it there if that screen was shared. If the window is closed or
+  minimised, or moves to a screen that was not shared, the picture goes back
+  to the whole screen and says why.
+- A program running as administrator can be watched this way, but Windows
+  does not let remote clicks and keys reach it; the list says so.
+- Only the windows on screens the person at that computer shared are listed.
+  It is not offered at the lock or sign-in screen, while control is paused,
+  or on a computer shared with you to watch only. It needs this version of
+  Púca on both computers; with an older one there, **Show one window…** is
+  not offered.
 
 ---
 

@@ -18,6 +18,7 @@ import type {
 import { shellPowerAction } from './hostBackend';
 import { NO_SCREEN_LID_REASON } from './noScreen';
 import { blockedAppName } from './inputReach';
+import { isWindowEndReason, sanitizeIcons, sanitizeWindowList } from './windowPick';
 
 /** One output as `list_monitors` describes it. */
 interface AgentMonitor {
@@ -68,12 +69,50 @@ interface AgentReply {
     /** `prepare_screen`, with 'off' only: the DeviceEnd code the phone names
      *  (session.ts NO_SCREEN_LID_REASON / NO_SCREEN_VIRTUAL_FAILED_REASON). */
     reason?: string;
+    /** `capabilities`: one window can be shown on its own. */
+    windows?: unknown;
+    /** `list_windows` (`windows`): the icons by key; the windows themselves
+     *  ride `windows` above. */
+    icons?: unknown;
+    /** `window_shown`: what the picture now shows, and whether the window
+     *  came to the front. */
+    width?: number;
+    height?: number;
+    front?: boolean;
+    /** `session_state`: the window shown on its own (its handle), whether
+     *  its program is in front, the screen holding most of it, and why the
+     *  stream went back to the whole screen by itself. */
+    window?: number;
+    window_front?: boolean;
+    window_monitor?: number;
+    window_end?: string;
+    window_end_monitor?: number;
     /** `start_stream` (`streaming`): the screen the stream ACTUALLY captures,
      *  present only when the agent steered off the one asked for.
      *  `session_state`: the screen the session's live stream shows now, which
      *  changes when the agent moves it (a lid shut or opened mid-session).
      *  Absent from an agent older than either. */
     monitor?: number;
+}
+
+/** `session_state`'s window fields (the agent's window_pick.rs), checked:
+ *  a malformed value must not be able to say a window is shown, or that one
+ *  went away. Exported for its test. */
+export function windowStatusFields(reply: AgentReply): Partial<HostSessionStatus> {
+    const index = (v: unknown) =>
+        typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 255 ? v : undefined;
+    const out: Partial<HostSessionStatus> = {};
+    if (typeof reply.window === 'number' && Number.isSafeInteger(reply.window) && reply.window > 0) {
+        out.window = reply.window;
+        out.windowFront = reply.window_front !== false;
+        const m = index(reply.window_monitor);
+        if (m !== undefined) out.windowMonitor = m;
+    } else if (isWindowEndReason(reply.window_end)) {
+        out.windowEnd = reply.window_end;
+        const m = index(reply.window_end_monitor);
+        if (m !== undefined) out.windowEndMonitor = m;
+    }
+    return out;
 }
 
 /** What `prepare_screen` said. */
@@ -374,6 +413,9 @@ export function agentHostBackend(): HostBackend {
                 clipboard: false,
                 files: false,
                 monitors,
+                // `=== true`: an older agent never writes it, and the picker
+                // must not be offered by a host that cannot serve it.
+                windows: reply.windows === true,
                 limitation: reply.elevated
                     ? undefined
                     : 'This device can be controlled while it is running, but not through ' +
@@ -439,6 +481,31 @@ export function agentHostBackend(): HostBackend {
 
         async listMonitors(): Promise<MonitorInfo[]> {
             return describeMonitors(await request({ cmd: 'list_monitors' }));
+        },
+
+        async listWindows(): Promise<import('./hostBackend').HostWindowList> {
+            // Checked here too, not only by the viewer: the list goes out to
+            // a peer, and only what this side understood goes with it.
+            const reply = await request({ cmd: 'list_windows' });
+            return {
+                windows: sanitizeWindowList(reply.windows),
+                icons: sanitizeIcons(reply.icons),
+            };
+        },
+
+        async setWindow(
+            sessionId: string,
+            w: { hwnd: number; pid: number } | null,
+        ): Promise<{ width: number; height: number; front: boolean } | null> {
+            const reply = await request(w
+                ? { cmd: 'set_window', session_id: sessionId, hwnd: w.hwnd, pid: w.pid }
+                : { cmd: 'set_window', session_id: sessionId });
+            if (!w) return null;
+            const ok = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0;
+            if (reply.ok !== 'window_shown' || !ok(reply.width) || !ok(reply.height)) {
+                throw new Error('the agent did not say what it shows');
+            }
+            return { width: reply.width as number, height: reply.height as number, front: reply.front === true };
         },
 
         async updateStream(sessionId: string, fps?: number, bitrateKbps?: number): Promise<void> {
@@ -565,6 +632,7 @@ export function agentHostBackend(): HostBackend {
                     monitor: typeof reply.monitor === 'number' && Number.isInteger(reply.monitor) && reply.monitor >= 0
                         ? reply.monitor
                         : undefined,
+                    ...windowStatusFields(reply),
                 };
             } catch {
                 return { secureDesktop: false, cursorClipped: false };

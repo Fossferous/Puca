@@ -79,6 +79,20 @@ let transportKind: 'agent-pc' | 'webview-pc' = 'agent-pc';
  *  `{capture:false, files:true}` — the shape whose consent skip the
  *  files-only tests below exist to bound. */
 let hostCaps = { capture: true, files: true };
+/** ONE WINDOW (windowPick.ts): whether this host's agent offers it, what its
+ *  list says, and what the status poll answers (null = no sessionStatus, as
+ *  every other test here has it). */
+let hostWindowsOn = false;
+const WINDOWS_FIXTURE = [
+    { hwnd: 101, pid: 1, title: 'Main screen window', app: 'Alpha', icon: 'ia', monitor: 0 },
+    { hwnd: 102, pid: 2, title: 'Side screen window', app: 'Beta', icon: 'ib', monitor: 1 },
+    { hwnd: 103, pid: 3, title: 'Third screen window', app: 'Gamma', monitor: 2 },
+];
+const ICONS_FIXTURE = { ia: 'data:image/png;base64,AAAA', ib: 'data:image/png;base64,BBBB' };
+const listWindows = vi.fn(async () => ({ windows: WINDOWS_FIXTURE, icons: ICONS_FIXTURE }));
+const setWindow = vi.fn(async (..._a: unknown[]): Promise<{ width: number; height: number; front: boolean } | null> =>
+    ({ width: 900, height: 700, front: true }));
+let statusReply: Record<string, unknown> | null = null;
 vi.mock('../api/devices/hostBackend', () => ({
     getHostBackend: async () => ({
         kind: 'webview',
@@ -86,6 +100,7 @@ vi.mock('../api/devices/hostBackend', () => ({
             return {
                 capture: hostCaps.capture, unattended: true, input: hostCaps.capture,
                 elevated: false, clipboard: true, files: hostCaps.files, monitors: [],
+                windows: hostWindowsOn,
             };
         },
         startSession: async () => (transportKind === 'webview-pc'
@@ -104,6 +119,8 @@ vi.mock('../api/devices/hostBackend', () => ({
         // false leaves it undefined so the arm's "cannot lock or shut down
         // from here" branch is reachable from a test.
         ...(hasPowerAction ? { powerAction: (action: PowerAction) => powerAction(action) } : {}),
+        ...(hostWindowsOn ? { listWindows: () => listWindows(), setWindow: (...a: unknown[]) => setWindow(...a) } : {}),
+        ...(statusReply ? { sessionStatus: async () => statusReply } : {}),
         injectEvent,
     }),
 }));
@@ -299,6 +316,11 @@ async function activeHostSession(): Promise<{ id: string; key: Uint8Array }> {
 beforeEach(() => {
     armed = true;
     shareCaps = null;
+    hostWindowsOn = false;
+    statusReply = null;
+    listWindows.mockClear();
+    setWindow.mockReset();
+    setWindow.mockImplementation(async () => ({ width: 900, height: 700, front: true }));
     hasPowerAction = true;
     monitorsList = [];
     displayTopologyChanged.mockClear();
@@ -2425,5 +2447,194 @@ describe('Audio Hub requests', () => {
         await signal(key, { kind: 'audio-hub-ack', rid: RID });
         expect(hubCalls()).toEqual([]);
         expect(await sentFrames(key, before)).toEqual([]);
+    });
+});
+
+/**
+ * ONE WINDOW ON ITS OWN (windowPick.ts), HOST side: who is offered it, the
+ * consent boundary (the list, and every choice, stay inside the screens the
+ * person here shared), and what the 1 Hz status poll does with a window the
+ * agent let go of or one that moved. The viewer half is
+ * deviceWindowPickController.test.ts.
+ */
+describe('one window on its own', () => {
+    const OFFER = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+    async function frames(key: Uint8Array, from: number): Promise<Record<string, unknown>[]> {
+        const { openControl } = await import('../api/e2ee');
+        const out: Record<string, unknown>[] = [];
+        for (const m of sent.slice(from)) {
+            const blob = m.payload?.payload;
+            if (!blob) continue;
+            const plain = await openControl(key, blob);
+            if (plain) out.push(JSON.parse(plain) as Record<string, unknown>);
+        }
+        return out;
+    }
+    /** A screen session the person here agreed to (`monitor`), streaming. */
+    async function streaming(monitor: number) {
+        armed = false;
+        hostWindowsOn = true;
+        consentAnswer = { monitor };
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        return key;
+    }
+    async function listed(key: Uint8Array) {
+        const before = sent.length;
+        await signal(key, { kind: 'list-windows', rid: 'r1' });
+        return frames(key, before);
+    }
+
+    it('a host whose agent can show one window says so once its stream exists', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        expect(await frames(key, 0)).toContainEqual(expect.objectContaining({ kind: 'features', windows: true }));
+    });
+
+    it('NEGATIVE CONTROL: an agent that cannot (older, or the sign-in screen) is not announced, and a list asked for anyway is refused', async () => {
+        armed = false;
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        expect(await sentKinds(key, 0)).not.toContain('features');
+        const got = await listed(key);
+        expect(got.map(f => f.kind)).toEqual(['windows-failed']);
+        expect(listWindows).not.toHaveBeenCalled();
+    });
+
+    it('lists only the windows on the screen the person here shared, and only their icons', async () => {
+        const key = await streaming(1);
+        const got = await listed(key);
+        const list = got.find(f => f.kind === 'windows') as { windows: Array<{ hwnd: number }>; rid: string };
+        expect(list.rid).toBe('r1');
+        expect(list.windows.map(w => w.hwnd), 'a declined screen\'s titles never leave').toEqual([102]);
+        const icons = got.filter(f => f.kind === 'window-icons').flatMap(f => Object.keys(f.icons as object));
+        expect(icons).toEqual(['ib']);
+    });
+
+    it('POSITIVE CONTROL: every screen shared lists every window', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        const list = (await listed(key)).find(f => f.kind === 'windows') as { windows: Array<{ hwnd: number }> };
+        expect(list.windows.map(w => w.hwnd)).toEqual([101, 102, 103]);
+    });
+
+    it('shows a listed window from its own screen: the capture is switched first, then cropped', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        setMonitor.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 1);
+        expect(setWindow).toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+        expect(setMonitor.mock.invocationCallOrder[0]).toBeLessThan(setWindow.mock.invocationCallOrder[0]);
+        const got = await frames(key, before);
+        expect(got.map(f => f.kind)).toEqual(['monitor-active', 'window-active']);
+        expect(got[1].window).toEqual({ hwnd: 102, pid: 2, title: 'Side screen window', app: 'Beta', width: 900, height: 700 });
+    });
+
+    it('refuses a window it did not list, and one on a screen that was not shared, touching nothing', async () => {
+        const key = await streaming(1);
+        await listed(key);
+        setMonitor.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'set-window', hwnd: 101, pid: 1 });   // on screen 0: never listed
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 99 });  // the handle, another process
+        await signal(key, { kind: 'set-window', hwnd: 555, pid: 5 });   // made up
+        const got = await frames(key, before);
+        expect(got.map(f => f.kind)).toEqual(['window-failed', 'window-failed', 'window-failed']);
+        expect(setWindow).not.toHaveBeenCalled();
+        expect(setMonitor).not.toHaveBeenCalled();
+        // POSITIVE CONTROL: the listed one on the shared screen IS shown.
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        expect(setWindow).toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+    });
+
+    it('an agent\'s refusal reaches the viewer in its words, and nothing is said to be shown', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        setWindow.mockRejectedValueOnce(new Error('that window is minimised'));
+        const before = sent.length;
+        await signal(key, { kind: 'set-window', hwnd: 101, pid: 1 });
+        const got = await frames(key, before);
+        expect(got.find(f => f.kind === 'window-failed')?.reason).toBe('that window is minimised');
+        expect(got.map(f => f.kind)).not.toContain('window-active');
+    });
+
+    it('a view-only share is not offered it and is refused (raising a window acts on this PC)', async () => {
+        armed = false;
+        hostWindowsOn = true;
+        shareCaps = ['view_only'];
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        expect(await sentKinds(key, 0)).not.toContain('features');
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 101, pid: 1 });
+        expect(listWindows).not.toHaveBeenCalled();
+        expect(setWindow).not.toHaveBeenCalled();
+    });
+
+    it('an armed host acts for nobody who has not proved the passphrase', async () => {
+        armed = true;
+        hostWindowsOn = true;
+        const { key } = await activeHostSession();
+        const before = sent.length;
+        await signal(key, { kind: 'list-windows', rid: 'r1' });
+        await signal(key, { kind: 'set-window', hwnd: 101, pid: 1 });
+        expect(listWindows).not.toHaveBeenCalled();
+        expect(setWindow).not.toHaveBeenCalled();
+        expect((await sentKinds(key, before)).filter(k => k.startsWith('window'))).toEqual([]);
+    });
+
+    it('a screen chosen while a window is shown shows that screen whole', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        setWindow.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'set-monitor', monitor: 1 });
+        expect(setWindow).toHaveBeenCalledWith('ds-test', null);
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'asked' }));
+    });
+
+    it('the status poll: a window the agent let go of is said, and one that moved to a shared screen is followed', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        // Still shown, but most of it is now on screen 2: follow it there.
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 102, windowFront: false, windowMonitor: 2 };
+        setMonitor.mockClear();
+        setWindow.mockClear();
+        let before = sent.length;
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 2);
+        expect(setWindow).toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+        let got = await frames(key, before);
+        expect(got).toContainEqual(expect.objectContaining({ kind: 'window-front', front: false }));
+        expect(got.map(f => f.kind)).toContain('window-active');
+        // Then closed over there: the viewer is told why.
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 2, windowEnd: 'closed' };
+        before = sent.length;
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        got = await frames(key, before);
+        expect(got).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'closed' }));
+    });
+
+    it('the status poll never follows a window onto a screen that was not shared', async () => {
+        const key = await streaming(1);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 102, windowMonitor: 2 };
+        setMonitor.mockClear();
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        expect(setMonitor, 'mostly elsewhere: it stays cropped to what is left here').not.toHaveBeenCalled();
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, windowEnd: 'offscreen', windowEndMonitor: 2 };
+        const before = sent.length;
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        expect(setMonitor).not.toHaveBeenCalled();
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'unshared' }));
     });
 });

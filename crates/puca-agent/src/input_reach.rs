@@ -223,6 +223,16 @@ pub(crate) fn own_level() -> Option<u32> {
 /// gone, or protected — which is "cannot tell", never "blocked".
 #[cfg(windows)]
 fn owner_of(pid: u32) -> Option<(Owner, String)> {
+    let (owner, path) = process_image(pid)?;
+    Some((owner, app_name(&path).unwrap_or_else(|| format!("process {pid}"))))
+}
+
+/// A process's owner (as `owner_of` reads it) and its full image path, or an
+/// empty path when it would not say. The path stays in the agent: it names
+/// the user's folders, and only `app_name` of it is ever shown or logged
+/// (window_pick.rs reads the program's version resource through it).
+#[cfg(windows)]
+pub(crate) fn process_image(pid: u32) -> Option<(Owner, String)> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -233,15 +243,16 @@ fn owner_of(pid: u32) -> Option<(Owner, String)> {
     let owner = token_level(process).unwrap_or(Owner::Unreadable);
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
-    let name = unsafe {
+    let path = unsafe {
         QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
     }
     .ok()
-    .and_then(|_| app_name(&String::from_utf16_lossy(&buf[..len as usize])));
+    .map(|_| String::from_utf16_lossy(&buf[..len as usize]))
+    .unwrap_or_default();
     unsafe {
         let _ = CloseHandle(process);
     }
-    Some((owner, name.unwrap_or_else(|| format!("process {pid}"))))
+    Some((owner, path))
 }
 
 /// The integrity level on a process's token. `Some(Unreadable)` when the token

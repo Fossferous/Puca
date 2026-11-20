@@ -47,6 +47,10 @@ pub enum Capability {
     /// Locking the console or shutting the machine down on the controller's
     /// request (the sealed `power` signal).
     Power,
+    /// Listing the signed-in user's open windows, and showing one of them on
+    /// its own (window_pick.rs): their titles, programs and icons, and
+    /// bringing the chosen one to the front.
+    WindowPick,
 }
 
 impl Flavour {
@@ -100,6 +104,14 @@ impl Flavour {
             // Nothing is lost that the operator cannot get by signing in,
             // which is the one thing this agent exists to let them do.
             (Flavour::SystemInteractive, Capability::FileAccess) => false,
+
+            // Refused. The lock and sign-in screens have no app windows to
+            // choose between, and on a machine where someone else is signed
+            // in but locked, the windows a SYSTEM process could enumerate are
+            // THEIR session's titles: what a viewer at the lock screen has no
+            // business reading. Choosing a window is offered once somebody
+            // has signed in, by the agent running as them.
+            (Flavour::SystemInteractive, Capability::WindowPick) => false,
         }
     }
 
@@ -117,6 +129,11 @@ impl Flavour {
                 "file access is not offered before sign-in: this agent is running as the \
                  system, and file transfer is deliberately available only to an agent \
                  running as you. Sign in on this machine and reconnect."
+                    .to_string()
+            }
+            Capability::WindowPick => {
+                "choosing one window is not offered before sign-in: the lock and sign-in \
+                 screens have no app windows. Sign in on this machine and choose again."
                     .to_string()
             }
             Capability::Capture | Capability::Input | Capability::PrivacyMode | Capability::Power => {
@@ -168,6 +185,19 @@ mod tests {
         assert!(!f.allows(Capability::FileAccess));
         let msg = f.refusal(Capability::FileAccess).expect("a refusal");
         assert!(msg.contains("Sign in"), "the refusal must say how to proceed: {msg}");
+    }
+
+    #[test]
+    fn the_system_agent_offers_no_window_choice_and_the_user_agent_does() {
+        // The sign-in-screen agent never lists windows (it runs as SYSTEM, and
+        // a locked machine's windows are the signed-in person's).
+        let f = Flavour::SystemInteractive;
+        assert!(!f.allows(Capability::WindowPick));
+        let msg = f.refusal(Capability::WindowPick).expect("a refusal");
+        assert!(msg.contains("Sign in"), "the refusal must say how to proceed: {msg}");
+        // The positive control: the desktop app's agent offers it.
+        assert!(Flavour::User.allows(Capability::WindowPick));
+        assert_eq!(Flavour::User.refusal(Capability::WindowPick), None);
     }
 
     #[test]

@@ -28,6 +28,8 @@ import {
     sendInput,
     sendStreamQuality,
     sendViewSize,
+    chooseWindow,
+    dismissWindowNotice,
     subscribeCaret,
     subscribeSessions,
     type CaretReport,
@@ -91,6 +93,8 @@ import { useLatencyProbe } from '../api/devices/useLatencyProbe';
 import { DeviceStageDesktopBar } from './DeviceStageDesktopBar';
 import { DeviceStageStats } from './DeviceStageStats';
 import { DeviceStageTypeText } from './DeviceStageTypeText';
+import { DeviceStageWindowPicker } from './DeviceStageWindowPicker';
+import { ShownWindowLabel } from './DeviceStageWindowChip';
 import { enterStageFullscreen, leaveStageFullscreen, onFullscreenChange, stageElementFullscreen } from './stageFullscreen';
 import {
     CloseIcon, CrosshairIcon, LiveDotIcon, PlayIcon,
@@ -539,6 +543,8 @@ export function DeviceStage() {
     const [pins, setPins] = useState<PinnedKey[]>(readPins);
     const [showPins, setShowPins] = useState(readShowPins);
     const [pinsEditorOpen, setPinsEditorOpen] = useState(false);
+    /** ONE WINDOW (windowPick.ts): the picker of the PC's open windows. */
+    const [windowPickerOpen, setWindowPickerOpen] = useState(false);
     const updatePins = useCallback((next: PinnedKey[]) => { setPins(next); writePins(next); }, []);
     const setShowPinsRemembered = useCallback((on: boolean) => { setShowPins(on); writeShowPins(on); }, []);
     /** Where THIS end draws the pointer, in picture-relative coordinates —
@@ -1895,6 +1901,9 @@ export function DeviceStage() {
     // rendered beside.
     const edgeHops = useMemo(() => {
         if (!session || pointerLocked || !videoBox || videoBox.vw <= 0) return NO_EDGE_HOPS;
+        // ONE WINDOW: the picture is a window, not a screen, so there is no
+        // neighbouring screen at its edge to hop to.
+        if (session.activeWindow) return NO_EDGE_HOPS;
         const hops = availableEdgeHops(
             { w: videoBox.w, h: videoBox.h },
             pictureBox(videoBox.vw, videoBox.vh, videoBox.w, videoBox.h),
@@ -1913,6 +1922,7 @@ export function DeviceStage() {
         const v = videoRef.current;
         if (!s || !v || !v.videoWidth || !v.offsetWidth) return;
         if (s.activeMonitor === null || s.activeMonitor === ALL_DISPLAYS) return;
+        if (s.activeWindow) return;
         if (pendingFollowRef.current) return;
         const box = { w: v.offsetWidth, h: v.offsetHeight };
         const fromPict = pictureBox(v.videoWidth, v.videoHeight, v.offsetWidth, v.offsetHeight);
@@ -1980,6 +1990,9 @@ export function DeviceStage() {
         const timer = setTimeout(() => {
             const s = session;
             if (!s || pendingFollowRef.current) return;
+            // Zoom-follow maps the picture onto the screens' layout, and one
+            // window shown on its own is not a screen: zoom stays a zoom.
+            if (s.activeWindow) return;
             // A switch already on the stage whose confirmation has not come:
             // `s.activeMonitor` still names the screen it left, and judging
             // the new picture against that screen's geometry would start
@@ -2438,9 +2451,13 @@ export function DeviceStage() {
      *  verdicts run inside pointer handlers and channel callbacks. */
     const surfaceSizeRef = useRef<SurfaceSize | null>(null);
     useEffect(() => {
-        surfaceSizeRef.current = session
-            ? captureSurfaceSize(session.monitors, session.activeMonitor)
-            : null;
+        // ONE WINDOW: the caret fractions are of the window the picture
+        // shows, whose size the host said.
+        surfaceSizeRef.current = !session
+            ? null
+            : session.activeWindow
+                ? { w: session.activeWindow.width, h: session.activeWindow.height }
+                : captureSurfaceSize(session.monitors, session.activeMonitor);
     }, [session]);
     useEffect(() => {
         if (!autoKeyboardWanted) {
@@ -3003,6 +3020,21 @@ export function DeviceStage() {
         })
         : null;
     const olderHostShown = olderHostLine !== null && !!session && !olderHostDismissed.has(session.peerDevice);
+    // ONE WINDOW: why the picture went back to the whole screen (or why a
+    // choice was refused), else that another program is in front of the
+    // window shown, so keys go there. Said by the host, never guessed.
+    const windowLine = !session
+        ? null
+        : session.windowNotice ?? (session.activeWindow && !session.windowFront && controlEnabled && !session.viewOnly
+            ? `Another program is in front of “${session.activeWindow.title}” on ${session.peerName?.trim() || 'that computer'}, so your keys go to it. Click into the window to bring it forward.`
+            : null);
+    const windowNotice = session?.windowNotice ?? null;
+    const sessionIdForNotice = session?.id ?? null;
+    useEffect(() => {
+        if (!windowNotice || !sessionIdForNotice) return;
+        const t = setTimeout(() => dismissWindowNotice(sessionIdForNotice), 10_000);
+        return () => clearTimeout(t);
+    }, [windowNotice, sessionIdForNotice]);
     const dismissOlderHost = useCallback((peerDevice: string) => {
         setOlderHostDismissed(prev => new Set(prev).add(peerDevice));
     }, []);
@@ -3568,7 +3600,7 @@ export function DeviceStage() {
             // to the page — none of it is for the machine over there. Nor is what
             // answers one of the app's own questions (api/appDialogs.ts), which
             // this listener hears first.
-            if (barMenuOpenRef.current || typeTextOpen || pinsEditorOpen || appQuestionOpen()) return;
+            if (barMenuOpenRef.current || typeTextOpen || pinsEditorOpen || windowPickerOpen || appQuestionOpen()) return;
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
             // typed every character into the controlled PC as well. The
@@ -3594,7 +3626,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, pinsEditorOpen, isMinimized]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, pinsEditorOpen, windowPickerOpen, isMinimized]);
 
 
     if (!session) {
@@ -3669,6 +3701,7 @@ export function DeviceStage() {
                     clipboardBusy={clipboardBusy}
                     onTypeText={() => setTypeText('')}
                     onPinnedKeys={() => setPinsEditorOpen(true)}
+                    onPickWindow={() => setWindowPickerOpen(true)}
                     onTypeClipboard={() => void typeClipboard()}
                     onNotice={setClipboardNote}
                     onMenuOpenChange={onBarMenuOpenChange}
@@ -3677,6 +3710,7 @@ export function DeviceStage() {
                         {qualityError && <span className="device-stage-error">{qualityError}</span>}
                         {clipboardNote && <span className="device-stage-note">{clipboardNote}</span>}
                         {session.powerNotice && <span className="device-stage-note" role="status">{session.powerNotice}</span>}
+                        {windowLine && <span className="device-stage-note" role="status" data-testid="window-note">{windowLine}</span>}
                     </>}
                 />
             )}
@@ -4109,8 +4143,9 @@ export function DeviceStage() {
                 separate spans; the phone now does the same.
                 Paused, it goes above the paused banner and the arrow lifted
                 over it (DeviceStage.css, .over-paused). */}
-            {isMobile && (session.error || qualityError || clipboardNote || session.powerNotice) && (
+            {isMobile && (session.error || qualityError || clipboardNote || session.powerNotice || windowLine) && (
                 <div className={`device-stage-mobile-error${controlEnabled ? '' : ' over-paused'}`} role="status">
+                    {windowLine && <span className="dse-note" data-testid="window-note">{windowLine}</span>}
                     {qualityError && <span className="dse-bad">{qualityError}</span>}
                     {clipboardNote && <span className="dse-note">{clipboardNote}</span>}
                     {session.powerNotice && <span className="dse-note">{session.powerNotice}</span>}
@@ -4132,6 +4167,18 @@ export function DeviceStage() {
                     onCollapse={() => setToolbarCollapsed(true)}
                     onMinimize={minimizeStage}
                     onHeight={setToolbarH}
+                    strip={session.activeWindow ? (
+                        <div className="dswp-strip" data-testid="window-strip">
+                            <ShownWindowLabel session={session} />
+                            <button
+                                type="button"
+                                className="dswp-strip-btn"
+                                onClick={() => chooseWindow(session.id, null)}
+                            >
+                                Whole screen
+                            </button>
+                        </div>
+                    ) : undefined}
                 />
             )}
 
@@ -4186,6 +4233,7 @@ export function DeviceStage() {
                     onClose={() => setActiveMobileMenu(null)} 
                     fitResolution={fitResolution}
                     setFitResolution={setFitResolutionRemembered}
+                    onPickWindow={controlEnabled ? () => { setActiveMobileMenu(null); setWindowPickerOpen(true); } : undefined}
                 />
             )}
             
@@ -4229,6 +4277,9 @@ export function DeviceStage() {
                 />
             )}
             
+            {windowPickerOpen && session.windowsSupported && (
+                <DeviceStageWindowPicker session={session} touch={isMobile} onClose={() => setWindowPickerOpen(false)} />
+            )}
             {showFiles && <DeviceFileManager sessionId={session.id} onClose={() => setShowFiles(false)} />}
             {typeText !== null && (
                 <DeviceStageTypeText

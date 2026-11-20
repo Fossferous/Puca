@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { type DeviceControlSession, requestMonitor, setPrivacyMode, sendStreamQuality, sendClipboard, sendInput, sendPowerAction, ALL_DISPLAYS } from '../api/devices/session';
+import { type DeviceControlSession, chooseWindow, requestMonitor, setPrivacyMode, sendStreamQuality, sendClipboard, sendInput, sendPowerAction, ALL_DISPLAYS } from '../api/devices/session';
 import { STREAM_QUALITY_PRESETS, MOBILE_PRESET_LABELS, presetValue } from '../api/devices/streamQualityPresets';
 import type { FitResolution } from '../api/devices/viewSize';
 import { sendChord } from '../api/devices/chords';
@@ -8,8 +8,10 @@ import {
     GridIcon,
     HandIcon,
     Icon,
+    MonitorIcon,
     MouseIcon,
     PinchIcon,
+    PopOutIcon,
     TapDoubleIcon,
     TapIcon,
     TapLongIcon,
@@ -264,9 +266,12 @@ function shortLabel(label: string): string {
     return label.replace(/\s*\(\d+\s*[x×]\s*\d+\)\s*$/i, '');
 }
 
-export function MonitorMenu({ session, onClose, fitResolution, setFitResolution }: {
+export function MonitorMenu({ session, onClose, fitResolution, setFitResolution, onPickWindow }: {
     session: DeviceControlSession,
     onClose: () => void,
+    /** Open the window picker; absent while control is paused (bringing a
+     *  window to the front acts on that computer). */
+    onPickWindow?: () => void,
     /** Owned by DeviceStage, like the MouseMenu's toggles, so one preference
      *  serves both surfaces and there is one writer. */
     fitResolution: FitResolution,
@@ -313,12 +318,29 @@ export function MonitorMenu({ session, onClose, fitResolution, setFitResolution 
 
     return (
         <div className="device-stage-mobile-menu menu-center" style={{ height: '70vh' }}>
+            {/* ONE WINDOW, only from a host that offers it. */}
+            {session.windowsSupported && onPickWindow && (
+                <div className="dswp-menu-rows">
+                    <button type="button" className="dswp-menu-row" onClick={onPickWindow}>
+                        <PopOutIcon /> {session.activeWindow ? 'Show another window…' : 'Show one window…'}
+                    </button>
+                    {session.activeWindow && (
+                        <button
+                            type="button"
+                            className="dswp-menu-row"
+                            onClick={() => { chooseWindow(session.id, null); onClose(); }}
+                        >
+                            <MonitorIcon /> Whole screen
+                        </button>
+                    )}
+                </div>
+            )}
             {session.monitors.length > 1 && (
                 <div className="device-stage-mobile-menu-tabs">
                     {session.monitors.map(m => (
                         <button
                             key={m.id}
-                            className={`device-stage-mobile-menu-tab ${active === m.id ? 'active' : ''}`}
+                            className={`device-stage-mobile-menu-tab ${!session.activeWindow && active === m.id ? 'active' : ''}`}
                             onClick={() => pick(m.id)}
                         >
                             {shortLabel(m.label)}
@@ -330,7 +352,7 @@ export function MonitorMenu({ session, onClose, fitResolution, setFitResolution 
                         no active style at all, so it could never show as
                         selected even once the switch worked. */}
                     <button
-                        className={`device-stage-mobile-menu-tab ${active === ALL_DISPLAYS ? 'active' : ''}`}
+                        className={`device-stage-mobile-menu-tab ${!session.activeWindow && active === ALL_DISPLAYS ? 'active' : ''}`}
                         onClick={() => pick(ALL_DISPLAYS)}
                     >
                         <GridIcon /> All
