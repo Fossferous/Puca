@@ -89,6 +89,9 @@ const mainJs = await bundle({
         resolveDir: src, loader: 'ts', sourcefile: 'entry.ts',
     },
     plugins: [seams],
+    // authedMedia asks api/platform whether it runs in the desktop shell (where its
+    // [media-diag] lines also go to puca.log), and platform reads this build flag.
+    define: { __RC_ENABLED__: 'true' },
     format: 'iife',
 });
 const plaintextWorkerJs = await bundle({ entryPoints: [path.join(src, 'api', 'plaintextHost.worker.ts')], format: 'esm' });

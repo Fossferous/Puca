@@ -53,7 +53,7 @@
  *     one request at a time and one schedule: 2 s, 4 s, 8 s, 16 s, 30 s (plus
  *     up to a fifth more, so a crowd that failed together does not come back
  *     together), never sooner than a `Retry-After` asks (seconds or an HTTP
- *     date, read by api/client.ts retryAfterMsOf, at most a minute), and at
+ *     date, read by api/retryAfter.ts retryAfterMsOf, at most a minute), and at
  *     most FILE_ATTEMPTS attempts, with no wait begun once FILE_RETRY_TOTAL_MS
  *     have passed since the first request went out (a crowd queued ahead of
  *     the first request is not counted). The waits come to a minute; an attempt itself can take up
@@ -95,7 +95,7 @@ import { API_BASE_URL } from './config';
 import { getToken } from './auth';
 import { safeBlobType } from './attachments';
 import { bytesToB64 } from './parkedMedia';
-import { retryAfterMsOf } from './client';
+import { retryAfterMsOf } from './retryAfter';
 import { createPriorityLimiter } from './priorityLimiter';
 import { isTauri } from './platform';
 
