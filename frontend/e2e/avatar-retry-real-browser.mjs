@@ -254,7 +254,8 @@ try {
         const { done, most, pageMost } = await burst('new');
         ck(done === 30, '3. thirty pictures asked for at once all decode', `${done}/30`);
         ck(pageMost === 6, '3. the page has at most six fetches out at once, and the cap is what binds', `most at once: ${pageMost}`);
-        ck(most <= 6, '3. ...and the server never saw more than six at once', `most at once: ${most}`);
+        // A consistency check only: on this rig's HTTP/1.1 the browser holds a host to six anyway.
+        ck(most <= 6, '3. ...and the server never saw more than six at once (consistency: HTTP/1.1 here)', `most at once: ${most}`);
     }
 
     // 4: the network down through the whole schedule, then back.

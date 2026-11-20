@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { cachedFileUrl, fetchFileUrl } from '../../api/authedMedia';
+import { cachedFileUrl, loadFileUrl, onFileRecoveryChance } from '../../api/authedMedia';
 import { mapPicture, pictureStyle, readPictureTheme, readThemeColor } from '../../api/modeLook';
 import { accentTokens, type PictureLimit, type Rgb, type ServerMode } from '../../api/serverModes';
 
@@ -82,7 +82,9 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     // Nothing else would ask: the refetch that follows answers the same file, accent and look.
     // (The download's own job, api/authedMedia, tries a passing failure again by itself, and
     // at once for one that was out when the socket came back; this is for after it gave up,
-    // and for a picture that downloaded and could not be read.)
+    // and for a picture that downloaded and could not be read. A download that gave up also
+    // asks again when the browser is back online or the window is shown again, as an avatar
+    // does: onFileRecoveryChance below.)
     const [attempt, setAttempt] = useState(0);
     useEffect(() => {
         const again = () => setAttempt(n => n + 1);
@@ -92,17 +94,31 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     useEffect(() => {
         if (!fileId || !key || mapped?.key === key) return;
         let stale = false;
+        // Aborted when this attempt is over (the mode changed, the page left): the download's
+        // job stops trying once nobody waits for it.
+        const asking = new AbortController();
+        let stopListening: (() => void) | null = null;
         void (async () => {
             // A download still running when the socket came back is the job's to try again (it
             // does, at once, if it falls over): asking for a fresh one here once it gave up would
             // be a second whole schedule of tries for the same reconnect.
-            const source = cachedFileUrl(fileId) ?? await fetchFileUrl(fileId);
+            const cached = cachedFileUrl(fileId);
+            const got = cached ? { url: cached, retryable: false } : await loadFileUrl(fileId, { signal: asking.signal });
+            if (stale) return;
+            if (!got.url) {
+                if (got.retryable) stopListening = onFileRecoveryChance(fileId, () => setAttempt(n => n + 1));
+                return;
+            }
             const theme = readPictureTheme();
-            if (!source || !theme || stale) return;
-            const picture = await mapPicture(source, theme.limit);
+            if (!theme) return;
+            const picture = await mapPicture(got.url, theme.limit);
             if (picture && !stale) setMapped({ key, look: { style: pictureStyle(picture.url, theme) as CSSProperties, limit: theme.limit } });
         })();
-        return () => { stale = true; };
+        return () => {
+            stale = true;
+            asking.abort();
+            stopListening?.();
+        };
     }, [fileId, key, mapped?.key, attempt]);
 
     return key && mapped?.key === key ? mapped.look : undefined;

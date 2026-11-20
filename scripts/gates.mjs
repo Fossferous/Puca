@@ -280,6 +280,9 @@ const GATES = [
         // Edge and WebKit. Rebuilds e2e-artifacts/iphone-stream-dist, as e2e-iphone-stream does:
         // fine here, where the real-browser scripts run one at a time.
         ['e2e-stream-volume-button', 'stream-volume-button-real-browser.mjs'],
+        // A picture whose fetch failed once comes back (api/authedMedia.ts), with the
+        // 0.9.865 modules (src/tests/fixtures/*At865.ts) as the control that must fail.
+        ['e2e-avatar-retry', 'avatar-retry-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

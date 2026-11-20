@@ -62,6 +62,7 @@ describe('ServerSettingsModal — the icon preview', () => {
         expect(h.answers.has('old-icon')).toBe(true);
         await pickNewIcon();
         expect(changeLabel(), 'the upload is done: not "..." while its preview is fetched').toBe('Change');
+        expect(preview(), 'meanwhile the letter, not an icon').toBeNull();
         await answer('new-icon', 'data:image/png;base64,TkVX');
         expect(preview()).toBe('data:image/png;base64,TkVX');
         await answer('old-icon', 'data:image/png;base64,T0xE');
@@ -75,6 +76,18 @@ describe('ServerSettingsModal — the icon preview', () => {
         await pickNewIcon();
         await answer('new-icon', 'data:image/png;base64,TkVX');
         await answer('old-icon', null);
+        expect(preview()).toBe('data:image/png;base64,TkVX');
+    });
+
+    it('a new pick does not keep showing the icon it replaces while its own preview is fetched', async () => {
+        await act(async () => {
+            root.render(<ServerSettingsModal isOpen onClose={() => {}} serverId="s1" serverName="Test Server" isOwner initialIconFileId="old-icon" />);
+        });
+        await answer('old-icon', 'data:image/png;base64,T0xE');
+        expect(preview()).toBe('data:image/png;base64,T0xE');
+        await pickNewIcon();
+        expect(preview()).toBeNull();
+        await answer('new-icon', 'data:image/png;base64,TkVX');
         expect(preview()).toBe('data:image/png;base64,TkVX');
     });
 

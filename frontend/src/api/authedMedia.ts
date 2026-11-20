@@ -54,7 +54,12 @@
  *     up to a fifth more, so a crowd that failed together does not come back
  *     together), never sooner than a `Retry-After` asks (seconds or an HTTP
  *     date, read by api/client.ts retryAfterMsOf, at most a minute), and at
- *     most FILE_ATTEMPTS attempts in FILE_RETRY_TOTAL_MS: about a minute;
+ *     most FILE_ATTEMPTS attempts, with no wait begun once FILE_RETRY_TOTAL_MS
+ *     have passed since the first request went out (queueing for a slot is
+ *     not counted). The waits come to a minute; an attempt itself can take up
+ *     to FILE_ANSWER_TIMEOUT_MS to answer, so a server that never answers is
+ *     given up on after about a minute and a half, and the extra tries below
+ *     can add to that;
  *   - a DEFINITE one (401, 403, 404, 410, any other 4xx) is final at once,
  *     and nobody signed in means no request at all;
  *   - a job nobody waits for any more (every hook that asked unmounted) stops
@@ -78,9 +83,9 @@
  *     apply and a hundred requests leave at once; the ceiling is also shared
  *     with the attachment loader (its own 2 + 4, api/attachments.ts) and with
  *     every other device behind the same address. So a request whose answer
- *     has not begun within FILE_ANSWER_TIMEOUT_MS is let go and tried again,
- *     rather than hold a slot (and everything queued behind it) until a CDN
- *     gives up on its origin;
+ *     has not begun within FILE_ANSWER_TIMEOUT_MS, or whose body has sent
+ *     nothing for as long, is let go and tried again, rather than hold a slot
+ *     (and everything queued behind it) until a CDN gives up on its origin;
  *   - a give-up, a refusal and a load that took more than one attempt each
  *     write one `[media-diag]` line (the console, and puca.log through the
  *     desktop shell): the status and the attempts, a short prefix of the file
@@ -126,12 +131,13 @@ export const FILE_RETRY_TOTAL_MS = 90_000;
  *  may be from before the way was clear again, and a component still on its
  *  fallback listens for chances only once the job has given up). */
 export const FILE_EXTRA_ATTEMPTS = 2;
-/** An attempt whose answer has not BEGUN to arrive by now is given up as a
- *  network failure (and tried again): a request that hangs (a CDN holds one
- *  up to 100 s for an origin that does not answer) must not hold one of the
- *  MAX_FILE_FETCHES slots and every picture queued behind it. Only the
- *  answer's start is timed, never its body: a mode's background is a big
- *  picture and a phone's link a slow one. */
+/** An attempt whose answer has not BEGUN to arrive by now, or whose body has
+ *  sent nothing for this long, is given up as a network failure (and tried
+ *  again): a request that hangs (a CDN holds one up to 100 s for an origin
+ *  that does not answer) must not hold one of the MAX_FILE_FETCHES slots and
+ *  every picture queued behind it. A body that keeps arriving is never cut
+ *  off, however long it takes: a mode's background is a big picture and a
+ *  phone's link a slow one. */
 export const FILE_ANSWER_TIMEOUT_MS = 30_000;
 
 function remember(fileId: string, url: string): void {
@@ -167,7 +173,7 @@ export function isTransientStatus(status: number): boolean {
 
 /** What one GET /files/<id> came to. `status` 0: it never got an answer. */
 type Answer =
-    | { kind: 'ok'; bytes: ArrayBuffer; type: string }
+    | { kind: 'ok'; bytes: Uint8Array<ArrayBuffer>; type: string }
     | { kind: 'refused'; status: number }
     | { kind: 'transient'; status: number; retryAfterMs?: number }
     | { kind: 'signed-out' };
@@ -204,7 +210,7 @@ async function answerOf(fileId: string, token: string, request: AbortController)
     if (!res.ok) {
         // An error body is a line of text (a proxy's page at most): read it so
         // the connection is free again, and for a JSON `retry_after_ms`.
-        const text = await res.text().catch(() => '');
+        const text = await readAll(res, request).then((b) => new TextDecoder().decode(b), () => '');
         if (!isTransientStatus(res.status)) return { kind: 'refused', status: res.status };
         return { kind: 'transient', status: res.status, retryAfterMs: retryAfterMsOf(res.headers, text) };
     }
@@ -222,14 +228,50 @@ async function answerOf(fileId: string, token: string, request: AbortController)
     // never hits that, but CI did, and bytes are the same everywhere (and a
     // Blob is what fetchFileUrl must not make). The type comes from the
     // header, parameters dropped.
-    let bytes: ArrayBuffer;
+    let bytes: Uint8Array<ArrayBuffer>;
     try {
-        bytes = await res.arrayBuffer();
+        bytes = await readAll(res, request);
     } catch {
-        return { kind: 'transient', status: 0 };   // the body broke off
+        return { kind: 'transient', status: 0 };   // the body broke off, or stalled
     }
     const declared = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
     return { kind: 'ok', bytes, type: safeBlobType(declared) };
+}
+
+/**
+ * The body's bytes, ending the request once FILE_ANSWER_TIMEOUT_MS pass with
+ * NOTHING arriving (a body that stalls must not hold its slot either; one that
+ * keeps arriving, however slowly, is never cut off).
+ */
+async function readAll(res: Response, request: AbortController): Promise<Uint8Array<ArrayBuffer>> {
+    if (!res.body) return new Uint8Array(await res.arrayBuffer());
+    const reader = res.body.getReader();
+    // A real fetch's body errors when its signal ends; letting go of the
+    // reader makes sure of it whatever stands behind the Response.
+    const letGo = () => { void reader.cancel().catch(() => { /* already over */ }); };
+    request.signal.addEventListener('abort', letGo, { once: true });
+    const stall = () => setTimeout(() => request.abort(), FILE_ANSWER_TIMEOUT_MS);
+    let timer = stall();
+    const parts: Uint8Array[] = [];
+    let size = 0;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            clearTimeout(timer);
+            if (done) break;
+            parts.push(value);
+            size += value.byteLength;
+            timer = stall();
+        }
+    } finally {
+        clearTimeout(timer);
+        request.signal.removeEventListener('abort', letGo);
+    }
+    if (request.signal.aborted) throw new DOMException('The answer stalled.', 'AbortError');
+    const out = new Uint8Array(size);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.byteLength; }
+    return out;
 }
 
 /** What a caller of loadFileUrl gets. */
@@ -351,7 +393,9 @@ const statusWord = (status: number) => (status === 0 ? 'network' : String(status
 
 async function runJob(job: Job): Promise<void> {
     const { fileId } = job;
-    const started = Date.now();
+    // When the first request went out: the time budget is the server's, and a
+    // job queued behind a crowd for a slot (MAX_FILE_FETCHES) has spent none of it.
+    let started: number | null = null;
     let backoff = FILE_RETRY_BASE_MS;
     let extra = FILE_EXTRA_ATTEMPTS;
     const seen: string[] = [];
@@ -366,7 +410,12 @@ async function runJob(job: Job): Promise<void> {
         let answer: Answer;
         try {
             answer = await fileLimiter.schedule({
-                run: () => { job.phase = 'fetching'; seq = recoverySeq; return getFile(fileId, request.signal); },
+                run: () => {
+                    job.phase = 'fetching';
+                    seq = recoverySeq;
+                    started ??= Date.now();
+                    return getFile(fileId, request.signal);
+                },
                 urgency: () => 0,
                 signal: unqueue.signal,
             });
@@ -382,7 +431,7 @@ async function runJob(job: Job): Promise<void> {
         // Signed out while it was out: nothing of it is the next account's.
         if (job.done) return;
         if (answer.kind === 'ok') {
-            const url = `data:${answer.type};base64,${bytesToB64(new Uint8Array(answer.bytes))}`;
+            const url = `data:${answer.type};base64,${bytesToB64(answer.bytes)}`;
             remember(fileId, url);
             if (attempt > 1) logMediaDiag(`picture loaded on attempt ${attempt} after ${seen.join(',')}: file=${shortId(fileId)}`);
             finish(job, { url, retryable: false });
@@ -404,9 +453,10 @@ async function runJob(job: Job): Promise<void> {
         const chanced = recoverySeq !== seq;
         const wait = chanced ? floor : withJitter(Math.max(floor, backoff));
         backoff = Math.min(backoff * 2, FILE_RETRY_MAX_BACKOFF_MS);
-        const spent = attempt >= FILE_ATTEMPTS || Date.now() - started + wait > FILE_RETRY_TOTAL_MS;
+        const since = Date.now() - (started ?? Date.now());
+        const spent = attempt >= FILE_ATTEMPTS || since + wait > FILE_RETRY_TOTAL_MS;
         if (spent && !(chanced && extra > 0)) {
-            logMediaDiag(`picture gave up: last=${statusWord(answer.status)} attempts=${attempt} after=${Math.round((Date.now() - started) / 1000)}s seen=${seen.join(',')} file=${shortId(fileId)}`);
+            logMediaDiag(`picture gave up: last=${statusWord(answer.status)} attempts=${attempt} after=${Math.round(since / 1000)}s seen=${seen.join(',')} file=${shortId(fileId)}`);
             finish(job, RETRYABLE_NULL);
             return;
         }

@@ -119,6 +119,8 @@ export function ServerSettingsModal({
     const previewFor = useRef<string | null>(null);
     const showPreviewOf = (fileId: string) => {
         previewFor.current = fileId;
+        // The letter meanwhile, not the icon this one replaces.
+        setIconPreview(null);
         void fetchFileUrl(fileId).then((url) => { if (previewFor.current === fileId) setIconPreview(url); });
     };
     const [isSaving, setIsSaving] = useState(false);

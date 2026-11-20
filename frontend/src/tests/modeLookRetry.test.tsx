@@ -222,6 +222,28 @@ describe('after the job gave up (on the fake clock its schedule needs)', () => {
         expect(picture()).toBe('on');
     });
 
+    it('after the give-up, the browser back online asks again too, once', async () => {
+        fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+        await mountNow();
+        await advance(5 * 60_000);
+        expect(fetchSpy).toHaveBeenCalledTimes(6);
+        fetchSpy.mockImplementation(async () => served());
+        await act(async () => { window.dispatchEvent(new Event('online')); });
+        await tick();
+        expect(fetchSpy).toHaveBeenCalledTimes(7);
+        expect(picture()).toBe('on');
+    });
+
+    it('gone from the page while the job waits: it stops trying', async () => {
+        fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+        await mountNow();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        await act(async () => { root.render(<></>); });
+        await tick();
+        await advance(10 * 60_000);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('a reconnect during the job is one schedule of tries, not a second one after it gives up', async () => {
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
         await mountNow();

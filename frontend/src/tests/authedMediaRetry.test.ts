@@ -50,6 +50,19 @@ let clock = new Date('2026-11-20T12:00:00Z').getTime();
 
 const ok = () => new Response(PNG.slice(), { headers: { 'Content-Type': 'image/png' } });
 const status = (code: number, headers: Record<string, string> = {}) => new Response('nope', { status: code, headers });
+/** A 200 whose body never sends a byte (and never ends). */
+const stalled = () => new Response(new ReadableStream<Uint8Array>({ start() { /* nothing, ever */ } }), { headers: { 'Content-Type': 'image/png' } });
+/** A 200 whose body sends one byte every `everyMs`, `count` times, then ends. */
+const trickle = (count: number, everyMs: number) => new Response(new ReadableStream<Uint8Array>({
+    start(c) {
+        let sent = 0;
+        const next = () => setTimeout(() => {
+            c.enqueue(new Uint8Array([0x89]));
+            if (++sent === count) c.close(); else next();
+        }, everyMs);
+        next();
+    },
+}), { headers: { 'Content-Type': 'image/png' } });
 /** A request that never answers unless its signal ends it, as fetch does. */
 const hang = (signal: AbortSignal | undefined) => new Promise<Response>((_, reject) => {
     signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
@@ -455,15 +468,55 @@ describe('found in review', () => {
         expect((await Promise.all(hung)).every((u) => u?.startsWith('data:'))).toBe(true);
     });
 
-    it('...but a body that is slow to arrive is not timed', async () => {
-        script = () => new Response(new ReadableStream<Uint8Array>({
-            start(c) { setTimeout(() => { c.enqueue(PNG.slice()); c.close(); }, 45_000); },
-        }), { headers: { 'Content-Type': 'image/png' } });
+    it('...but a body that keeps arriving, however slowly, is never cut off (100 s here)', async () => {
+        script = () => trickle(5, 20_000);
         let got: string | null | undefined;
         void fetchFileUrl('big').then((u) => { got = u; });
-        await advance(45_000);
+        await advance(99_000);
+        expect(got).toBeUndefined();
+        await advance(1000);
         expect(got).toMatch(/^data:/);
         expect(calls).toHaveLength(1);
+    });
+
+    it('a body that sends nothing for 30 s is let go and tried again', async () => {
+        script = (n) => (n === 1 ? stalled() : ok());
+        const p = fetchFileUrl('av');
+        await advance(29_999);
+        expect(requestsFor('av')).toHaveLength(1);
+        await advance(1);
+        await advance(2000);
+        expect(requestsFor('av')).toHaveLength(2);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('...so six stalled bodies hold the slots for 30 s, not for ever', async () => {
+        script = (n, url) => (n === 1 && !url.endsWith('/next') ? stalled() : ok());
+        const stuck = Array.from({ length: 6 }, (_, i) => fetchFileUrl(`s${i}`));
+        const next = fetchFileUrl('next');
+        await advance(29_000);
+        expect(requestsFor('next'), 'queued behind six bodies that stopped').toHaveLength(0);
+        await advance(1000);
+        expect(requestsFor('next')).toHaveLength(1);
+        expect(await next).toMatch(/^data:/);
+        await advance(2000);
+        expect((await Promise.all(stuck)).every((u) => u?.startsWith('data:'))).toBe(true);
+    });
+
+    it('time queued for a slot is not the job\'s: one queued 100 s still has its retries', async () => {
+        // Six slow downloads (a byte every 10 s for 100 s: never a stall) hold every slot.
+        script = (n, url) => (url.endsWith('/q') ? (n === 1 ? status(503, { 'Retry-After': '2' }) : ok()) : trickle(10, 10_000));
+        const slow = Array.from({ length: 6 }, (_, i) => fetchFileUrl(`slow${i}`));
+        let got: string | null | undefined;
+        void fetchFileUrl('q').then((u) => { got = u; });
+        await advance(99_000);
+        expect(requestsFor('q')).toHaveLength(0);
+        await advance(1000);
+        expect(requestsFor('q'), 'out once a slot freed, at 100 s').toHaveLength(1);
+        await advance(2000);
+        expect(requestsFor('q'), 'and tried again after its Retry-After, not given up').toHaveLength(2);
+        expect(got).toMatch(/^data:/);
+        await Promise.all(slow);
     });
 
     it('signing out ends a request that is out', async () => {
