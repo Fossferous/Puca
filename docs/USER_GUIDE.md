@@ -1113,7 +1113,8 @@ above the bottom bar on a phone, goes back to the whole screen.
   a switch to another desktop), or moves to a screen that was not shared, the
   picture goes back to the whole screen and says why.
 - A program running as administrator can be watched this way, but Windows
-  does not let remote clicks and keys reach it; the list says so.
+  does not let remote clicks and keys reach it; the list says so. A window
+  smaller than 128 pixels either way is not listed.
 - Only the windows on screens the person at that computer shared are listed.
   It is not offered at the lock or sign-in screen, while control is paused,
   or on a computer shared with you to watch only. It needs this version of

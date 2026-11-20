@@ -192,6 +192,13 @@ pub(crate) fn crop_for(win: Rect, mon: Rect, frame_w: u32, frame_h: u32) -> Opti
     Some(Crop { x: x0 as u32, y: y0 as u32, w, h })
 }
 
+/// A window smaller than the smallest crop shown, on either edge (physical
+/// pixels): it is not offered, and one that shrinks below it goes back to the
+/// whole screen saying so.
+pub(crate) fn too_small(win: Rect) -> bool {
+    win.width < MIN_CROP_EDGE as i32 || win.height < MIN_CROP_EDGE as i32
+}
+
 /// `crop` kept at `size` (the size in force while a new one settles),
 /// anchored at the crop's own top-left and moved back inside the picture when
 /// that size would run off its edge. A window being resized is shown at its
@@ -324,6 +331,8 @@ pub enum Gone {
     /// cloaked (moved to another virtual desktop, or that desktop left): its
     /// rectangle is still there, with something else drawn in it.
     Hidden,
+    /// It became smaller than the smallest crop shown (`MIN_CROP_EDGE`).
+    Small,
     /// No part of it is on the screen being captured (moved to another one).
     Offscreen,
     /// The capture itself changed under it: another screen was chosen, or the
@@ -337,6 +346,7 @@ impl Gone {
             Gone::Closed => "closed",
             Gone::Minimized => "minimized",
             Gone::Hidden => "hidden",
+            Gone::Small => "small",
             Gone::Offscreen => "offscreen",
             Gone::Screen => "screen",
         }
@@ -511,6 +521,11 @@ impl WindowTrack {
             // gone; one that never says is closed in all but name.
             return if self.crop.is_some() { Tick::Showing } else { Tick::Gone(Gone::Closed) };
         };
+        // Shrunk below the smallest crop shown: said as that, not as a move
+        // (crop_for's None below is "not enough of it on this screen").
+        if too_small(win) {
+            return Tick::Gone(Gone::Small);
+        }
         let Some(full) = crop_for(win, self.mon_phys, frame_w, frame_h) else {
             return Tick::Gone(Gone::Offscreen);
         };
@@ -901,6 +916,11 @@ mod live {
             }
             let (f, pid) = facts(h, me);
             if !listable(&f) {
+                continue;
+            }
+            // Too small to show on its own (a minimised window's rectangle
+            // says nothing about the size it comes back at, so it stays).
+            if !unsafe { IsIconic(h) }.as_bool() && frame_bounds(h).is_some_and(too_small) {
                 continue;
             }
             let image = crate::input_reach::process_image(pid);
@@ -1484,7 +1504,7 @@ mod tests {
     #[test]
     fn a_window_that_closes_is_minimised_or_leaves_its_screen_goes_back_to_the_whole_screen() {
         let t0 = Instant::now();
-        let cases: [(Gone, fn(&mut Desk)); 5] = [
+        let cases: [(Gone, fn(&mut Desk)); 6] = [
             (Gone::Closed, |d| d.alive = false),
             (Gone::Closed, |d| d.pid = 99), // the handle reused by another program
             (Gone::Minimized, |d| d.iconic = true),
@@ -1492,6 +1512,8 @@ mod tests {
             // rectangle is still there (review, 2026-11-20).
             (Gone::Hidden, |d| d.shown = false),
             (Gone::Offscreen, |d| d.rect = Some(r(2500, 0, 800, 600))),
+            // Shrunk below the smallest crop: said as that, not as a move.
+            (Gone::Small, |d| d.rect = Some(r(100, 100, 800, 120))),
         ];
         for (want, change) in cases {
             let mut t = track();
@@ -1568,6 +1590,13 @@ mod tests {
         assert_eq!(borrowable_offset(bottom, 50, stride, len), None);
         let bottom_left = Crop { x: 0, y: 30, w: 40, h: 20 };
         assert_eq!(borrowable_offset(bottom_left, 50, stride, len), Some(30 * stride));
+    }
+
+    #[test]
+    fn a_window_too_small_to_show_is_told_apart_from_one_that_left() {
+        assert!(too_small(r(0, 0, 800, 127)));
+        assert!(too_small(r(0, 0, 100, 600)));
+        assert!(!too_small(r(0, 0, 128, 128)));
     }
 
     #[test]

@@ -1370,7 +1370,13 @@ function hostWindowFromStatus(s: Internal, st: Partial<HostSessionStatus>): void
     }
     // A NEW STREAM that has not been given the window yet (a media restart,
     // between its start and afterWindowStreamStart): not the window going.
-    if (!isWindowEndReason(st.windowEnd) && s.windowStreamGen !== s.agentStreamGen) return;
+    // If the re-show was missed (a window choice was in flight when the
+    // stream started, so afterWindowStreamStart stood aside), it is made now:
+    // it gives the window back, or ends it, saying so (review, 2026-11-20).
+    if (!isWindowEndReason(st.windowEnd) && s.windowStreamGen !== s.agentStreamGen) {
+        void afterWindowStreamStart(s);
+        return;
+    }
     // Gone by itself, with its reason; or gone with none (an agent replaced
     // under the session): the screen changed under it.
     endHostWindow(s, isWindowEndReason(st.windowEnd) ? st.windowEnd : 'screen');

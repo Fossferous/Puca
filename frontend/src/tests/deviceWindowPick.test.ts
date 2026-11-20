@@ -139,6 +139,7 @@ describe('what the viewer is told', () => {
         expect(windowEndWords('minimized', 'Notepad')).toMatch(/was minimised\. Showing the whole screen\. Choose it again/);
         expect(windowEndWords('offscreen', null)).toMatch(/^That window moved off this screen/);
         expect(windowEndWords('hidden', 'Discord')).toBe('“Discord” was hidden, or moved to another desktop. Showing the whole screen.');
+        expect(windowEndWords('small', 'Clock')).toBe('“Clock” is too small to show on its own now. Showing the whole screen.');
         expect(windowEndWords('unshared', 'X')).toMatch(/a screen that was not shared/);
         expect(windowEndWords('screen', 'X')).toMatch(/screens on that computer changed/);
         expect(windowEndWords('asked', 'X')).toBeNull();

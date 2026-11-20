@@ -489,6 +489,8 @@ itself, and says why in `SessionState.window_end` (`Gone`):
   its X is pressed (Discord, Steam, Teams), or a switch to another virtual
   desktop. Its rectangle stays, with something else drawn in it, so cropping
   it would show and click that;
+- **`small`**: the window itself shrank below 128 px either way (windows that
+  small are not listed at all);
 - **`offscreen`**: less than 128 px of it (either way) is on the capture's
   screen, with `window_end_monitor` the screen it is on now. Not less: a crop
   is encoded at its own size (the viewer fit never steps below 320 px, but a
@@ -530,7 +532,13 @@ not read as the window going (`windowStreamGen`). Whole screen asked for
 re-sends the picture at once: on a still screen nothing else would, and the
 viewer kept the window's picture while its clicks were already mapped over
 the whole screen. A window that is on another screen by the time it is chosen
-is refused before anything is restored or raised.
+is refused before anything is restored or raised. A crop that moved or
+resized on a still screen asks for the held picture again, cropped anew (the
+viewer fit's own request, so a drag costs no keyframe per frame): before that
+the end of a drag, or a size settling, aimed input at the new rectangle while
+the viewer kept the old picture. And a re-show a media restart missed (a
+window choice was in flight as the new stream started) is made on the next
+poll, which gives the window back or ends it saying so.
 
 **Bringing it forward.** Choosing a window restores it if it is minimised
 (`ShowWindowAsync(SW_RESTORE)`: posted, never waited on, so a hung program

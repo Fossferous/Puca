@@ -92,8 +92,10 @@
 }
 .dswp-row.active { background: var(--background-modifier-hover, rgba(79, 84, 92, 0.32)); }
 .dswp-row[aria-selected="true"] { background: var(--background-modifier-selected, rgba(79, 84, 92, 0.48)); }
-/* On the chosen row's darker fill the muted line fell to 3.55:1 on every
-   theme (the walk measured it): it takes the full text colour there. */
+/* On a highlighted or chosen row's fill the muted line fell below 4.5:1 on
+   every theme (3.85:1 highlighted, 3.55:1 chosen; the walk and the Light
+   sweep measured them): it takes the full text colour there. */
+.dswp-row.active .dswp-app,
 .dswp-row[aria-selected="true"] .dswp-app { color: var(--text-normal, #dcddde); }
 .dswp-row.busy { opacity: 0.8; }
 .dswp-row[aria-disabled="true"] { cursor: default; }

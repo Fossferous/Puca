@@ -298,7 +298,16 @@ const iconPixels = (page, windowIdSel) => page.evaluate(sel => {
     await page.getByRole('button', { name: 'Refresh the list' }).click();
     ck('desktop: Refresh asks again and lists them', await waitFor(page, () => document.querySelectorAll('.dswp-row').length === 13 && !document.querySelector('[data-testid="window-picker-status"]')));
 
-    // 8 (desktop). Themes, with the picker open.
+    // 8 (desktop). Themes, with the picker open and a row HIGHLIGHTED that is
+    // not the chosen one (the arrow's), so both fills are measured. The
+    // focus is on Refresh after the press above: back into the field first.
+    await page.locator('.dswp-search input').focus();
+    await page.keyboard.press('Control+Home');
+    await page.keyboard.press('ArrowDown');
+    ck('desktop: the measure sees a highlighted row that is not the chosen one', await page.evaluate(() => {
+        const a = document.querySelector('.dswp-row.active');
+        return !!a && a.getAttribute('aria-selected') !== 'true';
+    }));
     await themes(page, 'desktop');
     await page.keyboard.press('Escape');
     await ctx.close();

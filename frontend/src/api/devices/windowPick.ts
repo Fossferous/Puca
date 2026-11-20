@@ -198,11 +198,11 @@ export function matchWindows<T extends { title: string; app: string }>(windows: 
 
 /** The reasons a host gives for going back to the whole screen by itself
  *  (the agent's `Gone` codes), and the host app's own two. */
-export type WindowEndReason = 'closed' | 'minimized' | 'hidden' | 'offscreen' | 'screen' | 'unshared' | 'asked';
+export type WindowEndReason = 'closed' | 'minimized' | 'hidden' | 'small' | 'offscreen' | 'screen' | 'unshared' | 'asked';
 
 export function isWindowEndReason(v: unknown): v is WindowEndReason {
-    return v === 'closed' || v === 'minimized' || v === 'hidden' || v === 'offscreen' || v === 'screen'
-        || v === 'unshared' || v === 'asked';
+    return v === 'closed' || v === 'minimized' || v === 'hidden' || v === 'small' || v === 'offscreen'
+        || v === 'screen' || v === 'unshared' || v === 'asked';
 }
 
 /** VIEWER: the line the stage shows when the picture went back to the whole
@@ -214,6 +214,7 @@ export function windowEndWords(reason: WindowEndReason, title: string | null): s
         case 'closed': return `${name} was closed. Showing the whole screen.`;
         case 'minimized': return `${name} was minimised. Showing the whole screen. Choose it again to bring it back.`;
         case 'hidden': return `${name} was hidden, or moved to another desktop. Showing the whole screen.`;
+        case 'small': return `${name} is too small to show on its own now. Showing the whole screen.`;
         case 'offscreen': return `${name} moved off this screen. Showing the whole screen.`;
         case 'unshared': return `${name} moved to a screen that was not shared. Showing the whole screen.`;
         case 'screen': return `The screens on that computer changed. Showing the whole screen.`;

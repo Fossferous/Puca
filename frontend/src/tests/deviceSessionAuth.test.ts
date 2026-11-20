@@ -2809,4 +2809,26 @@ describe('one window on its own', () => {
         expect(got.filter(f => f.kind === 'window-active' && f.window === null), 'not ended as "the screens changed"').toEqual([]);
         expect(setWindow, 'given back to the new stream').toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
     });
+
+    // ---- review round 3 (2026-11-20).
+
+    it('a re-show missed at a media restart (a choice was in flight) is made on the next poll', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        // The viewer picks another window; its crop is held up on the pipe...
+        let refuse: (e: Error) => void = () => {};
+        setWindow.mockImplementationOnce(() => new Promise((_, rej) => { refuse = rej; }));
+        await signal(key, { kind: 'set-window', hwnd: 101, pid: 1 });
+        // ...when the media restarts: the restart's re-show stands aside.
+        await signal(key, { kind: 'restart-offer', sdp: OFFER });
+        // The held choice then fails on the new stream.
+        refuse(new Error('DeadlineExpired'));
+        await settle();
+        setWindow.mockClear();
+        // The new stream reports no window and no reason.
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 0 };
+        await poll();
+        expect(setWindow, 'the window shown before is given back').toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+    });
 });

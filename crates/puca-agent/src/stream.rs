@@ -3257,6 +3257,15 @@ fn run(
                                     }),
                                 );
                                 window_moved = true;
+                                // THE PICTURE MOVES WITH THE AIM. A still
+                                // screen pumps nothing, so a crop moved (the
+                                // end of a drag) or resized (a settle) went
+                                // unsent while input was already aimed at it
+                                // (review, 2026-11-20). The fit's own request
+                                // re-sends the held picture, cropped anew,
+                                // without the keyframe a drag would pay for
+                                // on every frame.
+                                fit.stage_changed();
                             }
                             let size = t.shown().map(|r| (r.width.max(0) as u32, r.height.max(0) as u32));
                             if let Ok(mut st) = window_status.lock() {
@@ -4117,6 +4126,7 @@ fn start_window(
         Tick::Gone(Gone::Closed) => Err("that window has closed".into()),
         Tick::Gone(Gone::Minimized) => Err("that window is minimised".into()),
         Tick::Gone(Gone::Hidden) => Err("that window is hidden, or on another desktop".into()),
+        Tick::Gone(Gone::Small) => Err("that window is too small to show on its own".into()),
         Tick::Gone(Gone::Offscreen) => Err("too little of that window is on its screen to show".into()),
         Tick::Gone(Gone::Screen) => Err("the screen changed".into()),
     }
@@ -5165,6 +5175,11 @@ mod tests {
             .next()
             .unwrap();
         assert!(arm.contains("want_keyframe = true"), "the whole-screen branch must ask for a picture");
+        // A crop that moved or resized asks for a picture too (the fit's
+        // request: no keyframe per frame of a drag).
+        let tick = run.rsplit("if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown())").next().unwrap();
+        let tick = tick.split("t.crop()").next().unwrap();
+        assert!(tick.contains("fit.stage_changed()"), "a moved crop must ask for the held picture");
         // The positive control: the window-chosen branch, and the end of a
         // window by itself, already did.
         let chosen = run.split("showing one window of").nth(1).unwrap().split("reply_tx.send(Ok(shown))").next().unwrap();
