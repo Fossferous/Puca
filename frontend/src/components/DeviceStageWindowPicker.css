@@ -1,0 +1,239 @@
+/* THE WINDOW PICKER (DeviceStageWindowPicker.tsx), and the chip and strip that
+   say a window is shown on its own.
+
+   The dialog is the Type text / pinned-keys dialog's surface and words (the
+   app's theme tokens), raised over the stage's own clusters (460) as the
+   pinned-keys editor is: on a phone it must cover what it is about. Every
+   row is 44 px or more, so a finger lands on it; the list scrolls inside the
+   dialog on a short screen. */
+
+.device-stage-typetext-backdrop.dswp-backdrop { z-index: 700; }
+
+.dswp-picker {
+    width: min(520px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    box-sizing: border-box;
+    overflow: hidden;
+}
+.dswp-picker:focus { outline: none; }
+
+/* A phone: a sheet from the bottom, the width of the screen. */
+.dswp-touch.dswp-backdrop { align-items: flex-end; }
+.dswp-touch .dswp-picker {
+    width: 100vw;
+    max-height: 80vh;
+    max-height: 80dvh;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.dswp-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.dswp-head strong { flex: 1 1 auto; font-size: 16px; }
+.dswp-head-btn {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: var(--text-normal, #dcddde);
+}
+
+.dswp-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 10px;
+    border: 1px solid var(--text-muted, #b9bbbe);
+    border-radius: 6px;
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-muted, #b9bbbe);
+}
+.dswp-search:focus-within { border-color: var(--text-normal, #dcddde); box-shadow: 0 0 0 1px var(--text-normal, #dcddde); }
+.dswp-search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 42px;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text-normal, #dcddde);
+    font: inherit;
+    /* 16 px: a phone zooms the page into a field typed into below it. */
+    font-size: 16px;
+}
+.dswp-search input::placeholder { color: var(--text-muted, #b9bbbe); opacity: 1; }
+
+.dswp-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+    overscroll-behavior: contain;
+}
+.dswp-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.dswp-row.active { background: var(--background-modifier-hover, rgba(79, 84, 92, 0.32)); }
+.dswp-row[aria-selected="true"] { background: var(--background-modifier-selected, rgba(79, 84, 92, 0.48)); }
+/* On a highlighted or chosen row's fill the muted line fell below 4.5:1 on
+   every theme (3.85:1 highlighted, 3.55:1 chosen; the walk and the Light
+   sweep measured them): it takes the full text colour there. */
+.dswp-row.active .dswp-app,
+.dswp-row[aria-selected="true"] .dswp-app { color: var(--text-normal, #dcddde); }
+.dswp-row.busy { opacity: 0.8; }
+.dswp-row[aria-disabled="true"] { cursor: default; }
+/* The highlighted row is the field's, not a focus of its own: a ring says
+   which one Enter takes while the field has the keyboard. */
+.dswp-search:focus-within ~ .dswp-list .dswp-row.active {
+    box-shadow: inset 0 0 0 2px var(--text-normal, #dcddde);
+}
+.dswp-whole { border-bottom: 1px solid var(--background-modifier-accent, #3f4147); border-radius: 6px 6px 0 0; }
+
+.dswp-icon {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-normal, #dcddde);
+    font-size: 20px;
+}
+.dswp-icon img { width: 24px; height: 24px; display: block; }
+
+.dswp-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.dswp-title {
+    font-weight: 600;
+    color: var(--text-normal, #dcddde);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dswp-app {
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dswp-warn {
+    font-size: 12px;
+    color: var(--text-normal, #dcddde);
+    font-style: italic;
+}
+.dswp-mark {
+    flex: none;
+    display: inline-flex;
+    color: var(--text-normal, #dcddde);
+    font-size: 18px;
+}
+
+.dswp-status { font-size: 13px; color: var(--text-normal, #dcddde); }
+.dswp-status-error { font-weight: 600; }
+
+/* THE CHIP in the desktop bar while a window is shown on its own: which
+   window, and Whole screen beside it — the way back, where the eye already
+   is. */
+.dswp-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 340px;
+    padding: 2px 2px 2px 8px;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 16px;
+    color: var(--text-normal, #dcddde);
+    font-size: 13px;
+}
+.dswp-chip .dswp-icon { width: 18px; height: 18px; font-size: 16px; }
+.dswp-chip .dswp-icon img { width: 18px; height: 18px; }
+.dswp-chip-title {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.dswp-chip .device-stage-btn { flex: none; border-radius: 14px; }
+
+/* THE STRIP on a phone: the first row of the bottom bar, so the picture gives
+   way to it as it does to the bar (the bar's measured height includes it). */
+.device-stage-mobile-toolbar { flex-wrap: wrap; }
+.dswp-strip {
+    flex: 1 0 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 0 4px 4px;
+    color: #fff;
+    font-size: 14px;
+}
+.dswp-strip .dswp-icon { color: #fff; }
+.dswp-strip .dswp-chip-title { flex: 1 1 auto; }
+.dswp-strip-btn {
+    flex: none;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid #fff;
+    border-radius: 22px;
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+.dswp-strip-btn:active { background: rgba(255, 255, 255, 0.18); }
+
+/* The stage's note under the bar or in the phone's feedback line: why the
+   picture went back to the whole screen. */
+.dswp-front {
+    font-size: 12px;
+}
+
+/* The phone's Screen sheet: its window rows, 44 px, above the screen tabs. */
+.dswp-menu-rows {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 8px;
+    border-bottom: 1px solid #3f4147;
+}
+.dswp-menu-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: #dcddde;
+    font: inherit;
+    font-size: 15px;
+    text-align: left;
+    cursor: pointer;
+}
+.dswp-menu-row:active { background: rgba(255, 255, 255, 0.08); }

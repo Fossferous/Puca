@@ -31,9 +31,13 @@ interface ToolbarProps {
      *  `button { min-height: 44px }` decides the real height, not the
      *  `--device-toolbar-h` guess in the stylesheet. */
     onHeight?: (px: number) => void;
+    /** A row above the buttons: the window shown on its own and Whole screen
+     *  (DeviceStageWindowChip.tsx). Inside the bar so the bar's measured
+     *  height, which the picture gives way to, includes it. */
+    strip?: React.ReactNode;
 }
 
-export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCollapse, onKeyboard, onMinimize, onHeight }: ToolbarProps) {
+export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCollapse, onKeyboard, onMinimize, onHeight, strip }: ToolbarProps) {
     const toggleMenu = (menu: string) => {
         setActiveMenu(activeMenu === menu ? null : menu);
     };
@@ -56,6 +60,7 @@ export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCol
 
     return (
         <div className="device-stage-mobile-toolbar" ref={rootRef}>
+            {strip}
             <button className="device-stage-mobile-btn" onClick={onCloseSession} title="Close">
                 <CloseIcon />
             </button>

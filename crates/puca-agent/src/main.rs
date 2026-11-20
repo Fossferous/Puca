@@ -44,6 +44,12 @@ mod input_wire;
 mod input_tally;
 // Whether the window that would receive input is above this agent (UIPI).
 mod input_reach;
+// One app window shown and controlled on its own: the list, the crop and the
+// input mapping (pure on every leg; the desktop calls on Windows only). Its
+// callers are the Windows stream and handlers, so elsewhere only its tests
+// and the wire types use it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod window_pick;
 // Capturing soon after an input, and the latency probe. Its only caller is
 // the Windows stream loop; tests compile it everywhere.
 #[cfg(any(windows, test))]

@@ -147,9 +147,12 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   - injecting into such a game can **still get the account banned**.
   Users are warned in the approval prompt; do not describe the feature as
   anti-cheat–safe.
-- **Multi-monitor edge:** a host sharing a **window** (not a full monitor), or an
-  unusual scaled/rotated layout, may map approximately; full-monitor share is the
-  supported path.
+- **Multi-monitor edge, in a call:** a CALL's screen share of a **window** (not a
+  full monitor; `getDisplayMedia` picks it), or an unusual scaled/rotated layout,
+  may map approximately, because the host maps input onto the window's monitor;
+  full-monitor share is the supported path there. My Devices shows one window
+  differently, as a crop of its screen with input aimed inside it: see
+  [One window](#one-window).
 - **A fullscreen app holding the pointer.** A game that confines the pointer to
   its own window (`ClipCursor`) makes every other screen unreachable: Windows
   clamps injected moves back into the game and still reports success, so
@@ -410,6 +413,219 @@ Up to three can be buttons on the Android app's session notification
   any notification's buttons, these included; even then the receiver's
   keyguard rule holds, so a locked phone still does not type. Lite registers
   no plugin and draws no buttons.
+
+## One window
+
+A controller can show ONE of the host's open windows on its own, sized to
+it, and drive it (the owner's ask, 2026-11-20; docs/USER_GUIDE.md, *One
+window*, for how it is used). The agent's half is
+`crates/puca-agent/src/window_pick.rs`, the wire and the checks every list goes
+through `frontend/src/api/devices/windowPick.ts`, the host app's half and the
+viewer's in `session.ts`, the picker `components/DeviceStageWindowPicker.tsx`.
+
+**How a window is shown: a crop of its screen.** The stream keeps capturing
+the window's screen with Desktop Duplication, as it always has, and sends only
+the window's part of each picture (`stream.rs` `pump_frame`, before the viewer
+fit). Not Windows.Graphics.Capture's `CreateForWindow`, for three reasons:
+
+- **No yellow border.** WGC outlines a captured window. Turning that off
+  (`GraphicsCaptureSession.IsBorderRequired = false`) needs Windows 10 build
+  20348 or later, a `GraphicsCaptureAccess.RequestAccessAsync(Borderless)`
+  that asks the person at the PC in a dialog (nobody is there on an
+  unattended PC), and the `graphicsCaptureWithoutBorder` capability of a
+  package manifest the agent does not have. The capture crate chose
+  duplication over WGC for the same border (its header).
+- **What you see is what you click.** Input lands on the screen at a point. A
+  picture of the window's own pixels would hide whatever covers it while a
+  click there hits the cover; the screen's pixels show the cover.
+- **Everything else keeps working unchanged**: one duplication per output and
+  its sharing between sessions, the viewer fit, the pointer drawn into the
+  picture, the early look after an input, the secure-desktop handling, the
+  pinned-screen check of every picture, the latency probe.
+
+What that costs, said here rather than found: a covered window shows the
+cover (the host also reports whether the window's program is in front, and
+the viewer says when it is not); a menu or dialog outside the window's
+rectangle is cut off (Whole screen is one press away); a minimised window has
+no pixels (it is restored when chosen); a window across two screens shows the
+part on the screen holding most of it (`MonitorFromWindow`). The old
+*Multi-monitor edge* caveat about a host sharing a window was about a CALL's
+screen share (`getDisplayMedia` of a window, mapped onto its monitor's
+bounds); My Devices had no window capture before this.
+
+**Coordinates.** The window's rectangle is
+`DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`, which Microsoft documents
+as not adjusted for DPI: physical pixels (the space DXGI's
+`DesktopCoordinates` use, whatever the caller's DPI awareness), without the
+invisible resize border `GetWindowRect` adds. The agent is DPI-unaware on
+purpose and `SendInput` normalises over the virtualised GDI desktop (session.rs
+`CaptureSurface`), so input is aimed by the crop's FRACTIONS of its screen laid
+over that screen's GDI rectangle (`window_target`), never by the physical
+numbers: on a 150% screen those differ by the scale (2560 against 1707).
+The agent keeps the window's target per session (`WINDOW_AIM`), so a
+whole-screen re-aim of that session's screen (after a switch or a topology
+rebuild) aims at the window instead, its fractions laid over the screen's
+FRESH whole-screen target: a monitor plugged in moves the virtual desktop
+every absolute move is normalised over. The
+viewer's pointer fractions are of the window's picture, so an absolute move
+lands inside the window. Game mode's relative moves are not confined; a game
+confines them itself. The caret surface is the crop too, so the phone's zoom
+to the text cursor follows.
+
+**Following the window.** The stream re-reads the window's rectangle at most
+every 33 ms. A move is followed at once (the same size costs the encoder
+nothing); a new SIZE is taken once it has held for 250 ms (`SizeSettle`:
+dragging an edge is a new size every frame, and each one reconfigures the
+encoder and reshapes the viewer's picture), shown meanwhile at the old size
+following the window's corner. Every pump also checks the window is still
+shown from the capture's own screen. It goes back to the whole screen by
+itself, and says why in `SessionState.window_end` (`Gone`):
+
+- **`closed`**: `IsWindow` is false, or the handle belongs to another process
+  now (a handle is reused once its window closes, so a window is always named
+  by its HWND and its pid);
+- **`minimized`**: `IsIconic`;
+- **`hidden`**: no longer visible, or cloaked: an app hidden to the tray when
+  its X is pressed (Discord, Steam, Teams), or a switch to another virtual
+  desktop. Its rectangle stays, with something else drawn in it, so cropping
+  it would show and click that;
+- **`small`**: the window itself shrank below 128 px either way (windows that
+  small are not listed at all);
+- **`offscreen`**: less than 128 px of it (either way) is on the capture's
+  screen, with `window_end_monitor` the screen it is on now. Not less: a crop
+  is encoded at its own size (the viewer fit never steps below 320 px, but a
+  crop is native), and Microsoft documents no minimum frame size for its
+  H.264 encoder MFT while documenting 48x48 for its decoder, so a thin strip
+  left on a shared screen could end the stream;
+- **`screen`**: the capture moved to another index or another screen (a
+  switch, a lid move, a topology rebuild); a rebuild in place keeps it.
+
+The host app reads that on its 1 Hz status poll and tells the viewer. It also
+FOLLOWS a window to another screen that holds most of it (`window_monitor`),
+or that it moved to wholly (`offscreen`), but only a screen the person at the
+host shared: it switches the capture there (`SetMonitor`, the consent-checked
+path) and selects the window again. Onto a screen that was not shared it
+never follows: the crop shows what is left on the shared screen, and when
+nothing is, the viewer is told the window went to a screen that was not
+shared. A screen chosen in the viewer's picker while a window is shown means
+that screen, whole: the host drops the window first (the agent keeps a window
+across a switch to the screen it is already on). A media restart starts a new
+stream on the whole screen; the host app selects the window again on it, a few
+times a second apart while the new stream is still opening its capture.
+
+**The host app and the agent never disagree for long** (review, 2026-11-20).
+A `SetWindow` the agent has not applied by its 2 s deadline is refused when
+its turn comes (`command_gate`, like `SetMonitor`), not applied seconds later
+behind a host app that already told the viewer it failed. And the status poll
+reconciles: an agent showing a window this side does not (or another one) is
+told to show the whole screen, and the viewer told if it had one; a window the
+agent no longer has and gives no reason for (an agent replaced under the
+session) ends as `screen`; a follow that fails also has the agent let go of
+the old window. A resize that settled reaches the viewer as the window's new
+size (`window_width` / `window_height`), the surface its caret is mapped over.
+A screen switch asked for while a window choice is half done (its `SetMonitor`
+in, its `SetWindow` not yet) is refused rather than undone by it, and a window
+chosen while a screen switch is in flight is refused the same way. A window
+pushed off its own screen is never "followed" onto that same screen. A media
+restart's new stream reports no window until it is given it back, and that is
+not read as the window going (`windowStreamGen`). Whole screen asked for
+re-sends the picture at once: on a still screen nothing else would, and the
+viewer kept the window's picture while its clicks were already mapped over
+the whole screen. A window that is on another screen by the time it is chosen
+is refused before anything is restored or raised. A crop that moved or
+resized on a still screen asks for the held picture again, cropped anew (the
+viewer fit's own request, so a drag costs no keyframe per frame): before that
+the end of a drag, or a size settling, aimed input at the new rectangle while
+the viewer kept the old picture. And a re-show a media restart missed (a
+window choice was in flight as the new stream started) is made on the next
+poll, which gives the window back or ends it saying so.
+
+**Bringing it forward.** Choosing a window restores it if it is minimised
+(`ShowWindowAsync(SW_RESTORE)`: posted, never waited on, so a hung program
+cannot hold the agent's pipe; then up to 600 ms for it to come back) and asks
+`SetForegroundWindow`. Nothing more: no injected Alt key, no
+`AttachThreadInput` (Raymond Chen documents that attaching input queues hangs).
+Windows may refuse (its foreground lock); the window then stays behind what is
+in front, the status poll says so (`window_front`), and a click into it
+brings it forward the way any click does. Keys go wherever the focus is, as on
+the whole screen: refocusing per key would take the focus off the program's
+own dialogs (a Save dialog is another window of the same program) and fight
+the person at the PC. The OS calls sit behind a seam (`FrontOs`) whose live
+implementation refuses to run in a test build.
+
+**The list** is the taskbar's: top-level, visible, not cloaked (another
+virtual desktop, a suspended Store app), titled, and unowned and activatable
+unless it asked for a taskbar button (`WS_EX_APPWINDOW`); never the desktop or
+the taskbar themselves (`listable`). Each entry carries the HWND and pid, the
+title (control characters out, 160 characters at most), the program's own
+name (its version resource's `FileDescription`, else its file name; a Store
+app's frame host is named by the window's title), minimised, elevated (its
+process is above the agent, input_reach.rs: Windows drops input to it, it can
+still be watched) and the capture index of its screen. Icons are the window's
+(`WM_GETICON` through `SendMessageTimeout` with `SMTO_ABORTIFHUNG`, 30 ms,
+and at most 400 ms of asking in all), else its class's, drawn at 24 px on
+black and on white so the straight alpha of any kind of icon is recovered
+(`unblend`), and written as a PNG with stored deflate blocks (no image crate
+in the agent). Each distinct icon is sent once.
+
+**The wire.** All of it is sealed device signals under the session key, so the
+server relays what it cannot read, and no route changed:
+
+- host → viewer `features {windows: true}`, once a stream exists, only when
+  the agent said so (`Capabilities.windows`) and the viewer may choose
+  (below);
+- viewer → host `list-windows {rid}`; host → viewer `windows {rid, windows}`,
+  then `window-icons {rid, icons}` frames of at most 36 KB each (the server
+  refuses a device signal over 64 KB, and sealing adds a third), or
+  `windows-failed {rid, reason}`. The list's own frame is measured in UTF-8
+  BYTES, as it is sealed: a title from outside the Basic Multilingual Plane is
+  two UTF-16 units but four bytes;
+- viewer → host `set-window {hwnd, pid}` or `{hwnd: null}` for the whole
+  screen; host → viewer `window-active {window | null, reason?}`,
+  `window-failed {reason}` and `window-front {front}`.
+
+The agent's half is additive (`ListWindows`, `SetWindow`,
+`Capabilities.windows`, `SessionState.window*`), with no PROTOCOL_VERSION bump.
+Skew both ways degrades to nothing offered: an older host app never says
+`features`, so a newer viewer shows no **Show one window…**; an older viewer
+ignores a kind it does not know; an older agent leaves `Capabilities.windows`
+out, so the host app never offers it.
+
+**Who may, and what bounds it.**
+
+- **The consent.** The list holds only the windows on screens the person at
+  the host shared (`windowsWithinConsent`): a one-screen consent never sends
+  the titles of the screens it declined. A `set-window` may name only a window
+  the host itself listed, and its screen is read from that list, never from
+  the viewer, and checked against the consent before the capture moves.
+- **A proved controller.** An armed host answers nothing before the
+  passphrase is proved, like every other request that reads its desktop.
+- **Control, not view-only.** Bringing a window to the front acts on the PC,
+  so a share without `control` is not offered it and is refused; the viewer
+  hides it while control is paused.
+- **Not at the sign-in screen.** The SYSTEM agent refuses `ListWindows` and
+  `SetWindow` (flavour.rs `WindowPick`): the lock screen has no app windows,
+  and a locked machine's windows are the signed-in person's titles. Its own
+  sealed path never announces the feature either.
+- **Not in Lite**, which has no My Devices at all (`check-no-rc.mjs` looks for
+  `list-windows`).
+
+**Tested.** The agent: the filter, the crop on negative and portrait screens,
+the input mapping at 150%, the size settle, every fallback on a scripted
+desktop, the PNG writer (read back by a decoder in the test, CRC-32 and
+Adler-32 against their reference values), the bring-forward order with the
+live calls refusing to run, the protocol bytes; and the real desktop calls on
+a HIDDEN window the test owns and never shows (its facts read back, and both
+kinds of class icon drawn through `DrawIconEx` into the PNG). A visible window
+cropped from a real screen is the one `#[ignore]`d test: it needs a desktop
+that is the test's to use. The host app and the viewer: the real `session.ts`
+handlers (`deviceSessionAuth.test.ts`, `deviceWindowPickController.test.ts`),
+the module (`deviceWindowPick.test.ts`), the picker
+(`deviceStageWindowPicker.test.tsx`), and the real stage in a real browser
+against a stand-in host that sends an icon the agent's own encoder made
+(`e2e/device-stage-window-picker-real-browser.mjs`). Not verified on real
+hardware: the crop of a real window, DPI on a real scaled screen, and whether
+Windows lets the agent's `SetForegroundWindow` through.
 
 ## Power off from the device list
 

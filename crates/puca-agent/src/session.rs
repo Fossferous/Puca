@@ -93,6 +93,77 @@ fn dispatch_input(event: puca_input::ControlInput) -> Result<(), String> {
 /// note asks for, could simply be missing it.
 static LAST_AIM_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// ONE WINDOW (window_pick.rs): the input target of the window a session's
+/// stream shows on its own, and the screen it is shown from.
+///
+/// WHY A RECORD AND NOT ONLY A `set_target`. Several places aim input at a
+/// session's WHOLE screen after something changed under the capture: the
+/// SetMonitor and topology handlers here once their rebuild has answered, the
+/// stream's own self-heal. A rebuild in place (same index, same screen) keeps
+/// the window on the picture, and those aims would then point input at the
+/// whole screen while the viewer is clicking on a window — with nothing to
+/// put it back, since the stream re-aims only when the window moves. So the
+/// stream records the window's target here, and `aim_input_at` aims there
+/// for that session and that screen, whoever calls it and in whatever order.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WindowAim {
+    pub monitor: usize,
+    /// The target as the stream last worked it out...
+    pub target: puca_input::TargetMonitor,
+    /// ...and what it was worked out from: the shown rectangle and its
+    /// screen's, physical. A re-aim after the desktop changed (a monitor
+    /// plugged in moves the virtual desktop every absolute move is normalised
+    /// over) lays these fractions over the screen's FRESH whole-screen target
+    /// rather than reuse one made for the old desktop.
+    pub shown: crate::window_pick::Rect,
+    pub mon_phys: crate::window_pick::Rect,
+}
+
+/// The target for a recorded window, over `fresh` (the screen's whole-screen
+/// target read now) when there is one, else as recorded.
+pub(crate) fn window_aim_target(aim: &WindowAim, fresh: Option<puca_input::TargetMonitor>) -> puca_input::TargetMonitor {
+    match fresh {
+        Some(whole) => crate::window_pick::window_target(aim.shown, aim.mon_phys, whole),
+        None => aim.target,
+    }
+}
+static WINDOW_AIM: std::sync::Mutex<Option<(String, WindowAim)>> = std::sync::Mutex::new(None);
+
+/// Record (or, with None, forget) the window `session_id` shows on its own.
+/// Forgetting only ever forgets that session's own record. (Its callers are
+/// the Windows stream's.)
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn set_window_aim(session_id: &str, aim: Option<WindowAim>) {
+    if let Ok(mut w) = WINDOW_AIM.lock() {
+        match aim {
+            // The target is set UNDER this lock, as `aim_input_at` sets its
+            // own, so the two can never interleave into input aimed at a
+            // window that has just gone (review, 2026-11-20).
+            Some(a) => {
+                *w = Some((session_id.to_string(), a));
+                puca_input::set_target(Some(a.target));
+            }
+            None => {
+                if w.as_ref().is_some_and(|(sid, _)| sid == session_id) {
+                    *w = None;
+                }
+            }
+        }
+    }
+}
+
+/// The window target to aim at for `session_id` on `monitor`, if it shows a
+/// window there. Pure over the record, so the rule is tested without one.
+pub(crate) fn window_aim_for(
+    record: Option<&(String, WindowAim)>,
+    session_id: &str,
+    monitor: usize,
+) -> Option<WindowAim> {
+    record
+        .filter(|(sid, a)| sid == session_id && a.monitor == monitor)
+        .map(|(_, a)| *a)
+}
+
 /// `line` if it differs from the last one recorded in `last` (which it then
 /// becomes), else `None` — so a re-aim at the same rectangle BY THE SAME
 /// SESSION, which every SetMonitor does, writes nothing.
@@ -396,6 +467,47 @@ pub(crate) fn resolve_target(
         Some(m) => virt(m.left, m.top, m.width, m.height),
         None => virt(out.left, out.top, out.width, out.height),
     })
+}
+
+/// The window fields of `SessionState`, from a stream's `WindowStatus`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowState {
+    pub window: Option<i64>,
+    pub front: Option<bool>,
+    pub monitor: Option<usize>,
+    pub end: Option<String>,
+    pub end_monitor: Option<usize>,
+    pub size: Option<(u32, u32)>,
+}
+
+/// `SessionState`'s window fields for one stream's status. Pure, so the shape
+/// the host app reads is tested without a desktop: a screen is named by its
+/// CAPTURE index (joined by HMONITOR), never by the handle itself.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn window_state(
+    status: Option<crate::window_pick::WindowStatus>,
+    outputs: &[puca_capture::OutputInfo],
+) -> WindowState {
+    let Some(st) = status else { return WindowState::default() };
+    let index_of = |h: Option<isize>| -> Option<usize> {
+        let h = h?;
+        outputs.iter().find(|o| o.hmonitor != 0 && o.hmonitor == h).map(|o| o.index)
+    };
+    match st.active {
+        Some(w) => WindowState {
+            window: Some(w.hwnd),
+            front: Some(st.front),
+            monitor: index_of(st.elsewhere),
+            end: None,
+            end_monitor: None,
+            size: st.size,
+        },
+        None => WindowState {
+            end: st.ended.map(|g| g.code().to_string()),
+            end_monitor: index_of(st.ended_on),
+            ..WindowState::default()
+        },
+    }
 }
 
 /// Is a cursor clip (`clip`, read live with the live virtual screen `virt`)
@@ -994,15 +1106,25 @@ impl Agent {
     pub(crate) fn aim_input_at(session_id: &str, monitor: usize) {
         let outputs = puca_capture::outputs();
         let list = puca_input::list_monitors();
-        let target = resolve_target(monitor, &outputs, &list);
+        // A window shown on its own from this screen keeps the input
+        // (`WINDOW_AIM`).
+        let whole = resolve_target(monitor, &outputs, &list);
+        // Read and set under the record's lock (see set_window_aim).
+        let record = WINDOW_AIM.lock();
+        let window = record.as_ref().ok().and_then(|w| window_aim_for(w.as_ref(), session_id, monitor));
+        let target = match window {
+            Some(aim) => Some(window_aim_target(&aim, whole)),
+            None => whole,
+        };
         // LOGGED ON CHANGE. Absolute moves are mapped onto this rectangle, and
         // nothing recorded it: "the pointer landed on a screen nobody was
         // watching" and "it landed where it should" were indistinguishable in
         // the log. `None` is the primary-only fallback, the one worth seeing.
+        puca_input::set_target(target);
+        drop(record);
         if let Some(line) = aim_changed(&LAST_AIM_LINE, aim_line(session_id, monitor, target.as_ref())) {
             eprintln!("{line}");
         }
-        puca_input::set_target(target);
     }
 
     /// Refuse a request this flavour does not serve.
@@ -1383,7 +1505,26 @@ impl Agent {
                 // "cannot reach those" note on the strength of this field.
                 elevated: self.flavour.is_elevated(),
                 monitors: ScreenCapture::monitor_count(),
+                // One window on its own: a Windows desktop, and only the agent
+                // running as the signed-in user (flavour.rs `WindowPick`).
+                windows: cfg!(windows) && self.flavour.allows(crate::flavour::Capability::WindowPick),
             },
+
+            // The open windows the picker offers (window_pick.rs). Read-only.
+            Request::ListWindows => {
+                if let Some(r) = self.gate(crate::flavour::Capability::WindowPick) {
+                    return r;
+                }
+                #[cfg(windows)]
+                {
+                    let (windows, icons) = crate::window_pick::list_windows();
+                    Response::Windows { windows, icons }
+                }
+                #[cfg(not(windows))]
+                {
+                    Response::error("choosing one window is only implemented on Windows")
+                }
+            }
 
             Request::ListMonitors => {
                 let outputs = puca_capture::outputs();
@@ -1810,6 +1951,62 @@ impl Agent {
                 }
             }
 
+            // ONE WINDOW (window_pick.rs): show the chosen window of the
+            // stream's screen on its own, or (no `hwnd`) the whole screen.
+            #[cfg(windows)]
+            Request::SetWindow { session_id, hwnd, pid } => {
+                if let Some(r) = self.gate(crate::flavour::Capability::WindowPick) {
+                    return r;
+                }
+                let Some(stream) = self.streams.get(&session_id) else {
+                    return Response::error("no live stream for that session");
+                };
+                let timeout = std::time::Duration::from_secs(2);
+                let Some(hwnd) = hwnd else {
+                    return match stream.set_window_sync(None, timeout) {
+                        Ok(_) => Response::Ok,
+                        Err(e) => Response::error(format!("could not show the whole screen: {e}")),
+                    };
+                };
+                let Some(pid) = pid else {
+                    return Response::error("a window is named by its handle and its process");
+                };
+                // THE SAME WINDOW the picker listed: a handle is reused once
+                // its window closes, and the other program behind it now is
+                // not the one the viewer chose.
+                use crate::window_pick::WindowOs;
+                let os = crate::window_pick::LiveWindows;
+                if !os.alive(hwnd) || os.pid(hwnd) != pid {
+                    return Response::error("that window has closed");
+                }
+                // ON THE STREAM'S SCREEN, before anything is raised: a stale
+                // list entry for a window since moved elsewhere must not
+                // restore or raise it (the stream would refuse it anyway).
+                if let Some(&mon) = self.sessions.get(&session_id) {
+                    let outs = puca_capture::outputs();
+                    if let (Some(own), Some(on)) =
+                        (outs.iter().find(|o| o.index == mon).map(|o| o.hmonitor), os.monitor(hwnd))
+                    {
+                        if own != 0 && own != on {
+                            return Response::error("that window is on another screen");
+                        }
+                    }
+                }
+                // Restored if minimised (it has no pixels otherwise), then
+                // asked to the front. Windows may refuse the second; the
+                // stream reports who is in front either way.
+                let forward = crate::window_pick::bring_forward(hwnd);
+                if forward.still_minimized {
+                    return Response::error("that window stayed minimised");
+                }
+                let window = crate::window_pick::WindowRef { hwnd, pid };
+                match stream.set_window_sync(Some(window), timeout) {
+                    Ok(Some((width, height))) => Response::WindowShown { width, height, front: forward.front },
+                    Ok(None) => Response::error("the window could not be shown"),
+                    Err(e) => Response::error(e),
+                }
+            }
+
             Request::PrepareScreen { session_id } => {
                 // The same gate as StartStream: asking whether there is a
                 // screen is the first step of capturing it, and a flavour that
@@ -1910,6 +2107,19 @@ impl Agent {
                 }
                 let input_blocked = blocked.map(|b| b.app);
                 let pointer_captured = watched && crate::input_reach::pointer_captured();
+                // ONE WINDOW: what the live stream shows of it, read from the
+                // stream's own books (window_pick.rs `WindowStatus`), screens
+                // named by capture index as everywhere else on this wire.
+                #[cfg(windows)]
+                let w = {
+                    let st = self.streams.get(&session_id).map(|st| st.window_status());
+                    // A screen to name only when a window is elsewhere or
+                    // went somewhere: the enumeration is not paid every poll.
+                    let named = st.as_ref().is_some_and(|x| x.elsewhere.is_some() || x.ended_on.is_some());
+                    window_state(st, &if named { puca_capture::outputs() } else { Vec::new() })
+                };
+                #[cfg(not(windows))]
+                let w = WindowState::default();
                 Response::SessionState {
                     secure_desktop,
                     cursor_clipped,
@@ -1918,12 +2128,20 @@ impl Agent {
                     input_blocked,
                     pointer_captured,
                     monitor,
+                    window: w.window,
+                    window_front: w.front,
+                    window_monitor: w.monitor,
+                    window_end: w.end,
+                    window_end_monitor: w.end_monitor,
+                    window_width: w.size.map(|x| x.0),
+                    window_height: w.size.map(|x| x.1),
                 }
             }
 
             #[cfg(not(windows))]
             Request::StartStream { .. }
             | Request::StopStream { .. }
+            | Request::SetWindow { .. }
             | Request::SetMonitor { .. }
             | Request::UpdateStream { .. }
             | Request::QueryStreamQuality { .. }
@@ -2955,6 +3173,63 @@ mod tests {
     /// through `union_box` + `composite_geometry`. If they ever disagree, input
     /// would land somewhere the caret mapping says it is not — the exact class of
     /// bug `resolve_target` was written to fix.
+    /// `SessionState`'s window fields name screens by CAPTURE index, joined
+    /// from the stream's HMONITORs; a screen no output has is said as nothing,
+    /// never as a guess.
+    /// A window shown on its own keeps the input through any whole-screen
+    /// re-aim of ITS session on ITS screen, and only that.
+    #[test]
+    fn a_shown_window_keeps_the_input_for_its_session_and_screen_only() {
+        let t = |left| puca_input::TargetMonitor {
+            left, top: 0, width: 100, height: 100, virt_left: 0, virt_top: 0, virt_width: 1920, virt_height: 1080,
+        };
+        let phys = crate::window_pick::Rect { left: 0, top: 0, width: 1920, height: 1080 };
+        let shown = crate::window_pick::Rect { left: 480, top: 270, width: 960, height: 540 };
+        let rec = ("s1".to_string(), WindowAim { monitor: 1, target: t(300), shown, mon_phys: phys });
+        assert_eq!(window_aim_for(Some(&rec), "s1", 1).map(|x| x.target.left), Some(300));
+        assert!(window_aim_for(Some(&rec), "s1", 0).is_none(), "another screen of the same session aims whole");
+        assert!(window_aim_for(Some(&rec), "s2", 1).is_none(), "another session aims whole");
+        assert!(window_aim_for(None, "s1", 1).is_none());
+        // Re-aimed after the desktop changed: the window's fractions over the
+        // screen's fresh target, with the fresh virtual desktop (review,
+        // 2026-11-20: the recorded one kept the old desktop for a second).
+        let mut fresh = t(1000);
+        fresh.width = 1920;
+        fresh.height = 1080;
+        fresh.virt_left = -1920;
+        fresh.virt_width = 3840;
+        let aim = window_aim_for(Some(&rec), "s1", 1).unwrap();
+        let now = window_aim_target(&aim, Some(fresh));
+        assert_eq!((now.left, now.top, now.width, now.height), (1480, 270, 960, 540));
+        assert_eq!((now.virt_left, now.virt_width), (-1920, 3840));
+        assert_eq!(window_aim_target(&aim, None).left, 300, "nothing to read: as recorded");
+    }
+
+    #[test]
+    fn the_window_status_is_said_with_capture_indexes() {
+        use crate::window_pick::{Gone, WindowRef, WindowStatus};
+        let outs = vec![out(0, 0, 0, 1920, 1080, 0x10), out(2, 1920, 0, 1920, 1080, 0x20)];
+        assert_eq!(window_state(None, &outs), WindowState::default(), "no stream, nothing said");
+        let showing = WindowStatus {
+            active: Some(WindowRef { hwnd: 77, pid: 5 }),
+            front: false,
+            elsewhere: Some(0x20),
+            ..Default::default()
+        };
+        assert_eq!(
+            window_state(Some(showing), &outs),
+            WindowState { window: Some(77), front: Some(false), monitor: Some(2), end: None, end_monitor: None, size: None },
+        );
+        let ended = WindowStatus { ended: Some(Gone::Offscreen), ended_on: Some(0x20), ..Default::default() };
+        assert_eq!(
+            window_state(Some(ended), &outs),
+            WindowState { end: Some("offscreen".into()), end_monitor: Some(2), ..Default::default() },
+        );
+        let unknown = WindowStatus { ended: Some(Gone::Offscreen), ended_on: Some(0x99), ..Default::default() };
+        assert_eq!(window_state(Some(unknown), &outs).end_monitor, None, "a screen no output has is not guessed");
+        assert_eq!(window_state(Some(WindowStatus::default()), &outs), WindowState::default());
+    }
+
     #[test]
     fn the_caret_mapping_and_the_input_aim_describe_the_same_composite() {
         let outputs = reporter_outputs();

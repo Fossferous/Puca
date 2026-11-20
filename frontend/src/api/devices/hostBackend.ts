@@ -49,6 +49,27 @@ export interface HostSessionStatus {
      *  (it moves itself off a panel behind a lid shut mid-session). Absent
      *  from an agent older than the field, and while no stream is live. */
     monitor?: number;
+    /** ONE WINDOW (windowPick.ts): the window the stream shows on its own,
+     *  by its handle, while it does; whether its program is in front (keys
+     *  go there); the screen holding most of it when that is not the
+     *  stream's own. After the stream went back to the whole screen by
+     *  itself: why (`windowEnd`), and for `offscreen` the screen it is on
+     *  now. All absent from an agent older than the fields. */
+    window?: number;
+    windowFront?: boolean;
+    windowMonitor?: number;
+    windowEnd?: string;
+    windowEndMonitor?: number;
+    /** What the picture shows of the window now (a resize changes it). */
+    windowWidth?: number;
+    windowHeight?: number;
+}
+
+/** The host's open windows as its agent lists them (crates/puca-agent
+ *  window_pick.rs), and each distinct icon once by key. */
+export interface HostWindowList {
+    windows: import('./windowPick').RemoteWindow[];
+    icons: Record<string, string>;
 }
 
 export interface HostCapabilities {
@@ -63,6 +84,9 @@ export interface HostCapabilities {
     clipboard: boolean;
     files: boolean;
     monitors: MonitorInfo[];
+    /** One window can be shown on its own (`listWindows` / `setWindow`): the
+     *  agent running as the signed-in user said so. Absent = no. */
+    windows?: boolean;
     /** Why capture or unattended is unavailable, for the UI to show verbatim.
      *  A greyed-out control with no reason is a support ticket. */
     limitation?: string;
@@ -206,6 +230,18 @@ export interface HostBackend {
      *  request until this has been called, and confines all of them to the
      *  scope given. */
     setFileAccess?(sessionId: string, scope: FileScopeRequest | null): Promise<void>;
+    /** The open windows the window picker offers. Read-only on the host:
+     *  nothing is raised or focused. OPTIONAL and agent-only; rejects on an
+     *  agent that cannot (older, or the sign-in-screen flavour). */
+    listWindows?(): Promise<HostWindowList>;
+    /** Show one window of the live stream's screen on its own, or (null) the
+     *  whole screen again. Resolves with what the picture now shows (physical
+     *  pixels) and whether Windows let the window come to the front; rejects
+     *  with the agent's reason (the window closed, it is on another screen). */
+    setWindow?(
+        sessionId: string,
+        window: { hwnd: number; pid: number } | null,
+    ): Promise<{ width: number; height: number; front: boolean } | null>;
 }
 
 /**

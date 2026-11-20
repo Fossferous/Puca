@@ -220,6 +220,20 @@ pub enum StreamCommand {
     /// is idempotent, and the step is re-derived per frame from the picture
     /// the capture actually produced (a monitor switch changes it).
     SetViewSize { width: u32, height: u32 },
+    /// Show ONE window of this stream's screen on its own (window_pick.rs),
+    /// or the whole screen again (`None`). Answered with the size the
+    /// picture now shows (physical pixels), or None for the whole screen.
+    SetWindow {
+        generation: u64,
+        /// As for SetMonitor: a caller that gave up marks it cancelled, and a
+        /// choice that waited out its deadline in the queue (the stream still
+        /// opening its capture) is refused rather than applied seconds later
+        /// behind the back of a host app that told the viewer it failed.
+        deadline: Instant,
+        cancelled: Arc<AtomicBool>,
+        window: Option<crate::window_pick::WindowRef>,
+        reply_tx: std::sync::mpsc::Sender<Result<Option<(u32, u32)>, StreamCommandError>>,
+    },
 }
 
 /// A move the lid watch sent (`RebuildFor::Lid`), until its reply lands.
@@ -309,6 +323,9 @@ pub struct Stream {
     /// An `Option` rather than a `FileScope::None` variant so that revocation is
     /// the same "set it back to None" it has always been.
     file_scope: Arc<Mutex<Option<crate::file_transfer::FileScope>>>,
+    /// What the stream thread says about the window it shows on its own, if
+    /// any (window_pick.rs `WindowStatus`), for `SessionStatus`.
+    window_status: Arc<Mutex<crate::window_pick::WindowStatus>>,
 }
 
 /// Whether this stream carries a picture.
@@ -487,6 +504,50 @@ impl Stream {
             .lock()
             .map_err(|_| "file access lock poisoned".to_string())? = resolved;
         Ok(())
+    }
+
+    /// Show one window on its own, or (None) the whole screen, and wait for
+    /// the stream thread to say what it shows. See StreamCommand::SetWindow.
+    pub fn set_window_sync(
+        &self,
+        window: Option<crate::window_pick::WindowRef>,
+        timeout: Duration,
+    ) -> Result<Option<(u32, u32)>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + timeout;
+        self.command_tx
+            .send(StreamCommand::SetWindow {
+                generation: self.generation,
+                deadline,
+                cancelled: cancelled.clone(),
+                window,
+                reply_tx: tx,
+            })
+            .map_err(|_| "stream dead".to_string())?;
+        let answer = |res: Result<Option<(u32, u32)>, StreamCommandError>| match res {
+            Ok(shown) => Ok(shown),
+            Err(StreamCommandError::ConstructionFailed(why)) => Err(why),
+            Err(e) => Err(format!("{e:?}")),
+        };
+        match rx.recv_timeout(timeout) {
+            Ok(res) => answer(res),
+            Err(_) => {
+                // Not applied from here on (the arm checks it first); one
+                // the loop was already applying answers within a moment, and
+                // that answer is the truth.
+                cancelled.store(true, Ordering::Relaxed);
+                match rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(res) => answer(res),
+                    Err(_) => Err("timeout".to_string()),
+                }
+            }
+        }
+    }
+
+    /// What the stream thread last said about its window.
+    pub fn window_status(&self) -> crate::window_pick::WindowStatus {
+        self.window_status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     pub fn query_quality(&self) -> (u32, u32) {
@@ -930,6 +991,8 @@ pub fn start(
     let file_scope: Arc<Mutex<Option<crate::file_transfer::FileScope>>> =
         Arc::new(Mutex::new(None));
     let file_scope_thread = Arc::clone(&file_scope);
+    let window_status: Arc<Mutex<crate::window_pick::WindowStatus>> = Arc::default();
+    let window_status_thread = Arc::clone(&window_status);
 
     // The audit trail replaces the consent dialog as the local evidence that
     // files were touched, so a stream that cannot open its log still runs —
@@ -957,7 +1020,7 @@ pub fn start(
                 stream_events_tx: stream_events_tx_clone,
                 reason: Arc::clone(&reason_cell),
             };
-            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, steered_from, fps, bitrate, view, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel, steer_on_lid, held) {
+            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, steered_from, fps, bitrate, view, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel, steer_on_lid, held, window_status_thread) {
                 eprintln!("[stream] ended: {e}");
                 if let Ok(mut r) = reason_cell.lock() {
                     *r = e;
@@ -978,6 +1041,7 @@ pub fn start(
         current_fps,
         current_bitrate_bps,
         file_scope,
+        window_status,
     })
 }
 
@@ -1237,6 +1301,8 @@ fn run(
     steer_on_lid: bool,
     // The screens other captures hold, which a lid move passes over.
     held_screens: HeldScreens,
+    // What this stream says about the one window it shows (window_pick.rs).
+    window_status: Arc<Mutex<crate::window_pick::WindowStatus>>,
 ) -> Result<(), String> {
     // VIDEO ONLY. The justification — frame pacing rides socket read timeouts,
     // which tick at the ~15.6ms default — does not apply to a DataOnly session:
@@ -1283,6 +1349,18 @@ fn run(
     let mut caret_refusal_logged = false;
     let mut caret_budget_logged = false;
     let mut current_monitor = initial_monitor;
+    // ONE WINDOW shown on its own (SetWindow), and the buffer a crop that
+    // cannot be read in place is copied into (window_pick.rs). The guard
+    // forgets the window's input record on every way out of this thread.
+    struct WindowAimGuard(String);
+    impl Drop for WindowAimGuard {
+        fn drop(&mut self) {
+            crate::session::set_window_aim(&self.0, None);
+        }
+    }
+    let _window_aim_guard = WindowAimGuard(session_id.clone());
+    let mut window: Option<crate::window_pick::WindowTrack> = None;
+    let mut window_buf: Vec<u8> = Vec::new();
     let mut current_fps = initial_fps;
     let mut current_bitrate = initial_bitrate;
     // The viewer's stage in its device pixels, or None for native. Seeded from
@@ -1753,9 +1831,7 @@ fn run(
                             // outputs and arming recomputes it anyway.
                             caret_surf += 1;
                             if caret_tracker.is_some() {
-                                caret_surface = capture
-                                    .as_ref()
-                                    .and_then(|c| c.caret_surface(current_monitor));
+                                caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
                                 caret_geometry_checked = Some(Instant::now());
                                 caret_last_sent = None;
                             }
@@ -1958,9 +2034,7 @@ fn run(
                             // different surface — same bookkeeping as a switch.
                             caret_surf += 1;
                             if caret_tracker.is_some() {
-                                caret_surface = capture
-                                    .as_ref()
-                                    .and_then(|c| c.caret_surface(current_monitor));
+                                caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
                                 caret_geometry_checked = Some(Instant::now());
                                 caret_last_sent = None;
                             }
@@ -2012,6 +2086,81 @@ fn run(
                         }
                         Err(e) => {
                             let _ = reply_tx.send(Err(e));
+                        }
+                    }
+                }
+                StreamCommand::SetWindow { generation: gen, deadline, cancelled, window: want, reply_tx } => {
+                    if let Err(e) = command_gate(generation, gen, &cancelled, deadline) {
+                        let _ = reply_tx.send(Err(e));
+                        continue;
+                    }
+                    let Some(want) = want else {
+                        // Back to the whole screen, as the viewer asked.
+                        if window.take().is_some() {
+                            eprintln!("[window] back to the whole screen, as asked");
+                            crate::session::set_window_aim(&session_id, None);
+                            crate::session::Agent::aim_input_at(&session_id, current_monitor);
+                            // A still screen sends nothing by itself: without
+                            // this the viewer kept the window's picture while
+                            // its input was already the whole screen's.
+                            want_keyframe = true;
+                        caret_surf += 1;
+                        if caret_tracker.is_some() {
+                            caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
+                            caret_geometry_checked = Some(Instant::now());
+                            caret_last_sent = None;
+                        }
+                        }
+                        if let Ok(mut st) = window_status.lock() {
+                            *st = crate::window_pick::WindowStatus::default();
+                        }
+                        let _ = reply_tx.send(Ok(None));
+                        continue;
+                    };
+                    match start_window(want, capture.as_ref(), current_monitor, current_output) {
+                        Err(why) => {
+                            let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(why)));
+                        }
+                        Ok(track) => {
+                            let shown = track.shown().map(|r| (r.width.max(0) as u32, r.height.max(0) as u32));
+                            eprintln!(
+                                "[window] showing one window of {} on its own ({:?})",
+                                screen_name(current_monitor),
+                                track.shown()
+                            );
+                            if let Ok(mut st) = window_status.lock() {
+                                *st = crate::window_pick::WindowStatus {
+                                    active: Some(want),
+                                    front: track.front,
+                                    elsewhere: track.elsewhere,
+                                    size: shown,
+                                    ..Default::default()
+                                };
+                            }
+                            window = Some(track);
+                            if let Some(t) = window.as_mut() {
+                                if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown()) {
+                                    crate::session::set_window_aim(
+                                        &session_id,
+                                        Some(crate::session::WindowAim {
+                                            monitor: current_monitor,
+                                            target,
+                                            shown: shown_rect,
+                                            mon_phys: t.mon_phys(),
+                                        }),
+                                    );
+                                }
+                            }
+                        caret_surf += 1;
+                        if caret_tracker.is_some() {
+                            caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
+                            caret_geometry_checked = Some(Instant::now());
+                            caret_last_sent = None;
+                        }
+                            // A still screen sends nothing by itself: ask for
+                            // the held picture, cropped now, at once.
+                            want_keyframe = true;
+                            let _ = reply_tx.send(Ok(shown));
                         }
                     }
                 }
@@ -2312,9 +2461,7 @@ fn run(
                                 } else if caret_tracker.is_none() {
                                     caret_tracker =
                                         Some(puca_input::caret::track());
-                                    caret_surface = capture
-                                        .as_ref()
-                                        .and_then(|c| c.caret_surface(current_monitor));
+                                    caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
                                     caret_geometry_checked = Some(Instant::now());
                                     // Forces the immediate vis:false ACK below,
                                     // which is what lets the viewer tell "no
@@ -2512,7 +2659,7 @@ fn run(
             // cadence the desktop re-follow already pays.
             if should_recheck_caret_geometry(caret_geometry_checked, now) {
                 caret_geometry_checked = Some(now);
-                let fresh = capture.as_ref().and_then(|c| c.caret_surface(current_monitor));
+                let fresh = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
                 if fresh != caret_surface {
                     eprintln!("[caret] surface changed: {caret_surface:?} -> {fresh:?}");
                     // A SIZE change is the case nothing else in this loop
@@ -3067,7 +3214,97 @@ fn run(
             // A stream pinned to its screen never sends a picture of another
             // one, whatever renumbered the outputs (`screen_pin`).
             let pin = screen_pin(steer_on_lid, current_monitor, current_output);
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, why, draw_host_cursor, pin) {
+            // ONE WINDOW: look at it (at most every READ_EVERY) and crop the
+            // picture to it, or go back to the whole screen when it cannot be
+            // shown any more (window_pick.rs).
+            let mut window_moved = false;
+            let mut window_gone: Option<(crate::window_pick::Gone, Option<isize>)> = None;
+            let crop = match window.as_mut() {
+                None => None,
+                Some(t) => {
+                    use crate::window_pick::{Gone, Tick, WindowOs};
+                    let os = crate::window_pick::LiveWindows;
+                    let (fw, fh) = last_frame.as_ref().map(|f| (f.width, f.height)).unwrap_or_else(|| t.screen_size());
+                    let regeometry = if t.geometry_due(now) {
+                        // Its screen as the capture enumeration and GDI say
+                        // now: by index, and only while the same screen
+                        // (handle) is at it.
+                        let outs = puca_capture::outputs();
+                        let mon = outs
+                            .iter()
+                            .find(|o| o.index == t.monitor && (t.monitor_handle.is_none() || Some(o.hmonitor) == t.monitor_handle))
+                            .map(|o| crate::window_pick::Rect { left: o.left, top: o.top, width: o.width, height: o.height });
+                        let whole = crate::session::resolve_target(t.monitor, &outs, &puca_input::list_monitors());
+                        t.regeometry(mon, whole)
+                    } else {
+                        Ok(())
+                    };
+                    let look = if window_lost_its_screen(t, current_monitor, current_output) || regeometry.is_err() {
+                        Tick::Gone(Gone::Screen)
+                    } else {
+                        t.tick(&os, now, fw, fh, false)
+                    };
+                    match look {
+                        Tick::Showing => {
+                            if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown()) {
+                                crate::session::set_window_aim(
+                                    &session_id,
+                                    Some(crate::session::WindowAim {
+                                        monitor: t.monitor,
+                                        target,
+                                        shown: shown_rect,
+                                        mon_phys: t.mon_phys(),
+                                    }),
+                                );
+                                window_moved = true;
+                                // THE PICTURE MOVES WITH THE AIM. A still
+                                // screen pumps nothing, so a crop moved (the
+                                // end of a drag) or resized (a settle) went
+                                // unsent while input was already aimed at it
+                                // (review, 2026-11-20). The fit's own request
+                                // re-sends the held picture, cropped anew,
+                                // without the keyframe a drag would pay for
+                                // on every frame.
+                                fit.stage_changed();
+                            }
+                            let size = t.shown().map(|r| (r.width.max(0) as u32, r.height.max(0) as u32));
+                            if let Ok(mut st) = window_status.lock() {
+                                if st.front != t.front || st.elsewhere != t.elsewhere || st.size != size {
+                                    st.front = t.front;
+                                    st.elsewhere = t.elsewhere;
+                                    st.size = size;
+                                }
+                            }
+                            t.crop()
+                        }
+                        Tick::Gone(g) => {
+                            let on = if g == Gone::Offscreen { os.monitor(t.window.hwnd) } else { None };
+                            window_gone = Some((g, on));
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some((gone, on)) = window_gone {
+                window = None;
+                eprintln!("[window] the window shown on its own was {}; showing the whole screen", gone.code());
+                if let Ok(mut st) = window_status.lock() {
+                    *st = crate::window_pick::WindowStatus { ended: Some(gone), ended_on: on, ..Default::default() };
+                }
+                crate::session::set_window_aim(&session_id, None);
+                crate::session::Agent::aim_input_at(&session_id, current_monitor);
+                want_keyframe = true;
+                window_moved = true;
+            }
+            if window_moved {
+                caret_surf += 1;
+                if caret_tracker.is_some() {
+                    caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
+                    caret_geometry_checked = Some(now);
+                    caret_last_sent = None;
+                }
+            }
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, why, draw_host_cursor, pin, crop, &mut window_buf) {
                 Ok(pumped) => {
                     let sent = pumped.sent;
                     last_frame_at = Some(now);
@@ -3311,9 +3548,7 @@ fn run(
                                 // old one rather than carried over.
                                 caret_surf += 1;
                                 if caret_tracker.is_some() {
-                                    caret_surface = capture
-                                        .as_ref()
-                                        .and_then(|c| c.caret_surface(current_monitor));
+                                    caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
                                     caret_geometry_checked = Some(now);
                                     caret_last_sent = None;
                                 }
@@ -3832,6 +4067,71 @@ fn send_lid_move(
 }
 
 /// "screen 2", or "All Displays" for the composite.
+/// The caret surface: the window's crop while one is shown on its own, else
+/// what the capture shows.
+fn surface_of(
+    capture: Option<&AnyCapture>,
+    window: Option<&crate::window_pick::WindowTrack>,
+    monitor: usize,
+) -> Option<crate::session::CaptureSurface> {
+    if let Some(s) = window.and_then(|w| w.surface()) {
+        return Some(s);
+    }
+    capture.and_then(|c| c.caret_surface(monitor))
+}
+
+/// Has the capture moved off the screen a window is shown from? Any switch,
+/// lid move or rebuild onto another index or another screen at it. A rebuild
+/// in place (same index, same screen) keeps the window.
+fn window_lost_its_screen(
+    t: &crate::window_pick::WindowTrack,
+    current_monitor: usize,
+    current_output: Option<isize>,
+) -> bool {
+    t.monitor != current_monitor
+        || current_monitor == crate::composite::ALL_DISPLAYS
+        || (t.monitor_handle.is_some() && current_output.is_some() && t.monitor_handle != current_output)
+}
+
+/// A window to show on its own, read once and checked: the stream must show
+/// ONE screen (never the composite), and the window must be on it. Returns the
+/// track with its first crop worked out, or why not, in words for the viewer.
+fn start_window(
+    want: crate::window_pick::WindowRef,
+    capture: Option<&AnyCapture>,
+    current_monitor: usize,
+    current_output: Option<isize>,
+) -> Result<crate::window_pick::WindowTrack, String> {
+    use crate::window_pick::{Gone, Rect, Tick, WindowOs, WindowTrack};
+    if !matches!(capture, Some(AnyCapture::Single(_))) || current_monitor == crate::composite::ALL_DISPLAYS {
+        return Err("show one screen first: a window is shown from the screen it is on".into());
+    }
+    let outs = puca_capture::outputs();
+    let Some(out) = outs.iter().find(|o| o.index == current_monitor) else {
+        return Err("the screen this stream shows is gone".into());
+    };
+    let os = crate::window_pick::LiveWindows;
+    if let (Some(on), Some(own)) = (os.monitor(want.hwnd), current_output) {
+        if on != own {
+            return Err("that window is on another screen".into());
+        }
+    }
+    let list = puca_input::list_monitors();
+    let whole = crate::session::resolve_target(current_monitor, &outs, &list);
+    let mon = Rect { left: out.left, top: out.top, width: out.width, height: out.height };
+    let mut track = WindowTrack::new(want, current_monitor, current_output, mon, whole);
+    let (w, h) = track.screen_size();
+    match track.tick(&os, Instant::now(), w, h, true) {
+        Tick::Showing => Ok(track),
+        Tick::Gone(Gone::Closed) => Err("that window has closed".into()),
+        Tick::Gone(Gone::Minimized) => Err("that window is minimised".into()),
+        Tick::Gone(Gone::Hidden) => Err("that window is hidden, or on another desktop".into()),
+        Tick::Gone(Gone::Small) => Err("that window is too small to show on its own".into()),
+        Tick::Gone(Gone::Offscreen) => Err("too little of that window is on its screen to show".into()),
+        Tick::Gone(Gone::Screen) => Err("the screen changed".into()),
+    }
+}
+
 fn screen_name(i: usize) -> String {
     if i == crate::composite::ALL_DISPLAYS {
         "All Displays".to_string()
@@ -4689,6 +4989,10 @@ fn pump_frame(
     host_draws: bool,
     // The screen a single-screen picture must be of (`screen_pin`).
     pin: Option<isize>,
+    // ONE WINDOW: the part of a single screen's picture to send, and where a
+    // crop that cannot be read in place is copied (window_pick.rs).
+    crop: Option<crate::window_pick::Crop>,
+    crop_buf: &mut Vec<u8>,
 ) -> Result<Pumped, PumpError> {
     let t_capture = Instant::now();
     // Something WAITING for a picture: a keyframe (a rebuilt encoder, a peer's
@@ -4701,6 +5005,8 @@ fn pump_frame(
         capture, last_frame, need_picture, host_draws, why.acquire_ms(), session_cold, switch_waiting, pin,
     )?;
     let still_blocked = picture.still_blocked;
+    // Asked before the picture is borrowed out of the capture below.
+    let single = matches!(capture, AnyCapture::Single(_));
     // BORROWED, not owned. The composite path used to hand back a cloned
     // canvas every tick — 56 MB per frame on a three-screen desktop, competing
     // for memory bandwidth with the encoder that is about to read it.
@@ -4712,6 +5018,23 @@ fn pump_frame(
             (owned.width, owned.height, owned.stride, &owned.bgra)
         }
     };
+
+    // ONE WINDOW: only the window's part of a single screen goes on. A crop
+    // whose rows reach the picture's end from a point inside it is copied
+    // out (the encoder wants `stride * h` bytes from where it starts);
+    // anything else is read in place. The composite is never cropped: a
+    // window is shown from the one screen it is on.
+    let (fw, fh, fstride, fbytes): (u32, u32, usize, &[u8]) =
+        match crop.filter(|_| single).and_then(|c| crate::window_pick::clamp_crop(c, fw, fh)) {
+            None => (fw, fh, fstride, fbytes),
+            Some(c) => match crate::window_pick::borrowable_offset(c, fh, fstride, fbytes.len()) {
+                Some(off) => (c.w, c.h, fstride, &fbytes[off..]),
+                None => {
+                    crate::window_pick::copy_crop(fbytes, fstride, c, crop_buf);
+                    (c.w, c.h, c.w as usize * 4, &crop_buf[..])
+                }
+            },
+        };
 
     let capture_took = t_capture.elapsed();
 
@@ -4827,12 +5150,42 @@ impl Stream {
             current_bitrate_bps: Arc::new(AtomicU32::new(6_000_000)),
             // Ungranted, matching a real stream's initial state.
             file_scope: Arc::new(Mutex::new(None)),
+            window_status: Arc::default(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// Whole screen asked for (SetWindow with no window) must ask for a
+    /// picture at once, as choosing one does: on a still screen nothing else
+    /// sends one, and the viewer kept the window's crop on screen while its
+    /// clicks were already mapped over the whole screen (review, 2026-11-20).
+    /// The run loop needs DXGI and a peer, so its source is read, the pattern
+    /// of `the_loop_checks_every_picture_and_every_rebuild_by_the_capture`.
+    #[test]
+    fn whole_screen_asked_for_sends_a_picture_at_once() {
+        let src = include_str!("stream.rs").replace('\r', "");
+        let run = src.split("\nfn run(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let arm = run
+            .split("back to the whole screen, as asked")
+            .nth(1)
+            .expect("the SetWindow arm's whole-screen branch")
+            .split("reply_tx.send(Ok(None))")
+            .next()
+            .unwrap();
+        assert!(arm.contains("want_keyframe = true"), "the whole-screen branch must ask for a picture");
+        // A crop that moved or resized asks for a picture too (the fit's
+        // request: no keyframe per frame of a drag).
+        let tick = run.rsplit("if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown())").next().unwrap();
+        let tick = tick.split("t.crop()").next().unwrap();
+        assert!(tick.contains("fit.stage_changed()"), "a moved crop must ask for the held picture");
+        // The positive control: the window-chosen branch, and the end of a
+        // window by itself, already did.
+        let chosen = run.split("showing one window of").nth(1).unwrap().split("reply_tx.send(Ok(shown))").next().unwrap();
+        assert!(chosen.contains("want_keyframe = true"));
+    }
+
     #[test]
     fn a_resend_during_a_blockage_does_not_end_it() {
         use super::{pumped_ends_blockage, should_rebuild_capture};

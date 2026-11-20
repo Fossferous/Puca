@@ -430,6 +430,33 @@ pub enum Request {
     /// Release every held key/button. Called on teardown so a session ending
     /// mid-keypress cannot strand a key down.
     ReleaseInput,
+
+    /// The signed-in user's open windows, as the taskbar would list them,
+    /// with each program's name and icon (window_pick.rs). Read-only: it
+    /// raises, restores and focuses nothing.
+    ///
+    /// ADDITIVE — do NOT bump PROTOCOL_VERSION, same rule as RequestKeyframe:
+    /// an older agent answers "bad request", and the host app offers no
+    /// window choice (it also asks `Capabilities.windows` first). Refused by
+    /// the sign-in-screen flavour (flavour.rs `WindowPick`).
+    ListWindows,
+
+    /// Show ONE window of the live stream's screen on its own — the picture
+    /// cropped to it and input aimed inside it — or, with `hwnd` absent, go
+    /// back to the whole screen. The window must be on the screen the stream
+    /// shows: the host app switches screens first (`SetMonitor`), where the
+    /// consent check lives. `pid` must still own `hwnd` (a handle is reused
+    /// once its window closes). A minimised window is restored, and the
+    /// window is asked to come to the front.
+    ///
+    /// ADDITIVE, like `ListWindows`.
+    SetWindow {
+        session_id: String,
+        #[serde(default)]
+        hwnd: Option<i64>,
+        #[serde(default)]
+        pid: Option<u32>,
+    },
 }
 
 /// One capturable output as the app's picker should describe it.
@@ -486,6 +513,27 @@ pub enum Response {
         /// so is better than a session that freezes at the first prompt.
         elevated: bool,
         monitors: usize,
+        /// `ListWindows` / `SetWindow` are served: Windows, and the agent
+        /// running as the signed-in user (never the sign-in-screen flavour).
+        /// ADDITIVE: an older agent never writes it, and the host app reads
+        /// absence as "no window choice".
+        #[serde(default, skip_serializing_if = "is_false")]
+        windows: bool,
+    },
+    /// Answer to `ListWindows`: the windows in front-to-back order, and each
+    /// distinct icon once, as a `data:image/png` URL keyed by
+    /// `WindowDesc.icon`.
+    Windows {
+        windows: Vec<crate::window_pick::WindowDesc>,
+        icons: std::collections::BTreeMap<String, String>,
+    },
+    /// Answer to `SetWindow` with a window: what the picture now shows, in
+    /// physical pixels (the viewer's surface for the caret), and whether
+    /// Windows let the window come to the front.
+    WindowShown {
+        width: u32,
+        height: u32,
+        front: bool,
     },
     Monitors {
         count: usize,
@@ -617,6 +665,32 @@ pub enum Response {
         pointer_captured: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor: Option<usize>,
+        /// ONE WINDOW (`SetWindow`): the `HWND` the live stream shows on its
+        /// own, while it does; `window_front` whether its program is the one
+        /// in front (keys go there); `window_monitor` the screen (capture
+        /// index) holding most of it, when that is not the stream's own — the
+        /// host app may follow it there if that screen was shared. After the
+        /// stream went back to the whole screen by itself, `window` is absent
+        /// and `window_end` says why (`closed`, `minimized`, `offscreen`,
+        /// `screen`; window_pick.rs `Gone`), with `window_end_monitor` the
+        /// screen an `offscreen` window is on now. All ADDITIVE and absent
+        /// in every other case, so the bytes above stay exactly as they were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_front: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_monitor: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_end: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_end_monitor: Option<usize>,
+        /// What the picture shows of the window now, physical pixels (a
+        /// resize changes it): the viewer's surface for the caret.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_height: Option<u32>,
     },
     /// Answer to `PrepareScreen`. `state` is `ready` (answer the offer now),
     /// `waking` / `starting` (ask again shortly; `starting` means the virtual
@@ -773,6 +847,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
@@ -786,6 +867,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
@@ -802,6 +890,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false}"#,
@@ -815,6 +910,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no_frame"}"#,
@@ -832,6 +934,13 @@ mod tests {
                 input_blocked: Some("valheim.exe".into()),
                 pointer_captured: true,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"input_blocked":"valheim.exe","pointer_captured":true}"#,
@@ -848,6 +957,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: Some(1),
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":1}"#,
@@ -861,6 +977,13 @@ mod tests {
                 input_blocked: None,
                 pointer_captured: false,
                 monitor: None,
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: None,
+                window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no-screen:lid"}"#,
@@ -869,5 +992,97 @@ mod tests {
         // `cursor_clipped` entirely. Response is Serialize-only here — the one
         // parser is the app, whose test (secureDesktopStatus.test.ts) pins
         // that absence reads as false.
+    }
+
+    /// The literals `hostAgent.ts` writes for the window choice (its test,
+    /// `deviceWindowPick.test.ts`, pins the same strings).
+    #[test]
+    fn list_windows_and_set_window_parse_from_the_frames_the_app_writes() {
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"cmd":"list_windows"}"#).expect("list_windows"),
+            Request::ListWindows
+        ));
+        match serde_json::from_str::<Request>(r#"{"cmd":"set_window","session_id":"s1","hwnd":66000,"pid":4}"#)
+            .expect("set_window")
+        {
+            Request::SetWindow { session_id, hwnd, pid } => {
+                assert_eq!((session_id.as_str(), hwnd, pid), ("s1", Some(66_000), Some(4)));
+            }
+            other => panic!("the app's set_window frame reached the wrong arm: {other:?}"),
+        }
+        // Back to the whole screen: no window named at all.
+        match serde_json::from_str::<Request>(r#"{"cmd":"set_window","session_id":"s1"}"#).expect("whole screen") {
+            Request::SetWindow { hwnd: None, pid: None, .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_window_answers_serialise_to_what_the_app_reads() {
+        assert_eq!(
+            serde_json::to_string(&Response::WindowShown { width: 800, height: 600, front: false }).unwrap(),
+            r#"{"ok":"window_shown","width":800,"height":600,"front":false}"#,
+        );
+        let mut icons = std::collections::BTreeMap::new();
+        icons.insert("iabc".to_string(), "data:image/png;base64,AA==".to_string());
+        assert_eq!(
+            serde_json::to_string(&Response::Windows { windows: vec![], icons }).unwrap(),
+            r#"{"ok":"windows","windows":[],"icons":{"iabc":"data:image/png;base64,AA=="}}"#,
+        );
+        // Capabilities: `windows` absent unless true, so an agent that cannot
+        // serve the choice writes exactly the bytes it always did.
+        let caps = |windows| Response::Capabilities {
+            capture: true,
+            unattended: true,
+            input: true,
+            elevated: false,
+            monitors: 1,
+            windows,
+        };
+        assert_eq!(
+            serde_json::to_string(&caps(false)).unwrap(),
+            r#"{"ok":"capabilities","capture":true,"unattended":true,"input":true,"elevated":false,"monitors":1}"#,
+        );
+        assert!(serde_json::to_string(&caps(true)).unwrap().ends_with(r#""monitors":1,"windows":true}"#));
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(true),
+                stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
+                monitor: Some(0),
+                window: Some(66_000),
+                window_front: Some(false),
+                window_monitor: Some(1),
+                window_end: None,
+                window_end_monitor: None,
+                window_width: Some(900),
+                window_height: Some(700),
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":0,"window":66000,"window_front":false,"window_monitor":1,"window_width":900,"window_height":700}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(true),
+                stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
+                monitor: Some(0),
+                window: None,
+                window_front: None,
+                window_monitor: None,
+                window_end: Some("offscreen".into()),
+                window_end_monitor: Some(1),
+                window_width: None,
+                window_height: None,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":0,"window_end":"offscreen","window_end_monitor":1}"#,
+        );
     }
 }

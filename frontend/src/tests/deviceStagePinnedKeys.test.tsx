@@ -67,6 +67,9 @@ vi.mock('../api/devices/session', () => ({
     setCaretTracking: () => { /* noop */ },
     sendInput: (...a: unknown[]) => h.sendInput(...a),
     requestMonitor: () => { /* noop */ },
+    requestWindowList: () => { /* noop */ },
+    chooseWindow: () => { /* noop */ },
+    dismissWindowNotice: () => { /* noop */ },
     requestKeyframe: () => true,
     setCursorOwned: () => { /* noop */ },
     endSession: () => { /* noop */ },
@@ -530,5 +533,21 @@ describe('through the real stage', () => {
         expect(document.querySelector('.dspk-editor')).not.toBeNull();
         await emit([session({ id: 'ds-2' })]);
         expect(document.querySelector('.dspk-editor')).toBeNull();
+    });
+
+    it('nor with the window picker open, holding every key back (to a host that offers none)', async () => {
+        await mountStage([]);
+        await emit([session({ windowsSupported: true, windowList: { rid: 'r', loading: false, error: null, windows: [], icons: {} } })]);
+        const menuButton = [...document.querySelectorAll('button')].find(b => /Screen/.test(b.textContent ?? '') && b.classList.contains('dsb-menu-btn'))!;
+        await act(async () => { menuButton.click(); });
+        await act(async () => { ([...document.querySelectorAll('[role="menuitem"]')].find(b => b.textContent === 'Show one window…') as HTMLButtonElement).click(); });
+        expect(document.querySelector('.dswp-picker')).not.toBeNull();
+        // The next session is to a host that offers no window choice.
+        await emit([session({ id: 'ds-2' })]);
+        expect(document.querySelector('.dswp-picker')).toBeNull();
+        await act(async () => {
+            document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyA', key: 'a', bubbles: true, cancelable: true }));
+        });
+        expect(keyFrames(), 'its keys go over').toEqual([['ds-2', { t: 'key', code: 'KeyA', down: true }]]);
     });
 });
