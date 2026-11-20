@@ -328,10 +328,24 @@ describe('reports reaching the stage', () => {
         subscribeCaret(id, r => got.push(r));
 
         caret().onmessage!({ data: JSON.stringify(VALID) });
+        // No `rev`: an agent from before 2026-11-20.
         expect(got).toEqual([{
             vis: true, x: 0.25, y: 0.5, w: 0.001, h: 0.02,
-            src: 'win32', mon: 0, surf: 3, seq: 7,
+            src: 'win32', mon: 0, surf: 3, seq: 7, rev: null,
         }]);
+    });
+
+    it("carries the host sampler's revision, on shown and hidden frames alike", async () => {
+        const { id } = await activeController();
+        const { subscribeCaret } = await import('../api/devices/session');
+        const got: Array<{ vis: boolean; rev: number | null }> = [];
+        subscribeCaret(id, r => got.push({ vis: r.vis, rev: r.rev }));
+
+        caret().onmessage!({ data: JSON.stringify({ ...VALID, src: 'msaa', rev: 2 }) });
+        caret().onmessage!({ data: JSON.stringify({ t: 'caret', vis: false, mon: 0, surf: 3, seq: 8, rev: 2 }) });
+        // Not a number: as good as absent, never trusted.
+        caret().onmessage!({ data: JSON.stringify({ ...VALID, rev: '2' }) });
+        expect(got).toEqual([{ vis: true, rev: 2 }, { vis: false, rev: 2 }, { vis: true, rev: null }]);
     });
 
     it('delivers vis:false too — "no caret here" is information', async () => {

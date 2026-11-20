@@ -376,6 +376,105 @@ Media keys, volume and the power button are not offered. My Devices does not
 control a phone yet (`api/devices/hostCapacitor.ts`); this is control from a
 call only.
 
+## From a phone: the keyboard that opens by itself, and the zoom to the caret
+
+A phone controlling a PC opens its soft keyboard on its own when a tap goes
+into text, and while the keyboard is up zooms the PC's picture to the text
+caret (docs/USER_GUIDE.md, *When the keyboard opens by itself*). The stage
+cannot hit-test the remote screen; the host reports where the caret is on
+the `caret` channel (puca-input's sampler: tier 1 the Win32 caret, tier 2 the
+focused window's MSAA caret object, tier 3 UI Automation's caret range, else
+the focused element's box as `field`). The rules, and what each one is for:
+
+- **The host's word, never a guess** (`components/deviceAutoKeyboard.ts`). The
+  keyboard opens when a caret appears, or moves, on the line the tap went to,
+  within 1.5 s of it. A caret that does not move opens nothing: until
+  2026-11-20 a tap within 640 remote px on the line of the caret raised it
+  ("near", for the empty search box that already has the focus), and so it
+  did for the Back button beside an address bar, the Send and emoji buttons
+  beside a message box and a long press on any of them ("a lot of clicks seem
+  to needlessly bring the keyboard up and change zoom"). A focused element's
+  box (`field`) is not a caret, a caret on another line is a window the tap
+  activated, and a drag, a pinch or a cancelled touch is no tap.
+- **Chromium's hidden caret is no caret.** Chrome, Edge and every Electron app
+  keep an MSAA caret object for assistive software
+  (`ui/accessibility/platform/ax_system_caret_win.cc`): 1 px wide when shown;
+  when no text box has the focus, `Hide()` marks it `STATE_SYSTEM_INVISIBLE`
+  and zeroes its width, keeping its place, and `accLocation` still answers
+  (S_FALSE, which windows-rs turns into `Ok`). Tier 2 took that for a caret,
+  so a Chromium window in front reported a caret on the line of the last text
+  box typed into there, indefinitely. The host now reads it as hidden
+  (`puca_input::caret::msaa_caret`), a definitive answer that does not send
+  the assist on to tier 3 (which would turn the window's UI Automation tree
+  on and report the focused button as a `field`), and reports it as no caret
+  (`vis:false`). Only a rect with a height is read that way: ALL ZEROES stays
+  a miss, invisible or not, because it is what oleacc's standard caret object
+  answers for any window whose thread has no Win32 caret (a XAML text box,
+  any text box only UI Automation can see; measured in
+  `caret::imp::tests`), and that is where tier 3 must be asked.
+- **An older host's Chromium caret** (a frame with no `rev`). Every caret
+  frame carries `rev` (puca-agent's `caret_wire::CARET_REPORT_REV`, 2 since
+  2026-11-20: Chromium's hidden caret is reported as no caret). An agent
+  before that reports it as a caret 0 px wide, which the viewer refuses
+  (`isMeasuredCaret`), but that agent sends a frame only for a change of more
+  than 1/2000 of the surface, and a hide or a show in place changes only the
+  width, by 1 px: on a surface wider than 2000 px (a 2560 screen, every
+  screen at once) the viewer sees the shape only as a first frame, and the
+  focus leaving the text never. So for a caret such a host may have left
+  standing (`hideMayGoUnheard`: `msaa`, no `rev`), a close keeps the rule it
+  had before: held 5 s at most (on the line of the caret at the close, as
+  every close is), or the address bar tapped again after a page took the
+  focus would be held for good.
+- **Closing sticks, on its line.** The keyboard button, or Android's Back
+  taking the IME down under the open bar (a measured fall: the native or
+  visual-viewport tier), records a close with the caret known then. While it
+  stands, a raise for a caret the tap MOVED along that caret's line (the
+  press's own tolerance, 1.5 caret heights) is held, however long after. A
+  caret the tap moved to ANOTHER line is raised for, and ends the close
+  (`deviceAutoKeyboard.heldByManualClose`): that is how a tap straight into
+  another text box arrives. The host reports no gap between the two carets:
+  a Win32 text box's caret is destroyed and the next one's created in one
+  message dispatch, and the sampler holds a caret 1.2 s after it stops being
+  measured (`puca_input::caret::CARET_HOLD`, for the blink), which also
+  bridges a window switch from the taskbar and a tier-2 hidden answer. Held
+  on every line, a form's next field, another app's text or a text box on a
+  page after its address bar would never bring the keyboard back until it
+  was opened by hand. Another line of
+  the same text arrives the same way and raises too, as before 2026-11-20;
+  a text box beside the closed one on its line is held. The close also ends
+  when the keyboard comes up (the button, "Tap to type"), when a measured
+  caret appears where there was none (the focus left the text and a text
+  box took it), and with the caret tracking (a monitor switch); a report
+  from another surface than the close's caret is not held. An older host's
+  Chromium caret also expires after 5 s (above).
+- **Only Back's fall is a close.** The native and visual-viewport tiers say
+  that the IME went down, never why, and it goes down for more than Back:
+  the app sent to the background (another app, a password manager), the
+  screen locking, the phone turning or a fold opening, a system dialog or
+  the shade taking the window's focus. Nothing brings it back on the way
+  back, so a close recorded for one of those held the next taps into the
+  text until a text box took the focus. A fall is therefore no close while the
+  page is hidden or within 1.5 s (`IME_FALL_LIFECYCLE_MS`) after
+  `visibilitychange`, `pagehide`/`pageshow`, the window's own `blur`/`focus`,
+  `orientationchange` (and `screen.orientation`'s `change`) or a resize to a
+  new WIDTH (the IME changes only the height, which Android 14 and older
+  resize the WebView by, Back included), and one of those within 1.5 s after
+  a fall takes its close back, whichever order Android delivers them in
+  (`deviceAutoKeyboard.imeFallIsAClose`, `imeCloseTakenBack`). The button's
+  close is never taken back. A Back pressed within 1.5 s of coming back to
+  the app is not counted (the next tap that moves a caret raises again).
+  "Copy diagnostics" counts these falls as `autoKeyboard.notCloses`.
+- **Only a text box's caret moves the picture** (`DeviceStage.tsx`, the caret
+  camera; `deviceZoomFollow.caretFollowTransform`). A `field` report, a hidden
+  caret and `vis:false` hold the view. Where the host reports no caret at
+  all, the pointer stands in for it: the band is placed on the last aim when
+  the keyboard opens, and on a later aim only when typing goes out (text, or
+  a key going down). Until 2026-11-20 every tap re-placed it a second after
+  the last report, and since an agent reports only on change, a caret sitting
+  still in its text box made every tap on a button zoom the picture there.
+  A pinch or two-finger pan while typing is the user's (`userDrove`), and the
+  view before typing comes back when the keyboard closes.
+
 ## Pinned keys and the notification's keys
 
 Pinned keys (docs/USER_GUIDE.md, *Pinned keys*) are ordinary key frames, the
