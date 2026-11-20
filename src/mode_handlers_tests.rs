@@ -1706,6 +1706,10 @@ mod db {
             usage.participants.insert(socketless.clone(), std::time::Instant::now());
             usage.participants.insert(in_voice.clone(), std::time::Instant::now());
             usage.reservations.insert(unconfirmed.clone(), std::time::Instant::now());
+            // Let go of `room`'s shard first: a DashMap guard holds its shard's lock, which
+            // is not reentrant, so a second key in the same shard waited on itself forever
+            // (the same hang as server_handlers' disband test; about one CI run in sixteen).
+            drop(usage);
             state.sfu_rooms.entry(other_room.clone()).or_default().participants.insert(stranger.clone(), std::time::Instant::now());
         }
         let mut sock = Sock::in_room(&state, f.mover, f.town);
