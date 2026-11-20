@@ -2193,7 +2193,7 @@ export function DeviceStage() {
         const aim = lastAimRef.current;
         caretReportRef.current = {
             vis: true, x: aim.x, y: aim.y, w: 0, h: 0,
-            src: null, mon: null, surf: null, seq: null,
+            src: null, mon: null, surf: null, seq: null, rev: null,
         };
         caretFallbackUsedRef.current = true;
         caretForceRef.current = true;
@@ -2252,11 +2252,13 @@ export function DeviceStage() {
     const lastCaretRef = useRef<CaretReport | null>(null);
     /** The user's last close of the keyboard (its button, or Android's Back
      *  under the open bar) — the auto-raise's stand-down record
-     *  (heldByManualClose). Nothing expires it: dropped when the keyboard
-     *  comes up (asked for, or for any reason), when a text box takes the
-     *  focus (textBoxTookFocus, in the tracking subscription below), and on a
-     *  surface change (the tracking cleanup below). Declared before the
-     *  tracking effect that clears it. */
+     *  (heldByManualClose), with the caret known then. Nothing expires it
+     *  (only an older host's Chromium caret is held for 5 s, on its line:
+     *  hideMayGoUnheard): dropped when the keyboard comes up (asked for, or
+     *  for any reason), when a text box takes the focus (textBoxTookFocus, in
+     *  the tracking subscription below), and on a surface change (the
+     *  tracking cleanup below). Declared before the tracking effect that
+     *  clears it. */
     const manualKbCloseRef = useRef<ManualClose | null>(null);
     /** The auto-keyboard's report sink; a slot for the same reason as
      *  caretOnAimRef — the subscription below outlives any one render of the
@@ -2522,7 +2524,10 @@ export function DeviceStage() {
             // text it was closed over, a caret the tap moved is the
             // interaction the close was FOR (read what it covered, tap around
             // in it). The press is spent either way.
-            if (heldByManualClose(manualKbCloseRef.current, verdict)) {
+            if (heldByManualClose({
+                close: manualKbCloseRef.current, verdict, before, report: r, now: Date.now(),
+                surface: surfaceSizeRef.current,
+            })) {
                 autoKbDiagRef.current.held++;
                 pressRef.current = null;
                 return;
@@ -2558,7 +2563,7 @@ export function DeviceStage() {
         }
         if (activeMobileMenu !== 'keyboard') return;
         if (kbInset.source !== 'native' && kbInset.source !== 'visual-viewport') return;
-        manualKbCloseRef.current = { at: Date.now() };
+        manualKbCloseRef.current = { at: Date.now(), caret: lastCaretRef.current };
         autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
     }, [kbInset.visible, kbInset.source, activeMobileMenu]);
 
@@ -2597,7 +2602,7 @@ export function DeviceStage() {
             return;
         }
         kbButtonTriedRaiseRef.current = false;
-        manualKbCloseRef.current = { at: Date.now() };
+        manualKbCloseRef.current = { at: Date.now(), caret: lastCaretRef.current };
         autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
         setActiveMobileMenu(null);
     }, [activeMobileMenu, kbInset]);

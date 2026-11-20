@@ -81,8 +81,22 @@ pub enum CaretReport {
         /// Sent-frame counter. Advances only when a frame was actually accepted
         /// by SCTP, so a gap means a drop rather than a suppressed duplicate.
         seq: u64,
+        /// Which sampler made this frame: `CARET_REPORT_REV`, on every frame.
+        /// Absent from every agent before it existed.
+        rev: u32,
     },
 }
+
+/// `rev` on every caret frame. 2: Chromium's hidden caret object (MSAA, 0 px
+/// wide on the line of the last text box) is reported as no caret
+/// (`puca_input::caret::msaa_caret`), so a Chromium window's focus leaving its
+/// text always reaches the viewer as `vis:false`. An agent before this (no
+/// `rev`) reported that caret as one, and on a surface wider than 2000 px never
+/// sent its hide at all (the 1 px width change is under `CARET_EPSILON`), so a
+/// viewer cannot tell from such an agent's `msaa` frames that the focus left
+/// the text, and keeps its older rule for them
+/// (`deviceAutoKeyboard.ts`, `hideMayGoUnheard`). Only ever raised.
+pub const CARET_REPORT_REV: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaretFractions {
@@ -114,7 +128,18 @@ impl CaretReport {
     /// silent one, so one ~50-byte frame on arming is what makes its 500ms
     /// fallback fire only against agents that genuinely predate this.
     pub fn hidden(mon: usize, surf: u64, seq: u64) -> Self {
-        Self::Caret { vis: false, x: None, y: None, w: None, h: None, src: None, mon, surf, seq }
+        Self::Caret {
+            vis: false,
+            x: None,
+            y: None,
+            w: None,
+            h: None,
+            src: None,
+            mon,
+            surf,
+            seq,
+            rev: CARET_REPORT_REV,
+        }
     }
 
     pub fn at(f: CaretFractions, src: CaretSource, mon: usize, surf: u64, seq: u64) -> Self {
@@ -128,6 +153,7 @@ impl CaretReport {
             mon,
             surf,
             seq,
+            rev: CARET_REPORT_REV,
         }
     }
 
@@ -245,8 +271,12 @@ mod tests {
         assert_eq!(v["mon"], 0);
         assert_eq!(v["surf"], 3);
         assert_eq!(v["seq"], 7);
+        // Every frame says which sampler made it: the viewer's older-host
+        // rule (deviceAutoKeyboard.hideMayGoUnheard) keys on its absence.
+        assert_eq!(v["rev"], 2);
 
         let v = serde_json::to_value(CaretReport::hidden(255, 4, 8)).unwrap();
+        assert_eq!(v["rev"], 2);
         assert_eq!(v["t"], "caret");
         assert_eq!(v["vis"], false);
         // ABSENT, not null. The viewer's checks are `typeof x === 'number'`, and
@@ -361,6 +391,55 @@ mod tests {
             Some(&base),
             &CaretReport::at(fr(0.5, 0.5, 0.00078, 0.0132), src, 0, 2, 1)
         ));
+    }
+
+    /// WHY THE VIEWER HAS TO KNOW WHICH SAMPLER IT IS TALKING TO. Chromium's
+    /// caret object hides by going from 1 px wide to 0 in place. An agent
+    /// whose sampler still reported that as a caret (before 2026-11-20) sent
+    /// the hide only when the width alone moved by more than CARET_EPSILON,
+    /// so on a surface wider than 2000 px (a 2560 screen, every composite)
+    /// it was never sent, and the viewer's own refusal of a 0 px msaa caret
+    /// never saw one. This sampler reports the hidden caret as NO caret, and
+    /// that always costs a packet. `CARET_REPORT_REV` says which of the two
+    /// a frame came from.
+    #[test]
+    fn chromiums_hide_reaches_the_viewer_only_from_this_sampler() {
+        use puca_input::caret::{msaa_caret, CaretSource, MsaaCaret, MSAA_STATE_INVISIBLE};
+        let msaa = CaretSource::Msaa;
+        // The address bar's caret, 1 px wide and 22 tall, at (400, 1059) of a
+        // 2560x1440 screen, then hidden in place.
+        let shown = CaretReport::at(fr(400.0 / 2560.0, 1059.0 / 1440.0, 1.0 / 2560.0, 22.0 / 1440.0), msaa, 0, 1, 1);
+        let old_hide = CaretReport::at(fr(400.0 / 2560.0, 1059.0 / 1440.0, 0.0, 22.0 / 1440.0), msaa, 0, 1, 2);
+        assert!(!caret_changed(Some(&shown), &old_hide), "the old hide on 2560 px: under the epsilon, never sent");
+        // CONTROL: on a 1920 px screen the same hide was sent (1/1920 > 0.0005).
+        let shown_1920 = CaretReport::at(fr(400.0 / 1920.0, 0.7, 1.0 / 1920.0, 0.02), msaa, 0, 1, 1);
+        let hide_1920 = CaretReport::at(fr(400.0 / 1920.0, 0.7, 0.0, 0.02), msaa, 0, 1, 2);
+        assert!(caret_changed(Some(&shown_1920), &hide_1920));
+        // THIS sampler: Chromium's hidden caret is no caret, and "no caret"
+        // is always a packet, whatever the width.
+        assert_eq!(msaa_caret((400, 1059, 0, 22), Some(MSAA_STATE_INVISIBLE)), MsaaCaret::Hidden);
+        assert!(caret_changed(Some(&shown), &CaretReport::hidden(0, 1, 2)));
+        assert!(CARET_REPORT_REV >= 2);
+    }
+
+    /// The viewer's half of the revision, read from the file that holds it:
+    /// a frame of this revision must be one the viewer counts as reporting
+    /// Chromium's hide.
+    #[test]
+    fn the_viewer_knows_this_revision_reports_chromiums_hide() {
+        let viewer = include_str!("../../../frontend/src/components/deviceAutoKeyboard.ts");
+        let at = viewer
+            .find("export const CARET_REV_HIDDEN_MSAA = ")
+            .expect("deviceAutoKeyboard.ts must define CARET_REV_HIDDEN_MSAA");
+        let rest = &viewer[at + "export const CARET_REV_HIDDEN_MSAA = ".len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let wanted: u32 = digits.parse().expect("a number");
+        assert!(
+            CARET_REPORT_REV >= wanted,
+            "this agent's frames (rev {CARET_REPORT_REV}) would be read as an older host's (the viewer wants {wanted})",
+        );
+        let client = include_str!("../../../frontend/src/api/devices/session.ts");
+        assert!(client.contains("rev: num(o.rev)"), "session.ts must read `rev` off the frame");
     }
 
     /// The log must record STATE, not coordinates — ten lines a second for the

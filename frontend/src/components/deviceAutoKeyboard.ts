@@ -34,7 +34,8 @@
  *    box, whatever that element is. A focused button, list or pane is reported
  *    as a "field" and is exactly the thing a tap that is NOT in a text box
  *    lands on. Only a measured caret counts.
- *  - Chromium's HIDDEN caret: `src: 'msaa'` 0 px wide (isMeasuredCaret).
+ *  - Chromium's HIDDEN caret: `src: 'msaa'` 0 px wide (isMeasuredCaret), from
+ *    an older host; a current one reports it as no caret.
  *  - a caret that does not move. See above: the press may have landed on
  *    anything beside it.
  *  - a caret that appears or moves on a DIFFERENT LINE from the press. Tapping
@@ -78,6 +79,9 @@ export interface CaretState {
     src: string | null;
     mon: number | null;
     surf: number | null;
+    /** The host sampler's revision (the frame's `rev`); absent or null from
+     *  an agent before 2026-11-20. See hideMayGoUnheard. */
+    rev?: number | null;
 }
 
 /** Where and when the press went out, fractions of the same surface. */
@@ -133,12 +137,26 @@ export type AutoKeyboardVerdict =
     | { raise: true; reason: 'appeared' | 'moved' }
     | { raise: false; reason: 'no-press' | 'expired' | 'hidden' | 'not-a-caret' | 'surface-changed' | 'unchanged' | 'other-line' };
 
+/** The caret-frame revision from which a host reports Chromium's hidden
+ *  caret as no caret (`rev`, puca-agent's caret_wire.rs CARET_REPORT_REV; its
+ *  test reads this line). */
+export const CARET_REV_HIDDEN_MSAA = 2;
+
+/** How long a close holds a raise for a caret whose hide may go unheard
+ *  (hideMayGoUnheard): the stand-down every close had before 2026-11-20,
+ *  together with "on the line of the caret at the close". */
+export const AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS = 5_000;
+
 /** What the stage records when the person CLOSES the keyboard: its toolbar
  *  button, or Android's Back taking the soft keyboard down under the open
- *  bar. Nothing expires it (heldByManualClose says what ends it). */
+ *  bar. Nothing expires it, except for an older host's Chromium caret
+ *  (heldByManualClose says what ends it). */
 export interface ManualClose {
-    /** Date.now() of the close, for the diagnostic. */
+    /** Date.now() of the close. */
     at: number;
+    /** The caret known at the close, or null: the line an older host's
+     *  hold keeps to. */
+    caret: CaretState | null;
 }
 
 /** Is `report` a measured caret (as opposed to hidden, a whole-field rect,
@@ -153,7 +171,10 @@ export interface ManualClose {
  *  agent from before this change took it for a caret, so for as long as such
  *  a window is in front this end was told that a caret sits on the line of
  *  the last text box typed into there. 0 px wide is the shape of that; a
- *  shown one is never 0 wide. */
+ *  shown one is never 0 wide. Such an agent sends that shape only where the
+ *  1 px width change is worth a frame to it, a surface up to 2000 px wide (or
+ *  as its first frame): wider, the shown caret simply stays, and
+ *  hideMayGoUnheard is what copes with that. */
 export function isMeasuredCaret(report: CaretState): boolean {
     if (!report.vis || report.src === null || !AUTO_KEYBOARD_CARET_SOURCES.has(report.src)) return false;
     if (report.src === 'msaa' && !(report.w > 0)) return false;
@@ -234,6 +255,28 @@ export function autoKeyboardVerdict(input: {
 }
 
 /**
+ * Can the focus have left the text this caret is in without this end being
+ * told? For an older host's Chromium caret, yes.
+ *
+ * Sticking (heldByManualClose) rests on the host saying when the focus leaves
+ * the text: the caret goes (`vis:false`) or turns into something that is no
+ * caret, and the next caret is then a text box TAKING the focus. Chromium's
+ * caret object hides by going from 1 px wide to 0 in place. A host before
+ * 2026-11-20 (no `rev`) reported that as a caret 0 px wide, which
+ * isMeasuredCaret refuses — but its agent sends a frame only when something
+ * moved by more than 1/2000 of the surface, and the width alone moves by 1 px,
+ * so on a surface wider than 2000 px (a 2560 screen, every screen at once) the
+ * hide is never sent at all. The caret stays measured here, on the line of a
+ * text box that no longer has the focus, and the next text box tapped is a
+ * caret that MOVED. A host with `rev` >= CARET_REV_HIDDEN_MSAA reports the
+ * hidden caret as no caret, which is always sent.
+ */
+export function hideMayGoUnheard(caret: CaretState | null): boolean {
+    return caret !== null && caret.vis && caret.src === 'msaa'
+        && !(typeof caret.rev === 'number' && caret.rev >= CARET_REV_HIDDEN_MSAA);
+}
+
+/**
  * Does the person's close of the keyboard hold this raise back?
  *
  * Closing the keyboard is the one unambiguous "not now" the user can give,
@@ -252,9 +295,32 @@ export function autoKeyboardVerdict(input: {
  *    which is never held;
  *  - the caret's surface changing (a monitor switch: the record is the
  *    tracking's, and tracking starts again).
+ *
+ * AN OLDER HOST'S CHROMIUM CARET (hideMayGoUnheard on the caret the tap
+ * moved): the second of those may never come, so sticking there would hold
+ * every Chromium text box off until the keyboard is opened by hand. Such a
+ * raise keeps the rule every close had before 2026-11-20: held for 5 s, and
+ * only on the line of the caret at the close (none known: the whole 5 s).
  */
-export function heldByManualClose(close: ManualClose | null, verdict: AutoKeyboardVerdict): boolean {
-    return close !== null && verdict.raise && verdict.reason === 'moved';
+export function heldByManualClose(input: {
+    close: ManualClose | null;
+    verdict: AutoKeyboardVerdict;
+    /** The caret this end held before the report: the one the tap moved. */
+    before: CaretState | null;
+    report: CaretState;
+    now: number;
+    surface?: SurfaceSize | null;
+}): boolean {
+    const { close, verdict, before, report, now, surface } = input;
+    if (close === null || !verdict.raise || verdict.reason !== 'moved') return false;
+    if (!hideMayGoUnheard(before)) return true;
+    // `!(a <= b)` so a NaN timestamp fails OPEN: a broken record must not hold
+    // the feature off.
+    if (!(now - close.at <= AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS) || now < close.at) return false;
+    if (!close.caret || !isMeasuredCaret(close.caret)) return true;
+    // "On the line of the caret at the close": the press's own tolerance,
+    // with the new caret's centre standing in for the finger.
+    return pressOnCaretLine({ x: report.x, y: report.y + report.h / 2 }, close.caret, surface);
 }
 
 /** Did a text box take the focus between these two reports: no measured

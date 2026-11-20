@@ -29,14 +29,19 @@
  *  - measuring in fractions instead of pixels turns the stacked-layout case red.
  *  - letting heldByManualClose hold only the close's line, or nothing, turns
  *    the manual-close cases red.
+ *  - letting it hold an OLDER host's Chromium caret for good (as it did on
+ *    2026-11-20 before review) turns "an older host's Chromium caret" red;
+ *    keying that rule on the close's caret instead of the one the tap moved
+ *    turns its window-switch case red.
  */
 import { describe, it, expect } from 'vitest';
 import {
     ASSUMED_SURFACE, AUTO_KEYBOARD_MOVE_PX,
     AUTO_KEYBOARD_SAME_LINE_MIN_PX, AUTO_KEYBOARD_WINDOW_MS,
-    autoKeyboardVerdict, caretMoved, heldByManualClose, isMeasuredCaret,
+    AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS, CARET_REV_HIDDEN_MSAA,
+    autoKeyboardVerdict, caretMoved, heldByManualClose, hideMayGoUnheard, isMeasuredCaret,
     pressOnCaretLine, textBoxTookFocus,
-    type AutoKeyboardVerdict, type CaretState, type Press,
+    type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press,
 } from '../components/deviceAutoKeyboard';
 
 /** One 1920x1080 screen. */
@@ -51,6 +56,8 @@ const HIDDEN: CaretState = { vis: false, x: 0, y: 0, w: 0, h: 0, src: null, mon:
 const CHROMIUM_HIDDEN: CaretState = { ...CARET, w: 0, src: 'msaa' };
 /** A focused BUTTON, as tier 3 reports it: the element's whole box. */
 const FIELD: CaretState = { vis: true, x: 0.7, y: 0.9, w: 0.08, h: 0.03, src: 'field', mon: 0, surf: 7 };
+/** A Win32 caret on another line of the screen. */
+const MOVED_WIN32: CaretState = { ...CARET, x: 0.3, y: 0.6 };
 
 const T0 = 1_000_000;
 /** A press a little before `now`, on the caret's line, right on it. */
@@ -285,9 +292,12 @@ describe('a different surface', () => {
 });
 
 describe('closing the keyboard sticks', () => {
-    const close = { at: T0 };
+    const close: ManualClose = { at: T0, caret: CARET };
     const moved: AutoKeyboardVerdict = { raise: true, reason: 'moved' };
     const appeared: AutoKeyboardVerdict = { raise: true, reason: 'appeared' };
+    const held = (over: Partial<Parameters<typeof heldByManualClose>[0]>) => heldByManualClose({
+        close, verdict: moved, before: CARET, report: MOVED_WIN32, now: T0 + 6_000, surface: ONE, ...over,
+    });
 
     it('a caret the tap MOVED is held back, whatever the line and however long after', () => {
         // The person closed the keyboard over a text box and taps around in
@@ -297,18 +307,23 @@ describe('closing the keyboard sticks', () => {
         // came into a text box". (Before 2026-11-20 a different line, or 5 s,
         // let the keyboard straight back up, and the zoom with it.) The close
         // record carries no clock to run out.
-        expect(heldByManualClose(close, moved)).toBe(true);
-        expect(heldByManualClose({ at: T0 - 3_600_000 }, moved)).toBe(true);
+        expect(held({})).toBe(true);
+        expect(held({ report: { ...CARET, x: 0.5 } })).toBe(true);
+        expect(held({ close: { at: T0 - 3_600_000, caret: CARET } })).toBe(true);
+        // The same from a current host's Chromium caret (rev 2): its hide
+        // would have arrived.
+        const shown = { ...CARET, src: 'msaa', rev: CARET_REV_HIDDEN_MSAA };
+        expect(held({ before: shown, report: { ...shown, x: 0.3, y: 0.6 } })).toBe(true);
         // POSITIVE CONTROL: with no close standing, the same raise goes.
-        expect(heldByManualClose(null, moved)).toBe(false);
+        expect(held({ close: null })).toBe(false);
     });
 
     it('a text box TAKING the focus (a caret where there was none) is not held', () => {
-        expect(heldByManualClose(close, appeared)).toBe(false);
+        expect(held({ verdict: appeared, before: HIDDEN })).toBe(false);
     });
 
     it('no raise, nothing to hold', () => {
-        expect(heldByManualClose(close, { raise: false, reason: 'unchanged' })).toBe(false);
+        expect(held({ verdict: { raise: false, reason: 'unchanged' } })).toBe(false);
     });
 
     it('what ends a close: a measured caret where there was none', () => {
@@ -322,5 +337,68 @@ describe('closing the keyboard sticks', () => {
         expect(textBoxTookFocus(CARET, HIDDEN)).toBe(false);
         expect(textBoxTookFocus(HIDDEN, FIELD)).toBe(false);
         expect(textBoxTookFocus(HIDDEN, CHROMIUM_HIDDEN)).toBe(false);
+    });
+});
+
+describe("an older host's Chromium caret: its hide may never arrive", () => {
+    // A host before 2026-11-20 (no `rev`) on a surface wider than 2000 px: the
+    // address bar was typed into (msaa, 1 px wide), the keyboard closed, a tap
+    // on the page took the focus (Chromium hid its caret, 1 px to 0 in place,
+    // and the agent sent nothing: under its 1/2000 epsilon), then a tap into
+    // a text box on the page. Here that last caret MOVED, from a caret still
+    // believed in. Sticking held it, and every Chromium text box after it,
+    // until the keyboard was opened by hand.
+    const OLD_BAR: CaretState = { ...CARET, src: 'msaa', w: 1 / 2560 };
+    const OLD_PAGE_BOX: CaretState = { ...OLD_BAR, x: 0.3, y: 0.6 };
+    const close: ManualClose = { at: T0, caret: OLD_BAR };
+    const moved: AutoKeyboardVerdict = { raise: true, reason: 'moved' };
+    const held = (over: Partial<Parameters<typeof heldByManualClose>[0]>) => heldByManualClose({
+        close, verdict: moved, before: OLD_BAR, report: OLD_PAGE_BOX, now: T0 + 6_000, surface: ONE, ...over,
+    });
+
+    it('which carets those are: msaa, shown, with no revision or one before CARET_REV_HIDDEN_MSAA', () => {
+        expect(hideMayGoUnheard(OLD_BAR)).toBe(true);
+        expect(hideMayGoUnheard({ ...OLD_BAR, rev: null })).toBe(true);
+        expect(hideMayGoUnheard({ ...OLD_BAR, rev: CARET_REV_HIDDEN_MSAA - 1 })).toBe(true);
+        // A current host reports Chromium's hidden caret as no caret.
+        expect(hideMayGoUnheard({ ...OLD_BAR, rev: CARET_REV_HIDDEN_MSAA })).toBe(false);
+        expect(hideMayGoUnheard({ ...OLD_BAR, rev: CARET_REV_HIDDEN_MSAA + 1 })).toBe(false);
+        // Win32 and UIA carets go away when the focus leaves, on any host.
+        expect(hideMayGoUnheard({ ...OLD_BAR, src: 'win32' })).toBe(false);
+        expect(hideMayGoUnheard({ ...OLD_BAR, src: 'uia' })).toBe(false);
+        expect(hideMayGoUnheard(HIDDEN)).toBe(false);
+        expect(hideMayGoUnheard(null)).toBe(false);
+    });
+
+    it('after 5 s the text box tapped raises the keyboard, as every close did before', () => {
+        expect(held({})).toBe(false);
+        expect(held({ now: T0 + AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS + 1 })).toBe(false);
+        // CONTROL: the same story from a CURRENT host sticks (its hide would
+        // have arrived as vis:false, and this would be 'appeared').
+        expect(held({ before: { ...OLD_BAR, rev: 2 }, report: { ...OLD_PAGE_BOX, rev: 2 } })).toBe(true);
+    });
+
+    it('within 5 s, held on the line it was closed on, not on another', () => {
+        const soon = T0 + 2_000;
+        expect(held({ now: soon, report: { ...OLD_BAR, x: 0.5 } })).toBe(true);
+        expect(held({ now: soon })).toBe(false);
+        // No caret known at the close: the whole 5 s holds.
+        expect(held({ now: soon, close: { at: T0, caret: null } })).toBe(true);
+        expect(held({ now: soon, close: { at: T0, caret: HIDDEN } })).toBe(true);
+    });
+
+    it('it is the caret the tap MOVED that decides, not the one at the close', () => {
+        // Closed over Notepad (a Win32 caret, which does go away); the focus
+        // then went to Chrome's address bar, then to the page and into a box
+        // there. The hide that went unheard is Chrome's.
+        expect(held({ close: { at: T0, caret: CARET } })).toBe(false);
+        // ...and the other way round: closed over the older host's Chromium
+        // caret, then a Win32 caret moved (a window switch) sticks.
+        expect(held({ before: CARET, report: MOVED_WIN32 })).toBe(true);
+    });
+
+    it('a broken close time fails open', () => {
+        expect(held({ close: { at: Number.NaN, caret: OLD_BAR }, now: T0 })).toBe(false);
+        expect(held({ close: { at: T0 + 10_000, caret: OLD_BAR }, now: T0 })).toBe(false);
     });
 });

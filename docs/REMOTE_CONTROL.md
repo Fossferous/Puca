@@ -403,8 +403,23 @@ the focused element's box as `field`). The rules, and what each one is for:
   box typed into there, indefinitely. The host now reads it as hidden
   (`puca_input::caret::msaa_caret`), a definitive answer that does not send
   the assist on to tier 3 (which would turn the window's UI Automation tree
-  on and report the focused button as a `field`); the viewer also refuses an
-  `msaa` caret 0 px wide, for hosts not yet updated.
+  on and report the focused button as a `field`), and reports it as no caret
+  (`vis:false`). Only a rect with a height is read that way: ALL ZEROES stays
+  a miss, invisible or not, because it is what oleacc's standard caret object
+  answers for any window whose thread has no Win32 caret (a XAML text box,
+  any text box only UI Automation can see; measured in
+  `caret::imp::tests`), and that is where tier 3 must be asked.
+- **An older host's Chromium caret** (a frame with no `rev`). Every caret
+  frame carries `rev` (puca-agent's `caret_wire::CARET_REPORT_REV`, 2 since
+  2026-11-20: Chromium's hidden caret is reported as no caret). An agent
+  before that reports it as a caret 0 px wide, which the viewer refuses
+  (`isMeasuredCaret`), but that agent sends a frame only for a change of more
+  than 1/2000 of the surface, and a hide or a show in place changes only the
+  width, by 1 px: on a surface wider than 2000 px (a 2560 screen, every
+  screen at once) the viewer sees the shape only as a first frame, and the
+  focus leaving the text never. So for a caret such a host may have left
+  standing (`hideMayGoUnheard`: `msaa`, no `rev`), a close keeps the rule it
+  had before: 5 s, on the line of the caret at the close.
 - **Closing sticks.** The keyboard button, or Android's Back taking the IME
   down under the open bar (a measured fall: the native or visual-viewport
   tier), records a close. While it stands, a raise for a caret the tap MOVED
@@ -412,7 +427,9 @@ the focused element's box as `field`). The rules, and what each one is for:
   same text box from one the focus went straight into. It ends when the
   keyboard comes up (the button, "Tap to type"), when a measured caret
   appears where there was none (the focus left the text and a text box took
-  it), and with the caret tracking (a monitor switch).
+  it), and with the caret tracking (a monitor switch). An older host's
+  Chromium caret is the exception (above): the second of those may never
+  come.
 - **Only a text box's caret moves the picture** (`DeviceStage.tsx`, the caret
   camera; `deviceZoomFollow.caretFollowTransform`). A `field` report, a hidden
   caret and `vis:false` hold the view. Where the host reports no caret at

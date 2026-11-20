@@ -332,9 +332,11 @@ export async function connectToDevice(): Promise<string> { return SID; }
 
 // --- the driver's handle ----------------------------------------------------
 function pushCaret(r: Partial<CaretReport>): void {
+    // A current host's frame (`rev` 2) unless the driver says otherwise:
+    // `rev: null` is an agent from before 2026-11-20.
     const full: CaretReport = {
         vis: true, x: 0, y: 0, w: 0, h: 0, src: 'msaa',
-        mon: state.capturing, surf: 1, seq: null, ...r,
+        mon: state.capturing, surf: 1, seq: null, rev: 2, ...r,
     };
     log.push({ at: now(), ev: 'caret', ...full });
     for (const cb of caretSubs.get(SID) ?? []) cb(full);

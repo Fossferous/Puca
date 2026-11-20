@@ -3142,6 +3142,11 @@ export interface CaretReport {
     mon: number | null;
     surf: number | null;
     seq: number | null;
+    /** Which sampler on the host made the frame (puca-agent's caret_wire.rs
+     *  CARET_REPORT_REV): null from an agent before 2026-11-20, whose 'msaa'
+     *  caret can outlive the focus leaving the text
+     *  (deviceAutoKeyboard.hideMayGoUnheard). */
+    rev: number | null;
 }
 
 /** Viewer → agent. */
@@ -3187,7 +3192,7 @@ export function parseCaretFrame(raw: unknown): CaretReport | null {
         // speaks caret at all.
         return {
             vis: false, x: 0, y: 0, w: 0, h: 0, src: null,
-            mon: num(o.mon), surf: num(o.surf), seq: num(o.seq),
+            mon: num(o.mon), surf: num(o.surf), seq: num(o.seq), rev: num(o.rev),
         };
     }
     const q = [num(o.x), num(o.y), num(o.w), num(o.h)];
@@ -3203,7 +3208,7 @@ export function parseCaretFrame(raw: unknown): CaretReport | null {
     return {
         vis: true, x, y, w, h,
         src: typeof o.src === 'string' ? o.src : null,
-        mon, surf, seq: num(o.seq),
+        mon, surf, seq: num(o.seq), rev: num(o.rev),
     };
 }
 

@@ -65,7 +65,11 @@
 //      that moves the caret to it raises the keyboard and zooms; Chromium's
 //      caret shown again in place (the box taking the focus back) raises it;
 //      a text box taking the focus after a close raises it; the text caret
-//      moving out of view moves the picture. ONLY=taps runs just this.
+//      moving out of view moves the picture; closed over an OLDER host's
+//      Chromium caret (no `rev`), whose hide that agent never sends on a
+//      screen this wide, a text box tapped 6 s later raises it (CONTROL: the
+//      same from a current host, rev 2, stays closed). ONLY=taps runs just
+//      this.
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -324,12 +328,18 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
         ck('9a: CONTROL: a tap into the text, the caret moving to it, raises the keyboard with its field focused', kbUp(s), fmt(s));
         await ctx.close();
     }
-    // 9b: Chromium's HIDDEN caret: the address bar was typed into, then a page
-    // took the focus. The caret object stays on the address bar's line, 0 px
-    // wide, for as long as that window is in front.
+    // 9b: Chromium's HIDDEN caret from an OLDER host (an agent before
+    // 2026-11-20: no `rev`): the address bar was typed into, then a page took
+    // the focus. The caret object stays on the address bar's line, 0 px wide,
+    // for as long as that window is in front. Every frame here is one that
+    // agent really sends on this 2560 px wide screen: it sends only what moved
+    // by more than 1/2000 of the surface, so the hidden shape arrives only as
+    // the FIRST frame (tracking starting while it is hidden), and the 1 px
+    // width change of a hide or a show in place never arrives at all.
     {
+        const OLD = { src: 'msaa', rev: null };
         const { ctx, page, tap } = await tapsStage();
-        await caretOnMain(page, 400, 1059, { src: 'msaa', w: 0 });
+        await caretOnMain(page, 400, 1059, { ...OLD, w: 0 });
         await page.waitForTimeout(300);
         for (const [where, dx] of [['beside', 1000], ['on', 600]]) {
             await tap(await clientOnMain(page, dx, 1070));
@@ -338,14 +348,54 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
             ck(`9b: a tap ${where} the line a Chromium window's hidden caret was left on raises no keyboard`, !s.bar, fmt(s));
         }
         // CONTROL: the tap INTO that box gives it the focus back, and Chromium
-        // shows the caret where it was (1 px wide): that is a text box taking
-        // the focus because of the tap.
+        // shows the caret at the end of its text, further along that line:
+        // that is a text box taking the focus because of the tap.
         await tap(await clientOnMain(page, 600, 1070));
         await page.waitForTimeout(150);
-        await caretOnMain(page, 400, 1059, { src: 'msaa' });
+        await caretOnMain(page, 640, 1059, OLD);
         await page.waitForTimeout(700);
-        const s = await kbState(page);
-        ck('9b: CONTROL: the same box taking the focus back (its caret shown again in place) raises the keyboard', kbUp(s), fmt(s));
+        let s = await kbState(page);
+        ck('9b: CONTROL: the same box taking the focus back (its caret shown at the end of its text) raises the keyboard', kbUp(s), fmt(s));
+        // Closed, then the page takes the focus: Chromium hides its caret and
+        // this host sends nothing. A text box tapped on the page later is a
+        // caret that MOVED from one still believed in. Before review the close
+        // held that for good, and every Chromium text box after it.
+        await tap(await kbButton(page));
+        await page.waitForTimeout(600);
+        s = await kbState(page);
+        ck('9b: precondition: the keyboard button closed it', !s.bar, fmt(s));
+        await tap(await clientOnMain(page, 1800, 700));     // the page; nothing is sent
+        await page.waitForTimeout(5600);
+        await tap(await clientOnMain(page, 900, 300));      // a search box on the page
+        await page.waitForTimeout(150);
+        await caretOnMain(page, 900, 289, OLD);
+        await page.waitForTimeout(800);
+        s = await kbState(page);
+        ck('9b: closed over an older host\'s Chromium caret, whose hide never came: a text box tapped 6 s later raises the keyboard', kbUp(s), fmt(s));
+        await ctx.close();
+    }
+    // 9b CONTROL: the same close and the same taps from a CURRENT host (rev
+    // 2), where a caret that moved with no hide before it is the focus going
+    // straight into another box: it stays closed, as 9d's do.
+    {
+        const NEW = { src: 'msaa', rev: 2 };
+        const { ctx, page, tap } = await tapsStage();
+        await page.evaluate(() => window.__stage.pushCaret({ vis: false, mon: 0, rev: 2 }));
+        await tap(await clientOnMain(page, 600, 1070));
+        await page.waitForTimeout(150);
+        await caretOnMain(page, 640, 1059, NEW);
+        await page.waitForTimeout(700);
+        let s = await kbState(page);
+        ck('9b: precondition (current host): a tap into the address bar raised the keyboard', kbUp(s), fmt(s));
+        await tap(await kbButton(page));
+        await page.waitForTimeout(600);
+        await page.waitForTimeout(5600);
+        await tap(await clientOnMain(page, 900, 300));
+        await page.waitForTimeout(150);
+        await caretOnMain(page, 900, 289, NEW);
+        await page.waitForTimeout(800);
+        s = await kbState(page);
+        ck('9b: CONTROL: a current host\'s caret moving straight into another box 6 s after the close leaves it closed', !s.bar, fmt(s));
         await ctx.close();
     }
     // 9c: what is not a tap into a text box at all: the desktop, a window's

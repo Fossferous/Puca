@@ -593,6 +593,59 @@ describe('closing the keyboard sticks', () => {
         await caret('ds-1', WIN32(0.6, 0.8));
         expect(h.showMobileKeyboard, 'the keyboard up again ends the close').toHaveBeenCalled();
     });
+
+    // A host before 2026-11-20 (no `rev`) on a screen wider than 2000 px:
+    // Chromium's caret object hides by going from 1 px wide to 0 in place,
+    // and that agent sends nothing for it (under its 1/2000 epsilon). So the
+    // address bar's caret stays "measured" here after a tap on the page took
+    // the focus, and a text box tapped on the page next is a caret that MOVED.
+    const WIDE = [{ id: 0, label: 'Main display', left: 0, top: 0, width: 2560, height: 1440 }];
+    const CHROMIUM = (x: number, y: number, rev?: number) => ({
+        vis: true, x, y, w: 1 / 2560, h: 24 / 1440, src: 'msaa', mon: 0, surf: 1, seq: 1,
+        ...(rev === undefined ? {} : { rev }),
+    });
+    async function raiseInChromium(rev?: number) {
+        await caret('ds-1', { ...HIDDEN, ...(rev === undefined ? {} : { rev }) });
+        await pressAt(0.5, 0.5);
+        await caret('ds-1', CHROMIUM(0.5, 0.5, rev));
+        expect(panel(), 'precondition: a tap into the address bar opened it').toBeTruthy();
+        await act(async () => { kbButton().click(); });
+        await flush();
+        expect(panel(), 'precondition: the button closed it').toBeNull();
+    }
+
+    it("an OLDER host's Chromium caret, whose hide never arrives: held 5 s on its line, then the next text box opens it", async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session({ monitors: WIDE }));
+        await raiseInChromium();
+        vi.setSystemTime(Date.now() + 2_000);
+        await pressAt(0.6, 0.5 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.6, 0.5));     // further along the address bar
+        expect(panel(), 'within 5 s, on the line it was closed on: held, as before 2026-11-20').toBeNull();
+        vi.setSystemTime(Date.now() + 4_000);
+        await pressAt(0.7, 0.3);                     // the page: Chromium hides its caret, nothing is sent
+        await pressAt(0.3, 0.2 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.3, 0.2));     // a search box on the page
+        expect(panel(), 'the text box tapped on the page opens the keyboard').toBeTruthy();
+    });
+
+    it("CONTROL: a CURRENT host's (rev 2) Chromium caret sticks like any other, until its hide arrives", async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session({ monitors: WIDE }));
+        await raiseInChromium(2);
+        vi.setSystemTime(Date.now() + 6_000);
+        await pressAt(0.6, 0.5 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.6, 0.5, 2));
+        expect(panel(), 'the same text, 6 s later').toBeNull();
+        await pressAt(0.3, 0.2 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.3, 0.2, 2));  // the focus went straight into another box
+        expect(panel(), 'another box the focus went straight into').toBeNull();
+        // The page takes the focus: this host says so.
+        await caret('ds-1', { ...HIDDEN, rev: 2 });
+        await pressAt(0.4, 0.8 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.4, 0.8, 2));
+        expect(panel(), 'POSITIVE CONTROL: a text box taking the focus opens it').toBeTruthy();
+    });
 });
 
 describe('every screen by default — the viewer\'s half', () => {
