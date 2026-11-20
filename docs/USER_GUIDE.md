@@ -1041,7 +1041,10 @@ keeps it where it was (an empty search box, say): open the keyboard with
 **Keyboard** then. Close it with **Keyboard**, or with the phone's Back, and
 it stays closed while you tap around in that text; it comes up by itself
 again once the cursor has left the text and a text box takes it, or when you
-open it. (In Chrome, Edge and other Chromium-based apps on a computer whose
+open it. The keyboard going down because you switched to another app, locked
+the phone or turned it is not closing it: back in Púca, the next tap into the
+text brings it up.
+(In Chrome, Edge and other Chromium-based apps on a computer whose
 Púca is not yet updated, it still comes back after five seconds, or on
 another line, as it did before.) With **Zoom to the text cursor while
 typing** on, the picture zooms to the text cursor while the keyboard is up

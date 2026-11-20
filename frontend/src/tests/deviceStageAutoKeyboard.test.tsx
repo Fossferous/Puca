@@ -14,7 +14,11 @@
  *    up and change zoom");
  *  - a focused button ('field') after a press does not;
  *  - closing the keyboard (its button, or Android's Back under the open bar)
- *    sticks until a text box takes the focus or the keyboard comes up;
+ *    sticks until a text box takes the focus or the keyboard comes up; the
+ *    keyboard going down with the app, a screen lock, a rotation or the
+ *    window's focus is no close (each rule of that fails a case here when
+ *    taken out: the hidden page, the take-back, the clock, the window's own
+ *    focus, the width);
  *  - the preference off means none of it — and no tracking either;
  *  - after the first frame, an unattended session on an older multi-screen
  *    host is asked for every screen, once.
@@ -645,6 +649,186 @@ describe('closing the keyboard sticks', () => {
         await pressAt(0.4, 0.8 + 12 / 1440);
         await caret('ds-1', CHROMIUM(0.4, 0.8, 2));
         expect(panel(), 'POSITIVE CONTROL: a text box taking the focus opens it').toBeTruthy();
+    });
+});
+
+// The native tier (and the visual viewport) say only that the soft keyboard
+// went down, never why, and it goes down for more than Back: the app sent to
+// the background (another app, a password manager, the home screen), the
+// screen locking, the phone turning, a system dialog or the notification
+// shade taking the window's focus. Nothing brings it back on the way back
+// (the bar is still up, the IME is not). Until review of work/stage-taps each
+// of those was recorded as the person's close, and a close sticks: every tap
+// into the text afterwards (the caret MOVED) was held, for good on a current
+// host, until a text box took the focus after a gap or the keyboard was
+// opened by hand. Before the branch that tap brought the keyboard back.
+describe('the keyboard going down with the app, the screen or the window is no close', () => {
+    let vis: DocumentVisibilityState = 'visible';
+    let width = 390;
+    beforeEach(() => {
+        vis = 'visible';
+        width = 390;
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis });
+        Object.defineProperty(window, 'innerWidth', { configurable: true, get: () => width });
+        h.inset = { visible: true, top: 500, source: 'native' };
+    });
+    afterEach(() => {
+        Reflect.deleteProperty(document, 'visibilityState');
+        Reflect.deleteProperty(window, 'innerWidth');
+        vi.useRealTimers();
+    });
+
+    const ime = async (visible: boolean) => {
+        h.inset = { visible, top: visible ? 500 : 844, source: 'native' };
+        await act(async () => { for (const w of h.insetWatchers) w(h.inset); });
+        await flush();
+    };
+    const pageGoes = async (state: DocumentVisibilityState) => {
+        vis = state;
+        await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+        await flush();
+    };
+    const windowEvent = async (type: string) => {
+        await act(async () => { window.dispatchEvent(new Event(type)); });
+        await flush();
+    };
+    const later = (ms: number) => { vi.setSystemTime(Date.now() + ms); };
+    /** Typing on the PC with the keyboard up, by a tap into a text box. */
+    async function typing() {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await caret('ds-1', HIDDEN);
+        await pressAt(0.5, 0.5);
+        await caret('ds-1', WIN32(0.5, 0.5));
+        expect(panel(), 'precondition: a tap into a text box opened it').toBeTruthy();
+        expect(h.showMobileKeyboard, 'precondition: the raise asked the native show').toHaveBeenCalled();
+        later(10_000);
+    }
+    /** Back in the app with the bar up and the IME down: a tap elsewhere in
+     *  the text (the caret MOVES to it). Does the keyboard come back? */
+    async function tapInTheTextRaises(x: number, y: number): Promise<boolean> {
+        expect(panel(), 'the bar is still up').toBeTruthy();
+        expect(h.inset.visible, 'the IME is down').toBe(false);
+        later(3_000);
+        h.showMobileKeyboard.mockClear();
+        await pressAt(x, y + 9 / 1080);
+        await caret('ds-1', WIN32(x, y));
+        return h.showMobileKeyboard.mock.calls.length > 0;
+    }
+
+    it('another app, the keyboard going down on the way out (then the page hides)', async () => {
+        await typing();
+        await ime(false);
+        await windowEvent('blur');
+        await pageGoes('hidden');
+        later(30_000);
+        await pageGoes('visible');
+        await windowEvent('focus');
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+    });
+
+    it('another app, the keyboard reported down while the page is hidden', async () => {
+        await typing();
+        await pageGoes('hidden');
+        later(5_000);                                    // well after it hid
+        await ime(false);
+        later(30_000);
+        await pageGoes('visible');
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+    });
+
+    it('the screen locked, the keyboard reported down as the page comes back', async () => {
+        await typing();
+        await pageGoes('hidden');
+        later(60_000);
+        await pageGoes('visible');
+        await ime(false);
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+    });
+
+    it('a system dialog or the notification shade took the window\'s focus', async () => {
+        await typing();
+        await windowEvent('blur');
+        await ime(false);
+        later(5_000);
+        await windowEvent('focus');
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+    });
+
+    it('the phone turned, before the keyboard went down or after it', async () => {
+        await typing();
+        await windowEvent('orientationchange');
+        await ime(false);
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+        await ime(true);
+        later(10_000);
+        await ime(false);
+        await windowEvent('orientationchange');
+        expect(await tapInTheTextRaises(0.5, 0.8)).toBe(true);
+    });
+
+    it('a fold or a split screen: the window a new width', async () => {
+        await typing();
+        width = 690;
+        await windowEvent('resize');
+        await ime(false);
+        expect(await tapInTheTextRaises(0.7, 0.5)).toBe(true);
+    });
+
+    it('CONTROL: Back is still a close, with the window resized by the keyboard going down (the height alone)', async () => {
+        // Android 14 and older resize the WebView for the IME: Back comes with
+        // a resize that changes the height and not the width.
+        await typing();
+        await ime(false);
+        await windowEvent('resize');
+        expect(await tapInTheTextRaises(0.7, 0.5), 'after Back, a tap in the text').toBe(false);
+    });
+
+    it("CONTROL: an element's focus moving in the page is not the window's", async () => {
+        // Dispatched bubbling, so it is the stage's own check (the window's
+        // focus only) and not the browser's no-bubble rule that keeps it out.
+        await typing();
+        const field = host!.querySelector('.device-stage-keyboard-overlay input, .device-stage-keyboard-overlay textarea')
+            ?? host!.querySelector('.device-stage-keyboard-overlay')!;
+        await act(async () => {
+            field.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+            field.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+        });
+        await flush();
+        await ime(false);
+        expect(await tapInTheTextRaises(0.7, 0.5), 'after Back, a tap in the text').toBe(false);
+    });
+
+    it('CONTROL: a Back long after coming back to the app is a close, and leaving long after a Back does not take it back', async () => {
+        await typing();
+        await pageGoes('hidden');
+        later(30_000);
+        await pageGoes('visible');
+        later(5_000);
+        await ime(false);                                // the back gesture, 5 s after
+        expect(await tapInTheTextRaises(0.7, 0.5), 'held: the person closed it').toBe(false);
+        later(10_000);
+        await windowEvent('blur');
+        await pageGoes('hidden');
+        later(30_000);
+        await pageGoes('visible');
+        await windowEvent('focus');
+        expect(await tapInTheTextRaises(0.5, 0.8), 'still held after the app went and came back').toBe(false);
+    });
+
+    it("CONTROL: the button's close is not taken back by the app going and coming back", async () => {
+        await typing();
+        const kbButton = host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+        await act(async () => { kbButton.click(); });
+        await flush();
+        expect(panel(), 'precondition: the button closed it').toBeNull();
+        await pageGoes('hidden');
+        await ime(false);
+        await pageGoes('visible');
+        later(3_000);
+        await pressAt(0.7, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.7, 0.5));
+        expect(panel(), 'held: the person closed it').toBeNull();
     });
 });
 

@@ -430,6 +430,23 @@ the focused element's box as `field`). The rules, and what each one is for:
   it), and with the caret tracking (a monitor switch). An older host's
   Chromium caret is the exception (above): the second of those may never
   come.
+- **Only Back's fall is a close.** The native and visual-viewport tiers say
+  that the IME went down, never why, and it goes down for more than Back:
+  the app sent to the background (another app, a password manager), the
+  screen locking, the phone turning or a fold opening, a system dialog or
+  the shade taking the window's focus. Nothing brings it back on the way
+  back, so a close recorded for one of those held every tap into the text
+  until a text box took the focus. A fall is therefore no close while the
+  page is hidden or within 1.5 s (`IME_FALL_LIFECYCLE_MS`) after
+  `visibilitychange`, `pagehide`/`pageshow`, the window's own `blur`/`focus`,
+  `orientationchange` (and `screen.orientation`'s `change`) or a resize to a
+  new WIDTH (the IME changes only the height, which Android 14 and older
+  resize the WebView by, Back included), and one of those within 1.5 s after
+  a fall takes its close back, whichever order Android delivers them in
+  (`deviceAutoKeyboard.imeFallIsAClose`, `imeCloseTakenBack`). The button's
+  close is never taken back. A Back pressed within 1.5 s of coming back to
+  the app is not counted (the next tap that moves a caret raises again).
+  "Copy diagnostics" counts these falls as `autoKeyboard.notCloses`.
 - **Only a text box's caret moves the picture** (`DeviceStage.tsx`, the caret
   camera; `deviceZoomFollow.caretFollowTransform`). A `field` report, a hidden
   caret and `vis:false` hold the view. Where the host reports no caret at

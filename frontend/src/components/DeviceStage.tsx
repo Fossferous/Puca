@@ -56,7 +56,7 @@ import {
 import { hopChipShift, type PlaceRect } from './deviceStageHopPlace';
 import { pinchStep } from './deviceStagePinch';
 import {
-    autoKeyboardVerdict, heldByManualClose, isMeasuredCaret, textBoxTookFocus,
+    autoKeyboardVerdict, heldByManualClose, imeCloseTakenBack, imeFallIsAClose, isMeasuredCaret, textBoxTookFocus,
     type AutoKeyboardVerdict, type ManualClose, type Press, type SurfaceSize,
 } from './deviceAutoKeyboard';
 import { installBackgroundResume } from './deviceStageResume';
@@ -2256,9 +2256,11 @@ export function DeviceStage() {
      *  (only an older host's Chromium caret is held for 5 s, on its line:
      *  hideMayGoUnheard): dropped when the keyboard comes up (asked for, or
      *  for any reason), when a text box takes the focus (textBoxTookFocus, in
-     *  the tracking subscription below), and on a surface change (the
-     *  tracking cleanup below). Declared before the tracking effect that
-     *  clears it. */
+     *  the tracking subscription below), on a surface change (the tracking
+     *  cleanup below), and, for Back's, when the app, the window's focus or
+     *  the screen's orientation turns out to have gone with it
+     *  (imeCloseTakenBack, the lifecycle effect below). Declared before the
+     *  tracking effect that clears it. */
     const manualKbCloseRef = useRef<ManualClose | null>(null);
     /** The auto-keyboard's report sink; a slot for the same reason as
      *  caretOnAimRef — the subscription below outlives any one render of the
@@ -2475,7 +2477,11 @@ export function DeviceStage() {
         held: number;
         /** When the user last closed it. */
         closedAt: number;
-    }>({ onReport: null, press: null, raised: 0, dropped: 0, held: 0, closedAt: 0 });
+        /** Falls of the soft keyboard under the open bar NOT taken for Back:
+         *  the app, the window's focus or the screen's orientation went with
+         *  them (imeFallIsAClose, imeCloseTakenBack). */
+        notCloses: number;
+    }>({ onReport: null, press: null, raised: 0, dropped: 0, held: 0, closedAt: 0, notCloses: 0 });
     /** The captured surface in desktop px — what the caret fractions are OF
      *  — so the decision's tolerances can be pixels (a line on a 1080-row
      *  screen, not a line's fraction of a stacked composite). From the host's
@@ -2552,6 +2558,60 @@ export function DeviceStage() {
     // with it was recorded by the button. The keyboard coming UP, for any
     // reason (the button, "Tap to type", a raise), ends any close: only the
     // transitions count, so a tier pinned at visible:true clears nothing.
+    //
+    // BUT ONLY BACK. Those tiers say that the IME went down, never why, and it
+    // goes down for more than Back: the app sent to the background (another
+    // app, a password manager), the screen locking, the phone turning, a
+    // system dialog or the shade taking the window's focus. Recorded as the
+    // person's close, each held every tap into the text after they came back,
+    // and nothing brings the IME back on the way back. So a fall with the
+    // page hidden, or within IME_FALL_LIFECYCLE_MS after one of those, is no
+    // close, and one of them shortly after a fall takes its close back
+    // (imeFallIsAClose, imeCloseTakenBack; the order the two arrive in is not
+    // Android's to promise). `kbLifecycleAtRef` is when the last one came.
+    const kbLifecycleAtRef = useRef<number | null>(null);
+    useEffect(() => {
+        if (!isMobile) return;
+        let width = window.innerWidth;
+        const note = () => {
+            const now = Date.now();
+            kbLifecycleAtRef.current = now;
+            if (imeCloseTakenBack(manualKbCloseRef.current, now)) {
+                manualKbCloseRef.current = null;
+                autoKbDiagRef.current.notCloses++;
+            }
+        };
+        // The window's own focus, not an element's (those do not bubble, but
+        // say so rather than lean on it): an event AT this listener's target.
+        const onWindowFocus = (e: Event) => { if (e.eventPhase === Event.AT_TARGET) note(); };
+        // The soft keyboard changes only the HEIGHT (Android 14 and older
+        // resize the WebView for it, Back included); a new width is a
+        // rotation, a fold or a split screen.
+        const onResize = () => {
+            if (window.innerWidth === width) return;
+            width = window.innerWidth;
+            note();
+        };
+        const orientation: ScreenOrientation | undefined = typeof screen !== 'undefined' ? screen.orientation : undefined;
+        document.addEventListener('visibilitychange', note);
+        window.addEventListener('pagehide', note);
+        window.addEventListener('pageshow', note);
+        window.addEventListener('blur', onWindowFocus);
+        window.addEventListener('focus', onWindowFocus);
+        window.addEventListener('orientationchange', note);
+        window.addEventListener('resize', onResize);
+        orientation?.addEventListener?.('change', note);
+        return () => {
+            document.removeEventListener('visibilitychange', note);
+            window.removeEventListener('pagehide', note);
+            window.removeEventListener('pageshow', note);
+            window.removeEventListener('blur', onWindowFocus);
+            window.removeEventListener('focus', onWindowFocus);
+            window.removeEventListener('orientationchange', note);
+            window.removeEventListener('resize', onResize);
+            orientation?.removeEventListener?.('change', note);
+        };
+    }, [isMobile]);
     const kbWasVisibleRef = useRef(kbInset.visible);
     useEffect(() => {
         const was = kbWasVisibleRef.current;
@@ -2563,8 +2623,15 @@ export function DeviceStage() {
         }
         if (activeMobileMenu !== 'keyboard') return;
         if (kbInset.source !== 'native' && kbInset.source !== 'visual-viewport') return;
-        manualKbCloseRef.current = { at: Date.now(), caret: lastCaretRef.current };
-        autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
+        const now = Date.now();
+        if (!imeFallIsAClose({
+            now, hidden: document.visibilityState === 'hidden', lifecycleAt: kbLifecycleAtRef.current,
+        })) {
+            autoKbDiagRef.current.notCloses++;
+            return;
+        }
+        manualKbCloseRef.current = { at: now, caret: lastCaretRef.current, by: 'ime' };
+        autoKbDiagRef.current.closedAt = now;
     }, [kbInset.visible, kbInset.source, activeMobileMenu]);
 
     /** The toolbar's keyboard button. Three states, not a toggle's two:
@@ -2602,7 +2669,7 @@ export function DeviceStage() {
             return;
         }
         kbButtonTriedRaiseRef.current = false;
-        manualKbCloseRef.current = { at: Date.now(), caret: lastCaretRef.current };
+        manualKbCloseRef.current = { at: Date.now(), caret: lastCaretRef.current, by: 'button' };
         autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
         setActiveMobileMenu(null);
     }, [activeMobileMenu, kbInset]);

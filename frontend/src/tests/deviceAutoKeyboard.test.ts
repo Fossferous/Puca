@@ -33,14 +33,16 @@
  *    2026-11-20 before review) turns "an older host's Chromium caret" red;
  *    keying that rule on the close's caret instead of the one the tap moved
  *    turns its window-switch case red.
+ *  - letting imeCloseTakenBack take back the button's close as well turns
+ *    "one of those right AFTER a fall" red (and the stage's button control).
  */
 import { describe, it, expect } from 'vitest';
 import {
     ASSUMED_SURFACE, AUTO_KEYBOARD_MOVE_PX,
     AUTO_KEYBOARD_SAME_LINE_MIN_PX, AUTO_KEYBOARD_WINDOW_MS,
-    AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS, CARET_REV_HIDDEN_MSAA,
-    autoKeyboardVerdict, caretMoved, heldByManualClose, hideMayGoUnheard, isMeasuredCaret,
-    pressOnCaretLine, textBoxTookFocus,
+    AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS, CARET_REV_HIDDEN_MSAA, IME_FALL_LIFECYCLE_MS,
+    autoKeyboardVerdict, caretMoved, heldByManualClose, hideMayGoUnheard, imeCloseTakenBack,
+    imeFallIsAClose, isMeasuredCaret, pressOnCaretLine, textBoxTookFocus,
     type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press,
 } from '../components/deviceAutoKeyboard';
 
@@ -292,7 +294,7 @@ describe('a different surface', () => {
 });
 
 describe('closing the keyboard sticks', () => {
-    const close: ManualClose = { at: T0, caret: CARET };
+    const close: ManualClose = { at: T0, caret: CARET, by: 'button' };
     const moved: AutoKeyboardVerdict = { raise: true, reason: 'moved' };
     const appeared: AutoKeyboardVerdict = { raise: true, reason: 'appeared' };
     const held = (over: Partial<Parameters<typeof heldByManualClose>[0]>) => heldByManualClose({
@@ -309,7 +311,7 @@ describe('closing the keyboard sticks', () => {
         // record carries no clock to run out.
         expect(held({})).toBe(true);
         expect(held({ report: { ...CARET, x: 0.5 } })).toBe(true);
-        expect(held({ close: { at: T0 - 3_600_000, caret: CARET } })).toBe(true);
+        expect(held({ close: { at: T0 - 3_600_000, caret: CARET, by: 'button' } })).toBe(true);
         // The same from a current host's Chromium caret (rev 2): its hide
         // would have arrived.
         const shown = { ...CARET, src: 'msaa', rev: CARET_REV_HIDDEN_MSAA };
@@ -340,6 +342,47 @@ describe('closing the keyboard sticks', () => {
     });
 });
 
+describe('a fall of the soft keyboard is a close only when nothing else took it down', () => {
+    // The native tier says the IME went down, never why. Back is the
+    // person's close; the app sent to the background, the screen locking,
+    // the phone turning and a system dialog taking the window's focus are
+    // not, and a close sticks (review of work/stage-taps).
+    const fall = (over: Partial<Parameters<typeof imeFallIsAClose>[0]>) => imeFallIsAClose({
+        now: T0, hidden: false, lifecycleAt: null, ...over,
+    });
+
+    it('a fall with nothing else going on is Back', () => {
+        expect(fall({})).toBe(true);
+        expect(fall({ lifecycleAt: T0 - IME_FALL_LIFECYCLE_MS - 1 })).toBe(true);
+        expect(fall({ lifecycleAt: T0 - 60_000 })).toBe(true);
+    });
+
+    it('a fall with the page hidden, or soon after the app, the focus or the screen turned, is not', () => {
+        expect(fall({ hidden: true })).toBe(false);
+        expect(fall({ hidden: true, lifecycleAt: T0 - 60_000 })).toBe(false);
+        expect(fall({ lifecycleAt: T0 })).toBe(false);
+        expect(fall({ lifecycleAt: T0 - IME_FALL_LIFECYCLE_MS })).toBe(false);
+    });
+
+    it('a broken time is no close (it must not hold the feature off)', () => {
+        expect(fall({ lifecycleAt: Number.NaN })).toBe(false);
+        expect(fall({ lifecycleAt: T0 + 10_000 })).toBe(false);
+    });
+
+    const back: ManualClose = { at: T0, caret: CARET, by: 'ime' };
+    it('one of those right AFTER a fall takes its close back; long after, or after the button, it does not', () => {
+        expect(imeCloseTakenBack(back, T0)).toBe(true);
+        expect(imeCloseTakenBack(back, T0 + IME_FALL_LIFECYCLE_MS)).toBe(true);
+        expect(imeCloseTakenBack(back, T0 + IME_FALL_LIFECYCLE_MS + 1)).toBe(false);
+        expect(imeCloseTakenBack(back, T0 + 60_000)).toBe(false);
+        // The button is the person's whatever follows.
+        expect(imeCloseTakenBack({ ...back, by: 'button' }, T0)).toBe(false);
+        expect(imeCloseTakenBack(null, T0)).toBe(false);
+        // A broken time takes it back.
+        expect(imeCloseTakenBack({ ...back, at: Number.NaN }, T0)).toBe(true);
+    });
+});
+
 describe("an older host's Chromium caret: its hide may never arrive", () => {
     // A host before 2026-11-20 (no `rev`) on a surface wider than 2000 px: the
     // address bar was typed into (msaa, 1 px wide), the keyboard closed, a tap
@@ -350,7 +393,7 @@ describe("an older host's Chromium caret: its hide may never arrive", () => {
     // until the keyboard was opened by hand.
     const OLD_BAR: CaretState = { ...CARET, src: 'msaa', w: 1 / 2560 };
     const OLD_PAGE_BOX: CaretState = { ...OLD_BAR, x: 0.3, y: 0.6 };
-    const close: ManualClose = { at: T0, caret: OLD_BAR };
+    const close: ManualClose = { at: T0, caret: OLD_BAR, by: 'button' };
     const moved: AutoKeyboardVerdict = { raise: true, reason: 'moved' };
     const held = (over: Partial<Parameters<typeof heldByManualClose>[0]>) => heldByManualClose({
         close, verdict: moved, before: OLD_BAR, report: OLD_PAGE_BOX, now: T0 + 6_000, surface: ONE, ...over,
@@ -383,22 +426,22 @@ describe("an older host's Chromium caret: its hide may never arrive", () => {
         expect(held({ now: soon, report: { ...OLD_BAR, x: 0.5 } })).toBe(true);
         expect(held({ now: soon })).toBe(false);
         // No caret known at the close: the whole 5 s holds.
-        expect(held({ now: soon, close: { at: T0, caret: null } })).toBe(true);
-        expect(held({ now: soon, close: { at: T0, caret: HIDDEN } })).toBe(true);
+        expect(held({ now: soon, close: { at: T0, caret: null, by: 'button' } })).toBe(true);
+        expect(held({ now: soon, close: { at: T0, caret: HIDDEN, by: 'button' } })).toBe(true);
     });
 
     it('it is the caret the tap MOVED that decides, not the one at the close', () => {
         // Closed over Notepad (a Win32 caret, which does go away); the focus
         // then went to Chrome's address bar, then to the page and into a box
         // there. The hide that went unheard is Chrome's.
-        expect(held({ close: { at: T0, caret: CARET } })).toBe(false);
+        expect(held({ close: { at: T0, caret: CARET, by: 'button' } })).toBe(false);
         // ...and the other way round: closed over the older host's Chromium
         // caret, then a Win32 caret moved (a window switch) sticks.
         expect(held({ before: CARET, report: MOVED_WIN32 })).toBe(true);
     });
 
     it('a broken close time fails open', () => {
-        expect(held({ close: { at: Number.NaN, caret: OLD_BAR }, now: T0 })).toBe(false);
-        expect(held({ close: { at: T0 + 10_000, caret: OLD_BAR }, now: T0 })).toBe(false);
+        expect(held({ close: { at: Number.NaN, caret: OLD_BAR, by: 'button' }, now: T0 })).toBe(false);
+        expect(held({ close: { at: T0 + 10_000, caret: OLD_BAR, by: 'button' }, now: T0 })).toBe(false);
     });
 });

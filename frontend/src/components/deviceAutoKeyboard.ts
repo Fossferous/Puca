@@ -157,6 +157,59 @@ export interface ManualClose {
     /** The caret known at the close, or null: the line an older host's
      *  hold keeps to. */
     caret: CaretState | null;
+    /** The keyboard button, or a measured fall of the soft keyboard under the
+     *  open bar (taken for Android's Back: imeFallIsAClose). Only the second
+     *  can be taken back (imeCloseTakenBack). */
+    by: 'button' | 'ime';
+}
+
+/** How near the app leaving the screen or coming back to it, the window
+ *  losing or getting back the focus, or the screen turning, a fall of the
+ *  soft keyboard is put down to that and not to the person
+ *  (imeFallIsAClose). The system takes the IME down inside the window's
+ *  transition (a few hundred ms of animation) and the native report crosses
+ *  the bridge after it; coming back, the first report comes with the
+ *  window's first layout. The cost: a Back pressed this soon after coming
+ *  back is not a close, so a tap that moves a caret brings the keyboard
+ *  back, as every Back did before 2026-11-20. */
+export const IME_FALL_LIFECYCLE_MS = 1_500;
+
+/**
+ * Was a measured fall of the soft keyboard, under the open bar, the person
+ * closing it (Android's Back)?
+ *
+ * The native tier (and the visual viewport) say that the IME went down, never
+ * why, and it goes down for more than Back: the app sent to the background
+ * (another app, a password manager, the home screen), the screen locking, the
+ * phone turning or a fold opening, a system dialog or the notification shade
+ * taking the window's focus. None of those is "not now" about the text, and a
+ * close sticks (heldByManualClose): recorded for one of them, it held every
+ * tap into the text after the person came back (nothing brings the IME back
+ * on the way back), until a text box took the focus or the keyboard was
+ * opened by hand. So a fall is a close only while the page is on screen and
+ * longer than IME_FALL_LIFECYCLE_MS after the last of those (`lifecycleAt`,
+ * null for none yet); a close from a fall shortly BEFORE one of them is taken
+ * back (imeCloseTakenBack), because the order the two arrive in is not
+ * Android's to promise.
+ */
+export function imeFallIsAClose(input: { now: number; hidden: boolean; lifecycleAt: number | null }): boolean {
+    const { now, hidden, lifecycleAt } = input;
+    if (hidden) return false;
+    if (lifecycleAt === null) return true;
+    // `a > b`, so a NaN time (or a clock gone backwards) is no close: a
+    // broken record must not hold the feature off.
+    return now - lifecycleAt > IME_FALL_LIFECYCLE_MS;
+}
+
+/** One of the events imeFallIsAClose names, at `now`: does it take this close
+ *  back? Only a close from a fall of the IME, and only one recorded within
+ *  IME_FALL_LIFECYCLE_MS before it: that fall came with it. The button's
+ *  close is the person's whatever follows, and so is a Back long before. */
+export function imeCloseTakenBack(close: ManualClose | null, now: number): boolean {
+    if (close === null || close.by !== 'ime') return false;
+    // `!(a > b)`, so a NaN time takes it back: a broken record must not hold
+    // the feature off.
+    return !(now - close.at > IME_FALL_LIFECYCLE_MS);
 }
 
 /** Is `report` a measured caret (as opposed to hidden, a whole-field rect,
@@ -294,7 +347,11 @@ export function hideMayGoUnheard(caret: CaretState | null): boolean {
  *    a different one or the same one again. A raise for that is 'appeared',
  *    which is never held;
  *  - the caret's surface changing (a monitor switch: the record is the
- *    tracking's, and tracking starts again).
+ *    tracking's, and tracking starts again);
+ *  - for a close from a fall of the IME, the app leaving the screen or
+ *    coming back, the window's focus going or coming, or the screen turning,
+ *    within IME_FALL_LIFECYCLE_MS after it (imeCloseTakenBack): the IME went
+ *    down with that, not for the person.
  *
  * AN OLDER HOST'S CHROMIUM CARET (hideMayGoUnheard on the caret the tap
  * moved): the second of those may never come, so sticking there would hold
