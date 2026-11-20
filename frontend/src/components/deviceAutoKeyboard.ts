@@ -9,16 +9,34 @@
  * fractions of the captured surface (puca-input's caret sampler, tiers
  * Win32 → MSAA → UIA). So: a press goes out, and if a caret is there shortly
  * after that was not there before — or moved — ON THE LINE THE FINGER WENT TO,
- * the press landed in something typeable.
+ * the press put the caret there: it landed in something typeable.
+ *
+ * THE HOST'S WORD, NEVER THE STAGE'S GUESS (2026-11-20, the owner: "a lot of
+ * clicks seem to needlessly bring the keyboard up and change zoom"). The only
+ * trigger is a caret the press made appear or move. There used to be a
+ * second one, "near": a press on the line of a caret that did NOT move, within
+ * 640 remote px of it, raised the keyboard at the press, for the empty search
+ * box that already had the focus. Nothing on the host tells that tap from a
+ * tap on the Back button beside an address bar, the Send or emoji button
+ * beside a chat's message box, a search box's own magnifier, or a long press
+ * on any of them; and a Chromium window (Chrome, Edge, every Electron app)
+ * leaves its caret object on the line of the last text box it typed into,
+ * hidden but still reported as a caret by an agent from before this change
+ * (puca-input's msaa_caret), for as long as that window is in front, so every tap along that line raised the keyboard and
+ * the zoom with it. A text box that already has the focus is opened with
+ * the keyboard button.
  *
  * Pure, like deviceZoomFollow: every rule in here is arithmetic that can be
- * checked by hand, and DeviceStage is never mounted in a test.
+ * checked by hand.
  *
  * WHAT IS DELIBERATELY NOT A TRIGGER:
  *  - `src: 'field'` — tier 3's LAST resort is the focused element's bounding
  *    box, whatever that element is. A focused button, list or pane is reported
  *    as a "field" and is exactly the thing a tap that is NOT in a text box
  *    lands on. Only a measured caret counts.
+ *  - Chromium's HIDDEN caret: `src: 'msaa'` 0 px wide (isMeasuredCaret).
+ *  - a caret that does not move. See above: the press may have landed on
+ *    anything beside it.
  *  - a caret that appears or moves on a DIFFERENT LINE from the press. Tapping
  *    a window's title bar or its taskbar button brings an editor forward and
  *    its caret with it; a console prints; a dialog steals focus on another
@@ -33,19 +51,18 @@
  *    user-flavour agent may not query), and closing the keyboard mid-typing
  *    there would be worse than leaving it for the user to dismiss.
  *  - a report from another surface (`mon`/`surf` changed) — its fractions mean
- *    something different, so neither "moved" nor "near the tap" can be judged.
- *    The caller already drops frames for a monitor it is not watching; this
- *    module treats a surface generation change as a baseline reset.
+ *    something different, so "moved" cannot be judged. The caller already
+ *    drops frames for a monitor it is not watching; this module treats a
+ *    surface generation change as a baseline reset.
  *  - anything outside AUTO_KEYBOARD_WINDOW_MS of the press. A caret that
  *    appears seconds later is a page finishing loading, not the tap.
  *
  * DISTANCES ARE IN REMOTE PIXELS, NOT FRACTIONS. The caret arrives as
  * fractions of the captured surface, and since "every screen by default" that
- * surface is usually the multi-monitor composite — a third of a 5760-wide
- * desktop is a whole monitor, not a text box. The caller passes the surface's
- * desktop size (`monitorRegions`-style geometry for the composite, the one
- * screen's size otherwise; 1920x1080 when the host reported none) and the
- * tolerances below are pixels on it.
+ * surface is usually the multi-monitor composite. The caller passes the
+ * surface's desktop size (`monitorRegions`-style geometry for the composite,
+ * the one screen's size otherwise; 1920x1080 when the host reported none) and
+ * the tolerances below are pixels on it.
  */
 
 /** A caret report as the stage sees it — the wire shape minus `seq`. */
@@ -92,9 +109,9 @@ export const AUTO_KEYBOARD_WINDOW_MS = 1500;
 
 /** The tiers whose report means "there is a measured caret": a real system
  *  caret (GetGUIThreadInfo), the MSAA caret object (Chromium, Electron,
- *  Firefox show it only for a focused editable — it is driven by the text
- *  input state), or UIA's caret range. NOT 'field', for the reason in the
- *  header. */
+ *  Firefox show it for a focused editable — it is driven by the text input
+ *  state — and Chromium leaves it, hidden, where it was: isMeasuredCaret), or
+ *  UIA's caret range. NOT 'field', for the reason in the header. */
 export const AUTO_KEYBOARD_CARET_SOURCES: ReadonlySet<string> = new Set(['win32', 'msaa', 'uia']);
 
 /** A caret that moved less than this many remote px has not moved: under one
@@ -111,36 +128,36 @@ export const AUTO_KEYBOARD_SAME_LINE_HEIGHTS = 1.5;
  *  point) and a 1-line tolerance on that would be untappable. About a line on
  *  a 1080-row screen. */
 export const AUTO_KEYBOARD_SAME_LINE_MIN_PX = 13;
-/** "The tap was in the caret's FIELD": within this many remote px of the
- *  caret, horizontally. A URL bar or search box is the case that needs it — a
- *  tap into it parks the caret at the END of the existing text, which can be
- *  a long way from the finger on the same line. A third of a 1920-wide screen
- *  is a generous text box and still excludes a toolbar button on the far side
- *  — and, measured in pixels, stays that size on a three-screen composite. */
-export const AUTO_KEYBOARD_SAME_FIELD_PX = 640;
 
 export type AutoKeyboardVerdict =
-    | { raise: true; reason: 'appeared' | 'moved' | 'near' }
-    | { raise: false; reason: 'no-press' | 'expired' | 'hidden' | 'not-a-caret' | 'surface-changed' | 'unchanged' | 'no-caret' | 'elsewhere' | 'other-line' };
+    | { raise: true; reason: 'appeared' | 'moved' }
+    | { raise: false; reason: 'no-press' | 'expired' | 'hidden' | 'not-a-caret' | 'surface-changed' | 'unchanged' | 'other-line' };
 
-/** How long a manual close of the keyboard stands the auto-raise down.
- *  Long enough to cover the interaction the user closed it FOR (read what the
- *  keyboard was covering, hit the button underneath it); short enough that a
- *  field tapped later in the session behaves normally again. */
-export const AUTO_KEYBOARD_CLOSE_HOLDOFF_MS = 5_000;
-
-/** What the stage records when the person explicitly closes the keyboard. */
+/** What the stage records when the person CLOSES the keyboard: its toolbar
+ *  button, or Android's Back taking the soft keyboard down under the open
+ *  bar. Nothing expires it (heldByManualClose says what ends it). */
 export interface ManualClose {
-    /** The caret known at the close, or null when none was. */
-    caret: CaretState | null;
-    /** Date.now() of the close. */
+    /** Date.now() of the close, for the diagnostic. */
     at: number;
 }
 
-/** Is `report` a measured caret (as opposed to hidden, a whole-field rect, or
- *  the stage's own pointer stand-in)? */
+/** Is `report` a measured caret (as opposed to hidden, a whole-field rect,
+ *  Chromium's hidden caret, or the stage's own pointer stand-in)?
+ *
+ *  CHROMIUM'S HIDDEN CARET. Chrome, Edge and every Electron app draw their own
+ *  caret and keep an MSAA caret object for screen readers and magnifiers
+ *  (ui/accessibility/platform/ax_system_caret_win.cc). Shown, it is 1 px wide
+ *  (HWNDMessageHandler::OnCaretBoundsChanged sets that width); when no text
+ *  box has the focus, Hide() marks it invisible and zeroes its WIDTH, keeping
+ *  its place and height, and accLocation still answers with that rect. An
+ *  agent from before this change took it for a caret, so for as long as such
+ *  a window is in front this end was told that a caret sits on the line of
+ *  the last text box typed into there. 0 px wide is the shape of that; a
+ *  shown one is never 0 wide. */
 export function isMeasuredCaret(report: CaretState): boolean {
-    return report.vis && report.src !== null && AUTO_KEYBOARD_CARET_SOURCES.has(report.src);
+    if (!report.vis || report.src === null || !AUTO_KEYBOARD_CARET_SOURCES.has(report.src)) return false;
+    if (report.src === 'msaa' && !(report.w > 0)) return false;
+    return true;
 }
 
 function size(surface: SurfaceSize | null | undefined): SurfaceSize {
@@ -161,38 +178,6 @@ export function pressOnCaretLine(press: { x: number; y: number }, caret: CaretSt
     const lineTolPx = Math.max(caret.h * s.h * AUTO_KEYBOARD_SAME_LINE_HEIGHTS, AUTO_KEYBOARD_SAME_LINE_MIN_PX);
     const cy = caret.y + caret.h / 2;
     return Math.abs(press.y - cy) * s.h <= lineTolPx;
-}
-
-/** Was the press close enough to this caret to have been a tap INTO the text
- *  box it sits in? Same line, and within a text box's width. */
-export function pressNearCaret(press: { x: number; y: number }, caret: CaretState, surface?: SurfaceSize | null): boolean {
-    if (!pressOnCaretLine(press, caret, surface)) return false;
-    const s = size(surface);
-    return Math.abs(press.x - caret.x) * s.w <= AUTO_KEYBOARD_SAME_FIELD_PX;
-}
-
-/**
- * AT THE PRESS: is the finger landing on the caret that is ALREADY there?
- *
- * This is the one case no report can decide. A tap into a field that already
- * has focus — an empty search box whose caret sits at its start, a page that
- * autofocused its input — changes nothing on the host, the agent (which reports
- * only on change) stays silent, and waiting for a report would wait for ever.
- * The stage knows the caret's current state (`known`, the last report while
- * tracking, for THIS surface — the caller hands over null across a monitor
- * switch), so the answer is available the moment the press goes out — and that
- * moment is INSIDE the tap gesture, where a focus() raises the IME without any
- * native help at all.
- */
-export function autoKeyboardVerdictAtPress(input: {
-    press: { x: number; y: number };
-    known: CaretState | null;
-    surface?: SurfaceSize | null;
-}): AutoKeyboardVerdict {
-    const { press, known, surface } = input;
-    if (!known || !isMeasuredCaret(known)) return { raise: false, reason: 'no-caret' };
-    if (pressNearCaret(press, known, surface)) return { raise: true, reason: 'near' };
-    return { raise: false, reason: 'elsewhere' };
 }
 
 /**
@@ -231,11 +216,10 @@ export function autoKeyboardVerdict(input: {
                 ? { raise: true, reason: 'moved' }
                 : { raise: false, reason: 'other-line' };
         }
-        // The caret did not move — an already-focused field, tapped again (an
-        // empty search box whose caret sits at the start; a page that
-        // autofocused its input). A tap ON that field still deserves the
-        // keyboard; a tap elsewhere while that caret sits there does not.
-        if (pressNearCaret(press, report, surface)) return { raise: true, reason: 'near' };
+        // The caret did not move. The press may have gone into the text box
+        // that holds it (an empty one whose caret sits at its start) or onto
+        // anything beside it, a button on its line included, and nothing on
+        // the host tells those apart: no raise. See the header.
         return { raise: false, reason: 'unchanged' };
     }
     // No MEASURED caret before the press and one after it: the press put it
@@ -250,41 +234,32 @@ export function autoKeyboardVerdict(input: {
 }
 
 /**
- * Does a recent MANUAL close of the keyboard swallow this raise?
+ * Does the person's close of the keyboard hold this raise back?
  *
  * Closing the keyboard is the one unambiguous "not now" the user can give,
- * and without this the very next tap near the caret brought it straight back
- * — the panel covers half the screen, so "close it to see, tap what it was
- * covering, watch it reopen" was the normal case, not the corner.
+ * and it STICKS: the panel covers half the screen, so "close it to read what
+ * it covered, tap around in the text, watch it reopen (and the picture zoom
+ * back in)" was the normal case, not the corner. While the focus stays in
+ * text, a caret MOVED by a tap (in the same text box, or straight into
+ * another one) is held back, however long after the close.
  *
- * A latch with releases for every kind of fresh intent (the standing rule):
- *  - TIME — the holdoff expires on its own;
- *  - PLACE — a raise whose caret is on a DIFFERENT line from the caret at
- *    the close is a new field, i.e. new intent, and is not held (the caller
- *    clears the record and raises);
- *  - ASKING — the caller clears the record when the keyboard is opened by
- *    hand, and when the surface changes (the fractions compare nothing then).
- *
- * When no caret was known at the close there is nothing to compare against,
- * and the whole window holds: the user just said "not now" and the stage
- * cannot distinguish the field they said it about.
+ * What ends it (the caller drops the record):
+ *  - ASKING — the keyboard opened by hand (its button, "Tap to type") or the
+ *    soft keyboard coming up for any reason;
+ *  - A TEXT BOX TAKING THE FOCUS — a measured caret where there was none
+ *    (textBoxTookFocus): the focus had left the text and a text box took it,
+ *    a different one or the same one again. A raise for that is 'appeared',
+ *    which is never held;
+ *  - the caret's surface changing (a monitor switch: the record is the
+ *    tracking's, and tracking starts again).
  */
-export function suppressedByManualClose(input: {
-    close: ManualClose | null;
-    /** The caret this raise is credited to: the report for an on-report
-     *  raise, the known caret for an at-press one. */
-    caret: CaretState;
-    now: number;
-    surface?: SurfaceSize | null;
-}): boolean {
-    const { close, caret, now, surface } = input;
-    if (!close) return false;
-    // `!(a <= b)` so a NaN timestamp fails OPEN here — an unparseable close
-    // record must not permanently hold the feature off.
-    if (!(now - close.at <= AUTO_KEYBOARD_CLOSE_HOLDOFF_MS) || now < close.at) return false;
-    if (!close.caret || !isMeasuredCaret(close.caret)) return true;
-    // "Same line as the close" via the same tolerance a press uses, with the
-    // candidate caret's centre standing in for the finger.
-    return pressOnCaretLine(
-        { x: caret.x, y: caret.y + caret.h / 2 }, close.caret, surface);
+export function heldByManualClose(close: ManualClose | null, verdict: AutoKeyboardVerdict): boolean {
+    return close !== null && verdict.raise && verdict.reason === 'moved';
+}
+
+/** Did a text box take the focus between these two reports: no measured
+ *  caret before (none known, hidden, a focused button's box, Chromium's
+ *  hidden caret), a measured one now? Ends a ManualClose. */
+export function textBoxTookFocus(before: CaretState | null, report: CaretState): boolean {
+    return isMeasuredCaret(report) && !(before !== null && isMeasuredCaret(before));
 }

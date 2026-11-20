@@ -3136,7 +3136,8 @@ export interface CaretReport {
     vis: boolean;
     x: number; y: number; w: number; h: number;
     /** 'win32' | 'msaa' | 'uia' | 'field' — which tier answered. 'field' means
-     *  the focused element's box, not a real caret, and is placed differently. */
+     *  the focused element's box, not a real caret: it neither opens the
+     *  keyboard nor moves the stage's picture (deviceAutoKeyboard.isMeasuredCaret). */
     src: string | null;
     mon: number | null;
     surf: number | null;

@@ -418,7 +418,9 @@ export function clampPanToStrip(
 /** Where the remote caret is, as fractions of the CURRENTLY CAPTURED surface.
  *  `src` is which tier of the agent's sampler answered; 'field' means the
  *  focused element's whole box rather than a caret, which is placed
- *  differently. */
+ *  differently. (DeviceStage feeds this only measured carets since
+ *  2026-11-20: a 'field' is whatever element has the focus, a button most
+ *  often, and the camera flew to it.) */
 export interface CaretRect { x: number; y: number; w: number; h: number; src?: string | null }
 
 export interface CaretFollowInput {

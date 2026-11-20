@@ -1031,6 +1031,23 @@ mode**: tap to click, long-tap to right-click, double-tap and move to drag,
 move three fingers up or down to scroll, two fingers to move the picture,
 pinch to zoom.
 
+**When the keyboard opens by itself.** With **Open the keyboard when a text
+box is tapped** on, the keyboard comes up when a tap puts the computer's text
+cursor where you tapped: into a text box, or somewhere else in the text of
+one. A tap on anything else opens nothing: a button (one beside a text box
+included), a link, the desktop, a window's title bar, a long press, a scroll,
+a pinch. Neither does a tap on a text box that already had the cursor and
+keeps it where it was (an empty search box, say): open the keyboard with
+**Keyboard** then. Close it with **Keyboard**, or with the phone's Back, and
+it stays closed while you tap around in that text; it comes up by itself
+again once the cursor has left the text and a text box takes it, or when you
+open it. With **Zoom to the text cursor while typing** on, the picture zooms
+to the text cursor while the keyboard is up and follows it as you type; a
+tap on a button, or a button taking the focus, moves nothing, and the picture
+goes back to how it was when the keyboard closes. Where Púca on the computer
+cannot tell where the text cursor is, the picture goes to where you last
+tapped when the keyboard opens, and to a later tap only once you type.
+
 ### Pinned keys
 **Pinned keys…** (in **More** on a phone, in **Keyboard** on a computer) puts
 keys you choose on the screen as buttons, in a row like the virtual mouse's,

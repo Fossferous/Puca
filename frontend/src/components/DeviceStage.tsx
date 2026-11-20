@@ -56,8 +56,8 @@ import {
 import { hopChipShift, type PlaceRect } from './deviceStageHopPlace';
 import { pinchStep } from './deviceStagePinch';
 import {
-    autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
-    type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press, type SurfaceSize,
+    autoKeyboardVerdict, heldByManualClose, isMeasuredCaret, textBoxTookFocus,
+    type AutoKeyboardVerdict, type ManualClose, type Press, type SurfaceSize,
 } from './deviceAutoKeyboard';
 import { installBackgroundResume } from './deviceStageResume';
 import { installStallWatchdog } from './deviceStageStall';
@@ -292,10 +292,6 @@ const HOP_ARROW_OBSTACLES = '.device-stage-virtual-mouse, .device-stage-paused, 
  *  tiers) and an elevated window a user-flavour agent may not query. All silent,
  *  and all still deserve a readable band. */
 const CARET_REPORT_GRACE_MS = 500;
-/** How recently a real caret must have arrived for it to own the placement. Past
- *  this, a tap (which is the user saying where the caret now is) re-places the
- *  view — the fallback's only way to follow a moving caret on a silent peer. */
-const CARET_VIS_FRESH_MS = 1000;
 
 /** The pan clamp, shared by the pinch, wheel and follow-cursor writers so
  *  they cannot drift. Bounds come from where the PICTURE sits inside the
@@ -571,6 +567,11 @@ export function DeviceStage() {
      *  `send`, which the whole input path is built on and which is declared long
      *  before anything caret-shaped can be. */
     const caretOnAimRef = useRef<(() => void) | null>(null);
+    /** Same slot, told when TYPING goes out (text, or a key going down): the
+     *  moment the pointer fallback may stand in for a caret the host does not
+     *  report. Never the aim itself: a tap is not typing, and the picture must
+     *  not move for one. */
+    const caretOnTypeRef = useRef<(() => void) | null>(null);
     /** Same shape, for the auto-keyboard: told about every primary-button PRESS
      *  that actually went out, with where it was aimed; its RELEASE, with
      *  whether the gesture between them was a tap (no pointer movement went
@@ -775,6 +776,11 @@ export function DeviceStage() {
             if (e && e.t === 'up' && e.button === 0) {
                 pressEndHookRef.current?.(movesSincePressRef.current === 0);
             }
+            // TYPING THAT WENT OUT: the keyboard bar's text and keys, a
+            // physical keyboard's, a pinned key's. After the gate for the same
+            // reason as the press: a key the pause swallowed typed nothing.
+            const k = event as { t?: unknown; down?: unknown } | null;
+            if (k && (k.t === 'text' || (k.t === 'key' && k.down === true))) caretOnTypeRef.current?.();
         }
     }, [session, controlEnabled]);
     // Live mirror for effects that must NOT re-run when `send`'s identity
@@ -2103,13 +2109,21 @@ export function DeviceStage() {
     const caretReportRef = useRef<CaretReport | null>(null);
     const caretRafRef = useRef<number | null>(null);
     /** Solve from scratch on the next pass: first placement, a band change, a
-     *  surface change, or a tap while the peer is silent. */
+     *  surface change, or the pointer fallback placing on an aim. */
     const caretForceRef = useRef(false);
     const caretGraceRef = useRef<number | null>(null);
     /** Was the band up on the previous render? Drives the deactivate restore. */
     const caretWasActiveRef = useRef(false);
-    /** When a vis:true report last arrived (0 = never this activation). */
-    const caretSawVisRef = useRef(0);
+    /** When a MEASURED caret last arrived (0 = never this activation): the
+     *  only proof the peer can find a caret at all. */
+    const caretSawCaretRef = useRef(0);
+    /** Is the LATEST report the camera saw a measured caret? While it is, the
+     *  caret owns the placement and the pointer fallback stands aside — for
+     *  as long as it sits still, which is how a caret spends most of its
+     *  time: the agent reports only on change. */
+    const caretNowMeasuredRef = useRef(false);
+    /** An aim (a tap, a trackpad move) not yet placed on by the fallback. */
+    const caretAimPendingRef = useRef(false);
     /** The agent's surface generation, so a rebuild forces a re-place. */
     const caretSurfRef = useRef<number | null>(null);
     /** The view to give back when the keyboard closes. */
@@ -2236,10 +2250,13 @@ export function DeviceStage() {
         && session?.viewOnly !== true;
     const wantCaretTracking = autoKeyboardWanted || caretFollowActive;
     const lastCaretRef = useRef<CaretReport | null>(null);
-    /** The user's last explicit close of the keyboard — the auto-raise's
-     *  stand-down record (suppressedByManualClose). Cleared on a manual open,
-     *  on a surface change (the tracking cleanup below), and by expiry.
-     *  Declared before the tracking effect that clears it. */
+    /** The user's last close of the keyboard (its button, or Android's Back
+     *  under the open bar) — the auto-raise's stand-down record
+     *  (heldByManualClose). Nothing expires it: dropped when the keyboard
+     *  comes up (asked for, or for any reason), when a text box takes the
+     *  focus (textBoxTookFocus, in the tracking subscription below), and on a
+     *  surface change (the tracking cleanup below). Declared before the
+     *  tracking effect that clears it. */
     const manualKbCloseRef = useRef<ManualClose | null>(null);
     /** The auto-keyboard's report sink; a slot for the same reason as
      *  caretOnAimRef — the subscription below outlives any one render of the
@@ -2275,14 +2292,18 @@ export function DeviceStage() {
             }
             const before = lastCaretRef.current;
             lastCaretRef.current = r;
+            // The focus left the text and a text box took it again: the
+            // close was about the text box it was made over, and it is over.
+            if (manualKbCloseRef.current && textBoxTookFocus(before, r)) manualKbCloseRef.current = null;
             autoKeyboardSinkRef.current?.(r, before);
         });
         return () => {
             unsub();
             setCaretTracking(sessionActiveId, false);
             lastCaretRef.current = null;
-            // The close record holds caret fractions of THIS surface; after a
-            // monitor switch or session change they compare nothing.
+            // The close was about a text box on THIS surface; after a monitor
+            // switch or a session change nothing says which text box the
+            // next caret is in.
             manualKbCloseRef.current = null;
         };
     }, [wantCaretTracking, sessionActiveId, activeMonitorForTracking]);
@@ -2308,7 +2329,9 @@ export function DeviceStage() {
         if (!caretFollowActive || !sessionActiveId) return;
         caretFallbackUsedRef.current = false;
         caretForceRef.current = true;
-        caretSawVisRef.current = 0;
+        caretSawCaretRef.current = 0;
+        caretNowMeasuredRef.current = false;
+        caretAimPendingRef.current = false;
         caretSurfRef.current = null;
         caretDropRef.current = { mon: 0, surfChanged: 0 };
 
@@ -2323,13 +2346,23 @@ export function DeviceStage() {
                 }
                 caretSurfRef.current = r.surf;
             }
-            // vis:false is meaningful — the caret went away (focus moved to a
-            // button, or it is on a screen that is not being streamed). HOLD the
-            // view; never re-solve to nothing, and never say anything on screen.
-            // It does NOT disarm the fallback either: "no caret here" still
-            // deserves a readable band.
-            if (!r.vis) return;
-            caretSawVisRef.current = Date.now();
+            // ONLY A TEXT BOX'S CARET MOVES THE PICTURE. vis:false — the caret
+            // went away (focus moved to a button, or it is on a screen that is
+            // not being streamed) — HOLDS the view; never re-solve to nothing,
+            // and never say anything on screen. So does every report that is
+            // not a measured caret (deviceAutoKeyboard.isMeasuredCaret): a
+            // 'field' is the focused element's box, whatever that element is —
+            // a button, a list row, a page — and the camera flew to the button
+            // a tap had just focused; Chromium's hidden caret (an older agent)
+            // sits on the line of a text box that no longer has the focus.
+            // Neither disarms the pointer fallback either: "no caret here"
+            // still deserves a readable band once the user types.
+            if (!isMeasuredCaret(r)) {
+                caretNowMeasuredRef.current = false;
+                return;
+            }
+            caretNowMeasuredRef.current = true;
+            caretSawCaretRef.current = Date.now();
             if (caretGraceRef.current != null) {
                 clearTimeout(caretGraceRef.current);
                 caretGraceRef.current = null;
@@ -2359,25 +2392,36 @@ export function DeviceStage() {
         const known = lastCaretRef.current;
         if (known && (known.mon === null || known.mon === activeMonitorRef.current)) accept(known);
 
-        // NOBODY ANSWERED — see CARET_REPORT_GRACE_MS. Disarmed only by a real
-        // vis:true report, because that is the only proof the peer can find a
+        // NOBODY ANSWERED — see CARET_REPORT_GRACE_MS. Disarmed only by a
+        // measured caret, because that is the only proof the peer can find a
         // caret at all.
         caretGraceRef.current = window.setTimeout(() => {
             caretGraceRef.current = null;
-            if (caretSawVisRef.current !== 0) return;
+            if (caretSawCaretRef.current !== 0) return;
+            caretAimPendingRef.current = false;
             caretPlaceOnAim();
         }, CARET_REPORT_GRACE_MS);
 
-        // While the peer is silent, a tap IS the caret: the user just put it
-        // there. Suppressed as soon as real reports are flowing, so a well-behaved
-        // agent's caret is never overridden by where a finger landed.
-        caretOnAimRef.current = () => {
-            if (Date.now() - caretSawVisRef.current < CARET_VIS_FRESH_MS) return;
+        // THE POINTER STANDS IN FOR A CARET THE HOST DOES NOT REPORT — when the
+        // user TYPES, never when they tap. A tap is the best guess at where a
+        // silent peer's caret went, but the tap may as well have been on a
+        // button, and the picture must not zoom or pan for a plain click
+        // (2026-11-20: it did for every tap while the keyboard was up, a
+        // second after the caret last moved — "silent" was judged by how
+        // recently a report had come, and an agent reports only on change, so
+        // a caret sitting still in the text box read as a silent peer). And
+        // while the latest report IS a measured caret, the caret owns the
+        // placement however long it sits still.
+        caretOnAimRef.current = () => { caretAimPendingRef.current = true; };
+        caretOnTypeRef.current = () => {
+            if (caretNowMeasuredRef.current || !caretAimPendingRef.current) return;
+            caretAimPendingRef.current = false;
             caretPlaceOnAim();
         };
 
         return () => {
             caretOnAimRef.current = null;
+            caretOnTypeRef.current = null;
             unsub();
             if (caretGraceRef.current != null) {
                 clearTimeout(caretGraceRef.current);
@@ -2396,46 +2440,45 @@ export function DeviceStage() {
     //
     // The stage cannot hit-test the remote screen. What it has is the press it
     // just sent (where, when — via pressHookRef in `send`) and the caret
-    // reports flowing on the channel above; deviceAutoKeyboard.ts decides, in
-    // two places:
+    // reports flowing on the channel above; deviceAutoKeyboard.ts decides, ON A
+    // REPORT within the press window: the press put a caret where there was
+    // none, or moved it, onto the finger's line. That is the host's word that
+    // the tap went into text. A press whose gesture became a drag (pointer
+    // movement went out between the down and the up: a drag-select, a window
+    // move) or a pinch is forgotten, so neither ever raises. The raise is long
+    // after the gesture, so it also bumps `kbRaiseToken` and the panel brings
+    // the IME up through the native show.
     //
-    //  - AT THE PRESS, against the caret already known: a tap onto a field
-    //    that already has focus changes nothing on the host and no report
-    //    will ever come. The verdict is computed at the press and ACTED ON AT
-    //    ITS RELEASE, if the gesture turned out to be a tap (no pointer
-    //    movement went out in between — a drag-select, a window move or a
-    //    pinch's first finger is not a tap into a field). The release is
-    //    still the tap's own gesture, so the panel it mounts focuses its
-    //    field while Blink raises the IME for free.
-    //  - ON A REPORT within the press window: the press put a caret where
-    //    there was none, or moved it — onto the finger's line. This is long
-    //    after the gesture, so the raise also bumps `kbRaiseToken` and the
-    //    panel brings the IME up through the native show. A press whose
-    //    gesture became a drag is forgotten, so a drag never raises.
+    // NOTHING IS DECIDED AT THE PRESS any more. The stage used to raise the
+    // keyboard at the release of any tap on the line of the caret it knew,
+    // within 640 remote px of it, for an empty text box that already had the
+    // focus; it raised it just the same for every button on that line, and
+    // for every tap along the line of the hidden caret a Chromium window
+    // leaves behind (deviceAutoKeyboard.ts, the header). A text box that
+    // already has the focus is opened with the keyboard button.
     //
     // ONE RAISE PER PRESS: the press is consumed on a raise, so the caret
     // moving again while the user types (which happens on every keystroke)
-    // cannot keep re-raising. The diagnostic keeps the last verdicts, because
+    // cannot keep re-raising. The diagnostic keeps the last verdict, because
     // a keyboard that opens when it should not, or does not when it should,
     // is only diagnosable from the phone's "Copy diagnostics".
     const [kbRaiseToken, setKbRaiseToken] = useState(0);
     const pressRef = useRef<Press | null>(null);
-    /** The at-press verdict, awaiting the release that says it was a tap. */
-    const pendingAtPressRef = useRef<AutoKeyboardVerdict | null>(null);
     const autoKbDiagRef = useRef<{
-        atPress: AutoKeyboardVerdict | null;
         onReport: AutoKeyboardVerdict | null;
         press: Press | null;
         raised: number;
         dropped: number;
-        /** Raises swallowed by the manual-close holdoff. */
+        /** Raises held back by the user's close of the keyboard. */
         held: number;
-    }>({ atPress: null, onReport: null, press: null, raised: 0, dropped: 0, held: 0 });
+        /** When the user last closed it. */
+        closedAt: number;
+    }>({ onReport: null, press: null, raised: 0, dropped: 0, held: 0, closedAt: 0 });
     /** The captured surface in desktop px — what the caret fractions are OF
-     *  — so the decision's tolerances can be pixels (a third of one screen,
-     *  not a third of a three-screen composite). From the host's announced
-     *  geometry; a host that reported none is assumed 1920x1080. A ref: the
-     *  verdicts run inside pointer handlers and channel callbacks. */
+     *  — so the decision's tolerances can be pixels (a line on a 1080-row
+     *  screen, not a line's fraction of a stacked composite). From the host's
+     *  announced geometry; a host that reported none is assumed 1920x1080. A
+     *  ref: the verdicts run inside channel callbacks. */
     const surfaceSizeRef = useRef<SurfaceSize | null>(null);
     useEffect(() => {
         surfaceSizeRef.current = session
@@ -2445,12 +2488,10 @@ export function DeviceStage() {
     useEffect(() => {
         if (!autoKeyboardWanted) {
             pressRef.current = null;
-            pendingAtPressRef.current = null;
             return;
         }
         const raise = () => {
             pressRef.current = null;
-            pendingAtPressRef.current = null;
             autoKbDiagRef.current.raised++;
             setActiveMobileMenu('keyboard');
             setKbRaiseToken(t => t + 1);
@@ -2458,43 +2499,17 @@ export function DeviceStage() {
         pressHookRef.current = aim => {
             const press = { x: aim.x, y: aim.y, at: Date.now() };
             autoKbDiagRef.current.press = press;
-            const now = autoKeyboardVerdictAtPress({
-                press, known: lastCaretRef.current, surface: surfaceSizeRef.current,
-            });
-            autoKbDiagRef.current.atPress = now;
-            pendingAtPressRef.current = now;
             pressRef.current = press;
         };
-        // THE USER'S CLOSE OUTRANKS THE HEURISTIC. A raise whose caret sits on
-        // the line the keyboard was just closed over is the interaction the
-        // close was FOR (see what it covered, tap what is under it) and is
-        // swallowed; a different line — or the holdoff expiring — is fresh
-        // intent, and clears the record on its way through.
-        const throughHoldoff = (caret: CaretState | null): boolean => {
-            if (!caret) { manualKbCloseRef.current = null; return true; }
-            const held = suppressedByManualClose({
-                close: manualKbCloseRef.current, caret,
-                now: Date.now(), surface: surfaceSizeRef.current,
-            });
-            if (held) { autoKbDiagRef.current.held++; return false; }
-            manualKbCloseRef.current = null;
-            return true;
-        };
         pressEndHookRef.current = wasTap => {
-            const pending = pendingAtPressRef.current;
-            pendingAtPressRef.current = null;
-            if (!wasTap) {
-                // A drag. Not a tap into a field, whatever the caret does next.
-                if (pressRef.current) autoKbDiagRef.current.dropped++;
-                pressRef.current = null;
-                return;
-            }
-            if (pending?.raise && throughHoldoff(lastCaretRef.current)) raise();
+            if (wasTap) return;
+            // A drag. Not a tap into a field, whatever the caret does next.
+            if (pressRef.current) autoKbDiagRef.current.dropped++;
+            pressRef.current = null;
         };
         pressCancelHookRef.current = () => {
             if (pressRef.current) autoKbDiagRef.current.dropped++;
             pressRef.current = null;
-            pendingAtPressRef.current = null;
         };
         autoKeyboardSinkRef.current = (r, before) => {
             const verdict = autoKeyboardVerdict({
@@ -2502,7 +2517,18 @@ export function DeviceStage() {
                 surface: surfaceSizeRef.current,
             });
             autoKbDiagRef.current.onReport = verdict;
-            if (verdict.raise && throughHoldoff(r)) raise();
+            if (!verdict.raise) return;
+            // THE USER'S CLOSE OUTRANKS THE TAP: while the focus stays in the
+            // text it was closed over, a caret the tap moved is the
+            // interaction the close was FOR (read what it covered, tap around
+            // in it). The press is spent either way.
+            if (heldByManualClose(manualKbCloseRef.current, verdict)) {
+                autoKbDiagRef.current.held++;
+                pressRef.current = null;
+                return;
+            }
+            manualKbCloseRef.current = null;
+            raise();
         };
         return () => {
             pressHookRef.current = null;
@@ -2510,16 +2536,38 @@ export function DeviceStage() {
             pressCancelHookRef.current = null;
             autoKeyboardSinkRef.current = null;
             pressRef.current = null;
-            pendingAtPressRef.current = null;
         };
     }, [autoKeyboardWanted]);
+
+    // ANDROID'S BACK IS A CLOSE TOO. The back gesture takes the soft keyboard
+    // down and leaves the bar up, and the next tap that moved a caret brought
+    // it straight back (the raise re-shows the IME under a mounted bar). So a
+    // MEASURED fall of the IME under the open bar is recorded like the
+    // button's close; the 'assumed' tier never flips, and a bar that closed
+    // with it was recorded by the button. The keyboard coming UP, for any
+    // reason (the button, "Tap to type", a raise), ends any close: only the
+    // transitions count, so a tier pinned at visible:true clears nothing.
+    const kbWasVisibleRef = useRef(kbInset.visible);
+    useEffect(() => {
+        const was = kbWasVisibleRef.current;
+        kbWasVisibleRef.current = kbInset.visible;
+        if (was === kbInset.visible) return;
+        if (kbInset.visible) {
+            manualKbCloseRef.current = null;
+            return;
+        }
+        if (activeMobileMenu !== 'keyboard') return;
+        if (kbInset.source !== 'native' && kbInset.source !== 'visual-viewport') return;
+        manualKbCloseRef.current = { at: Date.now() };
+        autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
+    }, [kbInset.visible, kbInset.source, activeMobileMenu]);
 
     /** The toolbar's keyboard button. Three states, not a toggle's two:
      *  closed → open; open with the IME MEASURABLY down (the back gesture
      *  dismissed it — the native tier reports the flip) → re-raise, because
      *  the tap means "give me the keyboard", and making it "close the bar"
      *  cost a second tap to type again every time; open otherwise → close,
-     *  recording the close so the auto-raise stands down (throughHoldoff).
+     *  recording the close so the auto-raise stands down (heldByManualClose).
      *  "Measurably" excludes the `assumed` tier, which pins visible:true on
      *  exactly the builds that cannot see a dismissal — there the button
      *  stays a plain toggle rather than becoming a bar nothing can close.
@@ -2544,11 +2592,13 @@ export function DeviceStage() {
             && (kbInset.source === 'native' || kbInset.source === 'visual-viewport');
         if (imeMeasurablyDown && !kbButtonTriedRaiseRef.current) {
             kbButtonTriedRaiseRef.current = true;
+            manualKbCloseRef.current = null;
             setKbRaiseToken(t => t + 1);
             return;
         }
         kbButtonTriedRaiseRef.current = false;
-        manualKbCloseRef.current = { caret: lastCaretRef.current, at: Date.now() };
+        manualKbCloseRef.current = { at: Date.now() };
+        autoKbDiagRef.current.closedAt = manualKbCloseRef.current.at;
         setActiveMobileMenu(null);
     }, [activeMobileMenu, kbInset]);
 

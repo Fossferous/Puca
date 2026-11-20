@@ -25,7 +25,7 @@
 mod probe {
     use puca_input::caret::{
         oleacc_module_path, probe_set_thread_desktop_after_com, probe_tier1, probe_tier2,
-        probe_tier3, CaretRect, CaretSource, POLL_INTERVAL,
+        probe_tier3, CaretRect, CaretSource, MsaaCaret, POLL_INTERVAL,
     };
     use std::time::{Duration, Instant};
     use windows::Win32::Foundation::HWND;
@@ -205,8 +205,12 @@ mod probe {
         let tier3 = probe_tier3();
         let t3 = t0.elapsed();
 
+        let tier2_rect = match tier2 {
+            MsaaCaret::At(r) => Some(r),
+            MsaaCaret::Hidden | MsaaCaret::Absent => None,
+        };
         let winner = tier1
-            .or_else(|| tier2.map(|r| (r, CaretSource::Msaa)))
+            .or_else(|| tier2_rect.map(|r| (r, CaretSource::Msaa)))
             .or(tier3);
 
         let mut out = format!(
@@ -221,7 +225,7 @@ mod probe {
             show(tier1.map(|(r, _)| r)),
             t1,
             show(alt),
-            show(tier2),
+            if tier2 == MsaaCaret::Hidden { "hidden (no text box has the focus)".to_string() } else { show(tier2_rect) },
             t2,
             tier3
                 .map(|(r, s)| format!("{} {}", s.wire(), show(Some(r))))

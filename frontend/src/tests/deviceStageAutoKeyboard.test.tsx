@@ -8,8 +8,13 @@
  *    whole life (not only while the keyboard panel is up);
  *  - a press on the surface followed by a caret report opens the keyboard
  *    panel AND asks the native side to show the IME;
- *  - a press onto a caret that is ALREADY there opens it at the press;
+ *  - a press on the line of a caret that does not move opens nothing — a
+ *    button beside a focused text box, the line of Chromium's hidden caret
+ *    (2026-11-20, "a lot of clicks seem to needlessly bring the keyboard
+ *    up and change zoom");
  *  - a focused button ('field') after a press does not;
+ *  - closing the keyboard (its button, or Android's Back under the open bar)
+ *    sticks until a text box takes the focus or the keyboard comes up;
  *  - the preference off means none of it — and no tracking either;
  *  - after the first frame, an unattended session on an older multi-screen
  *    host is asked for every screen, once.
@@ -398,12 +403,17 @@ describe('a press that lands in a text box opens the keyboard', () => {
             .toHaveBeenCalled();
     });
 
-    it('a press ONTO a caret already there opens it at the press, with no report needed', async () => {
+    it('a press onto the line of a caret already there opens nothing until the caret moves to it', async () => {
+        // Until 2026-11-20 this opened the keyboard at the press, decided from
+        // the known caret alone ("near"): and so it did for every button on
+        // that line. The host's word is the caret moving.
         await mountWith(session());
         await caret('ds-1', WIN32(0.4, 0.3));       // an already-focused field
         expect(panel()).toBeNull();
         await pressAt(0.5, 0.3 + 9 / 1080);          // same line, a little to the right
-        expect(panel(), 'decided from the known caret, inside the tap').toBeTruthy();
+        expect(panel(), 'no report says the press went into the text').toBeNull();
+        await caret('ds-1', WIN32(0.5, 0.3));       // the press put the caret there
+        expect(panel(), 'the caret moved to the finger: the press went into the text').toBeTruthy();
     });
 
     it('a press elsewhere while that caret sits still does NOT open it', async () => {
@@ -453,8 +463,10 @@ describe('a gesture that is not a tap never opens the keyboard', () => {
         // the drag forgot its press.
         await caret('ds-1', WIN32(0.7, 0.3));
         expect(panel()).toBeNull();
-        // Positive control for the rig: the same two points as a TAP open it.
+        // Positive control for the rig: the same press as a TAP, the caret
+        // moving to it, opens it.
         await pressAt(0.4, 0.3 + 9 / 1080);
+        await caret('ds-1', WIN32(0.4, 0.3));
         expect(panel()).toBeTruthy();
     });
 
@@ -483,6 +495,103 @@ describe('a gesture that is not a tap never opens the keyboard', () => {
         await caret('ds-1', WIN32(0.5, 0.5));
         expect(panel(), 'the keyboard opened').toBeTruthy();
         expect(host!.querySelector('.device-stage-mobile-toolbar'), 'and the bar the user hid stayed hidden').toBeNull();
+    });
+});
+
+describe('a tap that is not into a text box opens nothing (2026-11-20)', () => {
+    // The owner, controlling a PC from the Android app: "a lot of clicks seem
+    // to needlessly bring the keyboard up and change zoom".
+    it('a button BESIDE a focused text box, on its line: left of it, right of it', async () => {
+        await mountWith(session());
+        await caret('ds-1', WIN32(0.4, 0.3));       // the text box has the focus
+        for (const dx of [-200, 300, 600]) {
+            await pressAt(0.4 + dx / 1920, 0.3 + 9 / 1080);
+            expect(panel(), `a button ${dx} px from the caret`).toBeNull();
+            // A tier flip re-sending the same caret is no move either.
+            await caret('ds-1', { ...WIN32(0.4, 0.3), src: 'msaa' });
+            expect(panel(), `…and the same caret re-sent (${dx} px)`).toBeNull();
+            await caret('ds-1', WIN32(0.4, 0.3));
+        }
+        expect(h.showMobileKeyboard).not.toHaveBeenCalled();
+    });
+
+    it("the line Chromium's hidden caret was left on (msaa, 0 px wide)", async () => {
+        await mountWith(session());
+        const hidden = { ...WIN32(0.4, 0.3), src: 'msaa', w: 0 };
+        await caret('ds-1', hidden);
+        await pressAt(0.6, 0.3 + 9 / 1080);
+        expect(panel(), 'a tap beside it').toBeNull();
+        await pressAt(0.45, 0.3 + 9 / 1080);
+        expect(panel(), 'a tap on it').toBeNull();
+        // POSITIVE CONTROL: the tap gives the box the focus back and Chromium
+        // shows its caret in place, 1 px wide: a text box took the focus.
+        await caret('ds-1', { ...hidden, w: 1 / 1920 });
+        expect(panel()).toBeTruthy();
+    });
+});
+
+describe('closing the keyboard sticks', () => {
+    const kbButton = () => host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+    async function raiseByTap() {
+        await caret('ds-1', HIDDEN);
+        await pressAt(0.5, 0.5);
+        await caret('ds-1', WIN32(0.5, 0.5));
+        expect(panel(), 'precondition: a tap into a text box opened it').toBeTruthy();
+    }
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('closed with its button: a caret the next taps move, on its line or another, leaves it closed, however long after', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await raiseByTap();
+        await act(async () => { kbButton().click(); });
+        await flush();
+        expect(panel(), 'precondition: the button closed it').toBeNull();
+        // Past the 5 s the stand-down used to last.
+        vi.setSystemTime(Date.now() + 6_000);
+        await pressAt(0.6, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.5));       // same text box, same line
+        expect(panel(), 'same line, 6 s later').toBeNull();
+        await pressAt(0.5, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.5, 0.8));       // another line of the text
+        expect(panel(), 'another line').toBeNull();
+        // The focus leaves the text (a button), then a text box takes it.
+        await caret('ds-1', HIDDEN);
+        await pressAt(0.3, 0.2 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.2));
+        expect(panel(), 'POSITIVE CONTROL: a text box taking the focus opens it').toBeTruthy();
+    });
+
+    it("Android's Back under the open bar is a close too; the keyboard coming up again ends it", async () => {
+        h.inset = { visible: true, top: 500, source: 'native' };
+        await mountWith(session());
+        await raiseByTap();
+        const ime = async (visible: boolean) => {
+            h.inset = { visible, top: visible ? 500 : 844, source: 'native' };
+            await act(async () => { for (const w of h.insetWatchers) w(h.inset); });
+            await flush();
+        };
+        // POSITIVE CONTROL: with the IME up, a tap that moves the caret
+        // raises again (the native show is asked).
+        h.showMobileKeyboard.mockClear();
+        await pressAt(0.6, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.5));
+        expect(h.showMobileKeyboard, 'precondition: a raise asks the native show').toHaveBeenCalled();
+
+        await ime(false);                            // the back gesture
+        expect(panel(), 'the bar stays up').toBeTruthy();
+        h.showMobileKeyboard.mockClear();
+        await pressAt(0.7, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.7, 0.5));
+        await pressAt(0.5, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.5, 0.8));
+        expect(h.showMobileKeyboard, 'after Back, taps in the text bring no keyboard back').not.toHaveBeenCalled();
+
+        await ime(true);                             // "Tap to type", or the button
+        h.showMobileKeyboard.mockClear();
+        await pressAt(0.6, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.8));
+        expect(h.showMobileKeyboard, 'the keyboard up again ends the close').toHaveBeenCalled();
     });
 });
 

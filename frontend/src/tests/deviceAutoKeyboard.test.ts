@@ -2,12 +2,17 @@
  * TAP A TEXT BOX, GET THE KEYBOARD — the decision, pinned.
  *
  * One pure function decides whether a caret report that arrives after a press
- * means "that press landed in something typeable", and a second decides, at
- * the press itself, whether the finger landed on a caret already there. Every
- * case below is a concrete story from the remote screen, and every "does not
- * raise" case has a positive-control sibling that differs in exactly one input
- * — a verdict that returned `raise:false` unconditionally would otherwise pass
- * half this file.
+ * means "that press put the caret there": it landed in something typeable.
+ * Every case below is a concrete story from the remote screen, and every "does
+ * not raise" case has a positive-control sibling that differs in exactly one
+ * input — a verdict that returned `raise:false` unconditionally would
+ * otherwise pass half this file.
+ *
+ * 2026-11-20 (the owner: "a lot of clicks seem to needlessly bring the
+ * keyboard up and change zoom"): a caret that does NOT move never raises (the
+ * old "near" rule raised for every button on its line), Chromium's hidden
+ * caret is no caret, and the person's close of the keyboard holds every raise
+ * for a caret the tap moved until a text box takes the focus.
  *
  * REVERT-TO-RED, checked while writing these:
  *  - dropping the `isMeasuredCaret(before)` guard (comparing against ANY
@@ -15,23 +20,23 @@
  *    that was already there" red — a 'field' before then has to MOVE to raise.
  *  - dropping 'field' from the rejected sources turns "a focused button is not
  *    a text box" red.
- *  - dropping the `near` rule turns "tapping the empty search box that already
- *    has focus" red (the caret does not move, so nothing else would raise).
- *  - dropping the horizontal limit from `pressNearCaret` turns "a toolbar button
- *    across the screen on the caret's line" red.
+ *  - putting the `near` rule back (a press within 640 px on the line of an
+ *    unmoved caret raises) turns "a button beside a focused text box" red.
+ *  - dropping the 0-px-wide msaa rule from isMeasuredCaret turns the Chromium
+ *    hidden-caret cases red.
  *  - dropping the same-line test from 'appeared'/'moved' turns the title-bar
  *    and window-drag cases red.
- *  - measuring in fractions instead of pixels turns the composite cases red.
+ *  - measuring in fractions instead of pixels turns the stacked-layout case red.
+ *  - letting heldByManualClose hold only the close's line, or nothing, turns
+ *    the manual-close cases red.
  */
 import { describe, it, expect } from 'vitest';
 import {
-    ASSUMED_SURFACE, AUTO_KEYBOARD_MOVE_PX, AUTO_KEYBOARD_SAME_FIELD_PX,
+    ASSUMED_SURFACE, AUTO_KEYBOARD_MOVE_PX,
     AUTO_KEYBOARD_SAME_LINE_MIN_PX, AUTO_KEYBOARD_WINDOW_MS,
-    AUTO_KEYBOARD_CLOSE_HOLDOFF_MS,
-    autoKeyboardVerdict, autoKeyboardVerdictAtPress, caretMoved, isMeasuredCaret,
-    suppressedByManualClose,
-    pressNearCaret, pressOnCaretLine,
-    type CaretState, type Press,
+    autoKeyboardVerdict, caretMoved, heldByManualClose, isMeasuredCaret,
+    pressOnCaretLine, textBoxTookFocus,
+    type AutoKeyboardVerdict, type CaretState, type Press,
 } from '../components/deviceAutoKeyboard';
 
 /** One 1920x1080 screen. */
@@ -41,6 +46,9 @@ const CARET: CaretState = {
     vis: true, x: 0.4, y: 0.3, w: 1 / 1920, h: 18 / 1080, src: 'win32', mon: 0, surf: 7,
 };
 const HIDDEN: CaretState = { vis: false, x: 0, y: 0, w: 0, h: 0, src: null, mon: 0, surf: 7 };
+/** Chromium's caret object once a page took the focus from the text box it
+ *  was in: msaa, 0 px wide, still on that text box's line. */
+const CHROMIUM_HIDDEN: CaretState = { ...CARET, w: 0, src: 'msaa' };
 /** A focused BUTTON, as tier 3 reports it: the element's whole box. */
 const FIELD: CaretState = { vis: true, x: 0.7, y: 0.9, w: 0.08, h: 0.03, src: 'field', mon: 0, surf: 7 };
 
@@ -65,6 +73,17 @@ describe('what counts as a measured caret', () => {
         // The stage's own "place on where the finger aimed" stand-in carries no
         // source at all — it is a guess, not a measurement.
         expect(isMeasuredCaret({ ...CARET, src: null })).toBe(false);
+    });
+
+    it("Chromium's HIDDEN caret object (msaa, 0 px wide, left on the old line) is not a caret", () => {
+        // ax_system_caret_win.cc: shown it is 1 px wide; Hide() zeroes the
+        // width and keeps the place, and an older agent still reports it.
+        expect(isMeasuredCaret(CHROMIUM_HIDDEN)).toBe(false);
+        // POSITIVE CONTROL: the same caret shown, 1 px wide.
+        expect(isMeasuredCaret({ ...CHROMIUM_HIDDEN, w: 1 / 1920 })).toBe(true);
+        // A 0-wide caret from tier 1 (a real system caret can measure 0) is
+        // still one: the rule is Chromium's caret object's, not every tier's.
+        expect(isMeasuredCaret({ ...CARET, w: 0, src: 'win32' })).toBe(true);
     });
 });
 
@@ -152,44 +171,40 @@ describe('a press that moves an existing caret', () => {
     });
 });
 
-describe('a press on a field whose caret does not move', () => {
-    it('raises AT THE PRESS: tapping the empty search box that already has focus', () => {
-        // The caret sits at the start of an empty box; the finger lands 15% of
-        // the screen (288 px) to the right of it, on the same line. Nothing on
-        // the host changes, so no report will ever come — the press itself
-        // must decide, from the caret the stage already knows about.
-        const press = { x: 0.55, y: CY };
-        expect(pressNearCaret(press, CARET, ONE)).toBe(true);
-        expect(autoKeyboardVerdictAtPress({ press, known: CARET, surface: ONE })).toEqual({ raise: true, reason: 'near' });
-        // And the report path agrees, should a report arrive anyway (a tier
-        // flip re-sends the same caret under a different source).
-        expect(verdict({ press: { ...press, at: T0 }, before: CARET, report: { ...CARET, src: 'msaa' } }))
-            .toEqual({ raise: true, reason: 'near' });
+describe('a press on the line of a caret that does not move raises nothing', () => {
+    it('a button BESIDE a focused text box, on its line (Back beside an address bar, Send beside a message box)', () => {
+        // The caret sits in the box; the finger lands to its right or to its
+        // left, on the same line. The caret does not move: nothing on the host
+        // says the press went into the box. (Before 2026-11-20 each of these
+        // raised the keyboard: the old "near" rule, within 640 px on the
+        // caret's line. So did the empty box itself, tapped again.)
+        for (const dx of [288, -200, 600]) {
+            const press = { x: 0.4 + dx / 1920, y: CY, at: T0 };
+            expect(verdict({ press, before: CARET, report: CARET }), `${dx} px`).toEqual({ raise: false, reason: 'unchanged' });
+            // A tier flip re-sending the same caret is no move either.
+            expect(verdict({ press, before: CARET, report: { ...CARET, src: 'msaa' } })).toEqual({ raise: false, reason: 'unchanged' });
+        }
+        // POSITIVE CONTROL: the same press, and the caret MOVED to it (the tap
+        // went into the text), raises.
+        const press = { x: 0.4 + 288 / 1920, y: CY, at: T0 };
+        expect(verdict({ press, before: CARET, report: { ...CARET, x: press.x } })).toEqual({ raise: true, reason: 'moved' });
     });
 
-    it('at the press, nothing known or a non-caret known means no raise', () => {
-        const press = { x: 0.4, y: CY };
-        expect(autoKeyboardVerdictAtPress({ press, known: null, surface: ONE })).toEqual({ raise: false, reason: 'no-caret' });
-        expect(autoKeyboardVerdictAtPress({ press, known: HIDDEN, surface: ONE })).toEqual({ raise: false, reason: 'no-caret' });
-        // A focused button's box under the finger is not a text box.
-        expect(autoKeyboardVerdictAtPress({ press: { x: 0.74, y: 0.915 }, known: FIELD, surface: ONE }))
-            .toEqual({ raise: false, reason: 'no-caret' });
-        // Positive control: the same box reported by a caret tier raises.
-        expect(autoKeyboardVerdictAtPress({ press: { x: 0.74, y: 0.915 }, known: { ...FIELD, src: 'uia' }, surface: ONE }))
-            .toEqual({ raise: true, reason: 'near' });
+    it("a tap on the line Chromium's hidden caret was left on, the caret not moving", () => {
+        const press = { x: 0.55, y: CY, at: T0 };
+        expect(verdict({ press, before: CHROMIUM_HIDDEN, report: CHROMIUM_HIDDEN })).toEqual({ raise: false, reason: 'not-a-caret' });
     });
 
-    it('does NOT raise for a toolbar button across the screen on the caret\'s line', () => {
-        // 640 px is the field width; 660 px away is across the screen.
-        const press = { x: 0.4 + 660 / 1920, y: CY, at: T0 };
-        expect(pressNearCaret(press, CARET, ONE)).toBe(false);
-        expect(autoKeyboardVerdictAtPress({ press, known: CARET, surface: ONE })).toEqual({ raise: false, reason: 'elsewhere' });
-        expect(verdict({ press, before: CARET, report: CARET })).toEqual({ raise: false, reason: 'unchanged' });
-        // Positive control: 620 px away is still the field.
-        const nearer = { ...press, x: 0.4 + 620 / 1920 };
-        expect(pressNearCaret(nearer, CARET, ONE)).toBe(true);
-        expect(autoKeyboardVerdictAtPress({ press: nearer, known: CARET, surface: ONE })).toEqual({ raise: true, reason: 'near' });
-        expect(AUTO_KEYBOARD_SAME_FIELD_PX).toBe(640);
+    it("a text box taking the focus back shows Chromium's caret again in place: that raises", () => {
+        // Hidden (0 wide) at the box, then shown (1 px) at the same place: the
+        // tap gave the box the focus. Judged against the hidden caret taken
+        // for a real one, as before, it was "no move".
+        const press = { x: 0.55, y: CY, at: T0 };
+        const shown = { ...CHROMIUM_HIDDEN, w: 1 / 1920 };
+        expect(verdict({ press, before: CHROMIUM_HIDDEN, report: shown })).toEqual({ raise: true, reason: 'appeared' });
+        // POSITIVE CONTROL for the rule: after a real 1 px caret there, the
+        // same report is no move.
+        expect(verdict({ press, before: shown, report: shown })).toEqual({ raise: false, reason: 'unchanged' });
     });
 
     it('"the same line" is 1.5 caret heights, with a floor for a 1px-tall caret', () => {
@@ -205,24 +220,7 @@ describe('a press on a field whose caret does not move', () => {
 });
 
 describe('the tolerances are pixels of the surface, not fractions of it', () => {
-    // Three 1920x1080 screens side by side: the every-screen default streams
-    // a 5760x1080 composite, and the caret's fractions are of THAT.
-    const THREE = { w: 5760, h: 1080 };
-    /** A caret in a Notepad window on screen 1 at desktop x=576 (0.10). */
-    const caret3 = { ...CARET, x: 576 / 5760, mon: 255 };
-
-    it('a tap on a button on the NEXT screen is not "in the same field"', () => {
-        // Desktop x=2534: 1958 px away — a different monitor — on the same row.
-        // As a fraction that is 0.34, which a fraction-based third would pass.
-        const press = { x: 2534 / 5760, y: CY };
-        expect(pressNearCaret(press, caret3, THREE)).toBe(false);
-        expect(autoKeyboardVerdictAtPress({ press, known: caret3, surface: THREE })).toEqual({ raise: false, reason: 'elsewhere' });
-        // Positive control: 600 px away on the SAME screen is the field.
-        const same = { x: (576 + 600) / 5760, y: CY };
-        expect(pressNearCaret(same, caret3, THREE)).toBe(true);
-    });
-
-    it('and the line tolerance is the same pixels on a tall stacked layout', () => {
+    it('the line tolerance is the same pixels on a tall stacked layout', () => {
         // Two screens stacked: 1920x2160. 27 px is 27 px, not 0.025 of 2160.
         const TALL = { w: 1920, h: 2160 };
         const caretTall = { ...CARET, y: 0.15, h: 18 / 2160 };
@@ -231,14 +229,19 @@ describe('the tolerances are pixels of the surface, not fractions of it', () => 
         expect(pressOnCaretLine({ x: 0.4, y: cyTall + 28 / 2160 }, caretTall, TALL)).toBe(false);
     });
 
+    it('a move is pixels too: one cell on the three-screen composite is a move, the send epsilon is not', () => {
+        const THREE = { w: 5760, h: 1080 };
+        const c = { ...CARET, x: 576 / 5760, mon: 255 };
+        expect(caretMoved(c, { ...c, x: (576 + 8) / 5760 }, THREE)).toBe(true);
+        expect(caretMoved(c, { ...c, x: (576 + 2) / 5760 }, THREE)).toBe(false);
+    });
+
     it('with no geometry from the host, a 1920x1080 screen is assumed', () => {
         expect(ASSUMED_SURFACE).toEqual({ w: 1920, h: 1080 });
-        const press = { x: 0.4 + 620 / 1920, y: CY };
-        expect(pressNearCaret(press, CARET, null)).toBe(true);
-        expect(pressNearCaret(press, CARET, undefined)).toBe(true);
-        expect(pressNearCaret({ ...press, x: 0.4 + 660 / 1920 }, CARET, null)).toBe(false);
+        expect(pressOnCaretLine({ x: 0.4, y: CY + 26 / 1080 }, CARET, null)).toBe(true);
+        expect(pressOnCaretLine({ x: 0.4, y: CY + 28 / 1080 }, CARET, undefined)).toBe(false);
         // A degenerate size is "no geometry", not a division by zero.
-        expect(pressNearCaret(press, CARET, { w: 0, h: 0 })).toBe(true);
+        expect(pressOnCaretLine({ x: 0.4, y: CY + 26 / 1080 }, CARET, { w: 0, h: 0 })).toBe(true);
     });
 });
 
@@ -264,7 +267,7 @@ describe('the press window', () => {
 describe('a different surface', () => {
     it('a report from after a monitor switch is not compared to a caret from before it', () => {
         // Same fractions, new surface generation: the SAME caret is a different
-        // fraction now, so "moved"/"near" are meaningless — and nothing raises.
+        // fraction now, so "moved" is meaningless — and nothing raises.
         expect(verdict({ before: CARET, report: { ...CARET, x: 0.6, surf: 8 } }))
             .toEqual({ raise: false, reason: 'surface-changed' });
         expect(verdict({ before: CARET, report: { ...CARET, x: 0.6, mon: 1 } }))
@@ -281,40 +284,43 @@ describe('a different surface', () => {
     });
 });
 
-describe('the manual-close holdoff', () => {
-    const close = { caret: CARET, at: T0 };
-    const held = (over: Partial<Parameters<typeof suppressedByManualClose>[0]>) =>
-        suppressedByManualClose({ close, caret: CARET, now: NOW, surface: ONE, ...over });
+describe('closing the keyboard sticks', () => {
+    const close = { at: T0 };
+    const moved: AutoKeyboardVerdict = { raise: true, reason: 'moved' };
+    const appeared: AutoKeyboardVerdict = { raise: true, reason: 'appeared' };
 
-    it('a raise on the line the keyboard was closed over is swallowed', () => {
-        expect(held({})).toBe(true);
+    it('a caret the tap MOVED is held back, whatever the line and however long after', () => {
+        // The person closed the keyboard over a text box and taps around in
+        // the text (to read, to select): the same line, another line of the
+        // same document, or a box beside it the focus went straight into.
+        // Nothing on the host tells those apart, and none of it is "the focus
+        // came into a text box". (Before 2026-11-20 a different line, or 5 s,
+        // let the keyboard straight back up, and the zoom with it.) The close
+        // record carries no clock to run out.
+        expect(heldByManualClose(close, moved)).toBe(true);
+        expect(heldByManualClose({ at: T0 - 3_600_000 }, moved)).toBe(true);
+        // POSITIVE CONTROL: with no close standing, the same raise goes.
+        expect(heldByManualClose(null, moved)).toBe(false);
     });
 
-    it('a raise on a DIFFERENT line is fresh intent and passes', () => {
-        // Two line-tolerances below the close caret: clearly another field.
-        const other = { ...CARET, y: CARET.y + (3 * AUTO_KEYBOARD_SAME_LINE_MIN_PX) / 1080 };
-        expect(held({ caret: other })).toBe(false);
+    it('a text box TAKING the focus (a caret where there was none) is not held', () => {
+        expect(heldByManualClose(close, appeared)).toBe(false);
     });
 
-    it('the holdoff expires on its own', () => {
-        expect(held({ now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS + 1 })).toBe(false);
-        // POSITIVE CONTROL: one ms inside the window it still holds.
-        expect(held({ now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS - 1 })).toBe(true);
+    it('no raise, nothing to hold', () => {
+        expect(heldByManualClose(close, { raise: false, reason: 'unchanged' })).toBe(false);
     });
 
-    it('no record, no holdoff', () => {
-        expect(held({ close: null })).toBe(false);
-    });
-
-    it('a close with NO known caret holds the whole window — there is nothing to compare', () => {
-        const blind = { caret: null, at: T0 };
-        expect(held({ close: blind })).toBe(true);
-        const other = { ...CARET, y: 0.9 };
-        expect(held({ close: blind, caret: other })).toBe(true);
-        expect(held({ close: blind, now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS + 1 })).toBe(false);
-    });
-
-    it('a NaN close timestamp fails OPEN — it must not hold the feature off forever', () => {
-        expect(held({ close: { caret: CARET, at: NaN } })).toBe(false);
+    it('what ends a close: a measured caret where there was none', () => {
+        expect(textBoxTookFocus(null, CARET)).toBe(true);
+        expect(textBoxTookFocus(HIDDEN, CARET)).toBe(true);
+        expect(textBoxTookFocus(FIELD, CARET)).toBe(true);
+        expect(textBoxTookFocus(CHROMIUM_HIDDEN, { ...CHROMIUM_HIDDEN, w: 1 / 1920 })).toBe(true);
+        // …and not the caret moving within the text, nor leaving it, nor a
+        // focused button, nor Chromium hiding its caret.
+        expect(textBoxTookFocus(CARET, { ...CARET, y: 0.6 })).toBe(false);
+        expect(textBoxTookFocus(CARET, HIDDEN)).toBe(false);
+        expect(textBoxTookFocus(HIDDEN, FIELD)).toBe(false);
+        expect(textBoxTookFocus(HIDDEN, CHROMIUM_HIDDEN)).toBe(false);
     });
 });
