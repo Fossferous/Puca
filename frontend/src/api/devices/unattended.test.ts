@@ -11,6 +11,7 @@ import {
     passphraseMatches,
     rememberUaSeed,
     rememberedUaSeed,
+    renewSameMachineUaSeeds,
     signUaChallenge,
     UA_REMEMBER_MS,
 } from './unattended';
@@ -196,5 +197,45 @@ describe('remembering a proved unattended seed', () => {
             await rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS + 1),
             'an actively used machine never notices the shorter window',
         ).toEqual(SEED);
+    });
+
+    it('the SAME PC\'s other row renews it too: the week is the PC\'s, not one row\'s', async () => {
+        // One PC is its desktop app's row and its lock-screen row, each with
+        // its own seed (its own record, its own salt). The lock screen is
+        // reached only when the PC is locked or off: on its own week its seed
+        // lapsed between uses while the desktop's stayed fresh.
+        const t0 = 1_700_000_000_000;
+        const SIGNIN_SEED = new Uint8Array(32).fill(6);
+        const SIGNIN_SALT = 'c2lnbmlu';
+        rememberUaSeed('pc-signin', SIGNIN_SALT, SIGNIN_SEED, t0); await flush();
+        rememberUaSeed('pc-app', SALT, SEED, t0); await flush();
+        const before = JSON.parse(localStorage.getItem('sovereign-ua-remember') ?? '{}') as Record<string, { salt: string; seed: string }>;
+        // A week of desktop sessions, each one renewing its PC's other row.
+        for (let day = 1; day <= 9; day++) {
+            confirmUaSeed('pc-app', t0 + day * 86_400_000);
+            renewSameMachineUaSeeds(['pc-signin'], t0 + day * 86_400_000);
+        }
+        expect(await rememberedUaSeed('pc-signin', SIGNIN_SALT, t0 + 10 * 86_400_000)).toEqual(SIGNIN_SEED);
+        // It only ever slid the expiry: each row still holds exactly its OWN
+        // seed under its OWN salt (nothing is copied across).
+        const after = JSON.parse(localStorage.getItem('sovereign-ua-remember') ?? '{}') as Record<string, { salt: string; seed: string }>;
+        expect(after['pc-signin'].salt).toBe(before['pc-signin'].salt);
+        expect(after['pc-signin'].seed).toBe(before['pc-signin'].seed);
+        expect(after['pc-app'].seed).toBe(before['pc-app'].seed);
+        expect(await rememberedUaSeed('pc-signin', SALT, t0 + 10 * 86_400_000), 'never under the other row\'s salt').toBeNull();
+    });
+
+    it('…but never makes an entry, and never brings back one that has lapsed', async () => {
+        const t0 = 1_700_000_000_000;
+        renewSameMachineUaSeeds(['nobody'], t0);
+        expect(localStorage.getItem('sovereign-ua-remember'), 'no entry from nothing').toBeNull();
+        rememberUaSeed('pc-signin', SALT, SEED, t0); await flush();
+        // Past its week with nothing at all: dead, and a later renew is too late.
+        renewSameMachineUaSeeds(['pc-signin'], t0 + UA_REMEMBER_MS);
+        expect(await rememberedUaSeed('pc-signin', SALT, t0 + UA_REMEMBER_MS + 1)).toBeNull();
+        // POSITIVE CONTROL: the same renew a moment inside the week keeps it.
+        rememberUaSeed('pc-signin', SALT, SEED, t0); await flush();
+        renewSameMachineUaSeeds(['pc-signin'], t0 + UA_REMEMBER_MS - 1);
+        expect(await rememberedUaSeed('pc-signin', SALT, t0 + UA_REMEMBER_MS + 1)).toEqual(SEED);
     });
 });

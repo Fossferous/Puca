@@ -255,7 +255,9 @@ describe('Devices settings', () => {
             await settle();
             // The card's name rides along for the messages that name the PC
             // ("…'s screen is off"; noScreen.ts). Display only.
-            expect(connectToDevice).toHaveBeenCalledWith('dev1', { peerName: 'Zeus-PC' });
+            // So do the PC's rows, so a proved session keeps the remembered
+            // passphrase of its other row (its lock screen) alive.
+            expect(connectToDevice).toHaveBeenCalledWith('dev1', { peerName: 'Zeus-PC', machineRows: ['dev1'] });
         });
 
         it('decides the row from a FRESH list, not the one the card was painted from', async () => {

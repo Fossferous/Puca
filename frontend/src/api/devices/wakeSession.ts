@@ -610,7 +610,13 @@ function watchForRow(opts: {
             // while a connect is in flight.
             set(cardId, 'connecting', found.connectingMessage);
             try {
-                await connectToDevice(found.row.id);
+                // The PC's rows ride along: a woken or followed PC is reached
+                // at its other row, and a session proved there keeps this
+                // row's remembered passphrase alive (session.ts machineRows).
+                await connectToDevice(
+                    found.row.id,
+                    machine ? { machineRows: machine.rows.map(r => r.id) } : undefined,
+                );
                 if (!isCurrent(cardId, token)) return;
                 clearTimers(cardId);
                 // The session UI takes over from here; drop our status so

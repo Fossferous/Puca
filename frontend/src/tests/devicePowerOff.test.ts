@@ -200,6 +200,20 @@ describe('the driver', () => {
         expect(connectToDevice.mock.calls[0][1]).toEqual({ powerOff: true, peerName: 'Box', share });
     });
 
+    it('the PC\'s rows ride along to the connect (the lock screen is its own row); never with a share', async () => {
+        connectToDevice.mockImplementation(async () => {
+            snaps = [{ id: 's4', role: 'controller', phase: 'ended', error: null, powerOff: { state: 'done', reason: null } }];
+            emit();
+            return 's4';
+        });
+        await powerOffDevice({ hostDevice: 'pc-signin', name: 'Slim-Jim', signIn: true, machineRows: ['pc', 'pc-signin'] });
+        expect(connectToDevice.mock.calls[0]).toEqual(['pc-signin', { powerOff: true, peerName: 'Slim-Jim', machineRows: ['pc', 'pc-signin'] }]);
+        // A friend's PC is in no machine of this account's, whatever a caller passes.
+        const share = { inviteId: 3, ownerUser: 9, ownerUsername: 'friend', capabilities: ['control'] };
+        await powerOffDevice({ hostDevice: 'their-pc', name: 'Box', share, machineRows: ['their-pc', 'x'] });
+        expect(connectToDevice.mock.calls[1][1]).toEqual({ powerOff: true, peerName: 'Box', share });
+    });
+
     it('a connect that throws is a refusal with its words', async () => {
         connectToDevice.mockRejectedValue(new Error('this device has not enrolled yet'));
         const o = await powerOffDevice({ hostDevice: 'pc', name: 'Slim-Jim' });

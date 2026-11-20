@@ -103,7 +103,7 @@ export function requestForcePowerOff(): boolean { return false; }
 
 export async function connectToDevice(
     hostDevice: string,
-    opts?: { powerOff?: boolean; peerName?: string; filesOnly?: boolean; share?: unknown },
+    opts?: { powerOff?: boolean; peerName?: string; filesOnly?: boolean; share?: unknown; machineRows?: readonly string[] },
 ): Promise<string> {
     calls.push({ host: hostDevice, opts: opts ?? null });
     const id = `ps${++n}`;

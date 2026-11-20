@@ -44,17 +44,20 @@ vi.mock('../api/devices/index', () => ({
 }));
 
 const connected: string[] = [];
+/** What each successful connect was told about the PC it reached. */
+const connectedRows: Array<readonly string[] | undefined> = [];
 /** How many of the NEXT connect attempts should reject (the unlock-transition
  *  race: the target's first capture-open lands on the still-secure desktop). */
 let connectFails = 0;
 vi.mock('../api/devices/session', () => ({
-    connectToDevice: (id: string) => {
+    connectToDevice: (id: string, opts?: { machineRows?: readonly string[] }) => {
         if (connectFails > 0) {
             connectFails--;
             return Promise.reject(new Error(
                 'capture: Access is denied (that computer is showing a Windows security screen)'));
         }
         connected.push(id);
+        connectedRows.push(opts?.machineRows);
         return Promise.resolve();
     },
 }));
@@ -103,6 +106,7 @@ beforeEach(() => {
     devices = [];
     listCalls = 0;
     connected.length = 0;
+    connectedRows.length = 0;
     connectFails = 0;
     latest = new Map();
     subscribeWakes(s => { latest = s; });
@@ -147,6 +151,10 @@ describe('following a machine from its sign-in screen to its desktop', () => {
         await vi.advanceTimersByTimeAsync(3_000);
 
         expect(connected).toEqual(['pc']);
+        // With the PC's rows: a session proved at the desktop keeps the
+        // passphrase remembered for the lock screen alive (session.ts
+        // machineRows), and the lock screen is where it came from.
+        expect(connectedRows).toEqual([['pc', 'pc-signin']]);
         // The stage owns the screen now; the card's status is gone.
         expect(latest.has('pc')).toBe(false);
     });

@@ -443,6 +443,24 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   leaving (the slow passphrase stretch, signing and sealing). The card's line
   is kept outside the Devices view (`setPowerOffLine` in powerOff.ts), so
   leaving the view mid-flight loses nothing.
+- **Which passphrase, and how long it is remembered.** A PC that is locked,
+  at its sign-in screen, or just restarted or woken answers as its
+  lock-screen row, which checks its OWN record (**Passphrase for the sign-in
+  screen**, set separately from **Unattended access**, with its own random
+  salt). So the seed this device remembers for the desktop row is never
+  offered there, and could not verify if it were: the first power-off of a
+  locked PC asks for that screen's passphrase, once. Each row's remembered
+  seed is renewed by a proved session to EITHER row of the PC
+  (`renewSameMachineUaSeeds` in `api/devices/unattended.ts`, fed the card's
+  `machineRows`): the lock-screen row is reached only when the PC is locked
+  or off, 4 to 26 days apart on the owner's PC, so on its own week it had
+  lapsed by the next time and Power off of a locked PC asked again
+  (2026-11-20). The renewal only slides an expiry; a row is still only ever
+  offered the seed proved with it, and its host still checks it. Offering one
+  row's seed to the other would need one record for both AND a binding only
+  the PC can vouch for: the grouping of rows into a PC (the MAC in their
+  sealed LAN details) is written with the account's keys, and an account in
+  the wrong hands is exactly what the passphrase is for.
 - **The host is the gate.** An unproved controller gets nothing; a share
   without `control` is refused — out loud, with `power-failed`, because the
   card is waiting on an answer (the other power actions keep their silence

@@ -65,6 +65,7 @@ import {
     forgetUaSeed,
     rememberUaSeed,
     rememberedUaSeed,
+    renewSameMachineUaSeeds,
     signUaChallengeSeed,
 } from './unattended';
 import { requestUnattendedPassphrase } from './unattendedPrompt';
@@ -678,6 +679,16 @@ interface Internal extends DeviceControlSession {
      *  produces is the teardown itself, so keeping the seed then would replay
      *  the same refusal promptless forever. */
     uaCache: 'used' | 'confirmed' | null;
+    /** CONTROLLER: the OTHER device rows of the same PC as `peerDevice`, as
+     *  the device list grouped them (machines.ts; `connectToDevice`'s
+     *  `machineRows`), so a proved session here keeps their remembered seeds
+     *  as alive as this one's (`renewSameMachineUaSeeds`). A PC at its lock
+     *  screen is its sign-in row, with its own passphrase record, and is
+     *  reached far less often than its desktop: on its own week it asked for
+     *  the passphrase again by the next time. Never used to OFFER a seed: each
+     *  row is only ever offered its own (see that function). Empty for a host
+     *  session, a share, and any caller that does not know the PC. */
+    machineRows: string[];
     /** HOST: this machine cannot capture at all (a phone). Stashed at accept
      *  time because the offer handler needs it later without re-probing: a
      *  screen request against such a host is torn down naming the limitation,
@@ -4035,6 +4046,12 @@ export async function connectToDevice(
         /** The name the person sees for that device, for the messages that
          *  name it ("Work Laptop's screen is off…"). Display only. */
         peerName?: string;
+        /** Every device row of the PC `hostDevice` belongs to, as the device
+         *  list grouped them (machines.ts `Machine.rows`): a PC is its desktop
+         *  app's row and its lock-screen service's row. Housekeeping only — a
+         *  proved session here renews the remembered passphrase of the others
+         *  (`Internal.machineRows`); nothing is ever offered to them. */
+        machineRows?: readonly string[];
     },
 ): Promise<string> {
     const myDevice = thisDeviceId();
@@ -4043,6 +4060,11 @@ export async function connectToDevice(
 
     const id = newId();
     const s: Internal = {
+        // A friend's PC has no remembered passphrase here (the grant stands
+        // in for it), and is in no machine of this account's.
+        machineRows: opts?.share
+            ? []
+            : [...new Set(opts?.machineRows ?? [])].filter(r => r !== hostDevice && r !== myDevice),
         // An Audio Hub session IS a files-only session on the wire: no
         // capture on the host, no media deadline here. So is a power-off one.
         filesOnly: opts?.filesOnly === true || opts?.audioHub === true || opts?.powerOff === true,
@@ -4789,6 +4811,7 @@ export function installDeviceSessions(): void {
                 audioHub: false,
                 powerOff: null,
                 powerOffOnly: false,
+                machineRows: [],
                 hostCaptureless: !caps.capture,
                 // Set below only after the share verification chain passes;
                 // the public shareUser/viewOnly are derived from it in emit().
@@ -6214,6 +6237,11 @@ function uaProofAccepted(s: Internal): void {
     if (s.role !== 'controller' || s.uaCache !== 'used') return;
     s.uaCache = 'confirmed';
     confirmUaSeed(s.peerDevice);
+    // And the same PC's other row: a PC that is locked, at its sign-in
+    // screen, or just restarted or woken answers as its lock-screen row, which
+    // this device reaches far less often than the desktop. Renewed, never
+    // offered: each row is only ever handed the seed proved with it.
+    if (s.machineRows.length > 0) renewSameMachineUaSeeds(s.machineRows);
 }
 
 async function handleSignalFrame(s: Internal, blob: string): Promise<void> {

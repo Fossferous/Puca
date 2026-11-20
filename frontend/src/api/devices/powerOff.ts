@@ -57,6 +57,13 @@ export interface PowerOffTarget {
      *  what answers there is its lock-screen service, which updates apart
      *  from the app (someone there clicks Update the service). */
     signIn?: boolean;
+    /** Every device row of this PC (the card's machine: its desktop app's
+     *  row and its lock-screen row), so a power-off proved with one keeps the
+     *  passphrase remembered for the other (connectToDevice's `machineRows`).
+     *  A locked PC answers as its lock-screen row, reached far less often
+     *  than the desktop: without this its remembered passphrase lapsed on its
+     *  own week and Power off of a locked PC asked again. */
+    machineRows?: readonly string[];
     /** Set for a friend's PC under an accepted share. */
     share?: {
         inviteId: number;
@@ -236,6 +243,7 @@ export async function powerOffDevice(
                 powerOff: true,
                 peerName: t.name,
                 ...(t.share ? { share: t.share } : {}),
+                ...(t.machineRows && !t.share ? { machineRows: t.machineRows } : {}),
             });
         }
         check();
