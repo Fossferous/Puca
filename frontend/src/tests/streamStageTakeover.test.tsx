@@ -55,12 +55,18 @@ vi.mock('../components/voiceState', () => ({
 
 /** Mutable so a test can put an ACTIVE remote-control session on a given user. */
 let controlState: { controlling: unknown; hosting: unknown } = { controlling: null, hosting: null };
+/** The stage's subscription, so a session can also start (or end) while it is on screen. */
+const controlSubs = new Set<(s: unknown) => void>();
+const setControlState = (next: typeof controlState) => {
+    controlState = next;
+    act(() => { for (const cb of [...controlSubs]) cb(next); });
+};
 
 vi.mock('../api/remoteControl', () => ({
     requestControl: vi.fn(),
     stopControlling: vi.fn(),
     sendControlEvent: vi.fn(),
-    subscribeControl: () => () => { /* unsubscribe */ },
+    subscribeControl: (cb: (s: unknown) => void) => { controlSubs.add(cb); return () => { controlSubs.delete(cb); }; },
     getControlState: () => controlState,
     offerControl: vi.fn(),
     computeRmoveScale: () => 1,
@@ -75,6 +81,31 @@ vi.mock('../api/rtc/sfuManager', () => ({
         setFocusedRemote: (id: number | null) => setFocusedRemote(id),
     },
 }));
+// The Android APP, as a switch (off by default: every other test here is an
+// iPhone or a desktop), its system bars recorded, and Android's Back as a
+// stack of what interceptBack was handed.
+const app = vi.hoisted(() => ({ android: false, bars: [] as string[], back: [] as (() => void)[] }));
+vi.mock('../api/platform', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/platform')>()),
+    isAndroidApp: () => app.android,
+}));
+vi.mock('../api/systemBars', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/systemBars')>()),
+    holdSystemBarsHidden: () => {
+        app.bars.push('hide');
+        let done = false;
+        return () => { if (!done) { done = true; app.bars.push('show'); } };
+    },
+}));
+vi.mock('../api/mobileApp', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../api/mobileApp')>()),
+    interceptBack: (onBack: () => void) => {
+        app.back.push(onBack);
+        return () => { const i = app.back.indexOf(onBack); if (i >= 0) app.back.splice(i, 1); };
+    },
+}));
+/** Android's Back: the newest layer closes. */
+const pressBack = () => act(() => { app.back[app.back.length - 1]?.(); });
 
 import { StreamStage } from '../components/StreamStage';
 import { useStreamStore } from '../stores/streamStore';
@@ -378,5 +409,176 @@ describe('Fullscreen where nothing can go fullscreen (in-app)', () => {
         } finally {
             delete (HTMLElement.prototype as { requestFullscreen?: unknown }).requestFullscreen;
         }
+    });
+});
+
+describe('the Android APP: Fullscreen is the stream alone (the owner\'s report, 2026-11-20)', () => {
+    let req: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+        app.android = true;
+        app.bars = [];
+        app.back = [];
+        // The WebView offers element fullscreen, and would grant it: the
+        // app must not ask (mediaFullscreen.ts route 0).
+        req = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', { configurable: true, value: req });
+    });
+    afterEach(() => {
+        app.android = false;
+        delete (HTMLElement.prototype as { requestFullscreen?: unknown }).requestFullscreen;
+    });
+
+    it('never asks the WebView: the in-app fullscreen, bare, the system bars hidden, and the same button leaves', () => {
+        render();
+        tap(fullscreenBtn());
+        expect(req).not.toHaveBeenCalled();
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().fullscreenBare).toBe('true');
+        expect(container.querySelector('.stream-tile.is-app-fullscreen')).not.toBeNull();
+        expect(app.bars).toEqual(['hide']);
+        expect(fullscreenBtn().getAttribute('aria-label')).toBe('Exit fullscreen');
+        tap(fullscreenBtn());
+        expect(html().streamTakeover).toBeUndefined();
+        expect(html().fullscreenBare).toBeUndefined();
+        expect(container.querySelector('.is-app-fullscreen')).toBeNull();
+        expect(app.bars).toEqual(['hide', 'show']);
+    });
+
+    it('Android\'s Back leaves it and gives the layout back (and is let go of afterwards)', () => {
+        render();
+        tap(fullscreenBtn());
+        expect(app.back.length).toBeGreaterThan(0);
+        pressBack();
+        expect(html().streamTakeover).toBeUndefined();
+        expect(html().fullscreenBare).toBeUndefined();
+        expect(app.bars).toEqual(['hide', 'show']);
+        expect(fullscreenBtn().getAttribute('aria-label')).toBe('Fullscreen');
+        expect(app.back).toHaveLength(0);
+    });
+
+    it('the stream ending takes the bare fullscreen and the hidden bars with it', () => {
+        render();
+        tap(fullscreenBtn());
+        expect(html().fullscreenBare).toBe('true');
+        selected = [];
+        act(() => notify());
+        expect(html().fullscreenBare).toBeUndefined();
+        expect(app.bars).toEqual(['hide', 'show']);
+    });
+
+    it('sideways, Fullscreen is the bare fullscreen too, and leaving it gives the sideways takeover back', () => {
+        rotate(true);
+        render();
+        expect(html().streamTakeover).toBe('landscape');
+        expect(html().fullscreenBare).toBeUndefined();
+        tap(fullscreenBtn());
+        expect(req).not.toHaveBeenCalled();
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().fullscreenBare).toBe('true');
+        tap(fullscreenBtn());
+        expect(html().streamTakeover).toBe('landscape');
+        expect(html().fullscreenBare).toBeUndefined();
+    });
+
+    // The review's scenario (2026-11-20): the stream is fullscreen when the
+    // session is granted. What the stylesheet is then handed is the state
+    // e2e/iphone-stream-real-browser.mjs lays out (section 7): the fullscreen
+    // kept, the session's layout published, its capture surface on the
+    // fullscreen tile; phoneLandscape.css puts that tile between the header
+    // and the voice bar.
+    it('a control session starting in it keeps the fullscreen and the hidden bars, and publishes the session layout', () => {
+        rotate(true);
+        render();
+        tap(fullscreenBtn());
+        expect(html().fullscreenBare).toBe('true');
+        expect(html().streamControlling).toBeUndefined();
+        setControlState({ controlling: { userId: 1, username: 'alice', status: 'active' }, hosting: null });
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().streamControlling).toBe('true');
+        expect(html().fullscreenBare).toBe('true');
+        expect(app.bars).toEqual(['hide']);
+        expect(container.querySelector('.stream-tile.is-app-fullscreen .control-capture')).not.toBeNull();
+        expect(container.querySelector('.stop-controlling-btn')).not.toBeNull();
+        // A session's controls never hide (every tap is a click over there).
+        act(() => { vi.advanceTimersByTime(10000); });
+        expect(html().streamChrome).toBeUndefined();
+        // The session over: the bare fullscreen again, the bars still away.
+        setControlState({ controlling: null, hosting: null });
+        expect(html().streamControlling).toBeUndefined();
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().fullscreenBare).toBe('true');
+        expect(container.querySelector('.control-capture')).toBeNull();
+        expect(app.bars).toEqual(['hide']);
+    });
+
+    it('CONTROL: an iPhone\'s in-app fullscreen is NOT bare (its voice bar stays in reach) and hides no bars', () => {
+        app.android = false;
+        Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false });
+        try {
+            render();
+            tap(fullscreenBtn());
+            expect(html().streamTakeover).toBe('fullscreen');
+            expect(html().fullscreenBare).toBeUndefined();
+            expect(app.bars).toEqual([]);
+        } finally {
+            delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
+        }
+    });
+
+    // The review's second scenario (2026-11-20): focus view with a filmstrip,
+    // and a THUMB put in fullscreen from its menu (a long press). A thumb's
+    // role hid its buttons (Exit fullscreen among them: StreamStage.css,
+    // .is-thumb .stream-tile-controls), drew it at 75%, kept a control
+    // session's capture surface off it and the SFU on its low layer. In the
+    // fullscreen it is the stage; leaving gives the stage back. The geometry
+    // (the stage's filmstrip row) is e2e/iphone-stream-real-browser.mjs's.
+    describe('focus view with a filmstrip', () => {
+        const tile = (id: number) => [...container.querySelectorAll<HTMLElement>('.stream-tile')]
+            .find((t) => t.querySelector('.streamer-name')?.textContent?.includes(id === 1 ? 'alice' : 'bob'))!;
+        const menuFullscreen = (id: number) => {
+            act(() => { tile(id).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+            const item = [...document.querySelectorAll<HTMLButtonElement>('.stream-context-menu .scm-item')]
+                .find((b) => /^\s*(Exit fullscreen|Fullscreen)/.test(b.textContent ?? ''))!;
+            tap(item);
+        };
+        beforeEach(() => {
+            STREAMS.set(2, { username: 'bob', stream: new MediaStream() });
+            selected = [1, 2];
+            streamers.push({ userId: 2, username: 'bob' });
+            act(() => { useStreamStore.getState().setFocusMode(true); useStreamStore.getState().setFocusedStream(1); });
+        });
+
+        it('a thumb put in fullscreen from its menu is the stage there, and leaving gives the stage back', () => {
+            rotate(true);
+            render();
+            expect(container.querySelector('.stream-grid')!.className).toContain('has-strip');
+            expect(tile(1).className).toContain('is-stage');
+            expect(tile(2).className).toContain('is-thumb');
+            setFocusedRemote.mockClear();
+            menuFullscreen(2);
+            expect(html().fullscreenBare).toBe('true');
+            expect(tile(2).className).toContain('is-app-fullscreen');
+            expect(tile(2).className).toContain('is-stage');
+            expect(tile(2).className).not.toContain('is-thumb');
+            expect(tile(2).querySelector('.tile-btn[aria-label="Exit fullscreen"]')).not.toBeNull();
+            // The picture in the fullscreen pulls the SFU's high layer.
+            expect(setFocusedRemote).toHaveBeenLastCalledWith(2);
+            // Leaving: the stage the person chose is back.
+            tap(tile(2).querySelector('.tile-btn[aria-label="Exit fullscreen"]')!);
+            expect(html().fullscreenBare).toBeUndefined();
+            expect(tile(1).className).toContain('is-stage');
+            expect(tile(2).className).toContain('is-thumb');
+            expect(setFocusedRemote).toHaveBeenLastCalledWith(1);
+        });
+
+        it('a control session on a thumb in fullscreen has its capture surface (a thumb never does: CONTROL)', () => {
+            controlState = { controlling: { userId: 2, username: 'bob', status: 'active' }, hosting: null };
+            render();
+            expect(tile(2).className).toContain('is-thumb');
+            expect(tile(2).querySelector('.control-capture')).toBeNull();
+            menuFullscreen(2);
+            expect(tile(2).className).toContain('is-app-fullscreen');
+            expect(tile(2).querySelector('.control-capture')).not.toBeNull();
+        });
     });
 });

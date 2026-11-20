@@ -37,14 +37,39 @@
 //      the screen in-app, its exit is 44 px and hit-testable, and it leaves.
 //   5. Desktop and Android unchanged: a 1280x800 fine-pointer window asks the
 //      TILE for real fullscreen exactly as before and never takes over, nor
-//      does a short 1000x400 one; a portrait Android phone takes no takeover,
-//      and neither does one typing upright with the keyboard shrinking its
+//      does a short 1000x400 one; a portrait Android phone (a browser: the
+//      Android APP's fullscreen is e2e/android-stream-fullscreen-live.mjs's)
+//      takes no takeover and asks the tile, and neither does one typing upright with the keyboard shrinking its
 //      viewport to 360x278 (the composer keeps its width beside the docked
 //      player; the old viewport-shaped rule as the control that must fail).
 //   6. The controls in reach: a touch on the voice bar (outside the stage)
 //      restarts the clock; Tab brings hidden controls back and keyboard focus
 //      on one keeps them up; a control session lays them out above and below
 //      the remote screen, never over it (the overlay as the control).
+//   7. A control session in the IN-APP fullscreen (Chromium), in the Android
+//      APP (its bridge faked: e2e/iphone-stream/checks.mjs FAKE_ANDROID_APP)
+//      sideways and upright, and on the iPhone shape sideways: Fullscreen is
+//      the bare picture first (the Android app: no voice bar, no stage header,
+//      SystemBars hidden); once a session starts the header is above the
+//      remote screen and the voice bar below it, the WHOLE remote picture is
+//      between them, every one of 35 points across it is the capture surface
+//      (elementFromPoint), the stage still holds the window and the bars stay
+//      hidden, Chat and Mute in reach; the session ending gives the bare
+//      picture back. CONTROL (must fail): the rule that puts the tile in the
+//      picture's row taken out of the stylesheet (the tile fixed to the
+//      window, under the header and the voice bar).
+//   8. FOCUS VIEW with a filmstrip (two streams) in the Android APP's in-app
+//      fullscreen (Chromium, the bridge faked), sideways 844x390 and upright
+//      390x844: Fullscreen on the stage makes it the whole window (its
+//      edges and 27 points across the window are the tile, the live picture
+//      centred with one side flush), Exit fullscreen 44 px and hit; a control
+//      session in it gets 7's checks and its tile fills the picture's row
+//      (header to voice bar, edge to edge); Exit gives the layout back; a filmstrip
+//      THUMB put in fullscreen from its menu is the stage there (the whole
+//      window, opacity 1, its Exit fullscreen 44 px and hit) and its Exit
+//      gives the stage back to the stream that had it. CONTROL (must fail):
+//      the focus-view rule taken out of the stylesheet (the stage's filmstrip
+//      row leaves the tile 112 px short sideways, 76 upright).
 //   "Sideways" is the DEVICE turning (api/phoneSideways.ts): Chromium's
 //   emulation turns its screen with the viewport; Playwright's WebKit always
 //   reports landscape-primary, so its screen orientation is made to follow
@@ -64,7 +89,7 @@ import { readFile, mkdir } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    ANDROID_UA, IPHONE_FULLSCREEN, IPHONE_UA, OLD_LAYOUT, ORIENTATION_FOLLOWS_SCREEN, ORIENTATION_UPRIGHT, RECORD_FULLSCREEN,
+    ANDROID_UA, CONTROL_SESSION, FAKE_ANDROID_APP, IPHONE_FULLSCREEN, IPHONE_UA, OLD_LAYOUT, ORIENTATION_FOLLOWS_SCREEN, ORIENTATION_UPRIGHT, RECORD_FULLSCREEN,
     insets, measure, overlap,
 } from './iphone-stream/checks.mjs';
 
@@ -403,7 +428,286 @@ async function unchanged(browser) {
         await page.locator('.stream-tile-header button[aria-label="Fullscreen"]').first().tap();
         await sleep(500);
         const calls = await page.evaluate(() => window.__fsCalls);
-        ck('Android: Fullscreen asks the TILE for element fullscreen, as before', calls.length === 1 && /stream-tile/.test(calls[0]), JSON.stringify(calls));
+        // A BROWSER on Android (Chrome's own fullscreen); the Android APP takes
+        // the in-app fullscreen instead (e2e/android-stream-fullscreen-live.mjs).
+        ck('Android browser: Fullscreen asks the TILE for element fullscreen, as before', calls.length === 1 && /stream-tile/.test(calls[0]), JSON.stringify(calls));
+        await ctx.close();
+    }
+}
+
+// ---- 7. A control session in the in-app fullscreen.
+/** Where the session's pieces are, and what a tap across the remote picture hits. */
+const controlLayout = (page) => page.evaluate(() => {
+    const r = (el) => { const b = el?.getBoundingClientRect(); return b ? { l: b.left, t: b.top, r: b.right, b: b.bottom, h: b.height } : null; };
+    const cap = document.querySelector('.control-capture');
+    const video = document.querySelector('.stream-stage video');
+    // The picture itself (object-fit: contain), not the element's box.
+    let pic = r(video);
+    if (pic && video.videoWidth > 0) {
+        const s = Math.min((pic.r - pic.l) / video.videoWidth, pic.h / video.videoHeight);
+        const w = video.videoWidth * s, h = video.videoHeight * s;
+        const l = pic.l + ((pic.r - pic.l) - w) / 2, t = pic.t + (pic.h - h) / 2;
+        pic = { l, t, r: l + w, b: t + h, h };
+    }
+    const missed = [];
+    let points = 0;
+    if (cap && pic) {
+        for (let i = 0; i < 5; i++) for (let j = 0; j < 7; j++) {
+            const x = pic.l + 2 + (pic.r - pic.l - 4) * (i / 4);
+            const y = pic.t + 2 + (pic.h - 4) * (j / 6);
+            points++;
+            const hit = document.elementFromPoint(x, y);
+            if (hit !== cap) missed.push({ x: Math.round(x), y: Math.round(y), hit: hit?.closest('.stream-stage-header') ? 'stage header' : hit?.closest('.voice-panel-compact') ? 'voice bar' : String(hit?.className || hit?.tagName) });
+        }
+    }
+    const shown = (s) => { const e = document.querySelector(s); return !!e && getComputedStyle(e).visibility === 'visible'; };
+    return {
+        head: r(document.querySelector('.stream-stage-header')), voice: r(document.querySelector('.voice-panel-compact')),
+        cap: r(cap), tile: r(document.querySelector('.stream-tile.is-app-fullscreen')), pic, live: !!video && video.videoWidth > 0,
+        points, missed, headShown: shown('.stream-stage-header'), voiceShown: shown('.voice-panel-compact'),
+        vw: document.documentElement.clientWidth, vh: innerHeight,
+        takeover: document.documentElement.dataset.streamTakeover ?? null,
+        bare: document.documentElement.dataset.fullscreenBare ?? null,
+        native: [...(window.__native ?? [])],
+    };
+});
+
+/** The capture surface (the remote screen) in a row of its own, between the header and the voice bar. */
+const capBetween = (l) => !!l.head && !!l.voice && !!l.cap && l.head.b <= l.cap.t + 0.5 && l.voice.t >= l.cap.b - 0.5 && l.cap.h >= 200;
+/** Nothing of Púca's over the remote screen: in its row, and every point across its picture the capture surface. */
+const sessionClear = (l) => capBetween(l) && l.points === 35 && l.missed.length === 0;
+
+/** The checks on a session in the in-app fullscreen. */
+function controlChecks(tag, l, m, { android }) {
+    const between = capBetween(l);
+    ck(`${tag}: the header is above the remote screen and the voice bar below it`, between, JSON.stringify({ head: l.head, cap: l.cap, voice: l.voice }));
+    ck(`${tag}: the WHOLE remote picture is between them (live frames)`, l.live && !!l.pic && l.pic.t >= l.head.b - 0.5 && l.pic.b <= l.voice.t + 0.5, JSON.stringify({ pic: l.pic, head: l.head, voice: l.voice }));
+    ck(`${tag}: every one of ${l.points} points across the remote picture is the capture surface`, l.points === 35 && l.missed.length === 0, JSON.stringify(l.missed.slice(0, 8)));
+    ck(`${tag}: still the in-app fullscreen, the stage holding the window`, l.takeover === 'fullscreen' && !!m.stage && m.stage.t <= 0.5 && m.stage.b >= m.vh - 0.5 && m.stage.l <= 0.5 && m.stage.r >= m.vw - 0.5, JSON.stringify({ takeover: l.takeover, stage: m.stage }));
+    if (android) ck(`${tag}: Android's bars stay hidden (no SystemBars.show)`, l.native.includes('SystemBars.hide') && !l.native.includes('SystemBars.show'), JSON.stringify(l.native));
+    ck(`${tag}: Chat and the voice bar's Mute are in reach`, !!m.buttons.find((b) => /chat/i.test(b.label))?.hit && !!m.mute?.hit, JSON.stringify(m.buttons));
+}
+
+/** Take the rule that puts the fullscreen tile in the picture's row out. */
+const DROP_CONTROL_FULLSCREEN_RULE = () => {
+    let n = 0;
+    const strip = (list) => {
+        for (let i = list.cssRules.length - 1; i >= 0; i--) {
+            const r = list.cssRules[i];
+            if ((r.selectorText ?? '').includes('[data-stream-takeover="fullscreen"][data-stream-controlling]')) { list.deleteRule(i); n++; continue; }
+            if (r.cssRules) strip(r);
+        }
+    };
+    for (const sh of document.styleSheets) strip(sh);
+    return n;
+};
+
+async function controlInAppFullscreen(browser) {
+    console.log('\n===== a control session in the in-app fullscreen (Chromium) =====');
+    const android = (w, h) => ({ viewport: { width: w, height: h }, screen: { width: w, height: h }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: ANDROID_UA });
+    for (const [w, h, name] of [[844, 390, 'sideways'], [390, 844, 'upright']]) {
+        const tag = `Android app ${w}x${h} ${name}`;
+        const { ctx, page, errors } = await openPage(browser, android(w, h), { init: [FAKE_ANDROID_APP] });
+        ck(`${tag}: the page is the Android app (precondition: the faked bridge)`, await page.evaluate(() => window.Capacitor.getPlatform() === 'android'));
+        await page.waitForFunction(() => (document.querySelector('.stream-stage video')?.videoWidth ?? 0) > 0, null, { timeout: 10000 }).catch(() => {});
+        await sleep(600); // the voice bar re-measures itself once restyled
+        await page.locator('.stream-tile-header button[aria-label="Fullscreen"]').first().tap();
+        await sleep(500);
+        const bare = await controlLayout(page);
+        ck(`${tag}, Fullscreen: the bare picture (no voice bar, no stage header, bars hidden), the tile the whole window`,
+            bare.takeover === 'fullscreen' && bare.bare === 'true' && !bare.headShown && !bare.voiceShown && bare.native.includes('SystemBars.hide')
+                && !!bare.tile && bare.tile.t <= 0.5 && bare.tile.b >= bare.vh - 0.5,
+            JSON.stringify(bare));
+        // The review's scenario: the session starts while the stream is fullscreen.
+        await page.evaluate(CONTROL_SESSION, true);
+        await sleep(400);
+        const l = await controlLayout(page);
+        ck(`${tag}, session: the header and the voice bar are back (Stop controlling and Mute in reach)`, l.headShown && l.voiceShown);
+        controlChecks(`${tag}, session`, l, await measure(page), { android: true });
+        await page.screenshot({ path: join(outdir, `android-app-${w}x${h}-control-in-fullscreen.png`) });
+        await page.evaluate(CONTROL_SESSION, false);
+        await sleep(400);
+        const after = await controlLayout(page);
+        ck(`${tag}, session over: the bare picture again, the tile the whole window`,
+            after.takeover === 'fullscreen' && !after.headShown && !after.voiceShown && !!after.tile && after.tile.t <= 0.5 && after.tile.b >= after.vh - 0.5,
+            JSON.stringify(after));
+        // NEGATIVE CONTROL: without the rule, the session's bars lie over the picture.
+        await page.evaluate(CONTROL_SESSION, true);
+        const dropped = await page.evaluate(DROP_CONTROL_FULLSCREEN_RULE);
+        await sleep(300);
+        const o = await controlLayout(page);
+        ck(`${tag}: the control's rule was found (${dropped} rules taken out)`, dropped === 2);
+        // Upright, a 16:9 picture is letterboxed clear of both bars, but the
+        // capture surface still runs under them (a tap there is a tap over there).
+        control(`${tag}, the tile fixed to the window: nothing of Púca's over the remote screen`, sessionClear(o), JSON.stringify({ head: o.head, cap: o.cap, voice: o.voice, missed: o.missed.slice(0, 4) }));
+        ck(`${tag}: no page errors`, errors.length === 0, errors.join(' | '));
+        await ctx.close();
+    }
+    {
+        // The iPhone shape's in-app fullscreen (route 3): not bare, the same layout once controlling.
+        const tag = 'iPhone shape 844x390 sideways';
+        const phone = { viewport: { width: 844, height: 390 }, screen: { width: 844, height: 390 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: IPHONE_UA };
+        const { ctx, page, errors } = await openPage(browser, phone, { init: [IPHONE_FULLSCREEN] });
+        await page.waitForFunction(() => (document.querySelector('.stream-stage video')?.videoWidth ?? 0) > 0, null, { timeout: 10000 }).catch(() => {});
+        await sleep(600);
+        await page.locator('.stream-tile-header button[aria-label="Fullscreen"]').first().tap();
+        await sleep(1300); // past the system player's chance to begin
+        await page.evaluate(CONTROL_SESSION, true);
+        await sleep(400);
+        const l = await controlLayout(page);
+        ck(`${tag}: the in-app fullscreen, not bare (precondition)`, l.takeover === 'fullscreen' && l.bare === null, JSON.stringify({ takeover: l.takeover, bare: l.bare }));
+        controlChecks(`${tag}, session`, l, await measure(page), { android: false });
+        await page.evaluate(DROP_CONTROL_FULLSCREEN_RULE);
+        await sleep(300);
+        const o = await controlLayout(page);
+        control(`${tag}, the tile fixed to the window: nothing of Púca's over the remote screen`, sessionClear(o), JSON.stringify({ head: o.head, cap: o.cap, voice: o.voice, missed: o.missed.slice(0, 4) }));
+        ck(`${tag}: no page errors`, errors.length === 0, errors.join(' | '));
+        await ctx.close();
+    }
+}
+
+// ---- 8. Focus view with a filmstrip, in the Android app's in-app fullscreen.
+/** The tile in the in-app fullscreen: where it is, what the window's points hit, its picture and its exit. */
+const fullscreenTile = (page) => page.evaluate(() => {
+    const t = document.querySelector('.stream-tile.is-app-fullscreen');
+    const vw = document.documentElement.clientWidth, vh = innerHeight;
+    const box = t?.getBoundingClientRect();
+    // The window's bottom and top rows and down its middle: each point must be the tile.
+    const pts = [];
+    for (let i = 0; i < 9; i++) { const x = 4 + (vw - 8) * (i / 8); pts.push([x, vh - 4], [x, 4]); }
+    for (let j = 0; j < 9; j++) pts.push([vw / 2, 4 + (vh - 8) * (j / 8)]);
+    const off = pts.flatMap(([x, y]) => {
+        const hit = document.elementFromPoint(x, y);
+        return t && hit && t.contains(hit) ? [] : [{ x: Math.round(x), y: Math.round(y), hit: String(hit?.className || hit?.tagName) }];
+    });
+    // The picture itself (object-fit: contain).
+    const video = t?.querySelector('video');
+    let pic = null;
+    if (video && video.videoWidth > 0) {
+        const r = video.getBoundingClientRect();
+        const s = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
+        const w = video.videoWidth * s, h = video.videoHeight * s;
+        pic = { l: r.left + (r.width - w) / 2, t: r.top + (r.height - h) / 2, w, h };
+    }
+    const exit = t?.querySelector('button[aria-label="Exit fullscreen"]');
+    const e = exit?.getBoundingClientRect();
+    return {
+        cls: t?.className ?? null, name: t?.querySelector('.streamer-name')?.textContent?.trim() ?? null,
+        tile: box ? { l: box.left, t: box.top, r: box.right, b: box.bottom } : null, vw, vh,
+        opacity: t ? Number(getComputedStyle(t).opacity) : null, points: pts.length, off, pic,
+        exit: e ? { w: e.width, h: e.height, hit: document.elementFromPoint(e.left + e.width / 2, e.top + e.height / 2)?.closest('button') === exit } : null,
+        bare: document.documentElement.dataset.fullscreenBare ?? null,
+        stageName: document.querySelector('.stream-tile.is-stage .streamer-name')?.textContent?.trim() ?? null,
+    };
+});
+
+/** The whole window is the tile, and its live picture is centred with one side flush. */
+const fillsWindow = (f) => !!f.tile && f.tile.l <= 0.5 && f.tile.t <= 0.5 && f.tile.r >= f.vw - 0.5 && f.tile.b >= f.vh - 0.5 && f.off.length === 0;
+const pictureCentred = (f) => !!f.pic && Math.abs(f.pic.l + f.pic.w / 2 - f.vw / 2) <= 1 && Math.abs(f.pic.t + f.pic.h / 2 - f.vh / 2) <= 1
+    && (f.pic.w >= f.vw - 1 || f.pic.h >= f.vh - 1);
+const exitInReach = (f) => !!f.exit && f.exit.w >= 43.5 && f.exit.h >= 43.5 && f.exit.hit;
+/** The controls hide by themselves after a few idle seconds: a key brings them back. Not a tap on the
+ *  picture, which also puts its stream on the stage (the tile's own click) and would decide which
+ *  stream the stage goes back to. */
+const showControls = async (page) => {
+    if (await page.evaluate(() => document.documentElement.dataset.streamChrome !== 'hidden')) return;
+    await page.keyboard.press('Shift');
+    await sleep(350);
+};
+
+/** Take the rule that sizes the fullscreen tile in focus view out. */
+const DROP_FOCUS_FULLSCREEN_RULE = () => {
+    let n = 0;
+    const strip = (list) => {
+        for (let i = list.cssRules.length - 1; i >= 0; i--) {
+            const r = list.cssRules[i];
+            if ((r.selectorText ?? '').includes('.stream-grid.focus-mode .stream-tile.is-app-fullscreen')) { list.deleteRule(i); n++; continue; }
+            if (r.cssRules) strip(r);
+        }
+    };
+    for (const sh of document.styleSheets) strip(sh);
+    return n;
+};
+
+async function focusViewInAppFullscreen(browser) {
+    console.log('\n===== focus view with a filmstrip, the Android app\'s in-app fullscreen (Chromium) =====');
+    for (const [w, h, name] of [[844, 390, 'sideways'], [390, 844, 'upright']]) {
+        const tag = `Android app ${w}x${h} ${name}, focus view`;
+        const opts = { viewport: { width: w, height: h }, screen: { width: w, height: h }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: ANDROID_UA };
+        const { ctx, page, errors } = await openPage(browser, opts, { init: [FAKE_ANDROID_APP], streams: 2 });
+        await page.waitForFunction(() => [...document.querySelectorAll('.stream-stage video')].every((v) => v.videoWidth > 0), null, { timeout: 10000 }).catch(() => {});
+        await showControls(page);
+        await page.locator('button[title="Switch to Focus View"]').tap();
+        await sleep(400);
+        const grid = await page.evaluate(() => document.querySelector('.stream-grid')?.className ?? '');
+        ck(`${tag}: focus view with a filmstrip (precondition: the Android app, two streams)`,
+            /focus-mode/.test(grid) && /has-strip/.test(grid) && await page.evaluate(() => window.Capacitor.getPlatform() === 'android'), grid);
+
+        // The stage in fullscreen.
+        await page.locator('.stream-tile.is-stage .stream-tile-header button[aria-label="Fullscreen"]').tap();
+        await sleep(500);
+        const st = await fullscreenTile(page);
+        ck(`${tag}, the stage in Fullscreen: the bare fullscreen, the stage's tile`, st.bare === 'true' && /is-stage/.test(st.cls ?? '') && st.name?.includes('Streamer 1'), JSON.stringify({ cls: st.cls, name: st.name, bare: st.bare }));
+        ck(`${tag}, the stage in Fullscreen: the tile is the whole window (its edges and ${st.points} points across it)`, fillsWindow(st), JSON.stringify({ tile: st.tile, vw: st.vw, vh: st.vh, off: st.off.slice(0, 6) }));
+        ck(`${tag}, the stage in Fullscreen: the live picture is centred, one side flush`, pictureCentred(st), JSON.stringify(st.pic));
+        ck(`${tag}, the stage in Fullscreen: Exit fullscreen is 44 px and what a tap hits`, exitInReach(st), JSON.stringify(st.exit));
+        await page.screenshot({ path: join(outdir, `android-app-${w}x${h}-focus-fullscreen.png`) });
+
+        // A control session in it: the stage's tile is the first in the DOM, where CONTROL_SESSION puts its surface.
+        await page.evaluate(CONTROL_SESSION, true);
+        await sleep(400);
+        const l = await controlLayout(page);
+        controlChecks(`${tag}, session`, l, await measure(page), { android: true });
+        // 7's checks hold for a tile short of its row too (a smaller picture is
+        // still between the bars): the tile must fill the row.
+        ck(`${tag}, session: the tile fills the picture's row, the header's foot to the voice bar's top, edge to edge`,
+            !!l.tile && !!l.head && !!l.voice && Math.abs(l.tile.t - l.head.b) <= 1 && Math.abs(l.tile.b - l.voice.t) <= 1 && l.tile.l <= 0.5 && l.tile.r >= l.vw - 0.5,
+            JSON.stringify({ head: l.head, tile: l.tile, voice: l.voice }));
+        await page.screenshot({ path: join(outdir, `android-app-${w}x${h}-focus-control-in-fullscreen.png`) });
+        await page.evaluate(CONTROL_SESSION, false);
+        await sleep(400);
+
+        await showControls(page);
+        await page.locator('.stream-tile.is-app-fullscreen button[aria-label="Exit fullscreen"]').tap();
+        await sleep(400);
+        const back = await fullscreenTile(page);
+        ck(`${tag}, Exit fullscreen: the layout back (no fullscreen tile, not bare)`, back.cls === null && back.bare === null && back.stageName?.includes('Streamer 1'), JSON.stringify({ cls: back.cls, bare: back.bare, stage: back.stageName }));
+
+        // A filmstrip THUMB put in fullscreen from its menu (a long press opens it).
+        const thumb = page.locator('.stream-tile.is-thumb').first();
+        const tb = await thumb.boundingBox();
+        await thumb.dispatchEvent('contextmenu', { clientX: tb.x + tb.width / 2, clientY: tb.y + tb.height / 2 });
+        await sleep(300);
+        const item = page.locator('.stream-context-menu .scm-item', { hasText: /^\s*Fullscreen/ });
+        // Sideways the menu is taller than the window and its last row, this
+        // one, is below it (a separate defect): pressed through the DOM there.
+        if (name === 'upright') await item.tap();
+        else await item.evaluate((b) => b.click());
+        await sleep(500);
+        const th = await fullscreenTile(page);
+        ck(`${tag}, a thumb in Fullscreen from its menu: it is the stage there`, th.bare === 'true' && /is-stage/.test(th.cls ?? '') && !/is-thumb/.test(th.cls ?? '') && th.name?.includes('Streamer 2'), JSON.stringify({ cls: th.cls, name: th.name }));
+        ck(`${tag}, a thumb in Fullscreen: the tile is the whole window, at full opacity`, fillsWindow(th) && th.opacity === 1, JSON.stringify({ tile: th.tile, opacity: th.opacity, off: th.off.slice(0, 6) }));
+        ck(`${tag}, a thumb in Fullscreen: the live picture is centred, one side flush`, pictureCentred(th), JSON.stringify(th.pic));
+        ck(`${tag}, a thumb in Fullscreen: its Exit fullscreen is 44 px and what a tap hits`, exitInReach(th), JSON.stringify(th.exit));
+        await page.screenshot({ path: join(outdir, `android-app-${w}x${h}-focus-thumb-fullscreen.png`) });
+        await showControls(page);
+        // With no exit to tap (the failure above), Escape leaves, so the run goes on.
+        if (exitInReach(await fullscreenTile(page))) await page.locator('.stream-tile.is-app-fullscreen button[aria-label="Exit fullscreen"]').tap();
+        else await page.keyboard.press('Escape');
+        await sleep(400);
+        const after = await fullscreenTile(page);
+        ck(`${tag}, the thumb's Exit fullscreen: the stage back to the stream that had it`, after.cls === null && after.bare === null && after.stageName?.includes('Streamer 1'), JSON.stringify({ cls: after.cls, stage: after.stageName }));
+
+        // NEGATIVE CONTROL: the focus-view rule taken out, the stage's filmstrip row keeps the tile short.
+        await showControls(page);
+        await page.locator('.stream-tile.is-stage .stream-tile-header button[aria-label="Fullscreen"]').tap();
+        await sleep(400);
+        const dropped = await page.evaluate(DROP_FOCUS_FULLSCREEN_RULE);
+        await sleep(300);
+        ck(`${tag}: the focus-view rule was found (${dropped} taken out)`, dropped === 1);
+        const o = await fullscreenTile(page);
+        control(`${tag}, without the rule: the tile is the whole window`, fillsWindow(o), JSON.stringify({ tile: o.tile, vh: o.vh }));
+        ck(`${tag}: no page errors`, errors.length === 0, errors.join(' | '));
         await ctx.close();
     }
 }
@@ -414,6 +718,8 @@ try {
     await suite(cr, 'chromium');
     engineInit = [];
     await unchanged(cr);
+    await controlInAppFullscreen(cr);
+    await focusViewInAppFullscreen(cr);
 } finally {
     await cr.close();
 }

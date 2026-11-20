@@ -65,7 +65,7 @@ import {
     fmtSens, loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
 } from '../utils/fpsSens';
 import { installBackgroundResumeAll } from './deviceStageResume';
-import { enterMediaFullscreen } from './mediaFullscreen';
+import { enterMediaFullscreen, holdBareFullscreen } from './mediaFullscreen';
 import {
     CHROME_HIDE_MS, inTakeoverControls, publishTakeover, usePhoneSideways, type StreamTakeover,
 } from './streamTakeover';
@@ -898,7 +898,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // Who is on the STAGE right now. Focus mode always has one: falling back to
     // the first selected stream matters because `focusedStream` is null until
     // you click a tile, and the layout would otherwise have no stage at all.
-    const stageUser = focusMode ? (focusedStream ?? selectedStreams[0] ?? null) : null;
+    // The stream in the in-app fullscreen is on it while it is there (the
+    // Android app's only fullscreen; its menu can fullscreen a filmstrip
+    // thumb): a thumb's role kept its buttons, Exit fullscreen among them,
+    // hidden, the picture at 75%, a control session's capture surface off it
+    // and the SFU on its low layer. Leaving gives the stage back.
+    const stageUser = focusMode ? (appFullscreen ?? focusedStream ?? selectedStreams[0] ?? null) : null;
 
     // SFU layer hint (§5.2 of the SFU design): the focused stream pulls the HIGH
     // simulcast layer, everything in the grid stays LOW/MEDIUM. No-op on mesh
@@ -916,6 +921,10 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // The takeover, on <html> for the stylesheet: before paint, so a phone
     // turned sideways never shows a frame of the squashed chat layout.
     useLayoutEffect(() => publishTakeover(takeover, chromeOff, controllingNow), [takeover, chromeOff, controllingNow]);
+    // The Android app's in-app fullscreen is the stream alone: nothing of
+    // Púca's over it and the system bars away (mediaFullscreen.ts route 0).
+    const inAppFullscreen = appFullscreen !== null;
+    useLayoutEffect(() => (inAppFullscreen ? holdBareFullscreen() : undefined), [inAppFullscreen]);
 
     // The controls hide themselves after a while — never while a menu or the
     // volume panel is open, a control session needs its Stop button in reach,

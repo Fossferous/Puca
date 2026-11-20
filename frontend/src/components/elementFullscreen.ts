@@ -19,6 +19,9 @@
  *    "fullscreen is over" that another WebView version is free to act on.
  *    The in-app fullscreen does not depend on that, follows a rotation, and
  *    is what the BACK gesture can leave (api/mobileApp.ts interceptBack).
+ *    A live stream or camera in the Android app does the same since
+ *    2026-11-20 (mediaFullscreen.ts route 0): granted there, the element
+ *    fullscreen had no exit of Púca's and Android's Back closed the app.
  *    iPhone WebKit has no element fullscreen at all.
  *
  * A refused request (an iframe without allowfullscreen, a permissions policy,

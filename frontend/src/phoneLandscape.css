@@ -116,6 +116,16 @@ html[data-stream-takeover="fullscreen"] .stream-tile.is-app-fullscreen {
     opacity: 1;
 }
 
+/* ...in focus view too. Its stage is the grid's height less a filmstrip row
+   (StreamStage.css, .focus-mode.has-strip .is-stage: 0,5,0), which outranked
+   the rule above (0,3,1), and a box with a height and top: 0 ignores its
+   bottom: the tile stopped 112 px short of the window sideways and 76 px
+   upright, the black stage (a camera strip) under it. The same held a
+   control session's tile short of its row (section 1, A CONTROL SESSION). */
+html[data-stream-takeover="fullscreen"] .stream-grid.focus-mode .stream-tile.is-app-fullscreen {
+    height: auto;
+}
+
 /* The voice bar floats over the bottom of the picture: the nav it sat on is
    gone, and mute and hang-up have to stay one tap away. */
 html[data-stream-takeover] .voice-panel-compact,
@@ -186,6 +196,21 @@ html[data-stream-controlling] .stream-stage-header {
 
 html[data-stream-controlling] .stream-tile:has(.control-capture) .stream-tile-header {
     display: none;
+}
+
+/* ...and in the in-app fullscreen too (Fullscreen tapped before the session
+   or during it): the tile fills the PICTURE's row, between the header and
+   the voice bar, instead of the whole window. Fixed to the window (the rule
+   above for a tile in the in-app fullscreen) it lay under both, so the top
+   and the bottom of the remote screen (a Windows taskbar) were out of sight
+   and a tap there landed on Púca's bars. The grid is that row. */
+html[data-stream-takeover="fullscreen"][data-stream-controlling] .stream-grid {
+    position: relative;
+}
+
+html[data-stream-takeover="fullscreen"][data-stream-controlling] .stream-tile.is-app-fullscreen {
+    position: absolute;
+    inset: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -306,4 +331,24 @@ html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn {
     min-width: 44px;
     min-height: 44px;
     opacity: 1;
+}
+
+/* ==========================================================================
+   4. The Android app's fullscreen: the picture alone
+   ========================================================================== */
+
+/* mediaFullscreen.ts route 0 (html[data-fullscreen-bare], the Android app
+   only): a stream or a camera in the in-app fullscreen fills the app with
+   its own controls and nothing of Púca's. The takeover above floats the
+   voice bar and the stage header over the picture so mute stays one tap
+   away on an iPhone, whose system player is the usual fullscreen there; on
+   Android this IS the fullscreen, and the owner's report (2026-11-20) was
+   parts of Púca around and over the picture. Leaving (the tile's Exit fullscreen, Android's Back) brings
+   them back. A control session keeps its own layout: Stop controlling must
+   stay in reach, so the header and the voice bar come back in rows of their
+   own and the picture sits between them (section 1, A CONTROL SESSION). */
+html[data-fullscreen-bare]:not([data-stream-controlling]) .voice-panel-compact,
+html[data-fullscreen-bare]:not([data-stream-controlling]) .stream-stage-header {
+    visibility: hidden;
+    pointer-events: none;
 }

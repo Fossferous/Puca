@@ -14,6 +14,52 @@ export const IPHONE_FULLSCREEN = () => {
     Object.defineProperty(Document.prototype, 'fullscreenEnabled', { configurable: true, get: () => false });
     Object.defineProperty(Document.prototype, 'webkitFullscreenEnabled', { configurable: true, get: () => false });
 };
+/**
+ * The ANDROID APP, as @capacitor/core tells it (window.androidBridge): its
+ * platform is 'android', and SystemBars and App answer from here, each call
+ * recorded in window.__native. Every other plugin is as absent as it is in a
+ * page with no bridge.
+ */
+export const FAKE_ANDROID_APP = () => {
+    window.__native = [];
+    window.androidBridge = { postMessage() {} };
+    let cb = 0;
+    const methods = (names) => [...names.map((name) => ({ name, rtype: 'promise' })), { name: 'addListener', rtype: 'callback' }, { name: 'removeListener', rtype: 'callback' }];
+    window.Capacitor = {
+        PluginHeaders: [
+            { name: 'SystemBars', methods: methods(['hide', 'show', 'setStyle']) },
+            { name: 'App', methods: methods(['setBackIntercept', 'getInfo', 'getState']) },
+        ],
+        nativePromise(plugin, method) { window.__native.push(`${plugin}.${method}`); return Promise.resolve({}); },
+        nativeCallback() { return String(++cb); },
+    };
+};
+
+/**
+ * What StreamStage publishes once a control session is active (vitest pins
+ * that it does: streamStageTakeover.test.tsx), and the capture surface it
+ * lays over the tile. `false` ends it. A session's controls never hide
+ * (StreamStage's chromeOff is false while controlling), so the idle timer of
+ * the stage, which does not know of this stand-in session, is overruled.
+ */
+export const CONTROL_SESSION = (on) => {
+    const root = document.documentElement;
+    window.__controlChromeHold?.disconnect();
+    if (!on) {
+        delete root.dataset.streamControlling;
+        document.querySelectorAll('.control-capture').forEach((n) => n.remove());
+        return;
+    }
+    const hold = new MutationObserver(() => { if (root.dataset.streamChrome) delete root.dataset.streamChrome; });
+    hold.observe(root, { attributes: true, attributeFilter: ['data-stream-chrome'] });
+    window.__controlChromeHold = hold;
+    delete root.dataset.streamChrome;
+    root.dataset.streamControlling = 'true';
+    const cap = document.createElement('div');
+    cap.className = 'control-capture';
+    document.querySelector('.stream-tile').appendChild(cap);
+};
+
 /** Records (and still makes) every element fullscreen request. */
 export const RECORD_FULLSCREEN = () => {
     window.__fsCalls = [];
