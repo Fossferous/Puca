@@ -41,14 +41,11 @@ vi.mock('../api/websocket', () => ({
 vi.mock('../api/devices/deviceKeyRc', () => ({ deviceKeyDh: async () => new Uint8Array(32).fill(3) }));
 /** Which host asked, every time the phone asked for a passphrase. */
 const prompts: string[] = [];
+/** Everything each of those asks handed the dialog (the REAL bridge's
+ *  PassphraseRequest, which is all UnattendedPassphrasePrompt reads). */
+const asked: Array<{ peerDevice: string; peerName: string | null; signIn: boolean }> = [];
 /** What the person types for each host (null: Cancel). */
 let typed: Record<string, string | null> = {};
-vi.mock('../api/devices/unattendedPrompt', () => ({
-    requestUnattendedPassphrase: async (peer: string) => {
-        prompts.push(peer);
-        return typed[peer] ?? null;
-    },
-}));
 vi.mock('../api/devices/wakeSession', () => ({ followToDesktop: () => {}, followToSignIn: () => {} }));
 vi.mock('../api/devices/index', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/devices/index')>()),
@@ -77,6 +74,7 @@ vi.mock('../api/devices/unattendedHost', () => ({
 import { sealControl, openControl, generateControlEphemeral, deriveDeviceControlKey } from '../api/e2ee';
 import { buildUaRecord, challengeMessage, type UaRecord } from '../api/devices/unattended';
 import type { PowerOffOutcome } from '../api/devices/powerOff';
+import { setUnattendedPassphraseHandler, resetUnattendedPassphraseHandler } from '../api/devices/unattendedPrompt';
 
 class ControllerPc {
     localDescription: unknown = null;
@@ -222,8 +220,16 @@ beforeEach(async () => {
     vi.mocked(localStorage.setItem).mockImplementation((k, v) => { store.set(k, v); });
     vi.mocked(localStorage.removeItem).mockImplementation((k) => { store.delete(k); });
     prompts.length = 0;
+    asked.length = 0;
     verdicts.length = 0;
     sent.length = 0;
+    // The REAL bridge, answered as the dialog would: what reaches the handler
+    // is all UnattendedPassphrasePrompt has to say which passphrase it wants.
+    setUnattendedPassphraseHandler(req => {
+        prompts.push(req.peerDevice);
+        asked.push({ peerDevice: req.peerDevice, peerName: req.peerName, signIn: req.signIn });
+        req.resolve(typed[req.peerDevice] ?? null);
+    });
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
     const { installDeviceSessions, endAllSessions } = await import('../api/devices/session');
@@ -238,6 +244,7 @@ beforeEach(async () => {
     typed = { [APP]: 'desk passphrase', [SIGNIN]: 'desk passphrase', [OTHER]: 'laptop passphrase' };
 });
 afterEach(() => {
+    resetUnattendedPassphraseHandler();
     vi.useRealTimers();
     vi.mocked(localStorage.getItem).mockReset();
     vi.mocked(localStorage.setItem).mockReset();
@@ -316,7 +323,10 @@ describe('Power off of a locked PC, with the passphrase remembered on this phone
         typed[SIGNIN] = 'not it';
         const first = await pressPowerOff(signIn, PC_ROWS);
         expect(first.kind).toBe('refused');
-        expect(first.text).toMatch(/did not accept the unattended-access passphrase/);
+        // And says WHICH passphrase it refused: the sign-in screen's, not the
+        // unattended one (the review of this branch, 2026-11-20).
+        expect(first.text).toMatch(/did not accept the passphrase for its sign-in screen/);
+        expect(first.text).toMatch(/not its unattended-access passphrase/);
         expect(verdicts).toEqual([{ host: SIGNIN, ok: false }]);
         // Everyday use of the desktop row meanwhile renews nothing it refused.
         vi.setSystemTime(T0 + 1 * DAY);
@@ -335,5 +345,44 @@ describe('Power off of a locked PC, with the passphrase remembered on this phone
         vi.setSystemTime(T0 + 9 * DAY);
         expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
         expect(promptsFor(SIGNIN)).toBe(2);
+    });
+});
+
+/**
+ * WHICH passphrase the phone asks for (the review of this branch,
+ * 2026-11-20). The two records may hold different words — the docs say each
+ * is set on its own — and a locked PC checks the sign-in screen's. The dialog
+ * asked every row for "the unattended passphrase", so a person who typed what
+ * it asked for was refused at every locked PC, the refused seed was
+ * forgotten, and the next Power off asked again: the remembering this branch
+ * adds could never start, because no sign-in seed was ever proved.
+ */
+describe('Power off of a locked PC whose two passphrases differ', { timeout: 60_000 }, () => {
+    /** The same PC's lock-screen service, its passphrase set with OTHER words. */
+    let lockScreen: StandIn | null = null;
+
+    it('THE FINDING: a locked PC asks for its sign-in screen\'s passphrase, naming the PC, and typing what it asks for powers it off', async () => {
+        lockScreen ??= { id: SIGNIN, record: buildUaRecord('lock-screen words'), kind: 'signin' };
+        // The person types what the dialog asks for, and nothing else.
+        setUnattendedPassphraseHandler(req => {
+            prompts.push(req.peerDevice);
+            asked.push({ peerDevice: req.peerDevice, peerName: req.peerName, signIn: req.signIn });
+            req.resolve(req.signIn === true ? 'lock-screen words' : 'desk passphrase');
+        });
+        const locked = await pressPowerOff(lockScreen, PC_ROWS);
+        // Before the fix: the dialog said "Unattended passphrase", the person
+        // typed that, and the lock screen refused it.
+        expect(verdicts, 'the lock screen accepted what was typed').toEqual([{ host: SIGNIN, ok: true }]);
+        expect(locked.kind).toBe('going');
+        expect(asked).toEqual([{ peerDevice: SIGNIN, peerName: 'Desk-PC', signIn: true }]);
+        // Proved, so remembered: the next one at the lock screen does not ask.
+        vi.setSystemTime(T0 + 1 * DAY);
+        expect((await pressPowerOff(lockScreen, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(1);
+        // CONTROL: the same PC signed in asks for the unattended passphrase,
+        // and that one powers it off.
+        const signedIn = await pressPowerOff(app, PC_ROWS);
+        expect(asked[1]).toEqual({ peerDevice: APP, peerName: 'Desk-PC', signIn: false });
+        expect(signedIn.kind).toBe('going');
     });
 });

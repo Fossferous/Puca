@@ -1054,11 +1054,16 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
             // The name rides along for the messages that name the PC
             // ("Work Laptop's screen is off…"); display only. The PC's rows
             // too: a session proved with one keeps the other's remembered
-            // passphrase alive (the lock screen is its own row).
+            // passphrase alive (the lock screen is its own row). And whether
+            // this IS the lock screen's row: its passphrase is its own, and
+            // the dialog asks for that one by name.
             const machineRows = machine.rows.map(r => r.id);
-            await connectToDevice(row.id, filesOnly
-                ? { filesOnly: true, peerName: machine.primary.name, machineRows }
-                : { peerName: machine.primary.name, machineRows });
+            const about = {
+                peerName: machine.primary.name,
+                machineRows,
+                ...(row.id === machine.signInRow?.id ? { signIn: true } : {}),
+            };
+            await connectToDevice(row.id, filesOnly ? { filesOnly: true, ...about } : about);
             // The stage takes over the screen from here (it mounts at the app
             // root, above this view); nothing to close.
         } catch (e) {

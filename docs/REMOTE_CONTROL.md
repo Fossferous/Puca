@@ -449,7 +449,14 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   screen**, set separately from **Unattended access**, with its own random
   salt). So the seed this device remembers for the desktop row is never
   offered there, and could not verify if it were: the first power-off of a
-  locked PC asks for that screen's passphrase, once. Each row's remembered
+  locked PC asks for that screen's passphrase, once, and by that name. The
+  caller says which row it reached (`connectToDevice`'s `signIn`, from
+  `Machine.signInRow`: the card, Control and Files, wake and follow), and
+  `UnattendedPassphrasePrompt` and the card's refusal sentences name **Passphrase for
+  the sign-in screen** then, not the unattended one: a person whose two
+  passphrases differ typed the one the dialog named, was refused, and was
+  asked again every time (review of 2026-11-20). Display only: what is
+  offered and how the host checks it do not change. Each row's remembered
   seed is renewed by a proved session to EITHER row of the PC
   (`renewSameMachineUaSeeds` in `api/devices/unattended.ts`, fed the card's
   `machineRows`): the lock-screen row is reached only when the PC is locked

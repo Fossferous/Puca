@@ -689,6 +689,13 @@ interface Internal extends DeviceControlSession {
      *  row is only ever offered its own (see that function). Empty for a host
      *  session, a share, and any caller that does not know the PC. */
     machineRows: string[];
+    /** CONTROLLER: `peerDevice` is its PC's SIGN-IN-SCREEN row, as the device
+     *  list grouped it (`connectToDevice`'s `signIn`), so the passphrase
+     *  dialog asks for "Passphrase for the sign-in screen", the record that
+     *  row checks, not the unattended one. Display only: what is offered and
+     *  how the host checks it are the same either way. False for a host
+     *  session, a share, and any caller that did not say. */
+    peerSignIn: boolean;
     /** HOST: this machine cannot capture at all (a phone). Stashed at accept
      *  time because the offer handler needs it later without re-probing: a
      *  screen request against such a host is torn down naming the limitation,
@@ -4052,6 +4059,12 @@ export async function connectToDevice(
          *  proved session here renews the remembered passphrase of the others
          *  (`Internal.machineRows`); nothing is ever offered to them. */
         machineRows?: readonly string[];
+        /** `hostDevice` is its PC's sign-in-screen row (machines.ts
+         *  `signInRow`): the PC is locked, at its sign-in screen, or just
+         *  restarted or woken. The passphrase dialog then asks for that
+         *  screen's own passphrase, by name (`Internal.peerSignIn`). Display
+         *  only. */
+        signIn?: boolean;
     },
 ): Promise<string> {
     const myDevice = thisDeviceId();
@@ -4065,6 +4078,7 @@ export async function connectToDevice(
         machineRows: opts?.share
             ? []
             : [...new Set(opts?.machineRows ?? [])].filter(r => r !== hostDevice && r !== myDevice),
+        peerSignIn: opts?.signIn === true && !opts.share,
         // An Audio Hub session IS a files-only session on the wire: no
         // capture on the host, no media deadline here. So is a power-off one.
         filesOnly: opts?.filesOnly === true || opts?.audioHub === true || opts?.powerOff === true,
@@ -4812,6 +4826,7 @@ export function installDeviceSessions(): void {
                 powerOff: null,
                 powerOffOnly: false,
                 machineRows: [],
+                peerSignIn: false,
                 hostCaptureless: !caps.capture,
                 // Set below only after the share verification chain passes;
                 // the public shareUser/viewOnly are derived from it in emit().
@@ -6362,7 +6377,12 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     // handler has finished setting the session up.
                     s.awaitingUaPassphrase = true;
                     clearMediaDeadline(s);
-                    const pass = await requestUnattendedPassphrase(s.peerDevice);
+                    // Which of the PC's two passphrases, and its name: a
+                    // locked PC's sign-in row checks its own record.
+                    const pass = await requestUnattendedPassphrase(s.peerDevice, {
+                        peerName: s.peerName,
+                        signIn: s.peerSignIn,
+                    });
                     s.awaitingUaPassphrase = false;
                     if (pass == null) {
                         teardown(s, 'unattended passphrase not entered', true);

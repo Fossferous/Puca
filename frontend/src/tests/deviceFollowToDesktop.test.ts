@@ -46,11 +46,14 @@ vi.mock('../api/devices/index', () => ({
 const connected: string[] = [];
 /** What each successful connect was told about the PC it reached. */
 const connectedRows: Array<readonly string[] | undefined> = [];
+/** Whether each successful connect was told it reached the sign-in row, and
+ *  the PC's name (the passphrase dialog asks for that screen's passphrase). */
+const connectedAbout: Array<{ signIn?: boolean; peerName?: string }> = [];
 /** How many of the NEXT connect attempts should reject (the unlock-transition
  *  race: the target's first capture-open lands on the still-secure desktop). */
 let connectFails = 0;
 vi.mock('../api/devices/session', () => ({
-    connectToDevice: (id: string, opts?: { machineRows?: readonly string[] }) => {
+    connectToDevice: (id: string, opts?: { machineRows?: readonly string[]; signIn?: boolean; peerName?: string }) => {
         if (connectFails > 0) {
             connectFails--;
             return Promise.reject(new Error(
@@ -58,6 +61,10 @@ vi.mock('../api/devices/session', () => ({
         }
         connected.push(id);
         connectedRows.push(opts?.machineRows);
+        connectedAbout.push({
+            ...(opts?.signIn !== undefined ? { signIn: opts.signIn } : {}),
+            ...(opts?.peerName !== undefined ? { peerName: opts.peerName } : {}),
+        });
         return Promise.resolve();
     },
 }));
@@ -107,6 +114,7 @@ beforeEach(() => {
     listCalls = 0;
     connected.length = 0;
     connectedRows.length = 0;
+    connectedAbout.length = 0;
     connectFails = 0;
     latest = new Map();
     subscribeWakes(s => { latest = s; });
@@ -155,6 +163,8 @@ describe('following a machine from its sign-in screen to its desktop', () => {
         // passphrase remembered for the lock screen alive (session.ts
         // machineRows), and the lock screen is where it came from.
         expect(connectedRows).toEqual([['pc', 'pc-signin']]);
+        // The desktop row: its passphrase is the unattended one.
+        expect(connectedAbout).toEqual([{ peerName: 'PC' }]);
         // The stage owns the screen now; the card's status is gone.
         expect(latest.has('pc')).toBe(false);
     });
@@ -328,6 +338,10 @@ describe('following a machine from its desktop to its sign-in screen (after Lock
         await vi.advanceTimersByTimeAsync(3_000);
 
         expect(connected).toEqual(['pc-signin']);
+        // Said to be the sign-in row, so the passphrase dialog asks for that
+        // screen's own passphrase, naming the PC (the review of
+        // work/poweroff-locked, 2026-11-20).
+        expect(connectedAbout).toEqual([{ signIn: true, peerName: 'PC' }]);
         expect(latest.has('pc')).toBe(false);
     });
 

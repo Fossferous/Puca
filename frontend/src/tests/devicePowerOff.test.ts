@@ -129,6 +129,30 @@ describe('what the card says', () => {
         expect(locked.text).toMatch(/is locked, and its lock-screen service runs a Púca too old.*Update the service/);
         expect(powerOffOutcome(N, { state: 'failed', reason: 'power-off: that Púca is too old to know it' }).text,
             'not locked: the app is what to update').not.toMatch(/Update the service/);
+        // Locked: it is the sign-in screen's passphrase, its own record, that
+        // was refused or not typed, and the card says so (the review of this
+        // branch, 2026-11-20: it named the unattended one, so a person whose
+        // two differ was told to retry the wrong one).
+        for (const reason of ['unattended access was refused', 'unattended passphrase rejected']) {
+            const t = powerOffOutcome(N, { state: 'failed', reason }, null, true).text;
+            expect(t, reason).toMatch(/^Slim-Jim is locked and did not accept the passphrase for its sign-in screen/);
+            expect(t, reason).toMatch(/Passphrase for the sign-in screen on Slim-Jim, not its unattended-access passphrase/);
+        }
+        for (const reason of ['unattended passphrase not entered', 'unattended passphrase not provided']) {
+            expect(powerOffOutcome(N, { state: 'failed', reason }, null, true).text, reason)
+                .toBe('Slim-Jim was not powered off: it is locked, and the passphrase for its sign-in screen was not entered.');
+        }
+        expect(powerOffOutcome(
+            N,
+            { state: 'failed', reason: 'too many wrong unattended passphrases in a row; try again in 30 seconds' },
+            null,
+            true,
+        ).text).toBe('Slim-Jim was not powered off: too many wrong passphrases for its sign-in screen in a row; try again in 30 seconds.');
+        // CONTROL: signed in, the same reasons still name the unattended one.
+        expect(powerOffOutcome(N, { state: 'failed', reason: 'unattended access was refused' }).text)
+            .not.toMatch(/sign-in screen/);
+        expect(powerOffOutcome(N, { state: 'failed', reason: 'too many wrong unattended passphrases in a row; try again in 30 seconds' }).text)
+            .toBe('Slim-Jim was not powered off: too many wrong unattended passphrases in a row; try again in 30 seconds.');
         // No reason at all is still said, never blank.
         expect(refusalText(N, '')).toBe('Slim-Jim was not powered off, and gave no reason.');
         // A session that ended with no record reads its error.
@@ -207,10 +231,14 @@ describe('the driver', () => {
             return 's4';
         });
         await powerOffDevice({ hostDevice: 'pc-signin', name: 'Slim-Jim', signIn: true, machineRows: ['pc', 'pc-signin'] });
-        expect(connectToDevice.mock.calls[0]).toEqual(['pc-signin', { powerOff: true, peerName: 'Slim-Jim', machineRows: ['pc', 'pc-signin'] }]);
-        // A friend's PC is in no machine of this account's, whatever a caller passes.
+        // `signIn` too: the passphrase dialog asks for the sign-in screen's.
+        expect(connectToDevice.mock.calls[0]).toEqual(['pc-signin', {
+            powerOff: true, peerName: 'Slim-Jim', signIn: true, machineRows: ['pc', 'pc-signin'],
+        }]);
+        // A friend's PC is in no machine of this account's, whatever a caller
+        // passes, and its grant stands in for any passphrase.
         const share = { inviteId: 3, ownerUser: 9, ownerUsername: 'friend', capabilities: ['control'] };
-        await powerOffDevice({ hostDevice: 'their-pc', name: 'Box', share, machineRows: ['their-pc', 'x'] });
+        await powerOffDevice({ hostDevice: 'their-pc', name: 'Box', share, signIn: true, machineRows: ['their-pc', 'x'] });
         expect(connectToDevice.mock.calls[1][1]).toEqual({ powerOff: true, peerName: 'Box', share });
     });
 

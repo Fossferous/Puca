@@ -217,6 +217,9 @@ const calls = page => page.evaluate(() => window.__power.calls.map(c => ({ host:
     // The PC's rows ride along (session.ts machineRows): a session proved with
     // one keeps the passphrase remembered for its other row (its lock screen).
     ck('desktop: the rows of the PC ride along with it', Array.isArray(c0?.opts?.machineRows) && c0.opts.machineRows.includes('pc-going'), JSON.stringify(c0?.opts?.machineRows));
+    // A signed-in PC (no sign-in row here): the passphrase dialog asks for the
+    // unattended one, so the connect is not said to reach a sign-in screen.
+    ck('desktop: a signed-in PC is not said to be at its sign-in screen', c0?.opts?.signIn === undefined, JSON.stringify(c0?.opts));
     ck('desktop: Power off is back once it is over', (await page.evaluate(cardParts, 'Slim-Jim')).buttonDisabled === false);
 
     const expectations = [

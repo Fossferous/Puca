@@ -927,7 +927,9 @@ A computer set up this way has two passphrases, both set on it in **Devices
 signed in to it, and **Passphrase for the sign-in screen**, for while it is
 locked, at its sign-in screen, or has just restarted or been woken. They are
 separate even if you chose the same words, so the device you connect from
-asks for each one the first time it is needed. The Púca app (on a computer or
+asks for each one the first time it is needed, and says which: its box is
+titled **Unattended passphrase**, or **Passphrase for the sign-in screen**
+while the computer is locked, and names the computer. The Púca app (on a computer or
 a phone) then remembers each, and does not ask again for as long as you keep
 reaching that computer from it, either way, at least once a week. One the
 computer refuses is forgotten and asked for next time; changing a passphrase
