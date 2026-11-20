@@ -188,6 +188,21 @@ html[data-stream-controlling] .stream-tile:has(.control-capture) .stream-tile-he
     display: none;
 }
 
+/* ...and in the in-app fullscreen too (Fullscreen tapped before the session
+   or during it): the tile fills the PICTURE's row, between the header and
+   the voice bar, instead of the whole window. Fixed to the window (the rule
+   above for a tile in the in-app fullscreen) it lay under both, so the top
+   and the bottom of the remote screen (a Windows taskbar) were out of sight
+   and a tap there landed on Púca's bars. The grid is that row. */
+html[data-stream-takeover="fullscreen"][data-stream-controlling] .stream-grid {
+    position: relative;
+}
+
+html[data-stream-takeover="fullscreen"][data-stream-controlling] .stream-tile.is-app-fullscreen {
+    position: absolute;
+    inset: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
     html[data-stream-takeover] .stream-stage-header,
     html[data-stream-takeover] .stream-tile-header,
@@ -320,7 +335,8 @@ html[data-media-fullscreen] .is-app-fullscreen .vs-fullscreen-btn {
    Android this IS the fullscreen, and the owner's report (2026-11-20) was
    parts of Púca around and over the picture. Leaving (the tile's Exit fullscreen, Android's Back) brings
    them back. A control session keeps its own layout: Stop controlling must
-   stay in reach. */
+   stay in reach, so the header and the voice bar come back in rows of their
+   own and the picture sits between them (section 1, A CONTROL SESSION). */
 html[data-fullscreen-bare]:not([data-stream-controlling]) .voice-panel-compact,
 html[data-fullscreen-bare]:not([data-stream-controlling]) .stream-stage-header {
     visibility: hidden;

@@ -8,5 +8,7 @@
   call with it. Now fullscreen fills the whole screen with only that picture
   and its own buttons, hides Android's bars (a swipe from the edge shows
   them), and its Exit fullscreen button or Android's Back gives the layout
-  back with the call still going. This comes with the update; no new install
-  is needed.
+  back with the call still going. Controlling a shared screen while it is
+  fullscreen, on any phone, puts Stop controlling above the picture and the
+  call's buttons below it, never over the top or the bottom of the other
+  screen. This comes with the update; no new install is needed.

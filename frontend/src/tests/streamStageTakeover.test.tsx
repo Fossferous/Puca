@@ -55,12 +55,18 @@ vi.mock('../components/voiceState', () => ({
 
 /** Mutable so a test can put an ACTIVE remote-control session on a given user. */
 let controlState: { controlling: unknown; hosting: unknown } = { controlling: null, hosting: null };
+/** The stage's subscription, so a session can also start (or end) while it is on screen. */
+const controlSubs = new Set<(s: unknown) => void>();
+const setControlState = (next: typeof controlState) => {
+    controlState = next;
+    act(() => { for (const cb of [...controlSubs]) cb(next); });
+};
 
 vi.mock('../api/remoteControl', () => ({
     requestControl: vi.fn(),
     stopControlling: vi.fn(),
     sendControlEvent: vi.fn(),
-    subscribeControl: () => () => { /* unsubscribe */ },
+    subscribeControl: (cb: (s: unknown) => void) => { controlSubs.add(cb); return () => { controlSubs.delete(cb); }; },
     getControlState: () => controlState,
     offerControl: vi.fn(),
     computeRmoveScale: () => 1,
@@ -472,6 +478,37 @@ describe('the Android APP: Fullscreen is the stream alone (the owner\'s report, 
         tap(fullscreenBtn());
         expect(html().streamTakeover).toBe('landscape');
         expect(html().fullscreenBare).toBeUndefined();
+    });
+
+    // The review's scenario (2026-11-20): the stream is fullscreen when the
+    // session is granted. What the stylesheet is then handed is the state
+    // e2e/iphone-stream-real-browser.mjs lays out (section 7): the fullscreen
+    // kept, the session's layout published, its capture surface on the
+    // fullscreen tile; phoneLandscape.css puts that tile between the header
+    // and the voice bar.
+    it('a control session starting in it keeps the fullscreen and the hidden bars, and publishes the session layout', () => {
+        rotate(true);
+        render();
+        tap(fullscreenBtn());
+        expect(html().fullscreenBare).toBe('true');
+        expect(html().streamControlling).toBeUndefined();
+        setControlState({ controlling: { userId: 1, username: 'alice', status: 'active' }, hosting: null });
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().streamControlling).toBe('true');
+        expect(html().fullscreenBare).toBe('true');
+        expect(app.bars).toEqual(['hide']);
+        expect(container.querySelector('.stream-tile.is-app-fullscreen .control-capture')).not.toBeNull();
+        expect(container.querySelector('.stop-controlling-btn')).not.toBeNull();
+        // A session's controls never hide (every tap is a click over there).
+        act(() => { vi.advanceTimersByTime(10000); });
+        expect(html().streamChrome).toBeUndefined();
+        // The session over: the bare fullscreen again, the bars still away.
+        setControlState({ controlling: null, hosting: null });
+        expect(html().streamControlling).toBeUndefined();
+        expect(html().streamTakeover).toBe('fullscreen');
+        expect(html().fullscreenBare).toBe('true');
+        expect(container.querySelector('.control-capture')).toBeNull();
+        expect(app.bars).toEqual(['hide']);
     });
 
     it('CONTROL: an iPhone\'s in-app fullscreen is NOT bare (its voice bar stays in reach) and hides no bars', () => {
