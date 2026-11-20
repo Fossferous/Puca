@@ -55,8 +55,8 @@
  *     together), never sooner than a `Retry-After` asks (seconds or an HTTP
  *     date, read by api/client.ts retryAfterMsOf, at most a minute), and at
  *     most FILE_ATTEMPTS attempts, with no wait begun once FILE_RETRY_TOTAL_MS
- *     have passed since the first request went out (queueing for a slot is
- *     not counted). The waits come to a minute; an attempt itself can take up
+ *     have passed since the first request went out (a crowd queued ahead of
+ *     the first request is not counted). The waits come to a minute; an attempt itself can take up
  *     to FILE_ANSWER_TIMEOUT_MS to answer, so a server that never answers is
  *     given up on after about a minute and a half, and the extra tries below
  *     can add to that;
@@ -353,14 +353,15 @@ function join(job: Job, signal: AbortSignal | undefined): void {
 
 const withJitter = (ms: number) => ms + Math.floor(Math.random() * ms * 0.2);
 
-/** Wait `ms`; `wakeable`: a chance to recover may end it early. */
-function sleep(job: Job, ms: number, wakeable: boolean): Promise<void> {
+/** Wait `ms`; `wakeable`: a chance to recover may end it early. True when
+ *  something did (a chance, or the job finishing), false when the time ran out. */
+function sleep(job: Job, ms: number, wakeable: boolean): Promise<boolean> {
     job.phase = 'sleeping';
     job.wakeable = wakeable;
-    return new Promise<void>((resolve) => {
-        const end = () => { clearTimeout(timer); job.wake = null; resolve(); };
-        const timer = setTimeout(end, ms);
-        job.wake = end;
+    return new Promise<boolean>((resolve) => {
+        const end = (cut: boolean) => { clearTimeout(timer); job.wake = null; resolve(cut); };
+        const timer = setTimeout(() => end(false), ms);
+        job.wake = () => end(true);
     });
 }
 
@@ -464,9 +465,12 @@ async function runJob(job: Job): Promise<void> {
         if (wait > 0) {
             const notBefore = Date.now() + floor;
             // A chance may end the part of the wait that is ours, and only that.
-            await sleep(job, wait, wait > floor);
+            const cut = await sleep(job, wait, wait > floor);
             if (job.done) return;
-            const left = notBefore - Date.now();
+            // Cut short by a chance: what is left of the server's wait, never
+            // more than it asked whatever the wall clock did meanwhile (set
+            // back an hour, this would be an hour no chance could end).
+            const left = cut ? Math.min(floor, notBefore - Date.now()) : 0;
             if (left > 0) {
                 await sleep(job, left, false);
                 if (job.done) return;
@@ -499,7 +503,9 @@ export function loadFileUrl(fileId: string, opts: { signal?: AbortSignal } = {})
     const hit = cache.get(fileId);
     if (hit) return Promise.resolve({ url: hit, retryable: false });
     // Signed out: no request, and nothing to ask again for.
-    if (!getToken()) return Promise.resolve(FINAL_NULL);
+    let token: string | null;
+    try { token = getToken(); } catch { token = null; }   // storage refused: as signed out
+    if (!token) return Promise.resolve(FINAL_NULL);
     const job = inflight.get(fileId) ?? startJob(fileId);
     join(job, opts.signal);
     return job.promise;

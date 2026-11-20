@@ -566,3 +566,31 @@ describe('found in review', () => {
         expect(await fetchFileUrl('av'), 'a new job, not the stuck one').toMatch(/^data:/);
     });
 });
+
+describe('found in the last review round', () => {
+    it('the wall clock set back during a wait does not turn it into an hour no chance can end', async () => {
+        script = (n) => (n === 1 ? status(502) : ok());
+        const p = fetchFileUrl('av');
+        await advance(500);
+        vi.setSystemTime(Date.now() - 60 * 60_000);
+        await advance(1500);
+        expect(requestsFor('av'), 'tried again when the 2 s timer ran out').toHaveLength(2);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('...nor a wait the server asked for longer than it asked', async () => {
+        script = (n) => (n === 1 ? status(503, { 'Retry-After': '2' }) : ok());
+        const p = fetchFileUrl('av');
+        await advance(500);
+        vi.setSystemTime(Date.now() - 60 * 60_000);
+        await advance(1500);
+        expect(requestsFor('av')).toHaveLength(2);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('a token read that throws is a signed-out caller: null, no request, nothing thrown at the caller', async () => {
+        h.throwOnRead = 1;
+        await expect(fetchFileUrl('av')).resolves.toBeNull();
+        expect(calls).toHaveLength(0);
+    });
+});
