@@ -2100,6 +2100,10 @@ fn run(
                             eprintln!("[window] back to the whole screen, as asked");
                             crate::session::set_window_aim(&session_id, None);
                             crate::session::Agent::aim_input_at(&session_id, current_monitor);
+                            // A still screen sends nothing by itself: without
+                            // this the viewer kept the window's picture while
+                            // its input was already the whole screen's.
+                            want_keyframe = true;
                         caret_surf += 1;
                         if caret_tracker.is_some() {
                             caret_surface = surface_of(capture.as_ref(), window.as_ref(), current_monitor);
@@ -2145,7 +2149,6 @@ fn run(
                                             mon_phys: t.mon_phys(),
                                         }),
                                     );
-                                    puca_input::set_target(Some(target));
                                 }
                             }
                         caret_surf += 1;
@@ -3253,7 +3256,6 @@ fn run(
                                         mon_phys: t.mon_phys(),
                                     }),
                                 );
-                                puca_input::set_target(Some(target));
                                 window_moved = true;
                             }
                             let size = t.shown().map(|r| (r.width.max(0) as u32, r.height.max(0) as u32));
@@ -5145,6 +5147,30 @@ impl Stream {
 
 #[cfg(test)]
 mod tests {
+    /// Whole screen asked for (SetWindow with no window) must ask for a
+    /// picture at once, as choosing one does: on a still screen nothing else
+    /// sends one, and the viewer kept the window's crop on screen while its
+    /// clicks were already mapped over the whole screen (review, 2026-11-20).
+    /// The run loop needs DXGI and a peer, so its source is read, the pattern
+    /// of `the_loop_checks_every_picture_and_every_rebuild_by_the_capture`.
+    #[test]
+    fn whole_screen_asked_for_sends_a_picture_at_once() {
+        let src = include_str!("stream.rs").replace('\r', "");
+        let run = src.split("\nfn run(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let arm = run
+            .split("back to the whole screen, as asked")
+            .nth(1)
+            .expect("the SetWindow arm's whole-screen branch")
+            .split("reply_tx.send(Ok(None))")
+            .next()
+            .unwrap();
+        assert!(arm.contains("want_keyframe = true"), "the whole-screen branch must ask for a picture");
+        // The positive control: the window-chosen branch, and the end of a
+        // window by itself, already did.
+        let chosen = run.split("showing one window of").nth(1).unwrap().split("reply_tx.send(Ok(shown))").next().unwrap();
+        assert!(chosen.contains("want_keyframe = true"));
+    }
+
     #[test]
     fn a_resend_during_a_blockage_does_not_end_it() {
         use super::{pumped_ends_blockage, should_rebuild_capture};

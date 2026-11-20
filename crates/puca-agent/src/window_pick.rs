@@ -54,8 +54,13 @@ pub const MAX_WINDOWS: usize = 64;
 pub const MAX_TITLE_CHARS: usize = 160;
 /// The edge of the icon sent for each program, in pixels.
 pub const ICON_EDGE: u32 = 24;
-/// The smallest crop worth encoding; below it the window is "off its screen".
-const MIN_CROP_EDGE: u32 = 16;
+/// The smallest crop shown; below it the window is "off its screen". Not 16:
+/// every size reaches the H.264 encoder (the fit never steps below 320, but a
+/// crop is native), and Microsoft documents no minimum frame size for its
+/// encoder MFT while documenting 48x48 for its decoder, so a strip of a
+/// window left on a shared screen could end the stream with an encoder that
+/// refuses it. 128 is well clear of that, and of any window anyone means.
+const MIN_CROP_EDGE: u32 = 128;
 /// A new window SIZE is taken once it has held this long: dragging an edge
 /// produces a new size every frame, and each one reconfigures the encoder and
 /// changes the viewer's picture shape. A MOVE is followed at once (same size,
@@ -1334,9 +1339,9 @@ mod tests {
     #[test]
     fn a_window_off_its_screen_or_almost_is_not_cropped() {
         assert_eq!(crop_for(r(2000, 0, 800, 600), r(0, 0, 1920, 1080), 1920, 1080), None);
-        assert_eq!(crop_for(r(1910, 0, 800, 600), r(0, 0, 1920, 1080), 1920, 1080), None, "10 px is not a picture");
+        assert_eq!(crop_for(r(1800, 0, 800, 600), r(0, 0, 1920, 1080), 1920, 1080), None, "120 px is not a picture an encoder is sure to take");
         // The positive control at the edge of the rule.
-        assert!(crop_for(r(1900, 0, 800, 600), r(0, 0, 1920, 1080), 1920, 1080).is_some());
+        assert!(crop_for(r(1792, 0, 800, 600), r(0, 0, 1920, 1080), 1920, 1080).is_some());
     }
 
     #[test]
@@ -1571,7 +1576,7 @@ mod tests {
         assert_eq!(clamp_crop(c, 1920, 1080), Some(Crop { x: 1320, y: 680, w: 600, h: 400 }));
         assert_eq!(clamp_crop(c, 1280, 720), Some(Crop { x: 680, y: 320, w: 600, h: 400 }));
         assert_eq!(clamp_crop(c, 501, 301), Some(Crop { x: 1, y: 1, w: 500, h: 300 }));
-        assert_eq!(clamp_crop(c, 10, 10), None);
+        assert_eq!(clamp_crop(c, 100, 100), None);
     }
 
     #[test]

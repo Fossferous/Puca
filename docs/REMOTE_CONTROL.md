@@ -489,8 +489,12 @@ itself, and says why in `SessionState.window_end` (`Gone`):
   its X is pressed (Discord, Steam, Teams), or a switch to another virtual
   desktop. Its rectangle stays, with something else drawn in it, so cropping
   it would show and click that;
-- **`offscreen`**: less than 16 px of it is on the capture's screen, with
-  `window_end_monitor` the screen it is on now;
+- **`offscreen`**: less than 128 px of it (either way) is on the capture's
+  screen, with `window_end_monitor` the screen it is on now. Not less: a crop
+  is encoded at its own size (the viewer fit never steps below 320 px, but a
+  crop is native), and Microsoft documents no minimum frame size for its
+  H.264 encoder MFT while documenting 48x48 for its decoder, so a thin strip
+  left on a shared screen could end the stream;
 - **`screen`**: the capture moved to another index or another screen (a
   switch, a lid move, a topology rebuild); a rebuild in place keeps it.
 
@@ -518,8 +522,15 @@ session) ends as `screen`; a follow that fails also has the agent let go of
 the old window. A resize that settled reaches the viewer as the window's new
 size (`window_width` / `window_height`), the surface its caret is mapped over.
 A screen switch asked for while a window choice is half done (its `SetMonitor`
-in, its `SetWindow` not yet) is refused rather than undone by it. A window
-pushed off its own screen is never "followed" onto that same screen.
+in, its `SetWindow` not yet) is refused rather than undone by it, and a window
+chosen while a screen switch is in flight is refused the same way. A window
+pushed off its own screen is never "followed" onto that same screen. A media
+restart's new stream reports no window until it is given it back, and that is
+not read as the window going (`windowStreamGen`). Whole screen asked for
+re-sends the picture at once: on a still screen nothing else would, and the
+viewer kept the window's picture while its clicks were already mapped over
+the whole screen. A window that is on another screen by the time it is chosen
+is refused before anything is restored or raised.
 
 **Bringing it forward.** Choosing a window restores it if it is minimised
 (`ShowWindowAsync(SW_RESTORE)`: posted, never waited on, so a hung program

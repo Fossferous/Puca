@@ -136,7 +136,13 @@ static WINDOW_AIM: std::sync::Mutex<Option<(String, WindowAim)>> = std::sync::Mu
 pub(crate) fn set_window_aim(session_id: &str, aim: Option<WindowAim>) {
     if let Ok(mut w) = WINDOW_AIM.lock() {
         match aim {
-            Some(a) => *w = Some((session_id.to_string(), a)),
+            // The target is set UNDER this lock, as `aim_input_at` sets its
+            // own, so the two can never interleave into input aimed at a
+            // window that has just gone (review, 2026-11-20).
+            Some(a) => {
+                *w = Some((session_id.to_string(), a));
+                puca_input::set_target(Some(a.target));
+            }
             None => {
                 if w.as_ref().is_some_and(|(sid, _)| sid == session_id) {
                     *w = None;
@@ -1102,8 +1108,10 @@ impl Agent {
         let list = puca_input::list_monitors();
         // A window shown on its own from this screen keeps the input
         // (`WINDOW_AIM`).
-        let window = WINDOW_AIM.lock().ok().and_then(|w| window_aim_for(w.as_ref(), session_id, monitor));
         let whole = resolve_target(monitor, &outputs, &list);
+        // Read and set under the record's lock (see set_window_aim).
+        let record = WINDOW_AIM.lock();
+        let window = record.as_ref().ok().and_then(|w| window_aim_for(w.as_ref(), session_id, monitor));
         let target = match window {
             Some(aim) => Some(window_aim_target(&aim, whole)),
             None => whole,
@@ -1112,10 +1120,11 @@ impl Agent {
         // nothing recorded it: "the pointer landed on a screen nobody was
         // watching" and "it landed where it should" were indistinguishable in
         // the log. `None` is the primary-only fallback, the one worth seeing.
+        puca_input::set_target(target);
+        drop(record);
         if let Some(line) = aim_changed(&LAST_AIM_LINE, aim_line(session_id, monitor, target.as_ref())) {
             eprintln!("{line}");
         }
-        puca_input::set_target(target);
     }
 
     /// Refuse a request this flavour does not serve.
@@ -1970,6 +1979,19 @@ impl Agent {
                 if !os.alive(hwnd) || os.pid(hwnd) != pid {
                     return Response::error("that window has closed");
                 }
+                // ON THE STREAM'S SCREEN, before anything is raised: a stale
+                // list entry for a window since moved elsewhere must not
+                // restore or raise it (the stream would refuse it anyway).
+                if let Some(&mon) = self.sessions.get(&session_id) {
+                    let outs = puca_capture::outputs();
+                    if let (Some(own), Some(on)) =
+                        (outs.iter().find(|o| o.index == mon).map(|o| o.hmonitor), os.monitor(hwnd))
+                    {
+                        if own != 0 && own != on {
+                            return Response::error("that window is on another screen");
+                        }
+                    }
+                }
                 // Restored if minimised (it has no pixels otherwise), then
                 // asked to the front. Windows may refuse the second; the
                 // stream reports who is in front either way.
@@ -2089,10 +2111,13 @@ impl Agent {
                 // stream's own books (window_pick.rs `WindowStatus`), screens
                 // named by capture index as everywhere else on this wire.
                 #[cfg(windows)]
-                let w = window_state(
-                    self.streams.get(&session_id).map(|st| st.window_status()),
-                    &puca_capture::outputs(),
-                );
+                let w = {
+                    let st = self.streams.get(&session_id).map(|st| st.window_status());
+                    // A screen to name only when a window is elsewhere or
+                    // went somewhere: the enumeration is not paid every poll.
+                    let named = st.as_ref().is_some_and(|x| x.elsewhere.is_some() || x.ended_on.is_some());
+                    window_state(st, &if named { puca_capture::outputs() } else { Vec::new() })
+                };
                 #[cfg(not(windows))]
                 let w = WindowState::default();
                 Response::SessionState {

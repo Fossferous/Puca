@@ -730,6 +730,13 @@ interface Internal extends DeviceControlSession {
     /** HOST: bumped on every change to `windowShown`, so a status reply read
      *  across one is not acted on. */
     windowGen?: number;
+    /** HOST: the agent stream (`agentStreamGen`) the window was last shown
+     *  on. A new stream (a media restart) starts on the whole screen and is
+     *  given the window again by afterWindowStreamStart; until then its
+     *  status says "no window", which is not the window going away. */
+    windowStreamGen?: number;
+    /** HOST: screen switches in flight; a window choice waits for them. */
+    monitorSwitching?: number;
     /** HOST: whether the window's program was last said to be in front. */
     windowFrontTold?: boolean | null;
     /** CONTROLLER: the deadline on an unanswered window list. */
@@ -1296,6 +1303,7 @@ async function showHostWindow(s: Internal, w: RemoteWindow, monitor: number): Pr
     if (!shown) throw new Error('the window could not be shown');
     s.windowShown = { ...w, monitor, width: shown.width, height: shown.height };
     s.windowGen = (s.windowGen ?? 0) + 1;
+    s.windowStreamGen = s.agentStreamGen;
     s.windowFrontTold = shown.front;
     await sendSignal(s, { kind: 'window-active', window: shownFrame(s.windowShown), front: shown.front });
 }
@@ -1360,8 +1368,11 @@ function hostWindowFromStatus(s: Internal, st: Partial<HostSessionStatus>): void
         else endHostWindow(s, 'unshared');
         return;
     }
+    // A NEW STREAM that has not been given the window yet (a media restart,
+    // between its start and afterWindowStreamStart): not the window going.
+    if (!isWindowEndReason(st.windowEnd) && s.windowStreamGen !== s.agentStreamGen) return;
     // Gone by itself, with its reason; or gone with none (an agent replaced
-    // under the session, a stream restarted): the screen changed under it.
+    // under the session): the screen changed under it.
     endHostWindow(s, isWindowEndReason(st.windowEnd) ? st.windowEnd : 'screen');
 }
 
@@ -1451,6 +1462,9 @@ async function serveSetWindow(s: Internal, data: Record<string, unknown>): Promi
     const fail = (reason: string) =>
         sendSignal(s, { kind: 'window-failed', reason }).catch(() => undefined);
     if (s.windowBusy) { await fail('the last choice is still being made'); return; }
+    // A screen switch in flight would land after this window's own switch
+    // and leave the host saying a window is shown over a whole screen.
+    if ((s.monitorSwitching ?? 0) > 0) { await fail('the screen is still being switched'); return; }
     const backend = await getHostBackend();
     if (!backend.setWindow) { await fail('this computer cannot show one window'); return; }
     s.windowBusy = true;
@@ -6921,6 +6935,7 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 void sendSignal(s, { kind: 'monitor-failed', reason: 'A window is still being shown. Try again in a moment.' });
                 return;
             }
+            s.monitorSwitching = (s.monitorSwitching ?? 0) + 1;
             void (async () => {
                 try {
                     const backend = await getHostBackend();
@@ -6958,6 +6973,8 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                         kind: 'monitor-failed',
                         reason: e instanceof Error ? e.message : 'could not switch screens',
                     });
+                } finally {
+                    s.monitorSwitching = Math.max(0, (s.monitorSwitching ?? 1) - 1);
                 }
             })();
             return;

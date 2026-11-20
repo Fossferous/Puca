@@ -89,7 +89,8 @@ const WINDOWS_FIXTURE = [
     { hwnd: 103, pid: 3, title: 'Third screen window', app: 'Gamma', monitor: 2 },
 ];
 const ICONS_FIXTURE = { ia: 'data:image/png;base64,AAAA', ib: 'data:image/png;base64,BBBB' };
-const listWindows = vi.fn(async () => ({ windows: WINDOWS_FIXTURE, icons: ICONS_FIXTURE }));
+const listWindows = vi.fn(async (): Promise<{ windows: Array<Record<string, unknown>>; icons: Record<string, string> }> =>
+    ({ windows: WINDOWS_FIXTURE, icons: ICONS_FIXTURE }));
 const setWindow = vi.fn(async (..._a: unknown[]): Promise<{ width: number; height: number; front: boolean } | null> =>
     ({ width: 900, height: 700, front: true }));
 let statusReply: Record<string, unknown> | null = null;
@@ -189,8 +190,11 @@ const agentAnswerOffer = vi.fn(async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n');
 vi.mock('../api/devices/hostAgent', () => ({
     // A screen is there to capture (session.ts prepareHostScreen).
     agentPrepareScreen: async () => ({ state: 'ready' }),
-    agentSteeredMonitor: () => null,
+    // A hook for the moment an answered stream is about to count as started
+    // (session.ts asks this right before it moves agentStreamGen).
+    agentSteeredMonitor: () => { onSteeredAsked?.(); return null; },
     agentAnswerOffer }));
+let onSteeredAsked: (() => void) | null = null;
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),
     signUaChallengeSeed: () => new Uint8Array(64),
@@ -318,6 +322,7 @@ beforeEach(() => {
     shareCaps = null;
     hostWindowsOn = false;
     statusReply = null;
+    onSteeredAsked = null;
     listWindows.mockClear();
     setWindow.mockReset();
     setWindow.mockImplementation(async () => ({ width: 900, height: 700, front: true }));
@@ -2754,5 +2759,54 @@ describe('one window on its own', () => {
         expect(bytes).toBeLessThanOrEqual(36_000);
         expect(list.windows.length, 'cut from the back, not all dropped').toBeGreaterThan(10);
         expect(list.windows.length).toBeLessThan(64);
+    });
+
+    // ---- review round 2 (2026-11-20).
+
+    it('a window choice while a screen switch is still in flight is refused, not landed over by it', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        let release: () => void = () => {};
+        setMonitor.mockImplementationOnce(() => new Promise<void>(r => { release = r; }));
+        await signal(key, { kind: 'set-monitor', monitor: 2 });
+        setWindow.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        expect(setWindow).not.toHaveBeenCalled();
+        expect((await frames(key, before)).find(f => f.kind === 'window-failed')?.reason).toBe('the screen is still being switched');
+        release();
+        await settle();
+        // POSITIVE CONTROL: once the switch is done, the same choice is shown.
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        expect(setWindow).toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+    });
+
+    it('a media restart does not lose the window to a status read before it is given back', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        // The new stream answers the poll before it has been given the window:
+        // live, on screen 1, no window and no reason. The poll is run in the
+        // gap after the new stream starts and before the window goes back.
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1 };
+        // In the gap: queued from the last synchronous step before the new
+        // stream's generation moves, it runs while the answer is being sealed.
+        onSteeredAsked = () => {
+            onSteeredAsked = null;
+            queueMicrotask(() => { void sessionMod.pollSecureDesktop(); });
+        };
+        setWindow.mockClear();
+        // Once given back, the agent says so (so the 1 Hz poll has nothing
+        // to end afterwards either).
+        setWindow.mockImplementationOnce(async () => {
+            statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 102 };
+            return { width: 900, height: 700, front: true };
+        });
+        const before = sent.length;
+        await signal(key, { kind: 'restart-offer', sdp: OFFER });
+        await settle(30);
+        const got = await frames(key, before);
+        expect(got.filter(f => f.kind === 'window-active' && f.window === null), 'not ended as "the screens changed"').toEqual([]);
+        expect(setWindow, 'given back to the new stream').toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
     });
 });

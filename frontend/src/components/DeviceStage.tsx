@@ -741,6 +741,10 @@ export function DeviceStage() {
         // The pinned-keys editor belongs to the session it was opened in; a
         // new one must not start with it up (and the keys held back by it).
         setPinsEditorOpen(false);
+        // And the window picker: left set, it was not drawn on a session to
+        // a host that offers no window choice, yet the key gate still held
+        // every key back, with nothing on screen to close (review, 2026-11-20).
+        setWindowPickerOpen(false);
         // So does a phone's open menu (the keyboard bar, More, the screens,
         // the mouse): left set when its session ended, it came back up, with
         // its Back layer, on the next session.
