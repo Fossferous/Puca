@@ -180,7 +180,10 @@ refusals a day, found by reading the journal on a hunch. The check now compares
 a fingerprint of `crates/puca-waker` against the one `ship-waker.sh` records in
 `/opt/<unit>/SOURCE_SHA`, and separately fails a waker that is running but
 REFUSED. **Change that crate and the version check fails until you run
-`ship-waker.sh`.**
+`ship-waker.sh`.** The fingerprint covers the whole root `Cargo.lock` too
+(`deploy/ops/waker-source-sha.sh`), so a lockfile change that never reaches
+the waker (0.9.867's lettre bump) fails it the same way: ship the waker in
+that release.
 
 **Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|
 installer-lite|backend|apk|apk-lite|apk-notes|decky} ...`, never a manual `scp`/`ssh` to one
