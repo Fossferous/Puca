@@ -2252,15 +2252,16 @@ export function DeviceStage() {
     const lastCaretRef = useRef<CaretReport | null>(null);
     /** The user's last close of the keyboard (its button, or Android's Back
      *  under the open bar) — the auto-raise's stand-down record
-     *  (heldByManualClose), with the caret known then. Nothing expires it
-     *  (only an older host's Chromium caret is held for 5 s, on its line:
-     *  hideMayGoUnheard): dropped when the keyboard comes up (asked for, or
-     *  for any reason), when a text box takes the focus (textBoxTookFocus, in
-     *  the tracking subscription below), on a surface change (the tracking
-     *  cleanup below), and, for Back's, when the app, the window's focus or
-     *  the screen's orientation turns out to have gone with it
-     *  (imeCloseTakenBack, the lifecycle effect below). Declared before the
-     *  tracking effect that clears it. */
+     *  (heldByManualClose), with the caret known then: it holds on that
+     *  caret's line. Nothing expires it (only an older host's Chromium caret
+     *  is held for 5 s at most: hideMayGoUnheard): dropped when a tap moves
+     *  the caret to another line (the sink below raises), when the keyboard
+     *  comes up (asked for, or for any reason), when a text box takes the
+     *  focus (textBoxTookFocus, in the tracking subscription below), on a
+     *  surface change (the tracking cleanup below), and, for Back's, when the
+     *  app, the window's focus or the screen's orientation turns out to have
+     *  gone with it (imeCloseTakenBack, the lifecycle effect below). Declared
+     *  before the tracking effect that clears it. */
     const manualKbCloseRef = useRef<ManualClose | null>(null);
     /** The auto-keyboard's report sink; a slot for the same reason as
      *  caretOnAimRef — the subscription below outlives any one render of the
@@ -2526,10 +2527,12 @@ export function DeviceStage() {
             });
             autoKbDiagRef.current.onReport = verdict;
             if (!verdict.raise) return;
-            // THE USER'S CLOSE OUTRANKS THE TAP: while the focus stays in the
-            // text it was closed over, a caret the tap moved is the
-            // interaction the close was FOR (read what it covered, tap around
-            // in it). The press is spent either way.
+            // THE USER'S CLOSE OUTRANKS THE TAP on the line it was closed
+            // over: a caret the tap moved along it is the interaction the
+            // close was FOR (read what it covered, tap along it again). A
+            // caret moved to another line goes through and ends the close: a
+            // tap straight into another text box looks just like that. The
+            // press is spent either way.
             if (heldByManualClose({
                 close: manualKbCloseRef.current, verdict, before, report: r, now: Date.now(),
                 surface: surfaceSizeRef.current,

@@ -14,7 +14,10 @@
  *    up and change zoom");
  *  - a focused button ('field') after a press does not;
  *  - closing the keyboard (its button, or Android's Back under the open bar)
- *    sticks until a text box takes the focus or the keyboard comes up; the
+ *    sticks on the line it was closed over until a text box takes the focus
+ *    or the keyboard comes up, and a tap that moves the caret to another
+ *    line opens it (a tap straight into another text box: a form's next
+ *    field, another app from the taskbar, a page after the address bar); the
  *    keyboard going down with the app, a screen lock, a rotation or the
  *    window's focus is no close (each rule of that fails a case here when
  *    taken out: the hidden page, the take-back, the clock, the window's own
@@ -534,7 +537,7 @@ describe('a tap that is not into a text box opens nothing (2026-11-20)', () => {
     });
 });
 
-describe('closing the keyboard sticks', () => {
+describe('closing the keyboard sticks on its line', () => {
     const kbButton = () => host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
     async function raiseByTap() {
         await caret('ds-1', HIDDEN);
@@ -544,7 +547,7 @@ describe('closing the keyboard sticks', () => {
     }
     afterEach(() => { vi.useRealTimers(); });
 
-    it('closed with its button: a caret the next taps move, on its line or another, leaves it closed, however long after', async () => {
+    it('closed with its button: a caret the next taps move along its line leaves it closed, however long after', async () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         await mountWith(session());
         await raiseByTap();
@@ -556,14 +559,39 @@ describe('closing the keyboard sticks', () => {
         await pressAt(0.6, 0.5 + 9 / 1080);
         await caret('ds-1', WIN32(0.6, 0.5));       // same text box, same line
         expect(panel(), 'same line, 6 s later').toBeNull();
-        await pressAt(0.5, 0.8 + 9 / 1080);
-        await caret('ds-1', WIN32(0.5, 0.8));       // another line of the text
-        expect(panel(), 'another line').toBeNull();
-        // The focus leaves the text (a button), then a text box takes it.
+        vi.setSystemTime(Date.now() + 60_000);
+        await pressAt(0.2, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.2, 0.5));
+        expect(panel(), 'same line, a minute later').toBeNull();
+        // The focus leaves the text (a button), then a text box takes it: on
+        // that same line, so only the gap can be what opens it.
         await caret('ds-1', HIDDEN);
-        await pressAt(0.3, 0.2 + 9 / 1080);
-        await caret('ds-1', WIN32(0.3, 0.2));
+        await pressAt(0.4, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.4, 0.5));
         expect(panel(), 'POSITIVE CONTROL: a text box taking the focus opens it').toBeTruthy();
+    });
+
+    it('a caret a tap moves to ANOTHER line opens it: the host cannot tell another text box from it', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await raiseByTap();
+        await act(async () => { kbButton().click(); });
+        await flush();
+        vi.setSystemTime(Date.now() + 6_000);
+        await pressAt(0.5, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.5, 0.8));
+        expect(panel(), 'another line, with no gap before it').toBeTruthy();
+        // ...and that close is over: closed again, the new close holds on ITS
+        // line, and the first one's line raises.
+        await act(async () => { kbButton().click(); });
+        await flush();
+        expect(panel(), 'precondition: closed again').toBeNull();
+        await pressAt(0.3, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.8));
+        expect(panel(), "CONTROL: the new close holds on its line").toBeNull();
+        await pressAt(0.3, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.5));
+        expect(panel(), "the first close's line raises").toBeTruthy();
     });
 
     it("Android's Back under the open bar is a close too; the keyboard coming up again ends it", async () => {
@@ -587,14 +615,14 @@ describe('closing the keyboard sticks', () => {
         h.showMobileKeyboard.mockClear();
         await pressAt(0.7, 0.5 + 9 / 1080);
         await caret('ds-1', WIN32(0.7, 0.5));
-        await pressAt(0.5, 0.8 + 9 / 1080);
-        await caret('ds-1', WIN32(0.5, 0.8));
-        expect(h.showMobileKeyboard, 'after Back, taps in the text bring no keyboard back').not.toHaveBeenCalled();
+        await pressAt(0.3, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.5));
+        expect(h.showMobileKeyboard, 'after Back, taps along the line bring no keyboard back').not.toHaveBeenCalled();
 
         await ime(true);                             // "Tap to type", or the button
         h.showMobileKeyboard.mockClear();
-        await pressAt(0.6, 0.8 + 9 / 1080);
-        await caret('ds-1', WIN32(0.6, 0.8));
+        await pressAt(0.6, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.5));
         expect(h.showMobileKeyboard, 'the keyboard up again ends the close').toHaveBeenCalled();
     });
 
@@ -602,7 +630,9 @@ describe('closing the keyboard sticks', () => {
     // Chromium's caret object hides by going from 1 px wide to 0 in place,
     // and that agent sends nothing for it (under its 1/2000 epsilon). So the
     // address bar's caret stays "measured" here after a tap on the page took
-    // the focus, and a text box tapped on the page next is a caret that MOVED.
+    // the focus, and the address bar tapped again is a caret that MOVED along
+    // the line it was closed on. (A text box on the page is another line,
+    // which a close never holds.)
     const WIDE = [{ id: 0, label: 'Main display', left: 0, top: 0, width: 2560, height: 1440 }];
     const CHROMIUM = (x: number, y: number, rev?: number) => ({
         vis: true, x, y, w: 1 / 2560, h: 24 / 1440, src: 'msaa', mon: 0, surf: 1, seq: 1,
@@ -618,7 +648,7 @@ describe('closing the keyboard sticks', () => {
         expect(panel(), 'precondition: the button closed it').toBeNull();
     }
 
-    it("an OLDER host's Chromium caret, whose hide never arrives: held 5 s on its line, then the next text box opens it", async () => {
+    it("an OLDER host's Chromium caret, whose hide never arrives: held 5 s on its line, then the address bar opens it", async () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         await mountWith(session({ monitors: WIDE }));
         await raiseInChromium();
@@ -628,12 +658,12 @@ describe('closing the keyboard sticks', () => {
         expect(panel(), 'within 5 s, on the line it was closed on: held, as before 2026-11-20').toBeNull();
         vi.setSystemTime(Date.now() + 4_000);
         await pressAt(0.7, 0.3);                     // the page: Chromium hides its caret, nothing is sent
-        await pressAt(0.3, 0.2 + 12 / 1440);
-        await caret('ds-1', CHROMIUM(0.3, 0.2));     // a search box on the page
-        expect(panel(), 'the text box tapped on the page opens the keyboard').toBeTruthy();
+        await pressAt(0.3, 0.5 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.3, 0.5));     // the address bar again
+        expect(panel(), 'the address bar tapped again 6 s later opens the keyboard').toBeTruthy();
     });
 
-    it("CONTROL: a CURRENT host's (rev 2) Chromium caret sticks like any other, until its hide arrives", async () => {
+    it("CONTROL: a CURRENT host's (rev 2) Chromium caret sticks on its line like any other, until its hide arrives", async () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         await mountWith(session({ monitors: WIDE }));
         await raiseInChromium(2);
@@ -641,14 +671,90 @@ describe('closing the keyboard sticks', () => {
         await pressAt(0.6, 0.5 + 12 / 1440);
         await caret('ds-1', CHROMIUM(0.6, 0.5, 2));
         expect(panel(), 'the same text, 6 s later').toBeNull();
-        await pressAt(0.3, 0.2 + 12 / 1440);
-        await caret('ds-1', CHROMIUM(0.3, 0.2, 2));  // the focus went straight into another box
-        expect(panel(), 'another box the focus went straight into').toBeNull();
-        // The page takes the focus: this host says so.
+        await pressAt(0.3, 0.5 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.3, 0.5, 2));
+        expect(panel(), 'the same line, further back').toBeNull();
+        // The page takes the focus: this host says so. Then the address bar
+        // again, on the line it was closed on.
         await caret('ds-1', { ...HIDDEN, rev: 2 });
-        await pressAt(0.4, 0.8 + 12 / 1440);
-        await caret('ds-1', CHROMIUM(0.4, 0.8, 2));
+        await pressAt(0.4, 0.5 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.4, 0.5, 2));
         expect(panel(), 'POSITIVE CONTROL: a text box taking the focus opens it').toBeTruthy();
+    });
+});
+
+// After a close, a tap STRAIGHT into another text box (review of
+// work/stage-taps, 2026-11-20). The close ended only when the host reported a
+// gap (no caret, then a caret), and for a tap from one text box straight into
+// another it reports none: a Win32 text box's caret is destroyed and the next
+// one's created in one message dispatch, so the next 100 ms poll sees a caret
+// that MOVED; the host holds a caret 1.2 s after it stops being measured
+// (CARET_HOLD), which bridges a window switch from the taskbar and a
+// Chromium hide. Every such tap was held, and the keyboard never came up by
+// itself again until it was opened by hand. Before the branch a raise on
+// another line went through at once. Taps along the line it was closed on
+// stay held (the CONTROL in each).
+describe('after a close, a tap straight into another text box opens it', () => {
+    const kbButton = () => host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+    const later = (ms: number) => { vi.setSystemTime(Date.now() + ms); };
+    async function closeOver(report: Record<string, unknown>, hidden: Record<string, unknown> = HIDDEN) {
+        await caret('ds-1', hidden);
+        await pressAt(report.x as number, (report.y as number) + (report.h as number) / 2);
+        await caret('ds-1', report);
+        expect(panel(), 'precondition: a tap into a text box opened it').toBeTruthy();
+        await act(async () => { kbButton().click(); });
+        await flush();
+        expect(panel(), 'precondition: the button closed it').toBeNull();
+    }
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('a Win32 form: field A closed, field B on another line tapped, no gap between their carets', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await closeOver(WIN32(0.5, 0.5));
+        later(2_000);
+        // CONTROL: further along field A's line, the close holds.
+        await pressAt(0.6, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.5));
+        expect(panel(), 'field A again, on the line it was closed on').toBeNull();
+        later(2_000);
+        await pressAt(0.3, 0.7 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.7));
+        expect(panel(), 'field B, the caret moved straight to it').toBeTruthy();
+    });
+
+    it("another app from the taskbar: its caret comes forward with it, then a tap into its text", async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await closeOver(WIN32(0.5, 0.5));
+        later(2_000);
+        await pressAt(0.4, 0.98);                    // a taskbar button; A's caret is held 1.2 s
+        await caret('ds-1', WIN32(0.6, 0.25));       // Word comes forward with its caret
+        expect(panel(), 'CONTROL: a window coming forward is no tap into its text').toBeNull();
+        later(2_000);
+        await pressAt(0.2, 0.4 + 9 / 1080);
+        await caret('ds-1', WIN32(0.2, 0.4));
+        expect(panel(), "a tap into Word's text").toBeTruthy();
+    });
+
+    const WIDE = [{ id: 0, label: 'Main display', left: 0, top: 0, width: 2560, height: 1440 }];
+    const CHROMIUM = (x: number, y: number) => ({
+        vis: true, x, y, w: 1 / 2560, h: 24 / 1440, src: 'msaa', mon: 0, surf: 1, seq: 1, rev: 2,
+    });
+    it("a current host's Chromium: the address bar closed, a link, then a text box on the page within 1.2 s", async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session({ monitors: WIDE }));
+        await closeOver(CHROMIUM(0.5, 0.05), { ...HIDDEN, rev: 2 });
+        later(3_000);
+        // CONTROL: further along the address bar, the close holds.
+        await pressAt(0.6, 0.05 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.6, 0.05));
+        expect(panel(), 'the address bar again').toBeNull();
+        await pressAt(0.7, 0.3);                     // a link: the hide is held 1.2 s on the host
+        later(600);
+        await pressAt(0.3, 0.6 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.3, 0.6));
+        expect(panel(), 'the text box on the page').toBeTruthy();
     });
 });
 
@@ -764,7 +870,7 @@ describe('the keyboard going down with the app, the screen or the window is no c
         later(10_000);
         await ime(false);
         await windowEvent('orientationchange');
-        expect(await tapInTheTextRaises(0.5, 0.8)).toBe(true);
+        expect(await tapInTheTextRaises(0.3, 0.5)).toBe(true);
     });
 
     it('a fold or a split screen: the window a new width', async () => {
@@ -813,7 +919,7 @@ describe('the keyboard going down with the app, the screen or the window is no c
         later(30_000);
         await pageGoes('visible');
         await windowEvent('focus');
-        expect(await tapInTheTextRaises(0.5, 0.8), 'still held after the app went and came back').toBe(false);
+        expect(await tapInTheTextRaises(0.3, 0.5), 'still held after the app went and came back').toBe(false);
     });
 
     it("CONTROL: the button's close is not taken back by the app going and coming back", async () => {

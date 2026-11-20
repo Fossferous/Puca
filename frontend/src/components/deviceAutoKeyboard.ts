@@ -143,8 +143,8 @@ export type AutoKeyboardVerdict =
 export const CARET_REV_HIDDEN_MSAA = 2;
 
 /** How long a close holds a raise for a caret whose hide may go unheard
- *  (hideMayGoUnheard): the stand-down every close had before 2026-11-20,
- *  together with "on the line of the caret at the close". */
+ *  (hideMayGoUnheard): the stand-down every close had before 2026-11-20.
+ *  On any host a close holds only on the line of the caret at the close. */
 export const AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS = 5_000;
 
 /** What the stage records when the person CLOSES the keyboard: its toolbar
@@ -154,8 +154,7 @@ export const AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS = 5_000;
 export interface ManualClose {
     /** Date.now() of the close. */
     at: number;
-    /** The caret known at the close, or null: the line an older host's
-     *  hold keeps to. */
+    /** The caret known at the close, or null: the line the hold keeps to. */
     caret: CaretState | null;
     /** The keyboard button, or a measured fall of the soft keyboard under the
      *  open bar (taken for Android's Back: imeFallIsAClose). Only the second
@@ -333,13 +332,27 @@ export function hideMayGoUnheard(caret: CaretState | null): boolean {
  * Does the person's close of the keyboard hold this raise back?
  *
  * Closing the keyboard is the one unambiguous "not now" the user can give,
- * and it STICKS: the panel covers half the screen, so "close it to read what
- * it covered, tap around in the text, watch it reopen (and the picture zoom
- * back in)" was the normal case, not the corner. While the focus stays in
- * text, a caret MOVED by a tap (in the same text box, or straight into
- * another one) is held back, however long after the close.
+ * and it STICKS on the line it was given over: the panel covers half the
+ * screen, so "close it to read what it covered, tap along the line again,
+ * watch it reopen (and the picture zoom back in)" was the normal case, not
+ * the corner. A caret MOVED by a tap along the line of the caret at the close
+ * (the address bar, the message box, the line of a document) is held back,
+ * however long after the close.
  *
- * What ends it (the caller drops the record):
+ * ONLY ON THAT LINE. A caret the tap moved to ANOTHER line is let through,
+ * and the caller drops the record: it is a new place to type. That is a tap
+ * straight into another text box (a form's next field, another app's text
+ * after its taskbar button, a text box on the page after the address bar),
+ * and the host says nothing in between: a Win32 text box's caret is
+ * destroyed and the next one's created in one message dispatch, and the host
+ * holds a caret for 1.2 s after it stops being measured (puca-input's
+ * CARET_HOLD), longer than any of those take. Held on every line (review of
+ * work/stage-taps, 2026-11-20), the keyboard never came up by itself again
+ * until it was opened by hand. It is also another line of the same text, a
+ * document's, which the host cannot tell from another text box: that one
+ * raises too, as it did before 2026-11-20.
+ *
+ * What else ends it (the caller drops the record):
  *  - ASKING — the keyboard opened by hand (its button, "Tap to type") or the
  *    soft keyboard coming up for any reason;
  *  - A TEXT BOX TAKING THE FOCUS — a measured caret where there was none
@@ -347,17 +360,21 @@ export function hideMayGoUnheard(caret: CaretState | null): boolean {
  *    a different one or the same one again. A raise for that is 'appeared',
  *    which is never held;
  *  - the caret's surface changing (a monitor switch: the record is the
- *    tracking's, and tracking starts again);
+ *    tracking's, and tracking starts again). A report from a surface other
+ *    than the close caret's is not compared with its line, and not held;
  *  - for a close from a fall of the IME, the app leaving the screen or
  *    coming back, the window's focus going or coming, or the screen turning,
  *    within IME_FALL_LIFECYCLE_MS after it (imeCloseTakenBack): the IME went
  *    down with that, not for the person.
  *
+ * No caret known at the close: every moved caret is held (the stage drops the
+ * record at the first measured caret after it anyway: textBoxTookFocus).
+ *
  * AN OLDER HOST'S CHROMIUM CARET (hideMayGoUnheard on the caret the tap
- * moved): the second of those may never come, so sticking there would hold
- * every Chromium text box off until the keyboard is opened by hand. Such a
- * raise keeps the rule every close had before 2026-11-20: held for 5 s, and
- * only on the line of the caret at the close (none known: the whole 5 s).
+ * moved): the focus may leave the text without this end hearing of it, and
+ * the next text box tapped on the same line (the address bar, after a page
+ * took the focus) would be held for good. Such a raise keeps the rule every
+ * close had before 2026-11-20: held for 5 s at most.
  */
 export function heldByManualClose(input: {
     close: ManualClose | null;
@@ -370,14 +387,17 @@ export function heldByManualClose(input: {
 }): boolean {
     const { close, verdict, before, report, now, surface } = input;
     if (close === null || !verdict.raise || verdict.reason !== 'moved') return false;
-    if (!hideMayGoUnheard(before)) return true;
     // `!(a <= b)` so a NaN timestamp fails OPEN: a broken record must not hold
     // the feature off.
-    if (!(now - close.at <= AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS) || now < close.at) return false;
-    if (!close.caret || !isMeasuredCaret(close.caret)) return true;
+    if (hideMayGoUnheard(before)
+        && (!(now - close.at <= AUTO_KEYBOARD_OLDER_HOST_CLOSE_MS) || now < close.at)) return false;
+    const at = close.caret;
+    if (!at || !isMeasuredCaret(at)) return true;
+    if ((at.surf !== null && report.surf !== null && at.surf !== report.surf)
+        || (at.mon !== null && report.mon !== null && at.mon !== report.mon)) return false;
     // "On the line of the caret at the close": the press's own tolerance,
     // with the new caret's centre standing in for the finger.
-    return pressOnCaretLine({ x: report.x, y: report.y + report.h / 2 }, close.caret, surface);
+    return pressOnCaretLine({ x: report.x, y: report.y + report.h / 2 }, at, surface);
 }
 
 /** Did a text box take the focus between these two reports: no measured

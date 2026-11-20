@@ -59,17 +59,19 @@
 //      window's title bar (its caret appearing on another line), a long
 //      press on a button on a caret's line, or a pinch over the text box;
 //      closed with its button, the keyboard stays closed for taps that move
-//      the caret in that text, 6 s later and on another line; while typing,
+//      the caret along the line it was closed on, 6 s later; while typing,
 //      a tap on a button a second after the caret last moved and a focused
 //      button reported by its box ('field') move no picture. CONTROLS: a tap
 //      that moves the caret to it raises the keyboard and zooms; Chromium's
 //      caret shown again in place (the box taking the focus back) raises it;
-//      a text box taking the focus after a close raises it; the text caret
-//      moving out of view moves the picture; closed over an OLDER host's
-//      Chromium caret (no `rev`), whose hide that agent never sends on a
-//      screen this wide, a text box tapped 6 s later raises it (CONTROL: the
-//      same from a current host, rev 2, stays closed). ONLY=taps runs just
-//      this.
+//      a text box taking the focus after a close raises it, on the line it
+//      was closed on; after a close, a tap straight into another text box
+//      (its caret on another line, no gap before it: review of the branch)
+//      raises it; the text caret moving out of view moves the picture;
+//      closed over an OLDER host's Chromium caret (no `rev`), whose hide that
+//      agent never sends on a screen this wide, the address bar tapped again
+//      6 s later raises it (CONTROL: the same from a current host, rev 2,
+//      stays closed). ONLY=taps runs just this.
 //
 // The black stage needs the Android IME's own report (the native keyboard
 // tier), which a desktop browser cannot produce; it is pinned in vitest
@@ -366,17 +368,17 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
         ck('9b: precondition: the keyboard button closed it', !s.bar, fmt(s));
         await tap(await clientOnMain(page, 1800, 700));     // the page; nothing is sent
         await page.waitForTimeout(5600);
-        await tap(await clientOnMain(page, 900, 300));      // a search box on the page
+        await tap(await clientOnMain(page, 300, 1070));     // the address bar again, on its line
         await page.waitForTimeout(150);
-        await caretOnMain(page, 900, 289, OLD);
+        await caretOnMain(page, 300, 1059, OLD);
         await page.waitForTimeout(800);
         s = await kbState(page);
-        ck('9b: closed over an older host\'s Chromium caret, whose hide never came: a text box tapped 6 s later raises the keyboard', kbUp(s), fmt(s));
+        ck('9b: closed over an older host\'s Chromium caret, whose hide never came: the address bar tapped again 6 s later raises the keyboard', kbUp(s), fmt(s));
         await ctx.close();
     }
     // 9b CONTROL: the same close and the same taps from a CURRENT host (rev
-    // 2), where a caret that moved with no hide before it is the focus going
-    // straight into another box: it stays closed, as 9d's do.
+    // 2), whose hide would have come: a caret that moved along the line it
+    // was closed on with no hide before it stays closed, as 9d's do.
     {
         const NEW = { src: 'msaa', rev: 2 };
         const { ctx, page, tap } = await tapsStage();
@@ -390,12 +392,12 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
         await tap(await kbButton(page));
         await page.waitForTimeout(600);
         await page.waitForTimeout(5600);
-        await tap(await clientOnMain(page, 900, 300));
+        await tap(await clientOnMain(page, 300, 1070));
         await page.waitForTimeout(150);
-        await caretOnMain(page, 900, 289, NEW);
+        await caretOnMain(page, 300, 1059, NEW);
         await page.waitForTimeout(800);
         s = await kbState(page);
-        ck('9b: CONTROL: a current host\'s caret moving straight into another box 6 s after the close leaves it closed', !s.bar, fmt(s));
+        ck('9b: CONTROL: a current host\'s caret moving along the line 6 s after the close leaves it closed', !s.bar, fmt(s));
         await ctx.close();
     }
     // 9c: what is not a tap into a text box at all: the desktop, a window's
@@ -431,10 +433,12 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
         ck('9c: a pinch over the text box (its caret moving meanwhile) raises no keyboard', !s.bar, fmt(s));
         await ctx.close();
     }
-    // 9d: closing the keyboard STICKS: taps that move the caret in the text
-    // it was closed over (past the old 5 s stand-down, and on another line,
-    // which used to count as a new text box) leave it closed; a text box
-    // taking the focus brings it back.
+    // 9d: closing the keyboard STICKS on its line: taps that move the caret
+    // along the line it was closed over (past the old 5 s stand-down) leave
+    // it closed; a text box taking the focus brings it back, and so does a
+    // tap straight into another text box, its caret on another line with no
+    // gap before it (review of the branch: held on every line, the keyboard
+    // never came up by itself again until it was opened by hand).
     {
         const { ctx, page, tap } = await tapsStage();
         await page.evaluate(() => window.__stage.pushCaret({ vis: false, mon: 0 }));
@@ -456,23 +460,36 @@ if (ONLY.length === 0 || ONLY.includes('taps')) {
         s = await kbState(page);
         ck('9d: closed, then the same text box tapped again 6 s later: the keyboard stays closed', !s.bar, fmt(s));
         ck('9d: …and the zoom stays where it was', s.t.scale === 1, fmt(s));
-        await tap(await clientOnMain(page, 700, 520));      // another line of the same text
+        await tap(await clientOnMain(page, 300, 1070));     // back along that line
         await page.waitForTimeout(150);
-        await caretOnMain(page, 700, 509);
+        await caretOnMain(page, 300, 1059);
         await page.waitForTimeout(800);
         s = await kbState(page);
-        ck('9d: …and so it does for another line of the text', !s.bar && s.t.scale === 1, fmt(s));
+        ck('9d: …and so it does further back along that line', !s.bar && s.t.scale === 1, fmt(s));
         // The focus leaves the text (a button: the host reports no caret),
-        // then a tap into a text box gives one the focus.
+        // then a tap into a text box gives one the focus: on the same line,
+        // so the gap alone is what opens it.
         await tap(await clientOnMain(page, 1800, 700));
         await page.evaluate(() => window.__stage.pushCaret({ vis: false, mon: 0 }));
         await page.waitForTimeout(300);
+        await tap(await clientOnMain(page, 450, 1070));
+        await page.waitForTimeout(150);
+        await caretOnMain(page, 450, 1059);
+        await page.waitForTimeout(800);
+        s = await kbState(page);
+        ck('9d: CONTROL: a text box taking the focus raises it again', kbUp(s), fmt(s));
+        // Closed again, then a tap straight into another text box: the caret
+        // moves to its line with nothing in between (a form's next field).
+        await tap(await kbButton(page));
+        await page.waitForTimeout(600);
+        s = await kbState(page);
+        ck('9d: precondition: closed again', !s.bar && s.t.scale === 1, fmt(s));
         await tap(await clientOnMain(page, 900, 300));
         await page.waitForTimeout(150);
         await caretOnMain(page, 900, 289);
         await page.waitForTimeout(800);
         s = await kbState(page);
-        ck('9d: CONTROL: a text box taking the focus raises it again', kbUp(s), fmt(s));
+        ck('9d: after a close, a tap straight into another text box (another line, no gap) raises the keyboard', kbUp(s), fmt(s));
         await ctx.close();
     }
     // 9e: while typing, the zoom moves for the text box's caret and for

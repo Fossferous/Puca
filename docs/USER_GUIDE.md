@@ -1039,14 +1039,18 @@ included), a link, the desktop, a window's title bar, a long press, a scroll,
 a pinch. Neither does a tap on a text box that already had the cursor and
 keeps it where it was (an empty search box, say): open the keyboard with
 **Keyboard** then. Close it with **Keyboard**, or with the phone's Back, and
-it stays closed while you tap around in that text; it comes up by itself
-again once the cursor has left the text and a text box takes it, or when you
-open it. The keyboard going down because you switched to another app, locked
-the phone or turned it is not closing it: back in Púca, the next tap into the
-text brings it up.
+it stays closed while your taps move the cursor along the line you closed it
+on (a text box beside it on that line counts as that line). It comes up by
+itself again when a tap puts the cursor on another line: in another text box
+(the next field of a form, another app, a text box on a web page after its
+address bar) or on another line of the same text, which Púca on the computer
+cannot tell apart. It also comes up again once the cursor has left the text
+and a text box takes it, and when you open it. The keyboard going down
+because you switched to another app, locked the phone or turned it is not
+closing it: back in Púca, the next tap into the text brings it up.
 (In Chrome, Edge and other Chromium-based apps on a computer whose
-Púca is not yet updated, it still comes back after five seconds, or on
-another line, as it did before.) With **Zoom to the text cursor while
+Púca is not yet updated, a tap along the line you closed it on still brings
+it back after five seconds, as it did before.) With **Zoom to the text cursor while
 typing** on, the picture zooms to the text cursor while the keyboard is up
 and follows it as you type; a tap on a button, or a button taking the focus,
 moves nothing, and the picture goes back to how it was when the keyboard

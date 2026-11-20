@@ -419,24 +419,38 @@ the focused element's box as `field`). The rules, and what each one is for:
   screen at once) the viewer sees the shape only as a first frame, and the
   focus leaving the text never. So for a caret such a host may have left
   standing (`hideMayGoUnheard`: `msaa`, no `rev`), a close keeps the rule it
-  had before: 5 s, on the line of the caret at the close.
-- **Closing sticks.** The keyboard button, or Android's Back taking the IME
-  down under the open bar (a measured fall: the native or visual-viewport
-  tier), records a close. While it stands, a raise for a caret the tap MOVED
-  is held, however long after and on whatever line: the host cannot tell the
-  same text box from one the focus went straight into. It ends when the
-  keyboard comes up (the button, "Tap to type"), when a measured caret
-  appears where there was none (the focus left the text and a text box took
-  it), and with the caret tracking (a monitor switch). An older host's
-  Chromium caret is the exception (above): the second of those may never
-  come.
+  had before: held 5 s at most (on the line of the caret at the close, as
+  every close is), or the address bar tapped again after a page took the
+  focus would be held for good.
+- **Closing sticks, on its line.** The keyboard button, or Android's Back
+  taking the IME down under the open bar (a measured fall: the native or
+  visual-viewport tier), records a close with the caret known then. While it
+  stands, a raise for a caret the tap MOVED along that caret's line (the
+  press's own tolerance, 1.5 caret heights) is held, however long after. A
+  caret the tap moved to ANOTHER line is raised for, and ends the close
+  (`deviceAutoKeyboard.heldByManualClose`): that is how a tap straight into
+  another text box arrives. The host reports no gap between the two carets:
+  a Win32 text box's caret is destroyed and the next one's created in one
+  message dispatch, and the sampler holds a caret 1.2 s after it stops being
+  measured (`puca_input::caret::CARET_HOLD`, for the blink), which also
+  bridges a window switch from the taskbar and a tier-2 hidden answer. Held
+  on every line, a form's next field, another app's text or a text box on a
+  page after its address bar would never bring the keyboard back until it
+  was opened by hand. Another line of
+  the same text arrives the same way and raises too, as before 2026-11-20;
+  a text box beside the closed one on its line is held. The close also ends
+  when the keyboard comes up (the button, "Tap to type"), when a measured
+  caret appears where there was none (the focus left the text and a text
+  box took it), and with the caret tracking (a monitor switch); a report
+  from another surface than the close's caret is not held. An older host's
+  Chromium caret also expires after 5 s (above).
 - **Only Back's fall is a close.** The native and visual-viewport tiers say
   that the IME went down, never why, and it goes down for more than Back:
   the app sent to the background (another app, a password manager), the
   screen locking, the phone turning or a fold opening, a system dialog or
   the shade taking the window's focus. Nothing brings it back on the way
-  back, so a close recorded for one of those held every tap into the text
-  until a text box took the focus. A fall is therefore no close while the
+  back, so a close recorded for one of those held the next taps into the
+  text until a text box took the focus. A fall is therefore no close while the
   page is hidden or within 1.5 s (`IME_FALL_LIFECYCLE_MS`) after
   `visibilitychange`, `pagehide`/`pageshow`, the window's own `blur`/`focus`,
   `orientationchange` (and `screen.orientation`'s `change`) or a resize to a
