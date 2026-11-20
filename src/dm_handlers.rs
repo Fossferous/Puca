@@ -160,7 +160,20 @@ pub(crate) struct Relationship {
 /// tombstone) OR a lookup that could not answer — both are refusals to every
 /// caller, and a query error must never read as a relationship.
 async fn relationship(pool: &sqlx::PgPool, me: i64, target: i64) -> Option<Relationship> {
-    match sqlx::query_as::<_, (bool, bool, bool, bool, bool)>(
+    match relationship_checked(pool, me, target).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("relationship: lookup failed for {} -> {}: {:?}", me, target, e);
+            None
+        }
+    }
+}
+
+/// [`relationship`] with the lookup's failure kept apart from "no live
+/// target", for a caller that answers a failure differently from a refusal
+/// (GET /files/:id answers 503 rather than 404, upload_handlers.rs).
+async fn relationship_checked(pool: &sqlx::PgPool, me: i64, target: i64) -> Result<Option<Relationship>, sqlx::Error> {
+    sqlx::query_as::<_, (bool, bool, bool, bool, bool)>(
         "SELECT EXISTS(SELECT 1 FROM blocked_users bl \
                        WHERE (bl.blocker_id = $1 AND bl.blocked_id = $2) \
                           OR (bl.blocker_id = $2 AND bl.blocked_id = $1)), \
@@ -182,16 +195,15 @@ async fn relationship(pool: &sqlx::PgPool, me: i64, target: i64) -> Option<Relat
     .bind(target)
     .fetch_optional(pool)
     .await
-    {
-        Ok(Some((blocked, friends, share_server, target_allows_server_dms, target_wrote_first))) => {
-            Some(Relationship { blocked, friends, share_server, target_allows_server_dms, target_wrote_first })
-        }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::error!("relationship: lookup failed for {} -> {}: {:?}", me, target, e);
-            None
-        }
-    }
+    .map(|row| {
+        row.map(|(blocked, friends, share_server, target_allows_server_dms, target_wrote_first)| Relationship {
+            blocked,
+            friends,
+            share_server,
+            target_allows_server_dms,
+            target_wrote_first,
+        })
+    })
 }
 
 /// The dm-keys rule, as a pure decision: friends, a shared server WHILE the
@@ -270,6 +282,18 @@ pub(crate) async fn users_share_identity_context(pool: &sqlx::PgPool, me: i64, t
         return true;
     }
     relationship(pool, me, target).await.map_or(false, |r| identity_context_allows(&r))
+}
+
+/// [`users_share_identity_context`], with a lookup that FAILED returned as
+/// `Err` instead of folded into `false`. The same rule; only the failure is
+/// kept apart, so GET /files/:id can answer a database fault with a 503 the
+/// client retries rather than a 404 it believes (the caller logs it). Every
+/// other caller keeps the folding function above.
+pub(crate) async fn try_users_share_identity_context(pool: &sqlx::PgPool, me: i64, target: i64) -> Result<bool, sqlx::Error> {
+    if me == target {
+        return Ok(true);
+    }
+    Ok(relationship_checked(pool, me, target).await?.map_or(false, |r| identity_context_allows(&r)))
 }
 
 /// Every account with a block in EITHER direction with `me`, in one query,
