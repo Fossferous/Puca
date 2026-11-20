@@ -15,11 +15,28 @@
 // must carry what a freeze came with (NACKs, PLIs, keyframes, bytes and the
 // RTP jitter), and those are only as real as the field names Chromium uses.
 //
-// SILENT: video only, from the fake camera; no audio track exists at all.
+// A FREEZE IN PROGRESS (2026-11-19: a share froze for 65 s and the overlay
+// said "0 freezes" all through it, because WebRTC counts a freeze only with
+// the frame that ends it). A canvas stream over the same kind of loopback,
+// read by the REAL sampler once a second as the overlay reads it:
+//   - every frame dropped at the receiver for 8 s (an encoded transform that
+//     forwards nothing: packets keep arriving, no frame decodes, as on a
+//     lossy path): the view says frozen within 4 s and counts up, while
+//     Chromium's own freezeCount stays where it was; frames back, the view
+//     clears and Chromium counts ONE freeze and no pause;
+//   - CONTROLS: the sender stops drawing for 8 s (no packets: Chromium counts
+//     a pause, not a freeze), the sender's track disabled (black frames at
+//     the full rate), and a share of a still canvas at about 1 fps (a frame
+//     every 1.25 s, so one second in five or more brings none, whatever the
+//     phase): never frozen, each premise checked from Chromium's counters
+//     first.
+//
+// SILENT: video only, from the fake camera and a canvas; no audio track
+// exists at all.
 //
 //   cd frontend && node e2e/stream-stats-real-browser.mjs
 //
-// No server and no build needed.
+// No server and no build needed. ~1.5 min.
 import { chromium } from '@playwright/test';
 import { build } from 'esbuild';
 import http from 'node:http';
@@ -181,6 +198,149 @@ if (r.h264Available) {
 } else {
     console.log('SKIP an H.264 stream names its profile (this browser offers no H.264)');
 }
+
+// ---- a freeze in progress, on a real loopback ------------------------------
+const fz = await page.evaluate(async () => {
+    const { StreamStatsSampler } = window.StreamStats;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+    /** A canvas stream to a receiver whose encoded transform can drop every
+     *  frame. `slow`: one frame per requestFrame, every 1.25 s. */
+    async function rig({ slow = false } = {}) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640; canvas.height = 360;
+        document.body.appendChild(canvas);
+        const ctx = canvas.getContext('2d');
+        let n = 0;
+        const draw = () => {
+            n++;
+            ctx.fillStyle = `hsl(${(n * 7) % 360} 70% 50%)`;
+            ctx.fillRect(0, 0, 640, 360);
+            ctx.fillStyle = '#fff';
+            ctx.font = '48px sans-serif';
+            ctx.fillText(String(n), 40, 120 + (n % 100));
+        };
+        const stream = canvas.captureStream(slow ? 0 : 30);
+        const track = stream.getVideoTracks()[0];
+        const state = { drawing: true, drop: false };
+        let timer;
+        if (slow) {
+            const tick = () => { draw(); track.requestFrame(); timer = setTimeout(tick, 1250); };
+            tick();
+        } else {
+            timer = setInterval(() => { if (state.drawing) draw(); }, 33);
+        }
+        const pc1 = new RTCPeerConnection();
+        const pc2 = new RTCPeerConnection({ encodedInsertableStreams: true });
+        pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+        pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+        pc1.addTrack(track, stream);
+        const got = new Promise((res) => {
+            pc2.ontrack = (e) => {
+                const { readable, writable } = e.receiver.createEncodedStreams();
+                readable.pipeThrough(new TransformStream({ transform(frame, c) { if (!state.drop) c.enqueue(frame); } })).pipeTo(writable);
+                res(e.receiver);
+            };
+        });
+        await pc1.setLocalDescription(await pc1.createOffer());
+        await pc2.setRemoteDescription(pc1.localDescription);
+        await pc2.setLocalDescription(await pc2.createAnswer());
+        await pc1.setRemoteDescription(pc2.localDescription);
+        const rx = await got;
+        // The overlay's sampler, with the endpoint as both managers build it.
+        const sampler = new StreamStatsSampler(() => [{
+            key: rx, direction: 'inbound', kind: 'video', getStats: () => rx.getStats(),
+            muted: () => rx.track.muted || rx.track.readyState !== 'live',
+        }]);
+        const reads = [];
+        const t0 = performance.now();
+        /** Sample once a second for `seconds`, each read labelled `phase`. */
+        const run = async (phase, seconds) => {
+            for (let i = 0; i < seconds; i++) {
+                const started = performance.now();
+                const v = await sampler.sample();
+                let raw = null;
+                (await rx.getStats()).forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'video') raw = s; });
+                reads.push({
+                    phase, t: Math.round(performance.now() - t0),
+                    frozenMs: v?.frozenMs ?? null, fps: v?.fps ?? null, freezes: v?.freezes ?? null, measured: v?.measured ?? false,
+                    decoded: raw?.framesDecoded ?? null, bytes: raw?.bytesReceived ?? null,
+                    freezeCount: raw?.freezeCount ?? null, pauseCount: raw?.pauseCount ?? null, muted: rx.track.muted,
+                });
+                await sleep(Math.max(0, 1000 - (performance.now() - started)));
+            }
+        };
+        const stop = () => { clearInterval(timer); clearTimeout(timer); pc1.close(); pc2.close(); track.stop(); canvas.remove(); };
+        return { state, track, run, reads, stop };
+    }
+
+    const a = await rig();
+    await a.run('flow', 5);
+    a.state.drop = true;
+    await a.run('dropped', 8);
+    a.state.drop = false;
+    await a.run('back', 5);
+    a.state.drawing = false;
+    await a.run('idle', 8);
+    a.state.drawing = true;
+    await a.run('drawing', 5);
+    a.track.enabled = false;
+    await a.run('disabled', 6);
+    a.track.enabled = true;
+    await a.run('enabled', 2);
+    a.stop();
+
+    const s = await rig({ slow: true });
+    await s.run('one-fps', 18);
+    s.stop();
+    return { reads: a.reads, slow: s.reads };
+});
+
+const phase = (name, list = fz.reads) => list.filter((x) => x.phase === name);
+const grew = (xs, k) => xs.length > 1 && xs[xs.length - 1][k] > xs[0][k];
+const flat = (xs, k) => xs.every((x) => x[k] === xs[0][k]);
+const before = (name, list = fz.reads) => list[list.indexOf(phase(name, list)[0]) - 1];
+const fmt = (xs) => xs.map((x) => `${x.phase}@${x.t}:${x.frozenMs ?? '-'}/${x.decoded}f/${x.bytes}B/fc${x.freezeCount}/pc${x.pauseCount}`).join(' ');
+
+// Frames dropped at the receiver: a real freeze.
+const dropped = phase('dropped');
+const back = phase('back');
+const frozenAt = dropped.findIndex((x) => x.frozenMs !== null);
+ck(grew(dropped, 'bytes') && flat(dropped.slice(1), 'decoded'),
+    'premise: with every frame dropped at the receiver, packets keep arriving and no frame is decoded', fmt(dropped));
+ck(dropped.every((x) => x.freezeCount === before('dropped').freezeCount),
+    'Chromium\'s freezeCount does not move while the picture is frozen (it counts a freeze when it ends)', fmt(dropped));
+ck(frozenAt >= 0 && frozenAt <= 4, 'the overlay says frozen within 4 s of the picture stopping', `first at read ${frozenAt} of the freeze`);
+const shown = dropped.slice(frozenAt).map((x) => x.frozenMs);
+ck(frozenAt >= 0 && shown.every((ms, k) => ms !== null && (k === 0 || ms > shown[k - 1])) && shown.at(-1) >= 5000,
+    'and it counts up, every read, to the freeze\'s length', JSON.stringify(shown));
+const cleared = back.findIndex((x) => x.frozenMs === null && x.decoded > dropped.at(-1).decoded);
+ck(cleared >= 0 && cleared <= 3 && back.slice(cleared).every((x) => x.frozenMs === null),
+    'frames back: the overlay stops saying frozen', fmt(back));
+ck(back.at(-1).freezeCount === before('dropped').freezeCount + 1 && back.at(-1).pauseCount === before('dropped').pauseCount,
+    'and Chromium then counts it: one freeze, no pause', `freezeCount ${before('dropped').freezeCount} -> ${back.at(-1).freezeCount}, pauseCount ${back.at(-1).pauseCount}`);
+ck(back.some((x) => x.freezes >= 1), 'the window\'s freezes count shows it once frames are back', JSON.stringify(back.map((x) => x.freezes)));
+
+// CONTROL: the sender stops sending. A pause, not a freeze.
+const idle = phase('idle');
+ck(flat(idle.slice(2), 'decoded') && flat(idle.slice(2), 'bytes'),
+    'premise: a sender that stops drawing sends nothing (no frame, no packet)', fmt(idle));
+ck(idle.every((x) => x.frozenMs === null), 'CONTROL: the sender stopping is never shown as frozen', fmt(idle));
+const drawing = phase('drawing');
+ck(drawing.at(-1).pauseCount === before('idle').pauseCount + 1 && drawing.at(-1).freezeCount === before('idle').freezeCount,
+    'and Chromium counts it as a pause, not a freeze', `pauseCount ${before('idle').pauseCount} -> ${drawing.at(-1).pauseCount}, freezeCount ${before('idle').freezeCount} -> ${drawing.at(-1).freezeCount}`);
+
+// CONTROL: the sender's track disabled: black frames, at the full rate.
+const disabled = phase('disabled');
+ck(disabled.slice(1).every((x) => x.fps >= 10), 'premise: a disabled sender track still sends frames (black ones)', JSON.stringify(disabled.map((x) => x.fps)));
+ck(disabled.every((x) => x.frozenMs === null), 'CONTROL: a disabled sender track is never shown as frozen', fmt(disabled));
+
+// CONTROL: a share of a still canvas at about 1 fps.
+const slow = fz.slow.filter((x) => x.measured);
+const frameless = slow.filter((x) => x.fps === 0).length;
+ck(frameless >= 3, 'premise: a share at a frame every 1.25 s has seconds with no frame (a "no frame this second" rule would fire)', `${frameless} of ${slow.length} reads`);
+ck(fz.slow.every((x) => x.frozenMs === null), 'CONTROL: a share at about 1 fps is never shown as frozen', fmt(fz.slow));
+ck(fz.slow.every((x) => !x.freezeCount), 'and Chromium agrees: no freeze counted', JSON.stringify(fz.slow.map((x) => x.freezeCount)));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 console.log(JSON.stringify({ inbound: i, outbound: o }, null, 1));

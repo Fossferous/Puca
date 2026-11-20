@@ -21,7 +21,7 @@ vi.mock('../api/rtc/streamStatsLive', () => ({
     },
 }));
 
-import { summariseStreamStats, StreamStatsSampler, formatKbps, type EndpointSample, type StreamStatsView } from '../api/rtc/streamStats';
+import { summariseStreamStats, StreamStatsSampler, formatKbps, formatFrozenFor, type EndpointSample, type StreamStatsView } from '../api/rtc/streamStats';
 import { StreamStatsOverlay, STREAM_STATS_INTERVAL_MS } from '../components/StreamStatsOverlay';
 
 type Row = Record<string, unknown>;
@@ -210,6 +210,177 @@ describe('the sampler', () => {
     });
 });
 
+/**
+ * A watched stream second by second, its counters as Chromium keeps them:
+ * second k's frames evenly spaced over (k, k+1], so the read at (k+1) s sees
+ * them all; totalInterFrameDelay is last frame minus first frame (libwebrtc's
+ * TotalFramesDurationMs), and a gap is added to freeze or pause totals only by
+ * the frame that ends it, the way VideoQualityObserver does.
+ */
+interface Second {
+    frames: number;
+    /** Packets arrive this second. Default: when frames do. */
+    bytes?: boolean;
+    /** Only retransmissions arrive (the bandwidth estimator's probes). */
+    rtx?: boolean;
+    /** Its first frame ends a gap WebRTC counts as a freeze / a pause. */
+    endsFreeze?: boolean;
+    endsPause?: boolean;
+}
+function watched(seconds: Second[], { interFrameDelay = true } = {}): Row[] {
+    let decoded = 0;
+    let bytes = 0;
+    let first: number | null = null;
+    let lastFrame: number | null = null;
+    let freezeCount = 0, freezeS = 0, pauseCount = 0, pauseS = 0;
+    let rtx = 0;
+    return seconds.map((s, k) => {
+        if (s.bytes ?? s.frames > 0) bytes += 100_000;
+        if (s.rtx) { bytes += 20_000; rtx += 20_000; }
+        for (let j = 1; j <= s.frames; j++) {
+            const t = k + j / s.frames;
+            if (j === 1 && lastFrame !== null) {
+                if (s.endsFreeze) { freezeCount++; freezeS += t - lastFrame; }
+                if (s.endsPause) { pauseCount++; pauseS += t - lastFrame; }
+            }
+            first ??= t;
+            lastFrame = t;
+            decoded++;
+        }
+        const row: Row = {
+            framesDecoded: decoded, bytesReceived: bytes, retransmittedBytesReceived: rtx, packetsReceived: bytes / 1000,
+            freezeCount, totalFreezesDuration: freezeS, pauseCount, totalPausesDuration: pauseS,
+        };
+        if (interFrameDelay) row.totalInterFrameDelay = lastFrame === null ? 0 : lastFrame - first!;
+        return row;
+    });
+}
+const secs = (n: number, s: Second): Second[] => Array.from({ length: n }, () => ({ ...s }));
+
+/** The sampler, read once a second over `rows` (one per read), as the
+ *  overlay drives it; each read's view. `muted(i)` / `id(i)`: read i's track
+ *  state and inbound-rtp id. */
+async function sampleEach(rows: Row[], opts: { muted?: (i: number) => boolean; id?: (i: number) => string } = {}) {
+    const vp8 = codec('C1', 'video/VP8');
+    let i = 0;
+    const sampler = new StreamStatsSampler(() => [{
+        key: KEY, direction: 'inbound' as const, kind: 'video',
+        getStats: async () => report(inbound({ ...rows[i], id: opts.id?.(i) ?? 'IN' }), vp8),
+        muted: () => opts.muted?.(i) ?? false,
+    }]);
+    const views: (StreamStatsView | null)[] = [];
+    let clock = 0;
+    for (; i < rows.length; i++) views.push(await sampler.sample(() => (clock += 1000)));
+    return views;
+}
+const KEY = {};
+const frozen = (views: (StreamStatsView | null)[]) => views.map((v) => v?.frozenMs ?? null);
+
+describe('a freeze in progress (WebRTC counts one only when it ends)', () => {
+    it('the field case: no frame for 12 s with packets still arriving reads frozen, ticking; frames back, the count takes over', async () => {
+        // 30 fps, then 12 s of packets and no decoded frame: freezeCount stays 0
+        // all through it, as Chromium's does (e2e/stream-stats-real-browser.mjs).
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(12, { frames: 0, bytes: true }), { frames: 30, endsFreeze: true }, { frames: 30 }]);
+        expect(rows[16].freezeCount).toBe(0);
+        const views = await sampleEach(rows);
+        expect(frozen(views)).toEqual([
+            null, null, null, null, null,
+            // The first second without a frame is not yet called one: its
+            // packets may be a frame still being decoded.
+            null, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000,
+            null, null,
+        ]);
+        expect(views[16]).toMatchObject({ fps: 0, freezes: 0, videoKbps: 800 });
+        // The frame that ends it is what WebRTC counts: the window's count shows.
+        expect(views[17]).toMatchObject({ frozenMs: null, freezes: 1 });
+        expect(views[18]).toMatchObject({ frozenMs: null, freezes: 0 });
+    });
+
+    it('CONTROL: a sender that stops sending (no packets) is a pause, not a freeze', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(12, { frames: 0, bytes: false }), { frames: 30, endsPause: true }]);
+        const views = await sampleEach(rows);
+        expect(frozen(views).every((f) => f === null)).toBe(true);
+        expect(views[17]).toMatchObject({ freezes: 0 });
+    });
+
+    it('CONTROL: a stopped sender\'s bandwidth probes (old packets resent) are not new packets', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(8, { frames: 0, bytes: false, rtx: true })]);
+        expect(frozen(await sampleEach(rows)).every((f) => f === null)).toBe(true);
+    });
+
+    it('a freeze whose packets then stop for 5 s becomes a pause, as WebRTC will count it', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(3, { frames: 0, bytes: true }), ...secs(8, { frames: 0, bytes: false })]);
+        const f = frozen(await sampleEach(rows));
+        expect(f.slice(5)).toEqual([null, 2000, 3000, 4000, 5000, 6000, 7000, null, null, null, null]);
+    });
+
+    it('a gap that has been a pause stays one until a frame comes, packets or not (WebRTC counts it all as the pause)', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(8, { frames: 0, bytes: false }), ...secs(4, { frames: 0, bytes: true }),
+            { frames: 30, endsPause: true }, ...secs(3, { frames: 0, bytes: true })]);
+        const f = frozen(await sampleEach(rows));
+        expect(f.slice(5, 18).every((x) => x === null)).toBe(true);
+        // A frame ends the pause; the next gap is judged afresh.
+        expect(f.slice(18)).toEqual([null, 2000, 3000]);
+    });
+
+    it('CONTROL: a muted track\'s still picture is not a freeze, the same reports otherwise are', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(8, { frames: 0, bytes: true })]);
+        expect(frozen(await sampleEach(rows, { muted: (i) => i >= 5 })).every((f) => f === null)).toBe(true);
+        expect(frozen(await sampleEach(rows)).at(-1)).toBe(8000);
+    });
+
+    it('CONTROL: a 1 fps share of a still screen is not frozen when a second goes by without a frame', async () => {
+        // Frames 800 and 1200 ms apart (Chromium repeats a still screen's
+        // frame about once a second): every other second has none.
+        const rows = watched([{ frames: 1 }, ...Array.from({ length: 20 }, (_, k) => ({ frames: k % 2 ? 2 : 0 }))]);
+        const views = await sampleEach(rows);
+        expect(views.filter((v) => v?.fps === 0).length).toBeGreaterThan(5); // a "no frame this second" rule would have fired
+        expect(frozen(views).every((f) => f === null)).toBe(true);
+    });
+
+    it('CONTROL: the threshold is the stream\'s own pace — 2 s with packets and no frame is a freeze at 30 fps, not at 1 fps', async () => {
+        const gap = secs(2, { frames: 0, bytes: true });
+        const fast = frozen(await sampleEach(watched([...secs(10, { frames: 30 }), ...gap])));
+        const slow = frozen(await sampleEach(watched([...secs(10, { frames: 1 }), ...gap])));
+        expect(fast.at(-1)).toBe(2000);
+        expect(slow.at(-1)).toBeNull();
+        // ...and a 1 fps stream that stays stuck past 3 x its pace is frozen.
+        const stuck = frozen(await sampleEach(watched([...secs(10, { frames: 1 }), ...secs(4, { frames: 0, bytes: true })])));
+        expect(stuck.slice(10)).toEqual([null, null, 3000, 4000]);
+    });
+
+    it('CONTROL: no measurement yet — a first read, and fewer than 5 frames to set a pace, are never frozen', async () => {
+        const views = await sampleEach(watched([{ frames: 3 }, ...secs(6, { frames: 0, bytes: true })]));
+        expect(views[0]).toMatchObject({ measured: false, frozenMs: null });
+        expect(frozen(views).every((f) => f === null)).toBe(true);
+    });
+
+    it('opened on a picture that is already frozen: frozen from the overlay\'s third read, counted from its first', async () => {
+        // Minutes of 30 fps before the overlay opened; its pace is the lifetime counters'.
+        const rows = watched([...secs(120, { frames: 30 }), ...secs(30, { frames: 0, bytes: true })]).slice(125);
+        const f = frozen(await sampleEach(rows));
+        expect(f.slice(0, 4)).toEqual([null, null, 2000, 3000]);
+    });
+
+    it('a browser without totalInterFrameDelay still finds it, from the frames per read', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(4, { frames: 0, bytes: true })], { interFrameDelay: false });
+        expect(frozen(await sampleEach(rows)).slice(5)).toEqual([null, 2000, 3000, 4000]);
+    });
+
+    it('a new stream on the receiver (another SSRC) starts over instead of diffing across', async () => {
+        const rows = watched([...secs(5, { frames: 30 }), ...secs(4, { frames: 0, bytes: true })]);
+        const f = frozen(await sampleEach(rows, { id: (i) => (i < 7 ? 'IN' : 'IN2') }));
+        expect(f.slice(5)).toEqual([null, 2000, null, null]);
+    });
+
+    it('says how long in words that fit a phone', () => {
+        expect(formatFrozenFor(400)).toBe('1 s');
+        expect(formatFrozenFor(12_900)).toBe('12 s');
+        expect(formatFrozenFor(60_000)).toBe('1 min');
+        expect(formatFrozenFor(65_400)).toBe('1 min 5 s');
+    });
+});
+
 describe('the overlay', () => {
     let container: HTMLDivElement;
     let root: Root;
@@ -230,7 +401,7 @@ describe('the overlay', () => {
     const base: StreamStatsView = {
         direction: 'inbound', size: '1920x1080', fps: 60, videoKbps: 6200, audioKbps: 128, codec: 'H264 High',
         implementation: 'D3D11VideoDecoder', hardware: true, lossPct: 0.5, jitterBufferMs: 40, rttMs: 24,
-        framesDropped: 2, freezes: 1, limit: null, targetKbps: null, transport: 'UDP', viewers: null, measured: true,
+        framesDropped: 2, freezes: 1, frozenMs: null, limit: null, targetKbps: null, transport: 'UDP', viewers: null, measured: true,
     };
     const text = () => container.textContent ?? '';
     async function mount(views: StreamStatsView[]) {
@@ -261,6 +432,19 @@ describe('the overlay', () => {
         expect(text()).toContain('3 viewers');
         expect(text()).toContain('software (OpenH264)');
         expect(text()).toContain('target 6.5 Mbps');
+    });
+
+    it('a frozen picture says so, ticking, in place of "0 freezes"; frames back, the count is back', async () => {
+        const still = { ...base, fps: 0, framesDropped: 0, freezes: 0, lossPct: 31, videoKbps: 2100 };
+        await mount([{ ...still, frozenMs: 12_400 }, { ...still, frozenMs: 13_400 }, { ...base, freezes: 1 }]);
+        expect(text()).toContain('1920×1080 · 0 fps');
+        expect(text()).toContain('Frozenfor 12 s');
+        expect(text()).not.toContain('freezes');
+        await act(async () => { vi.advanceTimersByTime(STREAM_STATS_INTERVAL_MS); await Promise.resolve(); });
+        expect(text()).toContain('Frozenfor 13 s');
+        await act(async () => { vi.advanceTimersByTime(STREAM_STATS_INTERVAL_MS); await Promise.resolve(); });
+        expect(text()).not.toContain('Frozen');
+        expect(text()).toContain('2 frames · 1 freezes');
     });
 
     it('a first read says "measuring", never a fake zero', async () => {

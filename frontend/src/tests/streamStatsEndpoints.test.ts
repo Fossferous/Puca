@@ -49,6 +49,21 @@ describe('mesh: rtpEndpointsFor', () => {
         const mgr = new WebRTCManager();
         expect(mgr.rtpEndpointsFor([t('x')])).toEqual([]);
     });
+
+    it('a watched track that is muted or ended says so (its still picture is not a freeze)', () => {
+        const mgr = new WebRTCManager();
+        const track = { id: 'their-screen', kind: 'video', muted: false, readyState: 'live' };
+        const theirs = track as unknown as MediaStreamTrack;
+        const peers = (mgr as unknown as { peers: Map<number, unknown> }).peers;
+        peers.set(1, { connection: { getReceivers: () => [endpoint(theirs)], getSenders: () => [] } });
+        const [e] = mgr.rtpEndpointsFor([theirs]);
+        expect(e.muted?.()).toBe(false);
+        track.muted = true;
+        expect(e.muted?.()).toBe(true);
+        track.muted = false;
+        track.readyState = 'ended';
+        expect(e.muted?.()).toBe(true);
+    });
 });
 
 describe('SFU: rtpEndpointsFor', () => {
@@ -81,6 +96,26 @@ describe('SFU: rtpEndpointsFor', () => {
 
     it('nothing when not in an SFU call', () => {
         expect(withRoom(null).rtpEndpointsFor([t('x')])).toEqual([]);
+    });
+
+    it('a watched publication the sender muted, or a muted or ended track, says so', () => {
+        const track = { id: 'their-screen', kind: 'video', muted: false, readyState: 'live' };
+        const theirs = track as unknown as MediaStreamTrack;
+        const pub = { isMuted: false, track: { mediaStreamTrack: theirs, receiver: { getStats: vi.fn(async () => new Map()) } } };
+        const m = withRoom({
+            remoteParticipants: new Map([['u1', { trackPublications: new Map([['p1', pub]]) }]]),
+            localParticipant: { trackPublications: new Map() },
+        });
+        const [e] = m.rtpEndpointsFor([theirs]);
+        expect(e.muted?.()).toBe(false);
+        pub.isMuted = true;
+        expect(e.muted?.()).toBe(true);
+        pub.isMuted = false;
+        track.muted = true;
+        expect(e.muted?.()).toBe(true);
+        track.muted = false;
+        track.readyState = 'ended';
+        expect(e.muted?.()).toBe(true);
     });
 });
 
