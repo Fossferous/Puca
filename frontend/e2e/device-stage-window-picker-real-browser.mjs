@@ -248,11 +248,20 @@ const iconPixels = (page, windowIdSel) => page.evaluate(sel => {
     await page.keyboard.press('Escape');
     await sleep(150);
     ck('desktop: Escape closes the picker, and is not sent', (await page.$('.dswp-picker')) === null && keyFrames(await inputs(page)).length === 0);
+    // Zoomed in on the screen first: a window chosen opens at Fit, not at the
+    // screen's zoom (which showed some corner of the window).
+    await screenMenu();
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await page.keyboard.press('Escape');
+    const zoomed = (await page.evaluate(() => window.__stage.transform()))?.scale ?? 1;
     await screenMenu();
     await page.getByRole('menuitem', { name: 'Show one window…' }).click();
     await page.waitForSelector('.dswp-row[data-window="65568:4200"]');
     await page.locator('.dswp-row[data-window="65568:4200"]').click();
     ck('desktop: a click on a row shows that window', await waitFor(page, () => document.querySelector('[data-testid="window-chip"] .dswp-chip-title')?.textContent === 'Inbox - Mail'));
+    const atFit = (await page.evaluate(() => window.__stage.transform()))?.scale ?? 1;
+    ck('desktop: …at Fit, though the screen was zoomed in before', zoomed > 1.2 && atFit === 1, `${zoomed} -> ${atFit}`);
     // Whole screen from the Screen menu too.
     await screenMenu();
     await page.getByRole('menuitem', { name: 'Whole screen' }).click();

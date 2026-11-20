@@ -137,7 +137,8 @@ describe('what the viewer is told', () => {
     test('each way back to the whole screen has its sentence; one the viewer asked for has none', () => {
         expect(windowEndWords('closed', 'Notepad')).toBe('“Notepad” was closed. Showing the whole screen.');
         expect(windowEndWords('minimized', 'Notepad')).toMatch(/was minimised\. Showing the whole screen\. Choose it again/);
-        expect(windowEndWords('offscreen', null)).toMatch(/^That window moved to another screen/);
+        expect(windowEndWords('offscreen', null)).toMatch(/^That window moved off this screen/);
+        expect(windowEndWords('hidden', 'Discord')).toBe('“Discord” was hidden, or moved to another desktop. Showing the whole screen.');
         expect(windowEndWords('unshared', 'X')).toMatch(/a screen that was not shared/);
         expect(windowEndWords('screen', 'X')).toMatch(/screens on that computer changed/);
         expect(windowEndWords('asked', 'X')).toBeNull();
@@ -194,6 +195,11 @@ describe('the frames hostAgent.ts writes to the agent', () => {
     test('the status poll\'s window fields, read only when well-formed', () => {
         expect(windowStatusFields({ window: 66_000, window_front: false, window_monitor: 1 } as never))
             .toEqual({ window: 66_000, windowFront: false, windowMonitor: 1 });
+        expect(windowStatusFields({ window: 66_000, window_width: 900, window_height: 700 } as never))
+            .toEqual({ window: 66_000, windowFront: true, windowWidth: 900, windowHeight: 700 });
+        expect(windowStatusFields({ window: 66_000, window_width: 0, window_height: 700 } as never))
+            .toEqual({ window: 66_000, windowFront: true });
+        expect(windowStatusFields({ window_end: 'hidden' } as never)).toEqual({ windowEnd: 'hidden' });
         expect(windowStatusFields({ window: 66_000 } as never)).toEqual({ window: 66_000, windowFront: true });
         expect(windowStatusFields({ window_end: 'offscreen', window_end_monitor: 2 } as never))
             .toEqual({ windowEnd: 'offscreen', windowEndMonitor: 2 });

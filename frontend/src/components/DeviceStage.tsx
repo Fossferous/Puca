@@ -2731,6 +2731,22 @@ export function DeviceStage() {
         }
     }, [sessionActiveId, gestures]);
 
+    // ONE WINDOW: a window chosen, another one, or the whole screen again is
+    // another picture of another shape, so it opens at Fit with the pointer
+    // centred, as a new session does — a 3x zoom on a screen carried onto a
+    // window showed some corner of it.
+    const shownWindowKey = session?.activeWindow ? `${session.activeWindow.hwnd}:${session.activeWindow.pid}` : null;
+    const shownWindowSeenRef = useRef<{ id: string | null; key: string | null } | null>(null);
+    useEffect(() => {
+        const seen = shownWindowSeenRef.current;
+        shownWindowSeenRef.current = { id: sessionActiveId, key: shownWindowKey };
+        // The first look at a session is the session reset's (above).
+        if (!seen || seen.id !== sessionActiveId || seen.key === shownWindowKey) return;
+        gestures.reset(0.5, 0.5);
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reset keyed on the window shown, not a render-cascading mirror of props
+        setTransform({ scale: 1, x: 0, y: 0 });
+    }, [sessionActiveId, shownWindowKey, gestures]);
+
     // ABOVE the `if (!session) return null` below, and it must stay there: a
     // hook after an early return is called conditionally, which is React error
     // #310 and takes the whole app down via the root ErrorBoundary. That exact

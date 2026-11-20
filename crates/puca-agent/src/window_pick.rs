@@ -315,6 +315,10 @@ pub enum Gone {
     /// The window closed, or its handle now belongs to another program.
     Closed,
     Minimized,
+    /// It was hidden (an app put away in the tray when its X is pressed) or
+    /// cloaked (moved to another virtual desktop, or that desktop left): its
+    /// rectangle is still there, with something else drawn in it.
+    Hidden,
     /// No part of it is on the screen being captured (moved to another one).
     Offscreen,
     /// The capture itself changed under it: another screen was chosen, or the
@@ -327,6 +331,7 @@ impl Gone {
         match self {
             Gone::Closed => "closed",
             Gone::Minimized => "minimized",
+            Gone::Hidden => "hidden",
             Gone::Offscreen => "offscreen",
             Gone::Screen => "screen",
         }
@@ -377,6 +382,8 @@ pub(crate) trait WindowOs {
     /// The process that owns it now.
     fn pid(&self, hwnd: i64) -> u32;
     fn iconic(&self, hwnd: i64) -> bool;
+    /// It is showing: visible and not cloaked (the list's own test).
+    fn shown(&self, hwnd: i64) -> bool;
     /// Its rectangle in PHYSICAL desktop pixels (the DWM frame bounds).
     fn rect(&self, hwnd: i64) -> Option<Rect>;
     /// The screen holding most of it, by HMONITOR.
@@ -450,6 +457,11 @@ impl WindowTrack {
         self.crop
     }
 
+    /// Its screen's physical rectangle, as the crop is worked out against it.
+    pub(crate) fn mon_phys(&self) -> Rect {
+        self.mon_phys
+    }
+
     /// The size of its screen's picture when it was chosen: what the crop is
     /// worked out against until a picture of the screen is in hand.
     pub(crate) fn screen_size(&self) -> (u32, u32) {
@@ -482,6 +494,12 @@ impl WindowTrack {
         }
         if os.iconic(hwnd) {
             return Tick::Gone(Gone::Minimized);
+        }
+        // A window hidden to the tray, or cloaked on another virtual desktop,
+        // keeps its rectangle; cropping it would show (and click) whatever is
+        // drawn there now.
+        if !os.shown(hwnd) {
+            return Tick::Gone(Gone::Hidden);
         }
         let Some(win) = os.rect(hwnd) else {
             // A window that will not say where it is, for one look, is not
@@ -588,6 +606,9 @@ pub struct WindowStatus {
     pub front: bool,
     /// Another screen holds most of it now (HMONITOR).
     pub elsewhere: Option<isize>,
+    /// What the picture shows of it, physical pixels: the viewer's surface
+    /// for the caret, which a resize changes.
+    pub size: Option<(u32, u32)>,
 }
 
 /// Where a crop of a picture can be read WITHOUT copying it: the byte offset
@@ -764,6 +785,9 @@ mod live {
         }
         fn iconic(&self, h: i64) -> bool {
             unsafe { IsIconic(hwnd(h)) }.as_bool()
+        }
+        fn shown(&self, h: i64) -> bool {
+            unsafe { IsWindowVisible(hwnd(h)) }.as_bool() && !cloaked(hwnd(h))
         }
         fn rect(&self, h: i64) -> Option<Rect> {
             frame_bounds(hwnd(h))
@@ -1388,6 +1412,7 @@ mod tests {
         alive: bool,
         pid: u32,
         iconic: bool,
+        shown: bool,
         rect: Option<Rect>,
         monitor: Option<isize>,
         fg: Option<u32>,
@@ -1402,6 +1427,9 @@ mod tests {
         fn iconic(&self, _h: i64) -> bool {
             self.iconic
         }
+        fn shown(&self, _h: i64) -> bool {
+            self.shown
+        }
         fn rect(&self, _h: i64) -> Option<Rect> {
             self.rect
         }
@@ -1414,7 +1442,7 @@ mod tests {
     }
 
     fn desk() -> Desk {
-        Desk { alive: true, pid: 42, iconic: false, rect: Some(r(100, 100, 800, 600)), monitor: Some(7), fg: Some(42) }
+        Desk { alive: true, pid: 42, iconic: false, shown: true, rect: Some(r(100, 100, 800, 600)), monitor: Some(7), fg: Some(42) }
     }
 
     fn track() -> WindowTrack {
@@ -1451,10 +1479,13 @@ mod tests {
     #[test]
     fn a_window_that_closes_is_minimised_or_leaves_its_screen_goes_back_to_the_whole_screen() {
         let t0 = Instant::now();
-        let cases: [(Gone, fn(&mut Desk)); 4] = [
+        let cases: [(Gone, fn(&mut Desk)); 5] = [
             (Gone::Closed, |d| d.alive = false),
             (Gone::Closed, |d| d.pid = 99), // the handle reused by another program
             (Gone::Minimized, |d| d.iconic = true),
+            // Hidden to the tray, or cloaked on another virtual desktop: its
+            // rectangle is still there (review, 2026-11-20).
+            (Gone::Hidden, |d| d.shown = false),
             (Gone::Offscreen, |d| d.rect = Some(r(2500, 0, 800, 600))),
         ];
         for (want, change) in cases {

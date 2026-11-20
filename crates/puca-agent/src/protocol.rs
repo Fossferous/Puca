@@ -685,6 +685,12 @@ pub enum Response {
         window_end: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_end_monitor: Option<usize>,
+        /// What the picture shows of the window now, physical pixels (a
+        /// resize changes it): the viewer's surface for the caret.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_height: Option<u32>,
     },
     /// Answer to `PrepareScreen`. `state` is `ready` (answer the offer now),
     /// `waking` / `starting` (ask again shortly; `starting` means the virtual
@@ -846,6 +852,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
@@ -864,6 +872,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
@@ -885,6 +895,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false}"#,
@@ -903,6 +915,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no_frame"}"#,
@@ -925,6 +939,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"input_blocked":"valheim.exe","pointer_captured":true}"#,
@@ -946,6 +962,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":1}"#,
@@ -964,6 +982,8 @@ mod tests {
                 window_monitor: None,
                 window_end: None,
                 window_end_monitor: None,
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no-screen:lid"}"#,
@@ -1038,9 +1058,11 @@ mod tests {
                 window_monitor: Some(1),
                 window_end: None,
                 window_end_monitor: None,
+                window_width: Some(900),
+                window_height: Some(700),
             })
             .unwrap(),
-            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":0,"window":66000,"window_front":false,"window_monitor":1}"#,
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":0,"window":66000,"window_front":false,"window_monitor":1,"window_width":900,"window_height":700}"#,
         );
         assert_eq!(
             serde_json::to_string(&Response::SessionState {
@@ -1056,6 +1078,8 @@ mod tests {
                 window_monitor: None,
                 window_end: Some("offscreen".into()),
                 window_end_monitor: Some(1),
+                window_width: None,
+                window_height: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"monitor":0,"window_end":"offscreen","window_end_monitor":1}"#,

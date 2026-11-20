@@ -1108,9 +1108,10 @@ above the bottom bar on a phone, goes back to the whole screen.
   the part on the screen that holds most of it.
 - Moving the window keeps it in the picture; resizing it changes the
   picture's shape once you stop. Dragged to another screen, the picture
-  follows it there if that screen was shared. If the window is closed or
-  minimised, or moves to a screen that was not shared, the picture goes back
-  to the whole screen and says why.
+  follows it there if that screen was shared. If the window is closed,
+  minimised or hidden (an app that goes to the tray when you press its X, or
+  a switch to another desktop), or moves to a screen that was not shared, the
+  picture goes back to the whole screen and says why.
 - A program running as administrator can be watched this way, but Windows
   does not let remote clicks and keys reach it; the list says so.
 - Only the windows on screens the person at that computer shared are listed.

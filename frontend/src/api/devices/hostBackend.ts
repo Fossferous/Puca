@@ -60,6 +60,9 @@ export interface HostSessionStatus {
     windowMonitor?: number;
     windowEnd?: string;
     windowEndMonitor?: number;
+    /** What the picture shows of the window now (a resize changes it). */
+    windowWidth?: number;
+    windowHeight?: number;
 }
 
 /** The host's open windows as its agent lists them (crates/puca-agent

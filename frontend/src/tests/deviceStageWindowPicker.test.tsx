@@ -8,7 +8,7 @@
  * walk (e2e/device-stage-window-picker-real-browser.mjs) measures layout,
  * touch targets and contrast; this pins the behaviour.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DeviceControlSession } from '../api/devices/session';
@@ -42,7 +42,7 @@ function snapshot(over: Partial<DeviceControlSession> = {}): DeviceControlSessio
 
 let root: Root;
 let host: HTMLDivElement;
-let onClose: ReturnType<typeof vi.fn>;
+let onClose: Mock<() => void>;
 function render(s: DeviceControlSession, touch = false) {
     act(() => { root.render(<DeviceStageWindowPicker session={s} touch={touch} onClose={onClose} />); });
 }
@@ -66,7 +66,7 @@ beforeEach(() => {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
-    onClose = vi.fn();
+    onClose = vi.fn<() => void>();
     h.requestWindowList.mockClear();
     h.chooseWindow.mockClear();
 });

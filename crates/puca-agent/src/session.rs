@@ -108,7 +108,24 @@ static LAST_AIM_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(N
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WindowAim {
     pub monitor: usize,
+    /// The target as the stream last worked it out...
     pub target: puca_input::TargetMonitor,
+    /// ...and what it was worked out from: the shown rectangle and its
+    /// screen's, physical. A re-aim after the desktop changed (a monitor
+    /// plugged in moves the virtual desktop every absolute move is normalised
+    /// over) lays these fractions over the screen's FRESH whole-screen target
+    /// rather than reuse one made for the old desktop.
+    pub shown: crate::window_pick::Rect,
+    pub mon_phys: crate::window_pick::Rect,
+}
+
+/// The target for a recorded window, over `fresh` (the screen's whole-screen
+/// target read now) when there is one, else as recorded.
+pub(crate) fn window_aim_target(aim: &WindowAim, fresh: Option<puca_input::TargetMonitor>) -> puca_input::TargetMonitor {
+    match fresh {
+        Some(whole) => crate::window_pick::window_target(aim.shown, aim.mon_phys, whole),
+        None => aim.target,
+    }
 }
 static WINDOW_AIM: std::sync::Mutex<Option<(String, WindowAim)>> = std::sync::Mutex::new(None);
 
@@ -135,10 +152,10 @@ pub(crate) fn window_aim_for(
     record: Option<&(String, WindowAim)>,
     session_id: &str,
     monitor: usize,
-) -> Option<puca_input::TargetMonitor> {
+) -> Option<WindowAim> {
     record
         .filter(|(sid, a)| sid == session_id && a.monitor == monitor)
-        .map(|(_, a)| a.target)
+        .map(|(_, a)| *a)
 }
 
 /// `line` if it differs from the last one recorded in `last` (which it then
@@ -454,6 +471,7 @@ pub(crate) struct WindowState {
     pub monitor: Option<usize>,
     pub end: Option<String>,
     pub end_monitor: Option<usize>,
+    pub size: Option<(u32, u32)>,
 }
 
 /// `SessionState`'s window fields for one stream's status. Pure, so the shape
@@ -476,6 +494,7 @@ pub(crate) fn window_state(
             monitor: index_of(st.elsewhere),
             end: None,
             end_monitor: None,
+            size: st.size,
         },
         None => WindowState {
             end: st.ended.map(|g| g.code().to_string()),
@@ -1084,7 +1103,11 @@ impl Agent {
         // A window shown on its own from this screen keeps the input
         // (`WINDOW_AIM`).
         let window = WINDOW_AIM.lock().ok().and_then(|w| window_aim_for(w.as_ref(), session_id, monitor));
-        let target = window.or_else(|| resolve_target(monitor, &outputs, &list));
+        let whole = resolve_target(monitor, &outputs, &list);
+        let target = match window {
+            Some(aim) => Some(window_aim_target(&aim, whole)),
+            None => whole,
+        };
         // LOGGED ON CHANGE. Absolute moves are mapped onto this rectangle, and
         // nothing recorded it: "the pointer landed on a screen nobody was
         // watching" and "it landed where it should" were indistinguishable in
@@ -2085,6 +2108,8 @@ impl Agent {
                     window_monitor: w.monitor,
                     window_end: w.end,
                     window_end_monitor: w.end_monitor,
+                    window_width: w.size.map(|x| x.0),
+                    window_height: w.size.map(|x| x.1),
                 }
             }
 
@@ -3133,11 +3158,26 @@ mod tests {
         let t = |left| puca_input::TargetMonitor {
             left, top: 0, width: 100, height: 100, virt_left: 0, virt_top: 0, virt_width: 1920, virt_height: 1080,
         };
-        let rec = ("s1".to_string(), WindowAim { monitor: 1, target: t(300) });
-        assert_eq!(window_aim_for(Some(&rec), "s1", 1).map(|x| x.left), Some(300));
+        let phys = crate::window_pick::Rect { left: 0, top: 0, width: 1920, height: 1080 };
+        let shown = crate::window_pick::Rect { left: 480, top: 270, width: 960, height: 540 };
+        let rec = ("s1".to_string(), WindowAim { monitor: 1, target: t(300), shown, mon_phys: phys });
+        assert_eq!(window_aim_for(Some(&rec), "s1", 1).map(|x| x.target.left), Some(300));
         assert!(window_aim_for(Some(&rec), "s1", 0).is_none(), "another screen of the same session aims whole");
         assert!(window_aim_for(Some(&rec), "s2", 1).is_none(), "another session aims whole");
         assert!(window_aim_for(None, "s1", 1).is_none());
+        // Re-aimed after the desktop changed: the window's fractions over the
+        // screen's fresh target, with the fresh virtual desktop (review,
+        // 2026-11-20: the recorded one kept the old desktop for a second).
+        let mut fresh = t(1000);
+        fresh.width = 1920;
+        fresh.height = 1080;
+        fresh.virt_left = -1920;
+        fresh.virt_width = 3840;
+        let aim = window_aim_for(Some(&rec), "s1", 1).unwrap();
+        let now = window_aim_target(&aim, Some(fresh));
+        assert_eq!((now.left, now.top, now.width, now.height), (1480, 270, 960, 540));
+        assert_eq!((now.virt_left, now.virt_width), (-1920, 3840));
+        assert_eq!(window_aim_target(&aim, None).left, 300, "nothing to read: as recorded");
     }
 
     #[test]
@@ -3153,7 +3193,7 @@ mod tests {
         };
         assert_eq!(
             window_state(Some(showing), &outs),
-            WindowState { window: Some(77), front: Some(false), monitor: Some(2), end: None, end_monitor: None },
+            WindowState { window: Some(77), front: Some(false), monitor: Some(2), end: None, end_monitor: None, size: None },
         );
         let ended = WindowStatus { ended: Some(Gone::Offscreen), ended_on: Some(0x20), ..Default::default() };
         assert_eq!(

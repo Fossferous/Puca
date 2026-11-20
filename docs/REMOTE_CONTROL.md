@@ -461,7 +461,12 @@ invisible resize border `GetWindowRect` adds. The agent is DPI-unaware on
 purpose and `SendInput` normalises over the virtualised GDI desktop (session.rs
 `CaptureSurface`), so input is aimed by the crop's FRACTIONS of its screen laid
 over that screen's GDI rectangle (`window_target`), never by the physical
-numbers: on a 150% screen those differ by the scale (2560 against 1707). The
+numbers: on a 150% screen those differ by the scale (2560 against 1707).
+The agent keeps the window's target per session (`WINDOW_AIM`), so a
+whole-screen re-aim of that session's screen (after a switch or a topology
+rebuild) aims at the window instead, its fractions laid over the screen's
+FRESH whole-screen target: a monitor plugged in moves the virtual desktop
+every absolute move is normalised over. The
 viewer's pointer fractions are of the window's picture, so an absolute move
 lands inside the window. Game mode's relative moves are not confined; a game
 confines them itself. The caret surface is the crop too, so the phone's zoom
@@ -480,6 +485,10 @@ itself, and says why in `SessionState.window_end` (`Gone`):
   now (a handle is reused once its window closes, so a window is always named
   by its HWND and its pid);
 - **`minimized`**: `IsIconic`;
+- **`hidden`**: no longer visible, or cloaked: an app hidden to the tray when
+  its X is pressed (Discord, Steam, Teams), or a switch to another virtual
+  desktop. Its rectangle stays, with something else drawn in it, so cropping
+  it would show and click that;
 - **`offscreen`**: less than 16 px of it is on the capture's screen, with
   `window_end_monitor` the screen it is on now;
 - **`screen`**: the capture moved to another index or another screen (a
@@ -495,7 +504,22 @@ nothing is, the viewer is told the window went to a screen that was not
 shared. A screen chosen in the viewer's picker while a window is shown means
 that screen, whole: the host drops the window first (the agent keeps a window
 across a switch to the screen it is already on). A media restart starts a new
-stream on the whole screen; the host app selects the window again on it.
+stream on the whole screen; the host app selects the window again on it, a few
+times a second apart while the new stream is still opening its capture.
+
+**The host app and the agent never disagree for long** (review, 2026-11-20).
+A `SetWindow` the agent has not applied by its 2 s deadline is refused when
+its turn comes (`command_gate`, like `SetMonitor`), not applied seconds later
+behind a host app that already told the viewer it failed. And the status poll
+reconciles: an agent showing a window this side does not (or another one) is
+told to show the whole screen, and the viewer told if it had one; a window the
+agent no longer has and gives no reason for (an agent replaced under the
+session) ends as `screen`; a follow that fails also has the agent let go of
+the old window. A resize that settled reaches the viewer as the window's new
+size (`window_width` / `window_height`), the surface its caret is mapped over.
+A screen switch asked for while a window choice is half done (its `SetMonitor`
+in, its `SetWindow` not yet) is refused rather than undone by it. A window
+pushed off its own screen is never "followed" onto that same screen.
 
 **Bringing it forward.** Choosing a window restores it if it is minimised
 (`ShowWindowAsync(SW_RESTORE)`: posted, never waited on, so a hung program
@@ -534,7 +558,9 @@ server relays what it cannot read, and no route changed:
 - viewer → host `list-windows {rid}`; host → viewer `windows {rid, windows}`,
   then `window-icons {rid, icons}` frames of at most 36 KB each (the server
   refuses a device signal over 64 KB, and sealing adds a third), or
-  `windows-failed {rid, reason}`;
+  `windows-failed {rid, reason}`. The list's own frame is measured in UTF-8
+  BYTES, as it is sealed: a title from outside the Basic Multilingual Plane is
+  two UTF-16 units but four bytes;
 - viewer → host `set-window {hwnd, pid}` or `{hwnd: null}` for the whole
   screen; host → viewer `window-active {window | null, reason?}`,
   `window-failed {reason}` and `window-front {front}`.

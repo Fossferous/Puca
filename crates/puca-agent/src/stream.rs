@@ -225,6 +225,12 @@ pub enum StreamCommand {
     /// picture now shows (physical pixels), or None for the whole screen.
     SetWindow {
         generation: u64,
+        /// As for SetMonitor: a caller that gave up marks it cancelled, and a
+        /// choice that waited out its deadline in the queue (the stream still
+        /// opening its capture) is refused rather than applied seconds later
+        /// behind the back of a host app that told the viewer it failed.
+        deadline: Instant,
+        cancelled: Arc<AtomicBool>,
         window: Option<crate::window_pick::WindowRef>,
         reply_tx: std::sync::mpsc::Sender<Result<Option<(u32, u32)>, StreamCommandError>>,
     },
@@ -508,14 +514,34 @@ impl Stream {
         timeout: Duration,
     ) -> Result<Option<(u32, u32)>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + timeout;
         self.command_tx
-            .send(StreamCommand::SetWindow { generation: self.generation, window, reply_tx: tx })
+            .send(StreamCommand::SetWindow {
+                generation: self.generation,
+                deadline,
+                cancelled: cancelled.clone(),
+                window,
+                reply_tx: tx,
+            })
             .map_err(|_| "stream dead".to_string())?;
+        let answer = |res: Result<Option<(u32, u32)>, StreamCommandError>| match res {
+            Ok(shown) => Ok(shown),
+            Err(StreamCommandError::ConstructionFailed(why)) => Err(why),
+            Err(e) => Err(format!("{e:?}")),
+        };
         match rx.recv_timeout(timeout) {
-            Ok(Ok(shown)) => Ok(shown),
-            Ok(Err(StreamCommandError::ConstructionFailed(why))) => Err(why),
-            Ok(Err(e)) => Err(format!("{e:?}")),
-            Err(_) => Err("timeout".to_string()),
+            Ok(res) => answer(res),
+            Err(_) => {
+                // Not applied from here on (the arm checks it first); one
+                // the loop was already applying answers within a moment, and
+                // that answer is the truth.
+                cancelled.store(true, Ordering::Relaxed);
+                match rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(res) => answer(res),
+                    Err(_) => Err("timeout".to_string()),
+                }
+            }
         }
     }
 
@@ -2063,9 +2089,9 @@ fn run(
                         }
                     }
                 }
-                StreamCommand::SetWindow { generation: gen, window: want, reply_tx } => {
-                    if gen != generation {
-                        let _ = reply_tx.send(Err(StreamCommandError::GenerationMismatch { expected: generation, actual: gen }));
+                StreamCommand::SetWindow { generation: gen, deadline, cancelled, window: want, reply_tx } => {
+                    if let Err(e) = command_gate(generation, gen, &cancelled, deadline) {
+                        let _ = reply_tx.send(Err(e));
                         continue;
                     }
                     let Some(want) = want else {
@@ -2103,16 +2129,24 @@ fn run(
                                     active: Some(want),
                                     front: track.front,
                                     elsewhere: track.elsewhere,
+                                    size: shown,
                                     ..Default::default()
                                 };
                             }
                             window = Some(track);
-                            if let Some(t) = window.as_mut().and_then(|t| t.retarget()) {
-                                crate::session::set_window_aim(
-                                    &session_id,
-                                    Some(crate::session::WindowAim { monitor: current_monitor, target: t }),
-                                );
-                                puca_input::set_target(Some(t));
+                            if let Some(t) = window.as_mut() {
+                                if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown()) {
+                                    crate::session::set_window_aim(
+                                        &session_id,
+                                        Some(crate::session::WindowAim {
+                                            monitor: current_monitor,
+                                            target,
+                                            shown: shown_rect,
+                                            mon_phys: t.mon_phys(),
+                                        }),
+                                    );
+                                    puca_input::set_target(Some(target));
+                                }
                             }
                         caret_surf += 1;
                         if caret_tracker.is_some() {
@@ -3209,18 +3243,25 @@ fn run(
                     };
                     match look {
                         Tick::Showing => {
-                            if let Some(target) = t.retarget() {
+                            if let (Some(target), Some(shown_rect)) = (t.retarget(), t.shown()) {
                                 crate::session::set_window_aim(
                                     &session_id,
-                                    Some(crate::session::WindowAim { monitor: t.monitor, target }),
+                                    Some(crate::session::WindowAim {
+                                        monitor: t.monitor,
+                                        target,
+                                        shown: shown_rect,
+                                        mon_phys: t.mon_phys(),
+                                    }),
                                 );
                                 puca_input::set_target(Some(target));
                                 window_moved = true;
                             }
+                            let size = t.shown().map(|r| (r.width.max(0) as u32, r.height.max(0) as u32));
                             if let Ok(mut st) = window_status.lock() {
-                                if st.front != t.front || st.elsewhere != t.elsewhere {
+                                if st.front != t.front || st.elsewhere != t.elsewhere || st.size != size {
                                     st.front = t.front;
                                     st.elsewhere = t.elsewhere;
+                                    st.size = size;
                                 }
                             }
                             t.crop()
@@ -4073,6 +4114,7 @@ fn start_window(
         Tick::Showing => Ok(track),
         Tick::Gone(Gone::Closed) => Err("that window has closed".into()),
         Tick::Gone(Gone::Minimized) => Err("that window is minimised".into()),
+        Tick::Gone(Gone::Hidden) => Err("that window is hidden, or on another desktop".into()),
         Tick::Gone(Gone::Offscreen) => Err("too little of that window is on its screen to show".into()),
         Tick::Gone(Gone::Screen) => Err("the screen changed".into()),
     }

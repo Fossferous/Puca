@@ -2637,4 +2637,122 @@ describe('one window on its own', () => {
         expect(setMonitor).not.toHaveBeenCalled();
         expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'unshared' }));
     });
+
+    // ---- review round 1 (2026-11-20): host and agent never left disagreeing.
+
+    async function poll() {
+        await sessionMod.pollSecureDesktop();
+        await settle();
+    }
+
+    it('an agent showing a window this side does not is told to show the whole screen', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        // A choice that timed out here and was applied there after all.
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 0, window: 999 };
+        setWindow.mockClear();
+        await poll();
+        expect(setWindow).toHaveBeenCalledWith('ds-test', null);
+        // And with one shown, the agent showing ANOTHER: dropped, and the viewer told.
+        // (No status while choosing, so the 1 Hz poll cannot act in between.)
+        statusReply = null;
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 101 };
+        setWindow.mockClear();
+        const before = sent.length;
+        await poll();
+        expect(setWindow).toHaveBeenCalledWith('ds-test', null);
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'screen' }));
+    });
+
+    it('a shown window the agent no longer has, and says nothing about, is ended (an agent replaced under it)', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1 };
+        const before = sent.length;
+        await poll();
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'screen' }));
+    });
+
+    it('a follow that fails leaves nothing cropped on the agent', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        setMonitor.mockRejectedValueOnce(new Error('that monitor is already reserved by another streaming session'));
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 102, windowMonitor: 2 };
+        setWindow.mockClear();
+        const before = sent.length;
+        await poll();
+        expect(setWindow, 'the agent is told to stop cropping').toHaveBeenCalledWith('ds-test', null);
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'offscreen' }));
+    });
+
+    it('a window pushed off its own screen is not "followed" onto that same screen', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, windowEnd: 'offscreen', windowEndMonitor: 1 };
+        setMonitor.mockClear();
+        setWindow.mockClear();
+        const before = sent.length;
+        await poll();
+        expect(setWindow).not.toHaveBeenCalledWith('ds-test', { hwnd: 102, pid: 2 });
+        expect(setMonitor).not.toHaveBeenCalled();
+        expect(await frames(key, before)).toContainEqual(expect.objectContaining({ kind: 'window-active', window: null, reason: 'offscreen' }));
+    });
+
+    it('a resize that settled reaches the viewer as the window\'s new size', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        statusReply = { secureDesktop: false, streamLive: true, monitor: 1, window: 102, windowWidth: 1200, windowHeight: 800 };
+        const before = sent.length;
+        await poll();
+        const told = (await frames(key, before)).find(f => f.kind === 'window-active');
+        expect(told?.window).toEqual(expect.objectContaining({ hwnd: 102, width: 1200, height: 800 }));
+        // The same size again says nothing more.
+        const again = sent.length;
+        await poll();
+        expect((await frames(key, again)).filter(f => f.kind === 'window-active')).toEqual([]);
+    });
+
+    it('a screen asked for while a window choice is half done is refused, not undone by it', async () => {
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        await listed(key);
+        let release: (v: { width: number; height: number; front: boolean }) => void = () => {};
+        setWindow.mockImplementationOnce(() => new Promise(r => { release = r; }));
+        await signal(key, { kind: 'set-window', hwnd: 102, pid: 2 });
+        setMonitor.mockClear();
+        const before = sent.length;
+        await signal(key, { kind: 'set-monitor', monitor: 0 });
+        expect(setMonitor).not.toHaveBeenCalled();
+        expect(await sentKinds(key, before)).toContain('monitor-failed');
+        release({ width: 900, height: 700, front: true });
+        await settle();
+        // POSITIVE CONTROL: once it is done, the same press switches.
+        await signal(key, { kind: 'set-monitor', monitor: 0 });
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 0);
+    });
+
+    it('the list is measured in BYTES against the relay\'s cap, so titles in another script still fit', async () => {
+        // 160 characters from outside the Basic Multilingual Plane (rare CJK
+        // ideographs): two UTF-16 units each but FOUR bytes once sealed.
+        const cjk = '\u{20000}'.repeat(160);
+        listWindows.mockImplementationOnce(async () => ({
+            windows: Array.from({ length: 64 }, (_, i) => ({ hwnd: 1000 + i, pid: 1, title: cjk, app: '应用程序', monitor: 0 })),
+            icons: {},
+        }));
+        const key = await streaming(sessionMod.ALL_DISPLAYS);
+        const list = (await listed(key)).find(f => f.kind === 'windows') as { windows: unknown[] };
+        // The premise: counted in UTF-16 units, the whole list "fits", which
+        // is how it used to be measured.
+        const whole = Array.from({ length: 64 }, (_, i) => ({ hwnd: 1000 + i, pid: 1, title: cjk, app: '应用程序', monitor: 0 }));
+        expect(JSON.stringify(whole).length).toBeLessThan(36_000);
+        expect(new TextEncoder().encode(JSON.stringify(whole)).length).toBeGreaterThan(36_000);
+        const bytes = new TextEncoder().encode(JSON.stringify(list.windows)).length;
+        expect(bytes).toBeLessThanOrEqual(36_000);
+        expect(list.windows.length, 'cut from the back, not all dropped').toBeGreaterThan(10);
+        expect(list.windows.length).toBeLessThan(64);
+    });
 });

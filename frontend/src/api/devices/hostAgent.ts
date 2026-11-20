@@ -87,6 +87,8 @@ interface AgentReply {
     window_monitor?: number;
     window_end?: string;
     window_end_monitor?: number;
+    window_width?: number;
+    window_height?: number;
     /** `start_stream` (`streaming`): the screen the stream ACTUALLY captures,
      *  present only when the agent steered off the one asked for.
      *  `session_state`: the screen the session's live stream shows now, which
@@ -107,6 +109,11 @@ export function windowStatusFields(reply: AgentReply): Partial<HostSessionStatus
         out.windowFront = reply.window_front !== false;
         const m = index(reply.window_monitor);
         if (m !== undefined) out.windowMonitor = m;
+        const dim = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0 && v <= 16_384;
+        if (dim(reply.window_width) && dim(reply.window_height)) {
+            out.windowWidth = reply.window_width;
+            out.windowHeight = reply.window_height;
+        }
     } else if (isWindowEndReason(reply.window_end)) {
         out.windowEnd = reply.window_end;
         const m = index(reply.window_end_monitor);

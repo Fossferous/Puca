@@ -7,7 +7,7 @@
   window, sized to it, and your clicks and keys go to it. It is brought to the
   front, and restored if it was minimised. **Whole screen**, beside the
   window's name in the bar (above the bottom bar on a phone), goes back. If
-  the window is closed or minimised there, or moves to a screen that was not
+  the window is closed, minimised or hidden there, or moves to a screen that was not
   shared, the picture goes back to the whole screen and says why; dragged to
   a screen that was shared, it is followed. Windows on screens the person at
   that computer did not share are never listed. Not offered at the sign-in

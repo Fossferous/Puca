@@ -1312,12 +1312,27 @@ async function showHostWindow(s: Internal, w: RemoteWindow, monitor: number): Pr
  *    was not.
  */
 function hostWindowFromStatus(s: Internal, st: Partial<HostSessionStatus>): void {
+    if (s.windowBusy) return;
     const shown = s.windowShown;
-    if (!shown || s.windowBusy) return;
+    // THE AGENT SHOWS A WINDOW THIS SIDE DOES NOT (a choice that timed out
+    // here and was applied there after all, a follow that half-happened): the
+    // viewer is told the whole screen, so the whole screen it is. Never left
+    // to disagree — the viewer would have no Whole screen button for a crop
+    // its clicks land in.
+    if (typeof st.window === 'number' && st.window !== shown?.hwnd) {
+        void dropAgentWindow(s, shown ? 'screen' : null);
+        return;
+    }
+    if (!shown) return;
     const follow = (monitor: number) => {
         s.windowBusy = true;
         void showHostWindow(s, shown, monitor)
-            .catch(() => endHostWindow(s, 'offscreen'))
+            .catch(async () => {
+                // Whatever the agent was left showing goes too: the viewer
+                // is about to be told the whole screen.
+                await dropAgentWindow(s, null);
+                endHostWindow(s, 'offscreen');
+            })
             .finally(() => { s.windowBusy = false; });
     };
     if (st.window === shown.hwnd) {
@@ -1326,19 +1341,41 @@ function hostWindowFromStatus(s: Internal, st: Partial<HostSessionStatus>): void
             s.windowFrontTold = front;
             void sendSignal(s, { kind: 'window-front', front }).catch(() => { s.windowFrontTold = null; });
         }
+        // A resize settled: the viewer's surface for the caret follows.
+        if (typeof st.windowWidth === 'number' && typeof st.windowHeight === 'number'
+            && (st.windowWidth !== shown.width || st.windowHeight !== shown.height)) {
+            shown.width = st.windowWidth;
+            shown.height = st.windowHeight;
+            void sendSignal(s, { kind: 'window-active', window: shownFrame(shown), front }).catch(() => undefined);
+        }
         if (typeof st.windowMonitor === 'number' && st.windowMonitor !== shown.monitor
             && monitorWithinConsent(s.consentedMonitor, st.windowMonitor)) {
             follow(st.windowMonitor);
         }
         return;
     }
-    if (st.window !== undefined) return;
-    if (st.windowEnd === 'offscreen' && typeof st.windowEndMonitor === 'number') {
+    if (st.windowEnd === 'offscreen' && typeof st.windowEndMonitor === 'number'
+        && st.windowEndMonitor !== shown.monitor) {
         if (monitorWithinConsent(s.consentedMonitor, st.windowEndMonitor)) follow(st.windowEndMonitor);
         else endHostWindow(s, 'unshared');
         return;
     }
-    if (isWindowEndReason(st.windowEnd)) endHostWindow(s, st.windowEnd);
+    // Gone by itself, with its reason; or gone with none (an agent replaced
+    // under the session, a stream restarted): the screen changed under it.
+    endHostWindow(s, isWindowEndReason(st.windowEnd) ? st.windowEnd : 'screen');
+}
+
+/** HOST: have the agent show the whole screen (best effort), and, with a
+ *  reason, tell the viewer the window it was told of is gone. */
+async function dropAgentWindow(s: Internal, reason: WindowEndReason | null): Promise<void> {
+    s.windowBusy = true;
+    try {
+        const backend = await getHostBackend();
+        await backend.setWindow?.(s.id, null).catch(() => undefined);
+    } finally {
+        s.windowBusy = false;
+    }
+    if (reason) endHostWindow(s, reason);
 }
 
 /** HOST: a stream (re)started: say the window choice is on offer, and carry a
@@ -1350,8 +1387,23 @@ async function afterWindowStreamStart(s: Internal): Promise<void> {
     if (!shown || s.windowBusy || !canPickWindows(s)) return;
     s.windowBusy = true;
     try {
-        await showHostWindow(s, shown, shown.monitor);
+        // A new stream processes nothing until its capture is open, which
+        // can take a few seconds on a display waking up: a choice that timed
+        // out in the queue is dropped there (the agent's deadline), so it is
+        // asked again here, a few times, rather than given up at once.
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await showHostWindow(s, shown, shown.monitor);
+                return;
+            } catch (e) {
+                const busy = e instanceof Error && /timeout|DeadlineExpired|Cancelled/.test(e.message);
+                if (!busy || attempt >= 3 || s.phase === 'ended' || sessions.get(s.id) !== s) throw e;
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
     } catch {
+        s.windowBusy = false;
+        await dropAgentWindow(s, null);
         endHostWindow(s, 'screen');
     } finally {
         s.windowBusy = false;
@@ -1369,7 +1421,11 @@ async function serveWindowList(s: Internal, rid: string): Promise<void> {
         let offered = windowsWithinConsent(list.windows, s.consentedMonitor, ALL_DISPLAYS).slice(0, MAX_WINDOWS);
         // One frame: a list that would not fit is cut from the back (the
         // windows furthest behind), never sent in a frame the relay refuses.
-        while (offered.length > 0 && JSON.stringify(offered).length > ICON_FRAME_BUDGET) {
+        // In BYTES, as sealed: a title in another script is three of them a
+        // character, and counting characters let a list of CJK titles past
+        // this into a frame the relay refuses.
+        const bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
+        while (offered.length > 0 && bytes(offered) > ICON_FRAME_BUDGET) {
             offered = offered.slice(0, -1);
         }
         s.windowsListed = new Map(offered.map(w => [windowId(w), w]));
@@ -2834,6 +2890,7 @@ export async function pollSecureDesktop(): Promise<void> {
                 windowFields = {
                     window: status.window, windowFront: status.windowFront, windowMonitor: status.windowMonitor,
                     windowEnd: status.windowEnd, windowEndMonitor: status.windowEndMonitor,
+                    windowWidth: status.windowWidth, windowHeight: status.windowHeight,
                 };
             } catch {
                 // sessionStatus swallows its own errors; this is belt and
@@ -6855,6 +6912,13 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     kind: 'monitor-failed',
                     reason: 'The person at that computer shared only one screen.',
                 });
+                return;
+            }
+            // A window choice (or a follow) is half done: its setMonitor may
+            // be in, its setWindow not yet. Switching now would be undone by
+            // it, so this waits for the next press.
+            if (s.windowBusy) {
+                void sendSignal(s, { kind: 'monitor-failed', reason: 'A window is still being shown. Try again in a moment.' });
                 return;
             }
             void (async () => {
