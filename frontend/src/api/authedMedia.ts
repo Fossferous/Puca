@@ -64,10 +64,12 @@
  *     what tells of a server that went away and came back, where the network
  *     never did) makes every component still showing its fallback for a
  *     transient reason ask again, once per such event and still one job per
- *     id (onFileRecoveryChance). The same event cuts short a wait that was our
- *     own backoff (never one the server asked for), and one arriving while an
- *     attempt is out makes its failure try again at once: that attempt may
- *     have begun before the connection came back;
+ *     id (onFileRecoveryChance). The same event cuts short the part of a
+ *     wait that is our own backoff (never what the server asked for), and one
+ *     arriving while an attempt is out makes its failure try again as soon as
+ *     the server allows, past the job's limits if need be (at most
+ *     FILE_EXTRA_ATTEMPTS times): that attempt may have begun before the way
+ *     was clear, and a component on its fallback listens only after a give-up;
  *   - at most MAX_FILE_FETCHES of these requests run at once, the rest queued
  *     in order, so a page's first paint (every avatar in the member list,
  *     every server icon, every emoji: one render's effects) cannot fill the
@@ -75,7 +77,10 @@
  *     on HTTP/2, where the browser's six-connections-per-host limit does not
  *     apply and a hundred requests leave at once; the ceiling is also shared
  *     with the attachment loader (its own 2 + 4, api/attachments.ts) and with
- *     every other device behind the same address;
+ *     every other device behind the same address. So a request whose answer
+ *     has not begun within FILE_ANSWER_TIMEOUT_MS is let go and tried again,
+ *     rather than hold a slot (and everything queued behind it) until a CDN
+ *     gives up on its origin;
  *   - a give-up, a refusal and a load that took more than one attempt each
  *     write one `[media-diag]` line (the console, and puca.log through the
  *     desktop shell): the status and the attempts, a short prefix of the file
@@ -114,8 +119,20 @@ export const FILE_RETRY_BASE_MS = 2000;
 export const FILE_RETRY_MAX_BACKOFF_MS = 30_000;
 /** A Retry-After is honoured up to this (a bogus header must not park a job). */
 export const FILE_RETRY_MAX_ASKED_MS = 60_000;
-/** A job never runs longer than this, whatever the server asks. */
+/** A job never runs longer than this, whatever the server asks... */
 export const FILE_RETRY_TOTAL_MS = 90_000;
+/** ...except for this many attempts more, each right after a chance to
+ *  recover arrived while the attempt before it was out (that one's failure
+ *  may be from before the way was clear again, and a component still on its
+ *  fallback listens for chances only once the job has given up). */
+export const FILE_EXTRA_ATTEMPTS = 2;
+/** An attempt whose answer has not BEGUN to arrive by now is given up as a
+ *  network failure (and tried again): a request that hangs (a CDN holds one
+ *  up to 100 s for an origin that does not answer) must not hold one of the
+ *  MAX_FILE_FETCHES slots and every picture queued behind it. Only the
+ *  answer's start is timed, never its body: a mode's background is a big
+ *  picture and a phone's link a slow one. */
+export const FILE_ANSWER_TIMEOUT_MS = 30_000;
 
 function remember(fileId: string, url: string): void {
     // Oldest-first eviction (Map preserves insertion order).
@@ -155,17 +172,34 @@ type Answer =
     | { kind: 'transient'; status: number; retryAfterMs?: number }
     | { kind: 'signed-out' };
 
-/** One request for the file's bytes and its (normalised) type. Never throws. */
-async function getFile(fileId: string): Promise<Answer> {
+/** One request for the file's bytes and its (normalised) type. `stop` ends
+ *  it (a sign-out). */
+async function getFile(fileId: string, stop?: AbortSignal): Promise<Answer> {
     const token = getToken();
     if (!token) return { kind: 'signed-out' };
+    const request = new AbortController();
+    const onStop = () => request.abort();
+    if (stop?.aborted) request.abort();
+    else stop?.addEventListener('abort', onStop, { once: true });
+    try {
+        return await answerOf(fileId, token, request);
+    } finally {
+        stop?.removeEventListener('abort', onStop);
+    }
+}
+
+async function answerOf(fileId: string, token: string, request: AbortController): Promise<Answer> {
     let res: Response;
+    const timer = setTimeout(() => request.abort(), FILE_ANSWER_TIMEOUT_MS);
     try {
         res = await fetch(`${API_BASE_URL}/files/${fileId}`, {
             headers: { Authorization: `Bearer ${token}` },
+            signal: request.signal,
         });
     } catch {
-        return { kind: 'transient', status: 0 };   // offline, reset, DNS, aborted
+        return { kind: 'transient', status: 0 };   // offline, reset, DNS, timed out
+    } finally {
+        clearTimeout(timer);
     }
     if (!res.ok) {
         // An error body is a line of text (a proxy's page at most): read it so
@@ -226,6 +260,9 @@ interface Job {
     wakeable: boolean;
     /** Takes the queued attempt out of the line. */
     unqueue: AbortController | null;
+    /** Ends the request that is out (only a sign-out does: one that lands
+     *  after everyone left is still worth its place in the cache). */
+    request: AbortController | null;
 }
 
 /** Jobs running (queued, fetching or waiting to try again), by file id. */
@@ -245,6 +282,7 @@ function finish(job: Job, outcome: FileUrlOutcome): void {
     if (inflight.get(job.fileId) === job) inflight.delete(job.fileId);
     job.wake?.();
     job.unqueue?.abort();
+    job.request?.abort();
     job.settle(outcome);
     syncRecoveryListeners();
 }
@@ -272,6 +310,17 @@ function join(job: Job, signal: AbortSignal | undefined): void {
 }
 
 const withJitter = (ms: number) => ms + Math.floor(Math.random() * ms * 0.2);
+
+/** Wait `ms`; `wakeable`: a chance to recover may end it early. */
+function sleep(job: Job, ms: number, wakeable: boolean): Promise<void> {
+    job.phase = 'sleeping';
+    job.wakeable = wakeable;
+    return new Promise<void>((resolve) => {
+        const end = () => { clearTimeout(timer); job.wake = null; resolve(); };
+        const timer = setTimeout(end, ms);
+        job.wake = end;
+    });
+}
 
 /** `[media-diag] …` lines, at most this many a minute (a server that went
  *  away for everyone gives up on every picture at once). */
@@ -304,6 +353,7 @@ async function runJob(job: Job): Promise<void> {
     const { fileId } = job;
     const started = Date.now();
     let backoff = FILE_RETRY_BASE_MS;
+    let extra = FILE_EXTRA_ATTEMPTS;
     const seen: string[] = [];
     for (let attempt = 1; ; attempt++) {
         // The chances counted when the request goes out (not while it queues).
@@ -311,17 +361,24 @@ async function runJob(job: Job): Promise<void> {
         job.phase = 'queued';
         const unqueue = new AbortController();
         job.unqueue = unqueue;
+        const request = new AbortController();
+        job.request = request;
         let answer: Answer;
         try {
             answer = await fileLimiter.schedule({
-                run: () => { job.phase = 'fetching'; seq = recoverySeq; return getFile(fileId); },
+                run: () => { job.phase = 'fetching'; seq = recoverySeq; return getFile(fileId, request.signal); },
                 urgency: () => 0,
                 signal: unqueue.signal,
             });
         } catch {
-            return;   // taken out of the line: finished already (nobody waits, or signed out)
+            // Taken out of the line (finished already: nobody waits, or signed
+            // out), or the attempt itself threw: then end it here, or it would
+            // never answer and its id would stay "running" for the session.
+            finish(job, RETRYABLE_NULL);
+            return;
         }
         job.unqueue = null;
+        job.request = null;
         // Signed out while it was out: nothing of it is the next account's.
         if (job.done) return;
         if (answer.kind === 'ok') {
@@ -339,26 +396,31 @@ async function runJob(job: Job): Promise<void> {
         }
         seen.push(statusWord(answer.status));
         if (job.waiters === 0) { finish(job, RETRYABLE_NULL); return; }
-        const asked = answer.retryAfterMs !== undefined ? Math.min(answer.retryAfterMs, FILE_RETRY_MAX_ASKED_MS) : undefined;
+        // The server's wait, never cut short (at most a minute: a bogus header must not park the job).
+        const floor = answer.retryAfterMs !== undefined ? Math.min(answer.retryAfterMs, FILE_RETRY_MAX_ASKED_MS) : 0;
         // Something said the way may be clear again while this attempt was out:
-        // its failure may be from before, so try again now, unless the server
-        // itself named a wait.
-        const wait = asked === undefined && recoverySeq !== seq ? 0 : withJitter(Math.max(asked ?? 0, backoff));
+        // its failure may be from before, so try again as soon as the server
+        // allows rather than after our own backoff.
+        const chanced = recoverySeq !== seq;
+        const wait = chanced ? floor : withJitter(Math.max(floor, backoff));
         backoff = Math.min(backoff * 2, FILE_RETRY_MAX_BACKOFF_MS);
-        if (attempt >= FILE_ATTEMPTS || Date.now() - started + wait > FILE_RETRY_TOTAL_MS) {
+        const spent = attempt >= FILE_ATTEMPTS || Date.now() - started + wait > FILE_RETRY_TOTAL_MS;
+        if (spent && !(chanced && extra > 0)) {
             logMediaDiag(`picture gave up: last=${statusWord(answer.status)} attempts=${attempt} after=${Math.round((Date.now() - started) / 1000)}s seen=${seen.join(',')} file=${shortId(fileId)}`);
             finish(job, RETRYABLE_NULL);
             return;
         }
+        if (spent) extra--;
         if (wait > 0) {
-            job.phase = 'sleeping';
-            job.wakeable = asked === undefined;
-            await new Promise<void>((resolve) => {
-                const end = () => { clearTimeout(timer); job.wake = null; resolve(); };
-                const timer = setTimeout(end, wait);
-                job.wake = end;
-            });
+            const notBefore = Date.now() + floor;
+            // A chance may end the part of the wait that is ours, and only that.
+            await sleep(job, wait, wait > floor);
             if (job.done) return;
+            const left = notBefore - Date.now();
+            if (left > 0) {
+                await sleep(job, left, false);
+                if (job.done) return;
+            }
         }
     }
 }
@@ -368,7 +430,7 @@ function startJob(fileId: string): Job {
     const promise = new Promise<FileUrlOutcome>((resolve) => { settle = resolve; });
     const job: Job = {
         fileId, promise, settle, done: false, waiters: 0,
-        phase: 'queued', wake: null, wakeable: false, unqueue: null,
+        phase: 'queued', wake: null, wakeable: false, unqueue: null, request: null,
     };
     inflight.set(fileId, job);
     syncRecoveryListeners();
@@ -401,11 +463,6 @@ export function loadFileUrl(fileId: string, opts: { signal?: AbortSignal } = {})
  */
 export function fetchFileUrl(fileId: string): Promise<string | null> {
     return loadFileUrl(fileId).then((o) => o.url);
-}
-
-/** Whether fetchFileUrl would join a fetch already running, rather than start one. */
-export function fileFetchRunning(fileId: string): boolean {
-    return inflight.has(fileId);
 }
 
 function onRecoveryEvent(e: Event): void {

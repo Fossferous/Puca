@@ -113,6 +113,14 @@ export function ServerSettingsModal({
     // real icon out from under everyone.
     const [savedIconId, setSavedIconId] = useState<string | null>(initialIconFileId);
     const [iconPreview, setIconPreview] = useState<string | null>(null);
+    // The file the preview is for. A preview's fetch can take a minute now (it
+    // tries a passing failure again: api/authedMedia), so the icon the modal
+    // opened with can land AFTER a new pick, and must not replace its preview.
+    const previewFor = useRef<string | null>(null);
+    const showPreviewOf = (fileId: string) => {
+        previewFor.current = fileId;
+        void fetchFileUrl(fileId).then((url) => { if (previewFor.current === fileId) setIconPreview(url); });
+    };
     const [isSaving, setIsSaving] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
 
@@ -180,7 +188,8 @@ export function ServerSettingsModal({
         setGamesEnabled(initialGamesEnabled === true);
         // Authenticated fetch -> data: URL; null until it lands.
         setIconPreview(null);
-        if (initialIconFileId) void fetchFileUrl(initialIconFileId).then(setIconPreview);
+        previewFor.current = null;
+        if (initialIconFileId) showPreviewOf(initialIconFileId);
         setError(null);
         setSuccess(null);
         // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately keyed on the open transition; the initial* props are read at that moment only
@@ -278,7 +287,9 @@ export function ServerSettingsModal({
             // at it. Only discard a pick that was never saved.
             if (iconFileId && iconFileId !== savedIconId) discardUpload(iconFileId);
             setIconFileId(uploaded.id);
-            setIconPreview(await fetchFileUrl(uploaded.id));
+            // Not awaited: the upload is done, and Change should not stay
+            // "..." while the preview is fetched (or tried again).
+            showPreviewOf(uploaded.id);
         } catch (err) {
             setError(err instanceof ImageMetadataError ? err.message : 'Failed to upload icon');
         } finally {

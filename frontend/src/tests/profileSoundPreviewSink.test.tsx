@@ -31,6 +31,8 @@ vi.mock('../api/uploads', () => ({
 const clipUrls = vi.hoisted(() => ({ released: 0 }));
 vi.mock('../api/authedMedia', () => ({
     fetchFileUrl: async () => null,
+    loadFileUrl: async () => ({ url: null, retryable: false }),
+    onFileRecoveryChance: () => () => {},
     fetchFileObjectUrl: async () => ({ url: 'blob:clip-1', release: () => { clipUrls.released++; } }),
     cachedFileUrl: () => null,
     clearFileCache: () => {},

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { cachedFileUrl, fetchFileUrl, fileFetchRunning } from '../../api/authedMedia';
+import { cachedFileUrl, fetchFileUrl } from '../../api/authedMedia';
 import { mapPicture, pictureStyle, readPictureTheme, readThemeColor } from '../../api/modeLook';
 import { accentTokens, type PictureLimit, type Rgb, type ServerMode } from '../../api/serverModes';
 
@@ -80,6 +80,9 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
     const [mapped, setMapped] = useState<{ key: string; look: ModeLook } | null>(null);
     // A fetch that fell over with the connection gets one more go each time the socket is back.
     // Nothing else would ask: the refetch that follows answers the same file, accent and look.
+    // (The download's own job, api/authedMedia, tries a passing failure again by itself, and
+    // at once for one that was out when the socket came back; this is for after it gave up,
+    // and for a picture that downloaded and could not be read.)
     const [attempt, setAttempt] = useState(0);
     useEffect(() => {
         const again = () => setAttempt(n => n + 1);
@@ -90,16 +93,10 @@ export function useModeLook(mode: ServerMode | null): ModeLook | undefined {
         if (!fileId || !key || mapped?.key === key) return;
         let stale = false;
         void (async () => {
-            const cached = cachedFileUrl(fileId);
-            // A download that began before this attempt can be the one the socket's reconnect was
-            // about, still hanging: if it falls over, that says nothing of the connection now, and
-            // this attempt has spent its go on it. So one of its own, which starts a fresh one.
-            const joined = !cached && fileFetchRunning(fileId);
-            const source = cached ?? await fetchFileUrl(fileId);
-            if (!source && joined && !stale) {
-                setAttempt(n => n + 1);
-                return;
-            }
+            // A download still running when the socket came back is the job's to try again (it
+            // does, at once, if it falls over): asking for a fresh one here once it gave up would
+            // be a second whole schedule of tries for the same reconnect.
+            const source = cachedFileUrl(fileId) ?? await fetchFileUrl(fileId);
             const theme = readPictureTheme();
             if (!source || !theme || stale) return;
             const picture = await mapPicture(source, theme.limit);

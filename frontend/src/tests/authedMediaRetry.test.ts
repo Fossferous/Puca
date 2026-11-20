@@ -19,13 +19,25 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 
-const h = vi.hoisted(() => ({ token: 'tok' as string | null }));
-vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => h.token }));
+const h = vi.hoisted(() => ({
+    token: 'tok' as string | null,
+    /** Throw on this call of getToken (localStorage can: a SecurityError); 0 never. */
+    throwOnRead: 0,
+    reads: 0,
+}));
+vi.mock('../api/auth', async (orig) => ({
+    ...(await orig<typeof import('../api/auth')>()),
+    getToken: () => {
+        h.reads++;
+        if (h.reads === h.throwOnRead) throw new DOMException('The operation is insecure.', 'SecurityError');
+        return h.token;
+    },
+}));
 
 import { fetchFileUrl, cachedFileUrl, clearFileCache } from '../api/authedMedia';
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-type Script = (n: number, url: string) => Response | Promise<Response> | Error;
+type Script = (n: number, url: string, signal: AbortSignal | undefined) => Response | Promise<Response> | Error;
 /** Every request, with the fake clock's time it was made at. */
 let calls: { url: string; at: number; auth: string | null }[] = [];
 let script: Script = () => ok();
@@ -38,6 +50,10 @@ let clock = new Date('2026-11-20T12:00:00Z').getTime();
 
 const ok = () => new Response(PNG.slice(), { headers: { 'Content-Type': 'image/png' } });
 const status = (code: number, headers: Record<string, string> = {}) => new Response('nope', { status: code, headers });
+/** A request that never answers unless its signal ends it, as fetch does. */
+const hang = (signal: AbortSignal | undefined) => new Promise<Response>((_, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+});
 const now = () => Date.now() - t0;
 /** Real macrotask turns (setImmediate is not faked): lets fetch bodies and
  *  the job's promise chain run. */
@@ -52,6 +68,8 @@ beforeEach(() => {
     t0 = Date.now();
     vi.spyOn(Math, 'random').mockReturnValue(0);   // no jitter: exact schedules
     h.token = 'tok';
+    h.throwOnRead = 0;
+    h.reads = 0;
     calls = [];
     script = () => ok();
     clearFileCache();
@@ -59,7 +77,7 @@ beforeEach(() => {
         const url = String(input);
         const auth = new Headers((init as RequestInit | undefined)?.headers).get('authorization');
         calls.push({ url, at: now(), auth });
-        const r = script(requestsFor(url.split('/files/')[1]).length, url);
+        const r = script(requestsFor(url.split('/files/')[1]).length, url, (init as RequestInit | undefined)?.signal ?? undefined);
         if (r instanceof Error) throw r;
         return r;
     });
@@ -376,5 +394,122 @@ describe('a chance to recover', () => {
         await advance(2000);
         await p;
         expect(removed.sort()).toEqual(['online', 'visibilitychange', 'wsConnected']);
+    });
+});
+
+describe('found in review', () => {
+    it('a chance during the LAST attempt still gets one more try (it was out before the way was clear)', async () => {
+        let fail: (e: Error) => void = () => {};
+        script = (n) => (n < 6 ? status(502) : n === 6 ? new Promise<Response>((_, reject) => { fail = reject; }) : ok());
+        let got: string | null | undefined;
+        void fetchFileUrl('av').then((u) => { got = u; });
+        await advance(60_000);
+        expect(requestsFor('av')).toHaveLength(6);
+        window.dispatchEvent(new CustomEvent('wsConnected'));
+        fail(new TypeError('Failed to fetch'));
+        await settle();
+        expect(requestsFor('av')).toHaveLength(7);
+        expect(requestsFor('av')[6].at).toBe(60_000);
+        expect(got).toMatch(/^data:/);
+    });
+
+    it('...at most two such extra tries a job', async () => {
+        const fails: ((e: Error) => void)[] = [];
+        script = (n) => (n < 6 ? status(502) : new Promise<Response>((_, reject) => { fails.push(reject); }));
+        let got: string | null | undefined;
+        void fetchFileUrl('av').then((u) => { got = u; });
+        await advance(60_000);
+        for (let i = 0; i < 3; i++) {
+            window.dispatchEvent(new Event('online'));
+            fails[i]?.(new TypeError('Failed to fetch'));
+            await settle();
+        }
+        expect(requestsFor('av')).toHaveLength(8);
+        expect(got).toBeNull();
+        await advance(10 * 60_000);
+        expect(requestsFor('av')).toHaveLength(8);
+    });
+
+    it('a request whose answer has not begun in 30 s is let go and tried again', async () => {
+        script = (n, _url, signal) => (n === 1 ? hang(signal) : ok());
+        const p = fetchFileUrl('av');
+        await advance(29_999);
+        expect(requestsFor('av')).toHaveLength(1);
+        await advance(1);
+        await advance(2000);
+        expect(requestsFor('av')).toHaveLength(2);
+        expect(requestsFor('av')[1].at).toBe(32_000);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('...so six that hang hold the slots for 30 s, not for ever', async () => {
+        script = (n, url, signal) => (n === 1 && !url.endsWith('/next') ? hang(signal) : ok());
+        const hung = Array.from({ length: 6 }, (_, i) => fetchFileUrl(`h${i}`));
+        const next = fetchFileUrl('next');
+        await advance(29_000);
+        expect(requestsFor('next'), 'queued behind six that do not answer').toHaveLength(0);
+        await advance(1000);
+        expect(requestsFor('next')).toHaveLength(1);
+        expect(await next).toMatch(/^data:/);
+        await advance(2000);
+        expect((await Promise.all(hung)).every((u) => u?.startsWith('data:'))).toBe(true);
+    });
+
+    it('...but a body that is slow to arrive is not timed', async () => {
+        script = () => new Response(new ReadableStream<Uint8Array>({
+            start(c) { setTimeout(() => { c.enqueue(PNG.slice()); c.close(); }, 45_000); },
+        }), { headers: { 'Content-Type': 'image/png' } });
+        let got: string | null | undefined;
+        void fetchFileUrl('big').then((u) => { got = u; });
+        await advance(45_000);
+        expect(got).toMatch(/^data:/);
+        expect(calls).toHaveLength(1);
+    });
+
+    it('signing out ends a request that is out', async () => {
+        let seenSignal: AbortSignal | undefined;
+        script = (_n, _url, signal) => { seenSignal = signal; return hang(signal); };
+        const p = fetchFileUrl('av');
+        await settle();
+        expect(seenSignal?.aborted).toBe(false);
+        clearFileCache();
+        expect(seenSignal?.aborted).toBe(true);
+        expect(await p).toBeNull();
+    });
+
+    it('Retry-After: 0 is no reason a chance cannot end our own wait', async () => {
+        script = (n) => (n === 1 ? status(503, { 'Retry-After': '0' }) : ok());
+        const p = fetchFileUrl('av');
+        await advance(500);
+        window.dispatchEvent(new Event('online'));
+        await settle();
+        expect(requestsFor('av')).toHaveLength(2);
+        expect(requestsFor('av')[1].at).toBe(500);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('a chance ends the part of the wait that is ours, never the part the server asked for', async () => {
+        // Attempt 3 at 6 s: our backoff is 8 s, the server asks 2.
+        script = (n) => (n < 3 ? status(500) : n === 3 ? status(503, { 'Retry-After': '2' }) : ok());
+        const p = fetchFileUrl('av');
+        await advance(6000);
+        expect(requestsFor('av')).toHaveLength(3);
+        await advance(1000);
+        window.dispatchEvent(new Event('online'));
+        await settle();
+        expect(requestsFor('av'), 'not before the server\'s 2 s').toHaveLength(3);
+        await advance(1000);
+        expect(requestsFor('av')).toHaveLength(4);
+        expect(requestsFor('av')[3].at).toBe(8000);
+        expect(await p).toMatch(/^data:/);
+    });
+
+    it('an attempt that throws ends the job (null) rather than leave it running for the session', async () => {
+        h.throwOnRead = 2;   // loadFileUrl's own read is the first; the attempt's is the second
+        let got: string | null | undefined = 'pending';
+        void fetchFileUrl('av').then((u) => { got = u; });
+        await settle();
+        expect(got).toBeNull();
+        expect(await fetchFileUrl('av'), 'a new job, not the stuck one').toMatch(/^data:/);
     });
 });

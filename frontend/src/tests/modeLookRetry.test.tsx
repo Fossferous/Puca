@@ -4,6 +4,11 @@
  * file id, so nothing in the hook's inputs changes and nothing would ask for it again. Through
  * the real hook and the real fetchFileUrl; only the canvas half of the look stands in, which
  * jsdom does not have and e2e/modes-look-real-browser.mjs drives for real.
+ *
+ * Since the download's job tries a passing failure again by itself (api/authedMedia.ts; its
+ * schedule in authedMediaRetry.test.ts), a reconnect while it waits cuts its wait short, and
+ * the hook's own go per reconnect is for after the job gave up: 'after the job gave up' below,
+ * on the fake clock the schedule needs.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -82,13 +87,13 @@ const mount = async () => {
 };
 
 describe('a mode\'s picture on a connection that drops', () => {
-    it('a download that fell over comes back with the next reconnect, and not before', async () => {
+    it("a download that fell over comes back at the next reconnect, without waiting out the job's backoff", async () => {
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
         await mount();
         expect(picture()).toBe('off');
         expect(fetchSpy).toHaveBeenCalledTimes(1);
         await settle();
-        expect(fetchSpy, 'control: nothing polls for it meanwhile').toHaveBeenCalledTimes(1);
+        expect(fetchSpy, "control: nothing asks again within the job's first wait (2 s)").toHaveBeenCalledTimes(1);
 
         fetchSpy.mockImplementation(async () => served());
         await reconnect();
@@ -96,7 +101,7 @@ describe('a mode\'s picture on a connection that drops', () => {
         expect(picture()).toBe('on');
     });
 
-    it('one attempt for each reconnect, however long it stays down', async () => {
+    it('one attempt for each reconnect while the job waits, however long it stays down', async () => {
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
         await mount();
         await reconnect();
@@ -146,7 +151,7 @@ describe('a mode\'s picture on a connection that drops', () => {
             await fallsOver();
             expect(fetchSpy).toHaveBeenCalledTimes(2);
             await settle();
-            expect(fetchSpy, 'control: nothing polls for it meanwhile').toHaveBeenCalledTimes(2);
+            expect(fetchSpy, "control: nothing asks again within the job's wait").toHaveBeenCalledTimes(2);
             expect(picture()).toBe('off');
             await reconnect();
             expect(fetchSpy).toHaveBeenCalledTimes(3);
@@ -174,6 +179,57 @@ describe('a mode\'s picture on a connection that drops', () => {
         await reconnect();
         expect(h.decodes).toHaveLength(2);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(picture()).toBe('off');
+    });
+});
+
+describe('after the job gave up (on the fake clock its schedule needs)', () => {
+    const tick = async () => { for (let i = 0; i < 4; i++) await act(async () => { await new Promise((r) => setImmediate(r)); }); };
+    const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); await tick(); };
+    const reconnectNow = async () => { await act(async () => { window.dispatchEvent(new CustomEvent('wsConnected')); }); await tick(); };
+    const mountNow = async () => { await act(async () => { root.render(<Chat mode={nightMode} />); }); await tick(); };
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        vi.spyOn(console, 'info').mockImplementation(() => {});
+    });
+    afterEach(() => {
+        clearFileCache();
+        vi.useRealTimers();
+        vi.mocked(Math.random).mockRestore();
+        vi.mocked(console.info).mockRestore();
+    });
+
+    it('the job tries again by itself, with no reconnect', async () => {
+        fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch')).mockImplementation(async () => served());
+        await mountNow();
+        expect(picture()).toBe('off');
+        await advance(2000);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(picture()).toBe('on');
+    });
+
+    it('nothing asks after the give-up until the next reconnect, which asks once', async () => {
+        fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+        await mountNow();
+        await advance(5 * 60_000);
+        expect(fetchSpy).toHaveBeenCalledTimes(6);
+        await advance(10 * 60_000);
+        expect(fetchSpy, 'control: nothing by itself after giving up').toHaveBeenCalledTimes(6);
+        fetchSpy.mockImplementation(async () => served());
+        await reconnectNow();
+        expect(fetchSpy).toHaveBeenCalledTimes(7);
+        expect(picture()).toBe('on');
+    });
+
+    it('a reconnect during the job is one schedule of tries, not a second one after it gives up', async () => {
+        fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+        await mountNow();
+        await advance(500);
+        await reconnectNow();
+        expect(fetchSpy, 'the reconnect cut the wait short').toHaveBeenCalledTimes(2);
+        await advance(10 * 60_000);
+        expect(fetchSpy).toHaveBeenCalledTimes(6);
         expect(picture()).toBe('off');
     });
 });
