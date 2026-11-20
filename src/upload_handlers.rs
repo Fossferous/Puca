@@ -325,8 +325,10 @@ pub async fn delete_file(
 
     // Ownership is enforced inside remove_file's WHERE clause, so a file
     // belonging to someone else is indistinguishable from one that does not
-    // exist — no existence oracle over other people's uploads. A DELETE the
-    // database did not carry out is a 503: the file is still there.
+    // exist — no existence oracle over other people's uploads. A DELETE that
+    // errored is a 503, not the 404 of a file that is gone: usually the row is
+    // still there. (If the connection dropped after the commit, it is not,
+    // and the retry's 404 says so.)
     match try_remove_file(&state.pool, &file_id, claims.sub).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
@@ -347,17 +349,19 @@ fn try_again_shortly(what: &'static str) -> axum::response::Response {
     (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "2")], what).into_response()
 }
 
-/// Did this lookup fail because of the id the caller sent? A data exception
-/// (SQLSTATE class 22) can only come from a value the statement was given, and
-/// on these lookups that is the id from the path: 22P02 when it is not a uuid
-/// (the `::uuid` cast), 22021 when it carries a NUL byte (`/files/%00`), which
-/// Postgres refuses in any text. Such an id names no file, so it is a 404 like
-/// any other unknown id. Everything else (a pool that timed out, a dropped
-/// connection, a statement the server cancelled) is the server's trouble.
+/// Did this lookup fail because of the id the caller sent? Two codes say so:
+/// 22P02 when the id is not a uuid (the `::uuid` cast), and 22021 when it
+/// carries a NUL byte (`/files/%00`), which Postgres refuses in any text. Such
+/// an id names no file, so it is a 404 like any other unknown id. Exactly
+/// those two, not their whole class: 22P03 is class 22 too, and it is OUR bug
+/// (a cached statement bound with a second type, CLAUDE.md's sql-bind-types
+/// gate), which a believed 404 would hide as "no such file". Everything else
+/// (a pool that timed out, a dropped connection, a statement the server
+/// cancelled) is the server's trouble.
 fn id_was_malformed(e: &sqlx::Error) -> bool {
     e.as_database_error()
         .and_then(|d| d.code())
-        .is_some_and(|code| code.starts_with("22"))
+        .is_some_and(|code| matches!(code.as_ref(), "22P02" | "22021"))
 }
 
 // --- DTOs ---
@@ -1675,8 +1679,10 @@ mod transient_fault_tests {
         sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&avatar).bind(owner as i32).execute(&pool).await.unwrap();
         let (faulty, schema) = faulty_pool(&pool, &url, &["friends"]).await;
         let faulted = fetch(&faulty, &avatar, stranger).await.status();
+        let identity = crate::dm_handlers::try_users_share_identity_context(&faulty, stranger, owner).await;
         drop_faults(&pool, faulty, &schema).await;
         cleanup(&pool, &[owner, stranger]).await;
+        assert!(identity.is_err(), "the identity lookup this request made did fail: {identity:?}");
         assert_eq!(faulted, StatusCode::OK, "a legacy upload is admitted by the era check, whatever the identity lookup did");
     }
 
@@ -1695,9 +1701,9 @@ mod transient_fault_tests {
         let uploader_through_fault = fetch(&faulty, &legacy, uploader).await.status();
         let era = super::cap_era_start(&faulty).await;
         drop_faults(&pool, faulty, &schema).await;
+        cleanup(&pool, &[uploader, stranger]).await;
         assert_eq!(uploader_through_fault, StatusCode::OK, "control: the same pool answers the metadata lookup");
         assert!(era.is_err(), "the fault reaches the era lookup: {era:?}");
-        cleanup(&pool, &[uploader, stranger]).await;
         assert_eq!(healthy, StatusCode::OK, "positive control: a pre-capability upload is fetchable by any account");
         assert_retry(&faulted, "the migration-era lookup failed");
     }
@@ -1737,16 +1743,62 @@ mod transient_fault_tests {
             Err(crate::permissions::LookupFailed)
         );
         drop_faults(&pool, faulty, &schema).await;
-        assert_eq!(uploader_through_messages, StatusCode::OK, "control: the messages-faulted pool answers the metadata lookup");
-        assert_eq!(uploader_through_channels, StatusCode::OK, "control: the channels-faulted pool answers the metadata lookup");
-        assert!(perms_failed, "the fault reaches the channel permission lookup");
         let _ = sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(chan).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(chan).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&srv).execute(&pool).await;
         cleanup(&pool, &[uploader, viewer]).await;
+        assert_eq!(uploader_through_messages, StatusCode::OK, "control: the messages-faulted pool answers the metadata lookup");
+        assert_eq!(uploader_through_channels, StatusCode::OK, "control: the channels-faulted pool answers the metadata lookup");
+        assert!(perms_failed, "the fault reaches the channel permission lookup");
         assert_eq!(healthy, StatusCode::OK, "positive control: a viewer of the channel it was posted in");
         assert_retry(&no_clip_row, "the clip's message lookup failed");
         assert_retry(&no_perms, "the channel permission lookup failed");
+    }
+
+    /// Which database errors are the caller's malformed id (a final 404) and
+    /// which are the server's (a 503). A stand-in error carries each code, so
+    /// this needs no database; `a_malformed_id_is_still_a_404` checks that the
+    /// database really answers 22P02 and 22021.
+    #[test]
+    fn only_a_bad_uuid_or_a_nul_byte_is_a_malformed_id() {
+        #[derive(Debug)]
+        struct Coded(&'static str);
+        impl std::fmt::Display for Coded {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "SQLSTATE {}", self.0)
+            }
+        }
+        impl std::error::Error for Coded {}
+        impl sqlx::error::DatabaseError for Coded {
+            fn message(&self) -> &str {
+                self.0
+            }
+            fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+                Some(self.0.into())
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+        let db = |code: &'static str| sqlx::Error::Database(Box::new(Coded(code)));
+        assert!(super::id_was_malformed(&db("22P02")), "not a uuid");
+        assert!(super::id_was_malformed(&db("22021")), "a NUL byte");
+        // 22P03 is class 22 as well, and it is the server's bug: a cached
+        // statement bound with a second type. It must not read as "no such file".
+        for code in ["22P03", "22003", "57014", "53300", "08006", "40001"] {
+            assert!(!super::id_was_malformed(&db(code)), "{code} is not the caller's id");
+        }
+        assert!(!super::id_was_malformed(&sqlx::Error::PoolTimedOut));
+        assert!(!super::id_was_malformed(&sqlx::Error::PoolClosed));
     }
 
     /// The blob will not open. NotFound is the file being gone (404, final);
@@ -1855,6 +1907,10 @@ mod transient_fault_tests {
         let in_use = delete(&pool, &avatar, uploader).await.status();
         let (faulty, schema) = faulty_pool(&pool, &url, &["users"]).await;
         let faulted = delete(&faulty, &avatar, uploader).await;
+        // The ownership lookup reads uploaded_files, which this pool still
+        // answers: so the 503 above is the in-use check's.
+        let owner_reads_through_fault = fetch(&faulty, &avatar, uploader).await.status();
+        let in_use_check = super::file_is_referenced(&faulty, &avatar).await;
         drop_faults(&pool, faulty, &schema).await;
         let exists = |id: String| {
             let pool = pool.clone();
@@ -1871,6 +1927,8 @@ mod transient_fault_tests {
         let unused_gone = !exists(unused.clone()).await;
         cleanup(&pool, &[uploader]).await;
         assert_eq!(in_use, StatusCode::CONFLICT, "control: an avatar in use is refused on a database that answers");
+        assert_eq!(owner_reads_through_fault, StatusCode::OK, "control: the users-faulted pool answers lookups of uploaded_files");
+        assert!(in_use_check.is_err(), "the fault reaches the in-use check: {in_use_check:?}");
         assert_retry(&faulted, "the in-use check failed");
         assert!(avatar_kept, "a failed in-use check must not delete the file");
         assert_eq!(healthy, StatusCode::NO_CONTENT, "control: an unused file is deleted");
