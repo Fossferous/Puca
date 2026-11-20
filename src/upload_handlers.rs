@@ -167,15 +167,29 @@ pub async fn reclaim_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) {
 /// Returns true if a row was actually removed (i.e. it existed AND belonged to
 /// `owner_id`), so a caller answering an HTTP request can tell 204 from 404.
 pub async fn remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> bool {
-    // An invalid uuid string errors on the ::uuid cast -> None -> no-op.
+    match try_remove_file(pool, file_id, owner_id).await {
+        Ok(removed) => removed,
+        // An invalid uuid string errors on the ::uuid cast -> no-op.
+        Err(e) => {
+            if !id_was_malformed(&e) {
+                tracing::warn!("remove_file: could not remove file {file_id:?}: {e:?}");
+            }
+            false
+        }
+    }
+}
+
+/// [`remove_file`] with a DELETE the database did not carry out returned as
+/// `Err`, for DELETE /files/:id: answering that with the 404 of a file that is
+/// gone would have the caller forget a file that is still there.
+async fn try_remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> Result<bool, sqlx::Error> {
     let row: Option<(String,)> = sqlx::query_as(
         "DELETE FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2 RETURNING stored_name",
     )
     .bind(file_id)
     .bind(owner_id as i32)
     .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    .await?;
     match row {
         Some((stored_name,)) => {
             let path = format!("uploads/{}", stored_name);
@@ -184,9 +198,9 @@ pub async fn remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> b
                 // a failed unlink leaks a blob but must not fail the caller.
                 tracing::warn!("remove_file: failed to unlink {}: {:?}", path, e);
             }
-            true
+            Ok(true)
         }
-        None => false,
+        None => Ok(false),
     }
 }
 
@@ -252,17 +266,27 @@ pub async fn delete_file(
     // whether an arbitrary uuid was someone's live avatar, icon, sound or emoji
     // (409) rather than unknown (404). A file the caller does not own must be
     // indistinguishable from one that does not exist. An invalid uuid string
-    // errors on the cast -> treated as no row -> 404.
+    // errors on the cast -> treated as no row -> 404. Any OTHER error is the
+    // database failing, not an answer: 503, so the caller does not take a
+    // file that is still there (and still counts against its quota) for gone.
+    // It comes before ownership is known, so it says nothing about the id.
     // id::text: the cast accepts other spellings of a uuid, and the in-use check below
     // compares text, so DELETE /files/<upper case> must not read as unreferenced.
-    let mine: Option<(String,)> = sqlx::query_as(
+    let mine: Option<(String,)> = match sqlx::query_as(
         "SELECT id::text FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
     )
     .bind(&file_id)
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) if id_was_malformed(&e) => None,
+        Err(e) => {
+            tracing::error!("delete_file: ownership lookup failed for file {file_id:?}: {e:?}");
+            return try_again_shortly("Could not delete that file right now");
+        }
+    };
     let Some((file_id,)) = mine else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -280,22 +304,60 @@ pub async fn delete_file(
     // replacement, emoji deletion) each clear their reference BEFORE calling
     // remove_file, so they must stay able to remove a blob this check would
     // have blocked a moment earlier.
-    if file_is_referenced(&state.pool, &file_id).await.unwrap_or(false) {
-        return (
-            StatusCode::CONFLICT,
-            "That file is still in use as an avatar, join/leave sound, server icon, mode background or emoji. Replace or remove it there first.",
-        )
-            .into_response();
+    //
+    // A check that FAILS refuses (503). It used to read as "not in use" and go
+    // on to delete: a database hiccup at this line removed a live avatar or
+    // server icon, the one thing the check is here to prevent.
+    match file_is_referenced(&state.pool, &file_id).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                "That file is still in use as an avatar, join/leave sound, server icon, mode background or emoji. Replace or remove it there first.",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("delete_file: in-use check failed for file {file_id}: {e:?}");
+            return try_again_shortly("Could not delete that file right now");
+        }
     }
 
     // Ownership is enforced inside remove_file's WHERE clause, so a file
     // belonging to someone else is indistinguishable from one that does not
-    // exist — no existence oracle over other people's uploads.
-    if remove_file(&state.pool, &file_id, claims.sub).await {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        StatusCode::NOT_FOUND.into_response()
+    // exist — no existence oracle over other people's uploads. A DELETE the
+    // database did not carry out is a 503: the file is still there.
+    match try_remove_file(&state.pool, &file_id, claims.sub).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("delete_file: the delete of file {file_id} failed: {e:?}");
+            try_again_shortly("Could not delete that file right now")
+        }
     }
+}
+
+/// The answer when the server cannot tell right now: 503 with `Retry-After: 2`,
+/// the shape GET /files' per-IP download ceiling already answers with. Still
+/// a refusal (nothing is served or deleted), but one a client may retry. A 404
+/// for a database fault says "there is no such file", and a client that
+/// believes it (one that stops asking for a 404 for the rest of the session)
+/// left a picture, icon or emoji blank over one busy moment.
+fn try_again_shortly(what: &'static str) -> axum::response::Response {
+    (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "2")], what).into_response()
+}
+
+/// Did this lookup fail because of the id the caller sent? A data exception
+/// (SQLSTATE class 22) can only come from a value the statement was given, and
+/// on these lookups that is the id from the path: 22P02 when it is not a uuid
+/// (the `::uuid` cast), 22021 when it carries a NUL byte (`/files/%00`), which
+/// Postgres refuses in any text. Such an id names no file, so it is a 404 like
+/// any other unknown id. Everything else (a pool that timed out, a dropped
+/// connection, a statement the server cancelled) is the server's trouble.
+fn id_was_malformed(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|code| code.starts_with("22"))
 }
 
 // --- DTOs ---
@@ -723,10 +785,27 @@ fn uncapped_decision(is_uploader: bool, visible_as_asset: bool, is_legacy: bool,
     is_uploader || visible_as_asset || is_legacy || !enforce
 }
 
+/// What [`uncapped_file_visible`] could establish about one caller and one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileVisibility {
+    /// A check that the database ANSWERED admits the caller.
+    Visible,
+    /// Every check answered, and none admits the caller: the 404.
+    NotVisible,
+    /// No check that answered admits the caller, and at least one failed, so
+    /// the answer is not known. Refused like `NotVisible` (nothing is served),
+    /// but as a 503 the client retries rather than a 404 it believes.
+    CouldNotTell,
+}
+
 /// Resolve `uncapped_decision`'s inputs for one file. Fails CLOSED on any
-/// database error (logged), like the membership probes in permissions.rs.
+/// database error (logged), like the membership probes in permissions.rs:
+/// a failed lookup never admits anyone. It is `CouldNotTell` rather than
+/// `NotVisible` unless a check that did answer admits the caller anyway
+/// (every grant is enough on its own, so one that answered stands).
 /// Checks run cheapest and most common first, so the everyday avatar fetch
-/// never reaches the migration-table lookup.
+/// never reaches the migration-table lookup; a failure asks no more of the
+/// database than the same request asked before failures were told apart.
 pub(crate) async fn uncapped_file_visible(
     pool: &sqlx::PgPool,
     file_id: &str,
@@ -735,10 +814,12 @@ pub(crate) async fn uncapped_file_visible(
     clip_id: Option<&str>,
     created_at: Option<DateTime<Utc>>,
     caller: i64,
-) -> bool {
+) -> FileVisibility {
     if uploader_id == caller {
-        return true;
+        return FileVisibility::Visible;
     }
+    // Set when a lookup below fails: nothing it could have granted is known.
+    let mut unsure = false;
 
     // Which asset roles this file plays, and whether the caller may see them.
     // Avatars and sounds hang off ONE account; icons and emoji off servers.
@@ -765,17 +846,24 @@ pub(crate) async fn uncapped_file_visible(
     {
         Ok(r) => r,
         Err(e) => {
+            // Without this row nothing below knows whose avatar or which
+            // server's icon it is; stop here, as this check always has.
             tracing::error!("uncapped_file_visible: asset lookup failed for file {file_id}: {e:?}");
-            return false;
+            return FileVisibility::CouldNotTell;
         }
     };
     if server_visible {
-        return true;
+        return FileVisibility::Visible;
     }
     if let Some(owner) = asset_owner {
         // ONE definition of "may see this account" — do not restate it here.
-        if crate::dm_handlers::users_share_identity_context(pool, caller, owner as i64).await {
-            return true;
+        match crate::dm_handlers::try_users_share_identity_context(pool, caller, owner as i64).await {
+            Ok(true) => return FileVisibility::Visible,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!("uncapped_file_visible: identity-context lookup failed for file {file_id}: {e:?}");
+                unsure = true;
+            }
         }
     }
 
@@ -785,24 +873,31 @@ pub(crate) async fn uncapped_file_visible(
     // check above).
     if kind == "clip" {
         if let Some(cid) = clip_id {
-            let channel: Option<i32> = sqlx::query_scalar(
+            let channel: Option<i32> = match sqlx::query_scalar(
                 "SELECT channel_id FROM messages \
                  WHERE clip_consent IS NOT NULL AND clip_consent->>'proposal_id' = $1 LIMIT 1",
             )
             .bind(cid)
             .fetch_optional(pool)
             .await
-            .unwrap_or_else(|e| {
-                tracing::error!("uncapped_file_visible: clip lookup failed for {cid}: {e:?}");
-                None
-            });
+            {
+                Ok(ch) => ch,
+                Err(e) => {
+                    tracing::error!("uncapped_file_visible: clip lookup failed for {cid}: {e:?}");
+                    unsure = true;
+                    None
+                }
+            };
             if let Some(ch) = channel {
-                if let crate::permissions::ChannelPermAccess::Allowed { perms, .. } =
-                    crate::permissions::get_user_channel_permissions(pool, ch as i64, caller).await
-                {
-                    if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) {
-                        return true;
+                // The resolver logs its own failures.
+                match crate::permissions::try_user_channel_permissions(pool, ch as i64, caller).await {
+                    Ok(crate::permissions::ChannelPermAccess::Allowed { perms, .. })
+                        if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) =>
+                    {
+                        return FileVisibility::Visible;
                     }
+                    Ok(_) => {}
+                    Err(crate::permissions::LookupFailed) => unsure = true,
                 }
             }
         }
@@ -815,11 +910,32 @@ pub(crate) async fn uncapped_file_visible(
             Ok(None) => true,
             Err(e) => {
                 tracing::error!("uncapped_file_visible: migration-era lookup failed for file {file_id}: {e:?}");
-                false // fail closed
+                unsure = true;
+                false // fail closed: not known to be legacy
             }
         },
     };
-    uncapped_decision(false, false, is_legacy, files_enforce_cap())
+    if uncapped_decision(false, false, is_legacy, files_enforce_cap()) {
+        FileVisibility::Visible
+    } else if unsure {
+        FileVisibility::CouldNotTell
+    } else {
+        FileVisibility::NotVisible
+    }
+}
+
+/// The answer when the blob of a file the caller may fetch will not open.
+/// `NotFound` is the file being gone (its row outlived the blob): a 404, and a
+/// retry cannot help. Anything else (the process out of file descriptors, a
+/// permission or I/O fault on the uploads directory) is the server's trouble,
+/// not the file's: a 503 to retry. Only callers already allowed this file get
+/// here, so the difference tells nobody anything they may not know.
+fn open_failure_response(e: &std::io::Error) -> axum::response::Response {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        (StatusCode::NOT_FOUND, "File not found").into_response()
+    } else {
+        try_again_shortly("File temporarily unavailable, try again shortly")
+    }
 }
 
 pub async fn get_file(
@@ -853,15 +969,26 @@ pub async fn get_file(
 
     // Get file metadata
     #[allow(clippy::type_complexity)]
-    let file_info: Option<(String, String, String, Option<Vec<u8>>, i32, String, Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        // id is uuid; cast the binding (an invalid uuid string errors -> None -> 404).
+    let file_info: Option<(String, String, String, Option<Vec<u8>>, i32, String, Option<String>, Option<DateTime<Utc>>)> = match sqlx::query_as(
+        // id is uuid; cast the binding (an invalid uuid string errors -> no row -> 404).
         "SELECT stored_name, original_name, mime_type, cap_hash, uploader_id, kind, clip_id::text, created_at \
          FROM uploaded_files WHERE id = $1::uuid",
     )
     .bind(&file_id)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        // A malformed id names no file: the same 404 as an unknown one.
+        Err(e) if id_was_malformed(&e) => None,
+        // The database did not answer (a pool timeout under load, a dropped
+        // connection): not "no such file". This comes before the row is known,
+        // so it says nothing about whether the id exists.
+        Err(e) => {
+            tracing::error!("get_file: metadata lookup failed for file {file_id:?}: {e:?}");
+            return try_again_shortly("File temporarily unavailable, try again shortly");
+        }
+    };
 
     let (stored_name, original_name, mime_type, cap_hash, uploader_id, kind, clip_id, created_at) = match file_info {
         Some(info) => info,
@@ -877,8 +1004,23 @@ pub async fn get_file(
     // No capability does NOT mean public. Scope the file to the people it is
     // for (see uncapped_decision); a stranger who merely learned the id gets
     // the same 404 as above.
-    if cap_hash.is_none()
-        && !uncapped_file_visible(
+    //
+    // A check the database could not answer is a 503, not that 404. That 503
+    // comes only once the row was found, so in principle it tells a caller who
+    // may not see the file that the id exists. Judged not worth hiding:
+    // - ids are random v4 uuids, so the only ids anyone can ask about are ones
+    //   they already learned somewhere;
+    // - for such an id, the response time already says as much today: a found
+    //   uncapped row runs the lookups below, an unknown id runs none;
+    // - to see the 503 at all, the database must answer the lookup above and
+    //   then fail inside the same request;
+    // - answering 404 to anyone but the uploader instead would undo the fix
+    //   where it matters: avatars, icons and emoji are fetched by friends and
+    //   members, and the uploader never reaches a lookup here (the first check).
+    // Capped files (attachments) never get here: the capability gates them,
+    // with no database question after the row.
+    if cap_hash.is_none() {
+        match uncapped_file_visible(
             &state.pool,
             &file_id,
             uploader_id as i64,
@@ -888,15 +1030,26 @@ pub async fn get_file(
             claims.sub,
         )
         .await
-    {
-        return (StatusCode::NOT_FOUND, "File not found").into_response();
+        {
+            FileVisibility::Visible => {}
+            FileVisibility::NotVisible => return (StatusCode::NOT_FOUND, "File not found").into_response(),
+            // Already logged where the lookup failed.
+            FileVisibility::CouldNotTell => {
+                return try_again_shortly("File temporarily unavailable, try again shortly")
+            }
+        }
     }
 
     // Open the file
     let file_path = format!("uploads/{}", stored_name);
     let file = match File::open(&file_path).await {
         Ok(f) => f,
-        Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!("get_file: could not open the blob of file {file_id}: {e:?}");
+            }
+            return open_failure_response(&e);
+        }
     };
 
     // Stream the file. Move stream_guard into the stream (UFCS map) so the per-IP
@@ -1071,7 +1224,7 @@ mod uncapped_file_tests {
     //! the uploader fetched an uncapped file's bytes by id. `file_cap_tests`
     //! above still says such a row is "never gated" BY THE CAPABILITY — this
     //! module is the gate that follows it.
-    use super::{uncapped_decision, uncapped_file_visible};
+    use super::{uncapped_decision, uncapped_file_visible, FileVisibility};
 
     #[test]
     fn each_grant_alone_admits_and_no_grant_refuses() {
@@ -1140,41 +1293,41 @@ mod uncapped_file_tests {
 
         // --- an unreferenced, post-capability upload ---
         let plain = mk_file("attachment", None).await;
-        assert!(!vis(&plain, stranger, "attachment", None).await, "THE FINDING: a stranger fetched this");
-        assert!(vis(&plain, uploader, "attachment", None).await, "the uploader always may");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::NotVisible, "THE FINDING: a stranger fetched this");
+        assert_eq!(vis(&plain, uploader, "attachment", None).await, FileVisibility::Visible, "the uploader always may");
 
         // --- an avatar: visible inside the owner's identity context only ---
         sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&plain).bind(uploader as i32).execute(&pool).await.unwrap();
-        assert!(!vis(&plain, stranger, "attachment", None).await, "being someone's avatar admits nobody by itself");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::NotVisible, "being someone's avatar admits nobody by itself");
         sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)").bind(uploader).bind(stranger).execute(&pool).await.unwrap();
-        assert!(vis(&plain, stranger, "attachment", None).await, "a friend sees the avatar");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::Visible, "a friend sees the avatar");
         sqlx::query("DELETE FROM friends WHERE user1_id = $1 AND user2_id = $2").bind(uploader).bind(stranger).execute(&pool).await.unwrap();
-        assert!(!vis(&plain, stranger, "attachment", None).await, "unfriending ends it");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::NotVisible, "unfriending ends it");
 
         let shared = format!("srv_shared_{tag}");
         sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'shared', $2)").bind(&shared).bind(uploader as i32).execute(&pool).await.unwrap();
         for u in [uploader, stranger] {
             sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&shared).bind(u as i32).execute(&pool).await.unwrap();
         }
-        assert!(vis(&plain, stranger, "attachment", None).await, "a co-member sees the avatar");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::Visible, "a co-member sees the avatar");
         sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2").bind(&shared).bind(stranger as i32).execute(&pool).await.unwrap();
-        assert!(!vis(&plain, stranger, "attachment", None).await, "kicked/banned/left: access ends with the membership");
+        assert_eq!(vis(&plain, stranger, "attachment", None).await, FileVisibility::NotVisible, "kicked/banned/left: access ends with the membership");
 
         // --- a server icon: members, or anyone once the server is public ---
         let icon = mk_file("attachment", None).await;
         let iconed = format!("srv_icon_{tag}");
         sqlx::query("INSERT INTO servers (id, name, owner_id, icon_file_id) VALUES ($1, 'iconed', $2, $3)").bind(&iconed).bind(uploader as i32).bind(&icon).execute(&pool).await.unwrap();
-        assert!(!vis(&icon, other, "attachment", None).await, "a private server's icon is not for outsiders");
+        assert_eq!(vis(&icon, other, "attachment", None).await, FileVisibility::NotVisible, "a private server's icon is not for outsiders");
         sqlx::query("UPDATE servers SET is_public = true WHERE id = $1").bind(&iconed).execute(&pool).await.unwrap();
-        assert!(vis(&icon, other, "attachment", None).await, "/discover shows public icons to everyone");
+        assert_eq!(vis(&icon, other, "attachment", None).await, FileVisibility::Visible, "/discover shows public icons to everyone");
         sqlx::query("UPDATE servers SET is_public = false WHERE id = $1").bind(&iconed).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&iconed).bind(other as i32).execute(&pool).await.unwrap();
-        assert!(vis(&icon, other, "attachment", None).await, "a member sees the icon");
+        assert_eq!(vis(&icon, other, "attachment", None).await, FileVisibility::Visible, "a member sees the icon");
 
         // --- a clip part: wherever the clip was posted, for those who can VIEW it ---
         let clip_id = uuid::Uuid::new_v4().to_string();
         let part = mk_file("clip", Some(clip_id.clone())).await;
-        assert!(!vis(&part, other, "clip", Some(&clip_id)).await, "an unposted proposal's parts are the proposer's alone");
+        assert_eq!(vis(&part, other, "clip", Some(&clip_id)).await, FileVisibility::NotVisible, "an unposted proposal's parts are the proposer's alone");
         let clip_srv = format!("srv_clip_{tag}");
         // `other` OWNS this server, so the resolver grants VIEW without any role rows.
         sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'clips', $2)").bind(&clip_srv).bind(other as i32).execute(&pool).await.unwrap();
@@ -1183,16 +1336,16 @@ mod uncapped_file_tests {
             .bind(uuid::Uuid::new_v4().to_string()).bind(chan).bind(uploader as i32)
             .bind(sqlx::types::Json(serde_json::json!({ "proposal_id": clip_id })))
             .execute(&pool).await.unwrap();
-        assert!(vis(&part, other, "clip", Some(&clip_id)).await, "a viewer of the channel the clip was posted in");
-        assert!(!vis(&part, stranger, "clip", Some(&clip_id)).await, "not a viewer: not admitted");
+        assert_eq!(vis(&part, other, "clip", Some(&clip_id)).await, FileVisibility::Visible, "a viewer of the channel the clip was posted in");
+        assert_eq!(vis(&part, stranger, "clip", Some(&clip_id)).await, FileVisibility::NotVisible, "not a viewer: not admitted");
 
         // --- history: an upload older than migration 054 keeps working ---
         let legacy = mk_file("attachment", None).await;
         let era: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT installed_on FROM _sqlx_migrations WHERE version = 54").fetch_one(&pool).await.expect("054 applied");
         let pool2 = pool.clone();
         let before = era - chrono::Duration::days(1);
-        assert!(uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(before), stranger).await, "a pre-capability upload is fetchable by any account (no way to scope it)");
-        assert!(!uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(era + chrono::Duration::seconds(1)), stranger).await, "positive control: one second after the era starts, it is not");
+        assert_eq!(uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(before), stranger).await, FileVisibility::Visible, "a pre-capability upload is fetchable by any account (no way to scope it)");
+        assert_eq!(uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(era + chrono::Duration::seconds(1)), stranger).await, FileVisibility::NotVisible, "positive control: one second after the era starts, it is not");
 
         // cleanup, dependents first
         let _ = sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(chan).execute(&pool).await;
@@ -1205,5 +1358,522 @@ mod uncapped_file_tests {
         for u in [uploader, stranger, other] {
             let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(u as i32).execute(&pool).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_fault_tests {
+    //! GET /files/:id and DELETE /files/:id answer a database or file-system
+    //! fault with 503 + `Retry-After: 2`, never with the 404 that says "no such
+    //! file". Field report (0.9.866): a busy database left pictures, server
+    //! icons and emoji blank until the app restarted, because a client that is
+    //! told 404 stops asking. The 404s that must stay 404 are pinned beside
+    //! them: no row, a malformed id, visibility genuinely denied, the blob gone.
+    //!
+    //! A fault on ONE lookup of a request, after the ones before it answered,
+    //! comes from `faulty_pool`: its connections resolve the named tables to
+    //! views that raise (as a cancelled statement does under load) and every
+    //! other name to the real table. Only that pool sees the fault.
+    use super::{delete_file, get_file};
+    use crate::auth::Claims;
+    use crate::state::AppState;
+    use axum::extract::{ConnectInfo, Path, State};
+    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::Extension;
+    use chrono::{DateTime, Utc};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn claims(sub: i64) -> Claims {
+        Claims {
+            sub,
+            username: format!("u{sub}"),
+            exp: Utc::now().timestamp() + 3600,
+            tv: 0,
+            sst: 0,
+            sid: String::new(),
+            ls: false,
+        }
+    }
+
+    fn app(pool: &sqlx::PgPool) -> Arc<AppState> {
+        AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    async fn fetch(pool: &sqlx::PgPool, id: &str, caller: i64) -> Response {
+        get_file(
+            State(app(pool)),
+            Path(id.to_string()),
+            Extension(claims(caller)),
+            HeaderMap::new(),
+            ConnectInfo("127.0.0.1:40000".parse().expect("addr")),
+        )
+        .await
+        .into_response()
+    }
+
+    async fn delete(pool: &sqlx::PgPool, id: &str, caller: i64) -> Response {
+        delete_file(State(app(pool)), Path(id.to_string()), Extension(claims(caller))).await.into_response()
+    }
+
+    #[track_caller]
+    fn assert_retry(resp: &Response, why: &str) {
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{why}");
+        assert_eq!(
+            resp.headers().get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+            Some("2"),
+            "{why}: Retry-After"
+        );
+    }
+
+    #[track_caller]
+    fn assert_not_found(resp: &Response, why: &str) {
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{why}");
+        assert!(resp.headers().get(header::RETRY_AFTER).is_none(), "{why}: a 404 is final, no Retry-After");
+    }
+
+    /// See the module comment. `tables` are names in `public`.
+    async fn faulty_pool(admin: &sqlx::PgPool, url: &str, tables: &[&str]) -> (sqlx::PgPool, String) {
+        let schema = format!("f503_{}", uuid::Uuid::new_v4().simple());
+        crate::migrator::test_ddl(admin, &format!("CREATE SCHEMA {schema}")).await;
+        for t in tables {
+            crate::migrator::test_ddl(
+                admin,
+                &format!(
+                    "CREATE FUNCTION {schema}.fault_{t}() RETURNS SETOF public.{t} LANGUAGE plpgsql AS \
+                     $$ BEGIN RAISE EXCEPTION 'injected fault on {t}' USING ERRCODE = 'query_canceled'; END $$"
+                ),
+            )
+            .await;
+            crate::migrator::test_ddl(admin, &format!("CREATE VIEW {schema}.{t} AS SELECT * FROM {schema}.fault_{t}()")).await;
+        }
+        let opts = url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("TEST_DATABASE_URL parses")
+            .options([("search_path", format!("{schema},public"))]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await
+            .expect("connect the faulty pool");
+        (pool, schema)
+    }
+
+    /// Like `faulty_pool`, but `table` READS normally (a plain view over the
+    /// real one) and only a DELETE through it fails.
+    async fn faulty_delete_pool(admin: &sqlx::PgPool, url: &str, table: &str) -> (sqlx::PgPool, String) {
+        let (pool, schema) = faulty_pool(admin, url, &[]).await;
+        crate::migrator::test_ddl(admin, &format!("CREATE VIEW {schema}.{table} AS SELECT * FROM public.{table}")).await;
+        crate::migrator::test_ddl(
+            admin,
+            &format!(
+                "CREATE FUNCTION {schema}.refuse_delete() RETURNS trigger LANGUAGE plpgsql AS \
+                 $$ BEGIN RAISE EXCEPTION 'injected fault on DELETE' USING ERRCODE = 'query_canceled'; END $$"
+            ),
+        )
+        .await;
+        crate::migrator::test_ddl(
+            admin,
+            &format!("CREATE TRIGGER refuse_delete INSTEAD OF DELETE ON {schema}.{table} FOR EACH ROW EXECUTE FUNCTION {schema}.refuse_delete()"),
+        )
+        .await;
+        (pool, schema)
+    }
+
+    async fn drop_faults(admin: &sqlx::PgPool, faulty: sqlx::PgPool, schema: &str) {
+        faulty.close().await;
+        crate::migrator::test_ddl(admin, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE")).await;
+    }
+
+    async fn user(pool: &sqlx::PgPool, role: &str) -> i64 {
+        let name = format!("f503_{role}_{}", uuid::Uuid::new_v4().simple());
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
+        )
+        .bind(&name)
+        .bind(format!("{name}@test.invalid"))
+        .bind(b"s".as_ref())
+        .bind(b"v".as_ref())
+        .fetch_one(pool)
+        .await
+        .expect("insert user");
+        id as i64
+    }
+
+    /// An upload row with NO capability (so the visibility gate decides), and
+    /// its blob on disk under `uploads/` so an admitted fetch is a 200: a 404
+    /// in these tests is then always a refusal, never a missing blob.
+    async fn upload(pool: &sqlx::PgPool, uploader: i64, kind: &str, clip: Option<&str>, created_at: Option<DateTime<Utc>>) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let stored = format!("f503-{id}.bin");
+        std::fs::create_dir_all("uploads").expect("uploads dir");
+        std::fs::write(format!("uploads/{stored}"), b"f503").expect("blob");
+        sqlx::query(
+            "INSERT INTO uploaded_files (id, uploader_id, original_name, stored_name, mime_type, size_bytes, kind, clip_id, created_at) \
+             VALUES ($1::uuid, $2, 'f.png', $3, 'image/png', 4, $4, $5::uuid, COALESCE($6, NOW()))",
+        )
+        .bind(&id)
+        .bind(uploader as i32)
+        .bind(&stored)
+        .bind(kind)
+        .bind(clip)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("insert file");
+        id
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, users: &[i64]) {
+        let ids: Vec<i32> = users.iter().map(|u| *u as i32).collect();
+        let stored: Vec<(String,)> = sqlx::query_as("DELETE FROM uploaded_files WHERE uploader_id = ANY($1) RETURNING stored_name")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        for (s,) in stored {
+            let _ = std::fs::remove_file(format!("uploads/{s}"));
+        }
+        let _ = sqlx::query("DELETE FROM friends WHERE user1_id = ANY($1) OR user2_id = ANY($1)").bind(&ids).execute(pool).await;
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE id = ANY($1)").bind(&ids).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(&ids).execute(pool).await;
+    }
+
+    async fn era_start(pool: &sqlx::PgPool) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT installed_on FROM _sqlx_migrations WHERE version = 54")
+            .fetch_one(pool)
+            .await
+            .expect("054 applied")
+    }
+
+    /// The field report with no database at all: a pool that never answers.
+    /// Needs no TEST_DATABASE_URL, so it runs everywhere.
+    #[tokio::test]
+    async fn a_database_that_does_not_answer_is_a_503_not_a_404() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(300))
+            .connect_lazy("postgres://127.0.0.1:1/does_not_connect")
+            .expect("lazy pool");
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_retry(&fetch(&pool, &id, 1).await, "GET: the metadata lookup did not answer");
+        assert_retry(&delete(&pool, &id, 1).await, "DELETE: the ownership lookup did not answer");
+    }
+
+    /// The field condition itself: every connection busy, the acquire times
+    /// out. The same request is the ordinary 404 once the pool is free again.
+    #[tokio::test]
+    async fn a_busy_pool_is_a_503_and_the_same_request_a_404_once_it_answers() {
+        let Some((_admin, url)) = crate::migrator::test_database(1).await else { return };
+        let busy = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(300))
+            .connect(&url)
+            .await
+            .expect("connect the one-connection pool");
+        let id = uuid::Uuid::new_v4().to_string();
+        let held = busy.acquire().await.expect("hold the only connection");
+        assert_retry(&fetch(&busy, &id, 1).await, "GET with every connection busy");
+        assert_retry(&delete(&busy, &id, 1).await, "DELETE with every connection busy");
+        drop(held);
+        assert_not_found(&fetch(&busy, &id, 1).await, "control: an unknown id on a pool that answers");
+        assert_not_found(&delete(&busy, &id, 1).await, "control: DELETE of an unknown id on a pool that answers");
+        busy.close().await;
+    }
+
+    /// CONTROL: a malformed id is refused by the database (a data exception),
+    /// and that is still the 404 of an unknown file, not a 503 to retry.
+    #[tokio::test]
+    async fn a_malformed_id_is_still_a_404() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        for id in ["not-a-uuid", "1234", "00000000-0000-0000-0000-00000000000g", "' OR 1=1 --", "nul\0byte"] {
+            assert_not_found(&fetch(&pool, id, 1).await, &format!("GET {id:?}"));
+            assert_not_found(&delete(&pool, id, 1).await, &format!("DELETE {id:?}"));
+        }
+        let unknown = uuid::Uuid::new_v4().to_string();
+        assert_not_found(&fetch(&pool, &unknown, 1).await, "an unknown well-formed id");
+        // What the database really says for the two shapes `id_was_malformed` names.
+        for (id, code) in [("not-a-uuid", "22P02"), ("nul\0byte", "22021")] {
+            let e = sqlx::query("SELECT 1 FROM uploaded_files WHERE id = $1::uuid").bind(id).execute(&pool).await.unwrap_err();
+            assert_eq!(e.as_database_error().and_then(|d| d.code()).as_deref(), Some(code), "{id:?}");
+            assert!(super::id_was_malformed(&e));
+        }
+    }
+
+    /// CONTROL: visibility genuinely denied is the 404 it always was, on a
+    /// database that answers, while the uploader is served the same row.
+    #[tokio::test]
+    async fn a_stranger_is_still_refused_with_a_404() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let stranger = user(&pool, "str").await;
+        let file = upload(&pool, uploader, "attachment", None, None).await;
+        let as_uploader = fetch(&pool, &file, uploader).await.status();
+        let as_stranger = fetch(&pool, &file, stranger).await;
+        cleanup(&pool, &[uploader, stranger]).await;
+        assert_eq!(as_uploader, StatusCode::OK, "positive control: the row and blob are served to the uploader");
+        assert_not_found(&as_stranger, "an unreferenced upload, a stranger");
+    }
+
+    /// The asset lookup (whose avatar, which server's icon) fails: a friend
+    /// asking for an avatar gets a 503 to retry, not the 404 of a stranger.
+    #[tokio::test]
+    async fn a_failed_asset_lookup_is_a_503() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let owner = user(&pool, "own").await;
+        let friend = user(&pool, "fr").await;
+        let avatar = upload(&pool, owner, "attachment", None, None).await;
+        sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&avatar).bind(owner as i32).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)").bind(owner).bind(friend).execute(&pool).await.unwrap();
+        let healthy = fetch(&pool, &avatar, friend).await.status();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["users"]).await;
+        let faulted = fetch(&faulty, &avatar, friend).await;
+        let uploader_through_fault = fetch(&faulty, &avatar, owner).await.status();
+        drop_faults(&pool, faulty, &schema).await;
+        cleanup(&pool, &[owner, friend]).await;
+        assert_eq!(healthy, StatusCode::OK, "positive control: a friend sees the avatar");
+        assert_eq!(uploader_through_fault, StatusCode::OK, "control: the same pool answers the metadata lookup");
+        assert_retry(&faulted, "the asset lookup failed");
+    }
+
+    /// The identity check (friends, a shared server, a conversation) fails.
+    #[tokio::test]
+    async fn a_failed_identity_lookup_is_a_503() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let owner = user(&pool, "own").await;
+        let friend = user(&pool, "fr").await;
+        let avatar = upload(&pool, owner, "attachment", None, None).await;
+        sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&avatar).bind(owner as i32).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)").bind(owner).bind(friend).execute(&pool).await.unwrap();
+        let healthy = fetch(&pool, &avatar, friend).await.status();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["friends"]).await;
+        let faulted = fetch(&faulty, &avatar, friend).await;
+        let uploader_through_fault = fetch(&faulty, &avatar, owner).await.status();
+        let identity = crate::dm_handlers::try_users_share_identity_context(&faulty, friend, owner).await;
+        drop_faults(&pool, faulty, &schema).await;
+        cleanup(&pool, &[owner, friend]).await;
+        assert_eq!(healthy, StatusCode::OK, "positive control: a friend sees the avatar");
+        assert_eq!(uploader_through_fault, StatusCode::OK, "control: the same pool answers the metadata lookup");
+        assert!(identity.is_err(), "the fault reaches the identity lookup: {identity:?}");
+        assert_retry(&faulted, "the identity-context lookup failed");
+    }
+
+    /// CONTROL for the one above: a grant from a check that DID answer stands
+    /// beside one that failed. A pre-capability avatar is fetchable by any
+    /// account, so the failed identity lookup changes nothing.
+    #[tokio::test]
+    async fn a_grant_that_answered_stands_beside_a_lookup_that_failed() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let owner = user(&pool, "own").await;
+        let stranger = user(&pool, "str").await;
+        let before = era_start(&pool).await - chrono::Duration::days(1);
+        let avatar = upload(&pool, owner, "attachment", None, Some(before)).await;
+        sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&avatar).bind(owner as i32).execute(&pool).await.unwrap();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["friends"]).await;
+        let faulted = fetch(&faulty, &avatar, stranger).await.status();
+        drop_faults(&pool, faulty, &schema).await;
+        cleanup(&pool, &[owner, stranger]).await;
+        assert_eq!(faulted, StatusCode::OK, "a legacy upload is admitted by the era check, whatever the identity lookup did");
+    }
+
+    /// The migration-era lookup fails, for an upload only it can admit.
+    #[tokio::test]
+    async fn a_failed_era_lookup_is_a_503() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let stranger = user(&pool, "str").await;
+        let before = era_start(&pool).await - chrono::Duration::days(1);
+        let legacy = upload(&pool, uploader, "attachment", None, Some(before)).await;
+        let healthy = fetch(&pool, &legacy, stranger).await.status();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["_sqlx_migrations"]).await;
+        let faulted = fetch(&faulty, &legacy, stranger).await;
+        let uploader_through_fault = fetch(&faulty, &legacy, uploader).await.status();
+        let era = super::cap_era_start(&faulty).await;
+        drop_faults(&pool, faulty, &schema).await;
+        assert_eq!(uploader_through_fault, StatusCode::OK, "control: the same pool answers the metadata lookup");
+        assert!(era.is_err(), "the fault reaches the era lookup: {era:?}");
+        cleanup(&pool, &[uploader, stranger]).await;
+        assert_eq!(healthy, StatusCode::OK, "positive control: a pre-capability upload is fetchable by any account");
+        assert_retry(&faulted, "the migration-era lookup failed");
+    }
+
+    /// A clip part: the lookup of where it was posted fails, and so does the
+    /// viewer's permission check in that channel.
+    #[tokio::test]
+    async fn a_failed_clip_or_channel_permission_lookup_is_a_503() {
+        std::env::remove_var("FILES_ENFORCE_CAP");
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let viewer = user(&pool, "view").await;
+        let clip_id = uuid::Uuid::new_v4().to_string();
+        let part = upload(&pool, uploader, "clip", Some(&clip_id), None).await;
+        let srv = format!("srv_f503_{}", uuid::Uuid::new_v4().simple());
+        // `viewer` OWNS the server, so the resolver grants VIEW without role rows.
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'f503', $2)").bind(&srv).bind(viewer as i32).execute(&pool).await.unwrap();
+        let (chan,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name) VALUES ($1, 'general') RETURNING id").bind(&srv).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, channel_id, user_id, content, clip_consent) VALUES ($1, $2, $3, 'clip', $4)")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(chan)
+            .bind(uploader as i32)
+            .bind(sqlx::types::Json(serde_json::json!({ "proposal_id": clip_id })))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let healthy = fetch(&pool, &part, viewer).await.status();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["messages"]).await;
+        let no_clip_row = fetch(&faulty, &part, viewer).await;
+        let uploader_through_messages = fetch(&faulty, &part, uploader).await.status();
+        drop_faults(&pool, faulty, &schema).await;
+        let (faulty, schema) = faulty_pool(&pool, &url, &["channels"]).await;
+        let no_perms = fetch(&faulty, &part, viewer).await;
+        let uploader_through_channels = fetch(&faulty, &part, uploader).await.status();
+        let perms_failed = matches!(
+            crate::permissions::try_user_channel_permissions(&faulty, chan as i64, viewer).await,
+            Err(crate::permissions::LookupFailed)
+        );
+        drop_faults(&pool, faulty, &schema).await;
+        assert_eq!(uploader_through_messages, StatusCode::OK, "control: the messages-faulted pool answers the metadata lookup");
+        assert_eq!(uploader_through_channels, StatusCode::OK, "control: the channels-faulted pool answers the metadata lookup");
+        assert!(perms_failed, "the fault reaches the channel permission lookup");
+        let _ = sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(chan).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(chan).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&srv).execute(&pool).await;
+        cleanup(&pool, &[uploader, viewer]).await;
+        assert_eq!(healthy, StatusCode::OK, "positive control: a viewer of the channel it was posted in");
+        assert_retry(&no_clip_row, "the clip's message lookup failed");
+        assert_retry(&no_perms, "the channel permission lookup failed");
+    }
+
+    /// The blob will not open. NotFound is the file being gone (404, final);
+    /// anything else is the server's trouble (503, retry). Pure, so it pins
+    /// every platform; the Windows test below drives it through the handler.
+    #[test]
+    fn a_blob_that_will_not_open_is_a_503_unless_it_is_gone() {
+        use std::io::{Error, ErrorKind};
+        assert_not_found(&super::open_failure_response(&Error::from(ErrorKind::NotFound)), "the blob is gone");
+        for e in [
+            Error::from(ErrorKind::PermissionDenied),
+            Error::other("Too many open files (os error 24)"),
+            Error::from(ErrorKind::Interrupted),
+            Error::from(ErrorKind::OutOfMemory),
+        ] {
+            assert_retry(&super::open_failure_response(&e), &format!("{e:?}"));
+        }
+    }
+
+    /// The same through the handler: a row whose blob is a DIRECTORY (Windows
+    /// refuses to open one as a file, with PermissionDenied) is a 503, and the
+    /// row whose blob is missing beside it the 404. Linux opens a directory
+    /// read-only, so the pure test above stands for this there.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn through_the_handler_an_unopenable_blob_is_a_503_and_a_missing_one_a_404() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let as_dir = upload(&pool, uploader, "attachment", None, None).await;
+        let gone = upload(&pool, uploader, "attachment", None, None).await;
+        let stored: Vec<(String, String)> = sqlx::query_as("SELECT id::text, stored_name FROM uploaded_files WHERE id = ANY($1::uuid[])")
+            .bind(vec![as_dir.clone(), gone.clone()])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for (id, s) in &stored {
+            std::fs::remove_file(format!("uploads/{s}")).unwrap();
+            if *id == as_dir {
+                std::fs::create_dir(format!("uploads/{s}")).unwrap();
+            }
+        }
+        let unopenable = fetch(&pool, &as_dir, uploader).await;
+        let missing = fetch(&pool, &gone, uploader).await;
+        for (id, s) in &stored {
+            if *id == as_dir {
+                let _ = std::fs::remove_dir(format!("uploads/{s}"));
+            }
+        }
+        cleanup(&pool, &[uploader]).await;
+        assert_retry(&unopenable, "a blob that would not open");
+        assert_not_found(&missing, "a blob that is gone");
+    }
+
+    /// DELETE's ownership lookup fails: a 503, so the caller does not take a
+    /// file that is still there (and still counts against its quota) for gone.
+    #[tokio::test]
+    async fn delete_answers_a_failed_ownership_lookup_with_a_503() {
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let file = upload(&pool, uploader, "attachment", None, None).await;
+        let (faulty, schema) = faulty_pool(&pool, &url, &["uploaded_files"]).await;
+        let faulted = delete(&faulty, &file, uploader).await;
+        drop_faults(&pool, faulty, &schema).await;
+        let still_there: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM uploaded_files WHERE id = $1::uuid)")
+            .bind(file.clone())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, &[uploader]).await;
+        assert_retry(&faulted, "the ownership lookup failed");
+        assert!(still_there);
+    }
+
+    /// The delete itself fails after ownership and the in-use check answered:
+    /// a 503 and the file still there, not the 404 of a file that is gone.
+    #[tokio::test]
+    async fn delete_answers_a_failed_delete_with_a_503() {
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let file = upload(&pool, uploader, "attachment", None, None).await;
+        let (faulty, schema) = faulty_delete_pool(&pool, &url, "uploaded_files").await;
+        let faulted = delete(&faulty, &file, uploader).await;
+        let reads_through_fault = fetch(&faulty, &file, uploader).await.status();
+        drop_faults(&pool, faulty, &schema).await;
+        assert_eq!(reads_through_fault, StatusCode::OK, "control: only the DELETE fails, the lookups before it answer");
+        let still_there: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM uploaded_files WHERE id = $1::uuid)")
+            .bind(file.clone())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, &[uploader]).await;
+        assert_retry(&faulted, "the DELETE failed");
+        assert!(still_there);
+    }
+
+    /// DELETE's in-use check fails. It used to read as "not in use" and go on
+    /// to delete: a database hiccup there removed a live avatar. Now a 503,
+    /// and the file is still there.
+    #[tokio::test]
+    async fn delete_keeps_a_file_whose_in_use_check_failed() {
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let uploader = user(&pool, "up").await;
+        let avatar = upload(&pool, uploader, "attachment", None, None).await;
+        let unused = upload(&pool, uploader, "attachment", None, None).await;
+        sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&avatar).bind(uploader as i32).execute(&pool).await.unwrap();
+        let in_use = delete(&pool, &avatar, uploader).await.status();
+        let (faulty, schema) = faulty_pool(&pool, &url, &["users"]).await;
+        let faulted = delete(&faulty, &avatar, uploader).await;
+        drop_faults(&pool, faulty, &schema).await;
+        let exists = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM uploaded_files WHERE id = $1::uuid)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let avatar_kept = exists(avatar.clone()).await;
+        let healthy = delete(&pool, &unused, uploader).await.status();
+        let unused_gone = !exists(unused.clone()).await;
+        cleanup(&pool, &[uploader]).await;
+        assert_eq!(in_use, StatusCode::CONFLICT, "control: an avatar in use is refused on a database that answers");
+        assert_retry(&faulted, "the in-use check failed");
+        assert!(avatar_kept, "a failed in-use check must not delete the file");
+        assert_eq!(healthy, StatusCode::NO_CONTENT, "control: an unused file is deleted");
+        assert!(unused_gone);
     }
 }

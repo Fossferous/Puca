@@ -1010,6 +1010,27 @@ pub async fn get_user_channel_permissions(
     channel_id: i64,
     user_id: i64,
 ) -> ChannelPermAccess {
+    try_user_channel_permissions(pool, channel_id, user_id)
+        .await
+        .unwrap_or(ChannelPermAccess::NotFound)
+}
+
+/// A permission lookup the database could not answer. The failure itself is
+/// logged where it happened; this only says that it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LookupFailed;
+
+/// [`get_user_channel_permissions`], the same resolver, with a lookup that
+/// FAILED returned as `Err(LookupFailed)` instead of folded into `NotFound`.
+/// For a caller that must answer a database fault differently from a refusal:
+/// GET /files/:id answers it with a 503 the client retries, where a 404 would
+/// be believed (upload_handlers.rs, `uncapped_file_visible`). `Ok(NotFound)`
+/// is now only "no such channel, or it has no server".
+pub(crate) async fn try_user_channel_permissions(
+    pool: &sqlx::PgPool,
+    channel_id: i64,
+    user_id: i64,
+) -> Result<ChannelPermAccess, LookupFailed> {
     // Channel -> owning server + owner status + type + whether a collection
     // holds it, in one round-trip.
     let row: Option<(Option<String>, bool, i32, bool)> = match sqlx::query_as(
@@ -1029,20 +1050,20 @@ pub async fn get_user_channel_permissions(
                 channel_id,
                 e
             );
-            return ChannelPermAccess::NotFound;
+            return Err(LookupFailed);
         }
     };
 
     let (server_id, is_owner, kind, in_collection) = match row {
         Some((Some(sid), owner, channel_type, held)) => (sid, owner, ChannelKind::from_type(channel_type), held),
-        _ => return ChannelPermAccess::NotFound,
+        _ => return Ok(ChannelPermAccess::NotFound),
     };
 
     if is_owner {
-        return ChannelPermAccess::Allowed {
+        return Ok(ChannelPermAccess::Allowed {
             server_id,
             perms: Permissions::ADMINISTRATOR,
-        };
+        });
     }
 
     // A membership lookup that FAILS is not an answer: it is reported as
@@ -1053,8 +1074,8 @@ pub async fn get_user_channel_permissions(
     // "this person is not a member of that server".
     match server_membership(pool, &server_id, user_id).await {
         Some(true) => {}
-        Some(false) => return ChannelPermAccess::NotMember,
-        None => return ChannelPermAccess::NotFound,
+        Some(false) => return Ok(ChannelPermAccess::NotMember),
+        None => return Err(LookupFailed),
     }
 
     // Base = OR of the member's roles + the @everyone (is_default) role.
@@ -1080,7 +1101,7 @@ pub async fn get_user_channel_permissions(
                 "get_user_channel_permissions: role fetch failed for server {} user {}: {}",
                 server_id, user_id, e
             );
-            return ChannelPermAccess::NotFound;
+            return Err(LookupFailed);
         }
     };
     let mut base = Permissions::empty();
@@ -1090,10 +1111,10 @@ pub async fn get_user_channel_permissions(
 
     // ADMINISTRATOR skips overwrites entirely.
     if base.is_admin() {
-        return ChannelPermAccess::Allowed {
+        return Ok(ChannelPermAccess::Allowed {
             server_id,
             perms: base,
-        };
+        });
     }
 
     // The collections above this channel (none for most channels: no extra
@@ -1106,7 +1127,7 @@ pub async fn get_user_channel_permissions(
                     "get_user_channel_permissions: parent lookup failed for channel {}: {}",
                     channel_id, e
                 );
-                return ChannelPermAccess::NotFound;
+                return Err(LookupFailed);
             }
         }
     } else {
@@ -1142,7 +1163,7 @@ pub async fn get_user_channel_permissions(
                 "get_user_channel_permissions: overwrite fetch failed for channel {} user {}: {}",
                 channel_id, user_id, e
             );
-                return ChannelPermAccess::NotFound;
+                return Err(LookupFailed);
             }
         };
 
@@ -1151,10 +1172,10 @@ pub async fn get_user_channel_permissions(
     let above: Vec<Vec<OverwriteRow>> = chain.iter().map(|c| by_channel.remove(c).unwrap_or_default()).collect();
     let above: Vec<&[OverwriteRow]> = above.iter().map(Vec::as_slice).collect();
 
-    ChannelPermAccess::Allowed {
+    Ok(ChannelPermAccess::Allowed {
         server_id,
         perms: layer_with_collections(channel_id, kind, base, &above, &own),
-    }
+    })
 }
 
 /// Effective per-channel permissions for `user_id` across many channels of ONE

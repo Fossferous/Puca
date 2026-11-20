@@ -752,8 +752,8 @@ mod db {
         assert!(loose_stamped, "control: an unreferenced upload is stamped");
         assert!(!backing_due, "the sweep skips a background");
         assert!(loose_due, "control: the sweep takes what nothing uses");
-        assert!(member_sees, "members may fetch it, as with a server icon");
-        assert!(!outsider_sees, "an outsider may not");
+        assert_eq!(member_sees, crate::upload_handlers::FileVisibility::Visible, "members may fetch it, as with a server icon");
+        assert_eq!(outsider_sees, crate::upload_handlers::FileVisibility::NotVisible, "an outsider may not");
     }
 
     /// Deleting the mode that is on is turning it off, with all that means.
