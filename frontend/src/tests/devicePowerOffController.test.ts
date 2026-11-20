@@ -392,6 +392,7 @@ describe('an armed PC (the passphrase)', () => {
     });
 
     it('the passphrase refused by the PC: a failure', async () => {
+        forgetUaSeed.mockClear();
         const { id, key } = await sentPowerOff();
         requestUnattendedPassphrase.mockResolvedValueOnce('wrong horse');
         await hostSignal(id, key, CHALLENGE);
@@ -399,7 +400,48 @@ describe('an armed PC (the passphrase)', () => {
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'unattended access was refused' } });
         await settle();
         expect(seen.get(id)?.powerOff).toEqual({ state: 'failed', reason: 'unattended access was refused' });
+        expect(forgetUaSeed, 'a refusal said out loud forgets it').toHaveBeenCalledWith('dev-host');
     });
+
+    // Each way a host says no, from both hosts (the agent's lockout and its
+    // catch-all, the desktop app's own words): still forgotten.
+    for (const refusal of [
+        'unattended passphrase rejected',
+        'too many wrong unattended passphrases in a row; try again in 30 seconds',
+    ]) {
+        it(`CONTROL: refused as "${refusal}" still forgets the passphrase`, async () => {
+            forgetUaSeed.mockClear();
+            const { id, key } = await sentPowerOff();
+            requestUnattendedPassphrase.mockResolvedValueOnce('wrong horse');
+            await hostSignal(id, key, CHALLENGE);
+            await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: refusal } });
+            await settle();
+            expect(seen.get(id)?.powerOff?.state).toBe('failed');
+            expect(forgetUaSeed).toHaveBeenCalledWith('dev-host');
+        });
+    }
+
+    // The sign-in-screen agent's only answer to a good proof is its end with
+    // the shutdown reason: a phone that missed that frame (its socket down,
+    // the server dropping it) or a service gone before it left is told
+    // nothing either way, and that is no refusal (review of
+    // work/poweroff-locked, round 2).
+    for (const end of ['that session did not survive the disconnect', 'the other device did not come back']) {
+        it(`the proof sent, then no answer either way ("${end}"): unknown, and the passphrase is NOT forgotten`, async () => {
+            confirmUaSeed.mockClear();
+            forgetUaSeed.mockClear();
+            const { id, key } = await sentPowerOff();
+            requestUnattendedPassphrase.mockResolvedValueOnce('correct horse');
+            await hostSignal(id, key, CHALLENGE);
+            await spinUntil('the proof', async () => (await controllerFrames(key)).some(f => f.kind === 'ua-response'));
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: end } });
+            await settle();
+            expect(seen.get(id)?.powerOff).toEqual({ state: 'unknown', reason: end });
+            expect(forgetUaSeed, 'silence is not a refusal').not.toHaveBeenCalled();
+            expect(confirmUaSeed, 'nor a confirmation: nothing renews it').not.toHaveBeenCalled();
+        });
+    }
 
     it('typing the passphrase does not count: the deadline waits, and starts afresh when the proof is sent', async () => {
         const { POWER_OFF_ANSWER_TIMEOUT_MS, POWER_OFF_TOO_OLD_REASON } = await import('../api/devices/session');

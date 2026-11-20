@@ -933,7 +933,9 @@ while the computer is locked, and names the computer. The Púca app (on a comput
 a phone) then remembers each, and does not ask again for as long as you keep
 reaching that computer from it, either way, at least once a week. One the
 computer refuses is forgotten and asked for next time; changing a passphrase
-on the computer makes it ask again too. A web browser asks every time.
+on the computer makes it ask again too. Losing the connection just as a
+**Power off** goes through does not make it forget. A web browser asks every
+time.
 
 ### Power off
 

@@ -144,11 +144,30 @@ let other: StandIn;
 const verdicts: Array<{ host: string; ok: boolean }> = [];
 
 /**
+ * How the host's answer to the proof can fail to reach the phone, as the
+ * server and the service really behave:
+ *  - 'socket': the PHONE's socket drops just as the PC answers. The server
+ *    relays the end to a connection that is no longer there (send_to_conn
+ *    drops it), and once the phone is back and has attested, its reattach
+ *    claim is answered the way src/ws.rs answers one for a session that has
+ *    ended: "that session did not survive the disconnect".
+ *  - 'service': the PC's side goes before its answer leaves (Windows taking
+ *    the service down with it): the server holds the session for it
+ *    (DevicePeerReconnecting), then its reaper ends it with "the other device
+ *    did not come back".
+ * Either way the answer (the shutdown, or the refusal) never arrives. The
+ * attended host's power-ack goes FIRST, before Windows, so a 'service' loss
+ * still delivers it; a 'socket' loss takes it with the end.
+ */
+type Loss = 'socket' | 'service';
+
+/**
  * Press Power off on a card, and play the host that answers. Resolves with
  * the card's outcome. `machineRows` is what the card knows of the PC: every
- * row the device list grouped into it.
+ * row the device list grouped into it. `lose`: the host's answer to the
+ * proof never reaches the phone (see Loss).
  */
-async function pressPowerOff(host: StandIn, machineRows: string[] | undefined): Promise<PowerOffOutcome> {
+async function pressPowerOff(host: StandIn, machineRows: string[] | undefined, lose?: Loss): Promise<PowerOffOutcome> {
     const { powerOffDevice } = await import('../api/devices/powerOff');
     const { SHUTDOWN_REASON } = await import('../api/devices/session');
     const before = sent.length;
@@ -193,7 +212,27 @@ async function pressPowerOff(host: StandIn, machineRows: string[] | undefined): 
             Uint8Array.from(host.record.verifying_key),
         );
         verdicts.push({ host: host.id, ok });
-        if (!ok) {
+        if (lose === 'socket') {
+            window.dispatchEvent(new CustomEvent('wsClosed', { detail: {} }));
+            window.dispatchEvent(new Event('deviceAttested'));
+            await spinUntil('the reattach claim', () => sent.slice(before).some(m =>
+                m.type === 'DeviceReattach' && m.payload?.session_id === id));
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'that session did not survive the disconnect' } });
+        } else if (lose === 'service') {
+            if (ok && host.kind === 'app') {
+                await signal({ kind: 'power-ack', action: 'force_power_off' });
+                // The reaper's end comes seconds later: the ack has been
+                // opened and taken by then.
+                const { subscribeSessions } = await import('../api/devices/session');
+                let acked = false;
+                const off = subscribeSessions(all => {
+                    acked ||= all.some(x => x.id === id && x.powerOff?.state === 'accepted');
+                });
+                try { await spinUntil('the power-ack taken', () => acked); } finally { off(); }
+            }
+            handlers.get('DevicePeerReconnecting')!({ payload: { session_id: id } });
+            handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'the other device did not come back' } });
+        } else if (!ok) {
             // A wrong proof: the host ends the session with that, and never
             // carries anything out.
             handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'unattended access was refused' } });
@@ -384,5 +423,102 @@ describe('Power off of a locked PC whose two passphrases differ', { timeout: 60_
         const signedIn = await pressPowerOff(app, PC_ROWS);
         expect(asked[1]).toEqual({ peerDevice: APP, peerName: 'Desk-PC', signIn: false });
         expect(signedIn.kind).toBe('going');
+    });
+});
+
+/**
+ * The PC's answer to the proof LOST on the way to the phone (the review of
+ * this branch, round 2). The sign-in-screen agent sends nothing between the
+ * proof and the shutdown: on a good proof it calls Windows and its only answer
+ * is the end, "the device is shutting down" (crates/puca-agent session.rs, the
+ * `ua-response` arm into power_now), so that one relayed frame was the only
+ * thing that could confirm the seed. A phone whose socket was down for it (the
+ * server drops a frame for a connection that is gone), or a service Windows
+ * took down before it left, ended the session with no answer either way: the
+ * card says so ('unknown'), and teardown forgot the seed as if the PC had
+ * refused it, so the next Power off of the locked PC asked again.
+ *
+ * Both hosts refuse a proof OUT LOUD (the agent: "unattended access was
+ * refused", or its lockout; the desktop app: "unattended passphrase
+ * rejected"), and that still forgets the seed. Silence is no refusal.
+ */
+describe('Power off of a locked PC whose answer never reached the phone', { timeout: 60_000 }, () => {
+    for (const lose of ['socket', 'service'] as const) {
+        it(`THE FINDING (${lose}): a remembered sign-in passphrase is not forgotten when the PC's answer is lost`, async () => {
+            expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+            vi.setSystemTime(T0 + 1 * DAY);
+            const lost = await pressPowerOff(signIn, PC_ROWS, lose);
+            expect(lost.kind, 'premise: the card cannot say whether it went').toBe('unknown');
+            expect(verdicts, 'premise: the PC accepted what was offered').toEqual([
+                { host: SIGNIN, ok: true }, { host: SIGNIN, ok: true },
+            ]);
+            vi.setSystemTime(T0 + 2 * DAY);
+            expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+            expect(promptsFor(SIGNIN), 'asked again after an answer that never arrived').toBe(1);
+        });
+    }
+
+    it('THE FINDING (just typed): the first time at the lock screen, its answer lost, is still the only time it asks', async () => {
+        expect((await pressPowerOff(signIn, PC_ROWS, 'socket')).kind).toBe('unknown');
+        vi.setSystemTime(T0 + 1 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(1);
+        expect(verdicts).toEqual([{ host: SIGNIN, ok: true }, { host: SIGNIN, ok: true }]);
+    });
+
+    it('THE REPORT, with the first answer lost: a week of everyday use after it, and the lock screen still does not ask', async () => {
+        expect((await pressPowerOff(signIn, PC_ROWS, 'socket')).kind).toBe('unknown');
+        for (let day = 1; day <= 9; day++) {
+            vi.setSystemTime(T0 + day * DAY);
+            expect((await pressPowerOff(app, PC_ROWS)).kind).toBe('going');
+        }
+        vi.setSystemTime(T0 + 10 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(1);
+        expect(promptsFor(APP)).toBe(1);
+    });
+
+    it('…and the desktop row the same, when the phone\'s socket takes its power-ack with the end', async () => {
+        expect((await pressPowerOff(app, PC_ROWS)).kind).toBe('going');
+        vi.setSystemTime(T0 + 1 * DAY);
+        expect((await pressPowerOff(app, PC_ROWS, 'socket')).kind).toBe('unknown');
+        vi.setSystemTime(T0 + 2 * DAY);
+        expect((await pressPowerOff(app, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(APP)).toBe(1);
+    });
+
+    it('CONTROL: the desktop row\'s power-ack, sent before Windows, confirms it even when the end is lost', async () => {
+        expect((await pressPowerOff(app, PC_ROWS)).kind).toBe('going');
+        vi.setSystemTime(T0 + 1 * DAY);
+        expect((await pressPowerOff(app, PC_ROWS, 'service')).kind).toBe('going');
+        vi.setSystemTime(T0 + 2 * DAY);
+        expect((await pressPowerOff(app, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(APP)).toBe(1);
+    });
+
+    it('THE GATE: a WRONG passphrase whose refusal was lost is offered once more, refused out loud, forgotten, and then asked for', async () => {
+        typed[SIGNIN] = 'not it';
+        expect((await pressPowerOff(signIn, PC_ROWS, 'socket')).kind).toBe('unknown');
+        vi.setSystemTime(T0 + 1 * DAY);
+        // Not asked: the phone still holds what was typed, and the PC says no.
+        const refused = await pressPowerOff(signIn, PC_ROWS);
+        expect(refused.kind).toBe('refused');
+        expect(refused.text).toMatch(/did not accept the passphrase for its sign-in screen/);
+        expect(promptsFor(SIGNIN)).toBe(1);
+        // That refusal was heard, so it is forgotten: the next press asks.
+        typed[SIGNIN] = 'desk passphrase';
+        vi.setSystemTime(T0 + 2 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(2);
+        expect(verdicts).toEqual([
+            { host: SIGNIN, ok: false }, { host: SIGNIN, ok: false }, { host: SIGNIN, ok: true },
+        ]);
+    });
+
+    it('CONTROL: a lost answer renews nothing: what it kept lapses on its own week', async () => {
+        expect((await pressPowerOff(signIn, PC_ROWS, 'socket')).kind).toBe('unknown');
+        vi.setSystemTime(T0 + 8 * DAY);
+        expect((await pressPowerOff(signIn, PC_ROWS)).kind).toBe('going');
+        expect(promptsFor(SIGNIN)).toBe(2);
     });
 });

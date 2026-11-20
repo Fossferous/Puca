@@ -433,6 +433,17 @@ Windows PC down forcibly without opening its screen. What it is, end to end:
   agent) and carry it out on the proof; a wrong or missing proof never does.
   The host's answer vouches for a remembered passphrase (as an answer to an
   offer does), so a power-off does not make the next Control ask for it again.
+  No answer at all is no verdict: an `unknown` end (the proof sent, then
+  neither the shutdown nor a refusal arrived) keeps the seed as it was,
+  neither renewed nor forgotten. The sign-in-screen agent's only answer to a
+  good proof is its end with the shutdown reason (it sends no ack), so a
+  phone whose socket was down for that one relayed frame, or a service
+  Windows took down before it left, lost the only thing that could confirm
+  the seed, and forgetting it made the next Power off of the locked PC ask
+  again. Both hosts refuse a bad proof out loud, and that still forgets it; a
+  typo whose refusal was lost too costs one refused try next time, then the
+  prompt. (A Control or Files session that dies before the host's first
+  frame after the proof still forgets: that frame follows the proof at once.)
   If somebody signs in at the locked PC first, the lock-screen service hands
   over and the session ends: not powered off, and — unlike a Control session
   — not followed to the desktop, which would open a session nobody asked for.

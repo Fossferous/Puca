@@ -6,12 +6,15 @@
   passphrase again, even though the app had remembered it, while the same
   computer signed in did not ask. The app forgot it after a week without a
   connection to the sign-in screen itself, however often you used that
-  computer otherwise. Now using the computer either way keeps both of its
-  passphrases remembered; only a week of not reaching it at all, a
-  passphrase the computer refuses, or a new one set on it makes the app ask
-  again. The sign-in screen's passphrase is still its own, so the first time
-  it is needed it is still asked for, once. This comes with the update; no
-  new install is needed.
+  computer otherwise, and it forgot it whenever the connection dropped just
+  as the computer powered off, before the computer's answer arrived. Now
+  using the computer either way keeps both of its passphrases remembered, and
+  losing the connection as a Power off goes through no longer makes it
+  forget. A week of not reaching the computer at all, a passphrase it
+  refuses, or a new one set on it still makes the app ask again. The sign-in
+  screen's passphrase is still its own, so the first time it is needed it is
+  still asked for, once. This comes with the update; no new install is
+  needed.
 - **A locked computer asks for the right passphrase.** When a computer was
   locked or at its sign-in screen, the box asking for its passphrase said
   "Unattended passphrase", though what it needs then is the passphrase set

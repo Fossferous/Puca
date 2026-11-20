@@ -1812,6 +1812,13 @@ function teardown(
         const wireReason = s.role === 'controller' && s.powerOffOnly ? 'the session ended' : reason;
         wsClient.send({ type: 'DeviceEnd', payload: { session_id: s.id, reason: wireReason } });
     }
+    // A power-off still in flight ends with the session, and HOW it ends is
+    // the card's answer (powerOff.ts words it): the host saying it is going
+    // (or going while it had said so) is the success; a session that never
+    // got as far as sending is a failure with the session's own reason; one
+    // that ended between sending and any answer cannot be called either way.
+    // Settled HERE, before the seed's verdict just below, which reads it.
+    settlePowerOff(s, deliberate ? reason : (s.error ?? reason));
     // A remembered unattended seed this session signed with but the host never
     // demonstrably accepted is dropped. Rejection produces no signal of its
     // own — the host just tears the session down — so "still 'used' at
@@ -1819,9 +1826,27 @@ function teardown(
     // the same refusal promptless on every future connect. The cost of the
     // conservative direction (a session that died before the host's first
     // post-proof frame re-prompts next time) is one typed passphrase.
+    //
+    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY ('unknown' with the proof
+    // sent: the session then ended with neither the shutdown nor a refusal).
+    // There is no "first post-proof frame" to wait for there. Both hosts carry
+    // a held power-off out on the proof and refuse a bad one with its reason
+    // (the agent's "unattended access was refused" or its lockout, the app's
+    // "unattended passphrase rejected": heldUnproved knows them, the outcome
+    // is 'failed', and that still forgets). The sign-in-screen agent sends
+    // NOTHING between the proof and the shutdown but its end (power_now), so
+    // a phone whose socket was down for that one relayed frame, or a service
+    // Windows took down before it left, lost the only thing that could
+    // confirm the seed, and forgetting it then made the next Power off of the
+    // locked PC ask again (review of work/poweroff-locked, round 2). Kept as
+    // it was: neither renewed nor forgotten, so its week still runs from when
+    // it was last proved or typed. Wrong after all (a typo whose refusal was
+    // lost too), the next connect offers it, hears the refusal, and forgets
+    // it: one refused try, then the prompt, never a loop.
     if (s.role === 'controller' && s.uaCache === 'used') {
         s.uaCache = null;
-        forgetUaSeed(s.peerDevice);
+        const noAnswer = s.powerOff?.state === 'unknown' && s.uaProofSent === true;
+        if (!noAnswer) forgetUaSeed(s.peerDevice);
     }
     // The session is ending for real; a pending transport-grace countdown has
     // nothing left to end. Same for the connect deadline and the
@@ -1914,12 +1939,7 @@ function teardown(
     s.caretChannel = null;
     s.caretOpen = false;
     clearMediaDeadline(s);
-    // A power-off still in flight ends with the session, and HOW it ends is
-    // the card's answer (powerOff.ts words it): the host saying it is going
-    // (or going while it had said so) is the success; a session that never
-    // got as far as sending is a failure with the session's own reason; one
-    // that ended between sending and any answer cannot be called either way.
-    settlePowerOff(s, deliberate ? reason : (s.error ?? reason));
+    // (The power-off was settled above, before the seed's verdict.)
     s.phase = 'ended';
     // A deliberate end must not LEAVE an error either: a transient one latched
     // earlier in the session (a refused monitor switch, a privacy toggle that
