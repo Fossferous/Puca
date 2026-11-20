@@ -2585,6 +2585,12 @@ mod server_gone_tests {
             usage.participants.insert(socketless.clone(), std::time::Instant::now());
             usage.participants.insert(in_voice.clone(), std::time::Instant::now());
             usage.reservations.insert(unconfirmed.clone(), std::time::Instant::now());
+            // Let go of `room`'s shard before asking for `other_room`: a DashMap
+            // guard holds its shard's lock, which is not reentrant, so asking for a
+            // key in the same shard waited on itself forever. The shard comes from
+            // a hash seeded per process, so it hung about one run in sixteen on a
+            // 4-core CI runner (0.9.866: three hours, cancelled).
+            drop(usage);
             state.sfu_rooms.entry(other_room.clone()).or_default().participants.insert(stranger.clone(), std::time::Instant::now());
         }
         let mut sock = Sock::in_room(&state, owner, &doomed.voice);
