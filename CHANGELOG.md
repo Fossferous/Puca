@@ -4,6 +4,38 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.866 — 2026-11-20
+
+Profile pictures that failed to load once come back by themselves, a busy server says try again instead of not found, and Show Stream Stats says when a picture is frozen
+### Fixed
+
+- **Pictures that failed to load once come back by themselves.** A profile
+  picture, server icon or custom emoji that could not be fetched once (the
+  server busy for a moment, a dropped connection) stayed as initials or a
+  blank until the app was restarted, while everyone else saw it. Now the app
+  tries again after a short wait, and if the server or the network is still
+  away, again when you are back online, return to the app or it reconnects.
+  The app also asks for fewer pictures at once, so a busy server is less
+  likely to turn them away in the first place. This comes with the update; no
+  new install is needed.
+- **A busy server no longer tells the app that a picture does not exist.**
+  When the server's database was slow to answer, asking it for a profile
+  picture, server icon, emoji or attachment could be answered "no such file",
+  which the app believes, so the picture stayed missing. The server now
+  answers "try again in a moment" whenever it could not check, and keeps "no
+  such file" for files that are really gone or that you may not see. Deleting
+  a file while the server is busy is refused the same way, where before it
+  could remove a picture that was still in use. This is a server update.
+- **Show Stream Stats says when a picture is frozen.** When a stream you were
+  watching stood still while its sound kept playing, the readout went on
+  saying "0 freezes" the whole time, because a freeze is only counted once
+  the picture moves again. Now, while the picture is frozen and the stream is
+  still arriving, that row reads "Frozen for 12 s" and counts up; once the
+  picture moves, the dropped frames and freezes are back as before. A sharer
+  who stops sending is not called frozen once nothing more is arriving, and
+  a camera turned off or a slow share of a still screen is not called frozen
+  at all. This comes with the update; no new install is needed.
+
 ## 0.9.865 — 2026-11-17
 
 Sticky notes on the Windows desktop with formatting in notes, links and buttons that read clearly on every theme, Jump to latest that goes all the way, two fingers that pan a zoomed picture to its edge, and a tablet that looks like one
