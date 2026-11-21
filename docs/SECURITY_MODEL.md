@@ -513,6 +513,53 @@ pasted into the message box (one of those blobs until it is sent or removed, wit
 effect), and, on a PC short of memory, the copy a clip's **Download** is written from,
 which can sit there for a few minutes after the save.
 
+### What a sign-out takes away from the running app
+
+A sign-out does not reload the app (a reload would drop the desktop app's own state that
+is not the account's), so everything the app holds in memory for the account has to be
+emptied by name. `logout()` in [`frontend/src/api/auth.ts`](../frontend/src/api/auth.ts)
+scrubs storage and runs every feature's sign-out hook
+([`frontend/src/api/logoutHooks.ts`](../frontend/src/api/logoutHooks.ts)). After a
+sign-out the app no longer holds:
+
+- **the keys**: the E2EE identity, the DM session and history keys, the unwrapped channel
+  keys, the TURN credentials;
+- **what was decrypted**: every decrypted attachment (above), the parsed messages (the
+  last few hundred messages read, kept as trees of their decrypted words, with an
+  attachment's key in its link), the addresses of the link cards drawn, the preview of a
+  Púca Notes picture still waiting to upload, a recovery code still waiting to be shown;
+- **what the account was told**: the server and channel lists, members and roles (the
+  query cache), who is in which call in every server, the server rail's unread counts, a
+  clip approval request and the account's own clip proposal, and a dialog still on screen;
+- **its notifications, wherever they are shown**: the page's own (each conversation's,
+  the task reminder) and their counts, the desktop app's toasts in Windows' notification
+  centre, Android's message notifications in the shade, and what the web app's push worker
+  showed. Only Chat closing used to take the first two away, so a sign-out from Púca
+  Notes' page left them, and nothing took the rest away at all.
+
+A sign-out in another tab of the same browser (Púca or Púca Notes) runs the same hooks in
+this one ([`frontend/src/api/sessionSync.ts`](../frontend/src/api/sessionSync.ts)): they
+are registered per page, and only a page's own sign-out used to run them. A session that
+**ends without a sign-out** (it ran out, or the app was closed) keeps them for the same
+account signing back in, since that is not somebody else; but the notifications it left
+where the operating system keeps them belong to that account, so when a **different**
+account signs in, at start or on the form, they are taken away first
+(`notificationsAreFor` in
+[`frontend/src/api/desktopNotify.ts`](../frontend/src/api/desktopNotify.ts)). And a recovery
+code is shown only to the account it was made for: a registration whose automatic
+sign-in failed used to leave its code for whoever signed in next on that form.
+
+What this cannot promise: memory the page let go of is gone from the app, not wiped,
+until the JavaScript engine reuses it; what an operating system copies into its own
+notification history (Android's, if turned on) stays there; Púca for Steam Deck's toasts
+are Steam's to keep (a tap on one after the sign-out opens nothing). Deliberately kept:
+the trust-on-first-use pins of other people's keys (`verified_key_*`, `control_pin_*`),
+which a sign-out must not reset, and this device's own settings and its **Stay signed
+in** answer, which hold no account.
+`frontend/src/tests/signOutForgetsReadContent.test.ts`,
+`signOutTakesNotificationsAway.test.ts` and `signInAsSomebodyElse.test.tsx` fill each of
+these and sign out through the real path.
+
 ### The honest limit
 
 **The server does not enforce this; the client is what tells you.**
@@ -625,7 +672,10 @@ session, which makes a new subscription with a new secret rather than reviving t
 one. The row is deleted when next looked at. A push service that answers that a
 subscription is gone (404 or 410) deletes it at once; other failures back off (30
 seconds, doubling, at most 6 hours), and a subscription that has failed for a day is
-given up on.
+given up on. Signing out also closes the notifications the worker has already shown on
+that browser, and so does somebody else signing in there after a session that ended
+without one (see *What a sign-out takes away from the running app*). What the operating
+system has copied into its own notification history is out of Púca's reach.
 
 **One account at a time, by choice.** The switch is remembered per account on that
 browser, not per browser: whoever signs in next on a shared browser is not opted in by
