@@ -47,6 +47,7 @@ vi.mock('../api/publicConfig', () => ({
 }));
 
 import { login, register, generateVerifierForReset, __testing as T } from '../api/auth';
+import { consumePendingRecoveryCode } from '../api/recoveryPrompt';
 
 type Account = { salt: Uint8Array; v: bigint; srp_version: number };
 type Attempt = { A: bigint; B: bigint; b: bigint; user: string };
@@ -165,6 +166,15 @@ describe('SRP verifier derivation (srp_version)', { timeout: 60_000 }, () => {
         const acct = fakeServer.users.get('dave')!;
         expect(acct.srp_version).toBe(1);
         expect(T.bytesToHex(acct.salt)).toBe(T.bytesToHex(salt));
+    });
+
+    it('the recovery code register() leaves for the sign-in after it is that account\'s alone', async () => {
+        await register('Rosa', 'rosa-pass-word');
+        // Somebody else signing in on the form a failed sign-in left (signInAsSomebodyElse.test.tsx).
+        expect(consumePendingRecoveryCode('mallory')).toBeNull();
+        expect(consumePendingRecoveryCode(null)).toBeNull();
+        // Its own account's sign-in, as the server spells the name.
+        expect(consumePendingRecoveryCode('rosa')).toMatch(/\S+( \S+){5,}/);
     });
 
     it('username case does not change the derivation: registered as "Erin", signs in as "ERIN"', async () => {

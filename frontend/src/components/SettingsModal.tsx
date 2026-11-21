@@ -475,7 +475,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             const code = await regenerateRecoveryCode(username, rcPassword);
             // Shown by RecoveryCodeModal (mounted in the authed layout, above
             // this modal), acknowledge-gated like the first one.
-            showRecoveryCode(code);
+            showRecoveryCode(code, username);
             // Regeneration is what turns forward-secret DMs on for an older
             // account, and this device now holds the history key.
             setFsAccount('on');

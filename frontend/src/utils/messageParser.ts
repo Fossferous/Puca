@@ -10,6 +10,7 @@
  * The parser is pure and knows nothing about members/channels — the renderer
  * resolves `mentionUser`/`channel` names against the current context.
  */
+import { registerLogoutCleanup } from '../api/logoutHooks';
 
 export type Node =
     | { type: 'text'; value: string }
@@ -381,6 +382,17 @@ const KEPT_MOST = 500;
 const KEPT_LENGTH_MOST = 200_000;
 const kept = new Map<string, Node[]>();
 let keptLength = 0;
+
+/**
+ * Forget every tree kept. At sign-out: they are the decrypted words of what that account read, and
+ * an attachment's link in them carries the file's key. A sign-out reloads nothing, so they stayed in
+ * memory for the next account signed in on the same running app (api/logoutHooks.ts).
+ */
+export function forgetParsedMessages(): void {
+    kept.clear();
+    keptLength = 0;
+}
+registerLogoutCleanup(forgetParsedMessages);
 
 function frozen(nodes: Node[]): Node[] {
     for (const n of nodes) {

@@ -15,6 +15,7 @@ import {
     recoveryCodeReminderDue,
     snoozeRecoveryCodeReminder,
 } from '../api/recoveryPrompt';
+import { currentUsernameFromToken } from '../api/auth';
 import { KeyIcon, CheckIcon, CopyIcon } from './Icons';
 import './RecoveryCodeModal.css';
 import { useBackClose } from '../hooks/useBackClose';
@@ -33,8 +34,10 @@ export function RecoveryCodeModal() {
 
     useEffect(() => {
         // Poll briefly for a stashed code (register/migration set it during login).
+        // Only the signed-in account's own: a registration whose sign-in failed
+        // leaves its code waiting under the next person's sign-in.
         const pick = () => {
-            const c = consumePendingRecoveryCode();
+            const c = consumePendingRecoveryCode(currentUsernameFromToken());
             if (c) { codeRef.current = c; setCode(c); setReminder(false); }
         };
         pick();

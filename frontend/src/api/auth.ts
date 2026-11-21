@@ -436,8 +436,10 @@ export async function register(username: string, password: string, inviteCode?: 
     // sign-in that follows registration adopts it (dmKeys.ts).
     storePendingHistoryKey(username, history.priv);
     // Surfaced by RecoveryCodeModal after the user logs in. The marker
-    // outlives a reload; the code itself deliberately does not.
-    setPendingRecoveryCode(recoveryCode);
+    // outlives a reload; the code itself deliberately does not. Shown only to
+    // a session signed in as THIS account (api/recoveryPrompt.ts): the sign-in
+    // that follows can fail and leave the form to somebody else.
+    setPendingRecoveryCode(recoveryCode, username);
     markRecoveryCodeUnacknowledged();
 }
 
@@ -1251,6 +1253,15 @@ export function currentUserIdFromToken(): number | null {
     if (!t) return null;
     const p = decodeJwtPayload(t);
     return typeof p?.sub === 'number' ? p.sub : null;
+}
+
+/** The signed-in account's username from the stored JWT, the same way:
+ *  local decode only. null when signed out or the token carries none. */
+export function currentUsernameFromToken(): string | null {
+    const t = getToken();
+    if (!t) return null;
+    const p = decodeJwtPayload(t);
+    return typeof p?.username === 'string' ? p.username : null;
 }
 
 /** Whether a JWT's `exp` has passed (with a small clock-skew margin). Local

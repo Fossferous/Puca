@@ -1,6 +1,7 @@
 // Link preview utilities for fetching and displaying URL metadata
 
 import { parseMessage, type Node } from '../utils/messageParser';
+import { registerLogoutCleanup } from './logoutHooks';
 
 export interface LinkPreviewData {
     url: string;
@@ -83,6 +84,13 @@ export function siteInitial(url: string): string {
 
 // Cache for link previews to avoid refetching
 const previewCache = new Map<string, LinkPreviewData>();
+
+/** Every address the account was shown a card for, taken from its decrypted messages: gone at
+ *  sign-out, which reloads nothing, so the next account on this running app is not left them. */
+export function forgetLinkPreviews(): void {
+    previewCache.clear();
+}
+registerLogoutCleanup(forgetLinkPreviews);
 
 /**
  * Fetch link preview metadata

@@ -13,28 +13,53 @@
  * registering — destroyed it with no second chance, and nothing ever said so.
  * The marker below survives that reload; RecoveryCodeModal then points the
  * user at Settings, where a new code can be generated (0.9.2).
+ *
+ * The phrase belongs to ONE account, and only that account's session is shown
+ * it. A registration whose automatic sign-in failed left it here with the
+ * sign-in form on screen, and whoever signed in next on that form, as anybody,
+ * was shown it: the code that unlocks the first account's keys. And a sign-out
+ * (which reloads nothing) takes it away.
  */
-let pending: string | null = null;
+import { registerLogoutCleanup } from './logoutHooks';
+
+let pending: { code: string; owner: string | null } | null = null;
 
 const UNACKED_KEY = 'recovery_code_unacked_v1';
 /** Per-tab "later" so the reminder is not a nag on every navigation. */
 const SNOOZED_KEY = 'recovery_code_snoozed_v1';
 
-export function setPendingRecoveryCode(code: string): void {
-    pending = code;
+/** Usernames compare as the server compares them: without case. */
+function ownerOf(account: string | null | undefined): string | null {
+    const a = account?.trim().toLowerCase();
+    return a ? a : null;
+}
+
+/** register(): the code of the account `account` (its username), shown only
+ *  to a session signed in as that account. */
+export function setPendingRecoveryCode(code: string, account?: string): void {
+    pending = { code, owner: ownerOf(account) };
 }
 
 /** Same hand-off, from Settings: show this code through the modal. */
-export function showRecoveryCode(code: string): void {
-    pending = code;
+export function showRecoveryCode(code: string, account?: string): void {
+    pending = { code, owner: ownerOf(account) };
     markRecoveryCodeUnacknowledged();
 }
 
-export function consumePendingRecoveryCode(): string | null {
-    const c = pending;
+/**
+ * The code waiting for `account` (the signed-in username), once. A code made
+ * for another account is not handed over, and stays for its own account's
+ * sign-in; one made without an account goes to whoever asks.
+ */
+export function consumePendingRecoveryCode(account?: string | null): string | null {
+    if (!pending) return null;
+    if (pending.owner !== null && pending.owner !== ownerOf(account)) return null;
+    const c = pending.code;
     pending = null;
     return c;
 }
+
+registerLogoutCleanup(() => { pending = null; });
 
 export function markRecoveryCodeUnacknowledged(): void {
     try { localStorage.setItem(UNACKED_KEY, '1'); } catch { /* private mode */ }
