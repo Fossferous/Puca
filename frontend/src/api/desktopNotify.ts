@@ -26,14 +26,15 @@ import { loadSettings, saveSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
 import {
-    type DueReminder, mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission,
-    requestNavigation,
+    type DueReminder, clearMobileNotifications, mobileAppAvailable, notesOwnsDueReminders, postMobileNotification,
+    requestMobileNotificationPermission, requestNavigation,
 } from './mobileApp';
 import { currentUserIdFromToken } from './auth';
 import { API_BASE_URL } from './config';
 import { hostSaysForeground, hostShowsNotifications, notifyHost } from './embedHost';
+import { registerLogoutCleanup } from './logoutHooks';
 import { NotifyGroups, TASKS_DUE_KEY, navForGroupKey, type GroupMessage, type GroupStep } from './notifyGroups';
-import { pageToldAwayForPush } from './webPushLocal';
+import { closeWorkerNotifications, pageToldAwayForPush } from './webPushLocal';
 
 export type NotifyDecision =
     /** `quiet`: it only updated its conversation's notification where it
@@ -245,6 +246,61 @@ export function clearAllConversationNotifications(): void {
     }
     // Always: names stay in a notification centre after sign-out otherwise.
     if (isTauri()) nativeCall('toast_clear_all').catch(() => undefined);
+}
+
+/**
+ * Every notification this app raised for the account, wherever it is shown:
+ * the page's own (each conversation's, the task reminder) and their counts,
+ * the desktop app's toasts in Windows' notification centre, Android's message
+ * notifications in the shade, and what the web app's push worker showed
+ * (public/sw.js). They name the account's people, channels and servers, and a
+ * click on one opens that account's conversation.
+ *
+ * Chat's unmount already did the first two, but only in a page where Chat
+ * had opened: Púca Notes' page signs out through logout() alone, and nothing
+ * ever cleared Android's shade or the push worker's at a sign-out, so they
+ * were there for whoever signed in next. Now logout() does it (its sign-out
+ * hook, below), and so does a sign-in as somebody else (notificationsAreFor).
+ */
+export function takeAwayAccountNotifications(): void {
+    clearAllConversationNotifications();
+    // The diagnostics name the account's conversations by id.
+    notifyLog.length = 0;
+    void clearMobileNotifications();
+    void closeWorkerNotifications();
+}
+
+/** Whose notifications this app has up: the account signed in when it last
+ *  ran signed in. Kept when a session runs out and when the app closes, as the
+ *  notifications themselves are (in Windows' notification centre, Android's
+ *  shade, the browser's list); taken away with them at a sign-out. A user id. */
+const NOTIFY_ACCOUNT_KEY = 'pucaNotificationsAccount';
+
+registerLogoutCleanup(() => {
+    takeAwayAccountNotifications();
+    // Signed out, nobody's are up. Only then: the same hook runs in a tab that
+    // heard ANOTHER tab sign in as somebody else (api/sessionSync.ts), and the
+    // mark there is already the new account's.
+    if (currentUserIdFromToken() === null) {
+        try { localStorage.removeItem(NOTIFY_ACCOUNT_KEY); } catch { /* private mode */ }
+    }
+});
+
+/**
+ * The app is signed in as `account` (at start with a stored session, and at
+ * every sign-in). Notifications left from ANOTHER account go first: one whose
+ * session ran out, or whose app was closed, without a sign-out, so neither
+ * logout() nor Chat's unmount ever took them away, and the next person to sign
+ * in found the last one's names in the notification centre and the shade, a
+ * click on one opening that account's conversation. The same account signing
+ * back in keeps its own.
+ */
+export function notificationsAreFor(account: number | null): void {
+    if (account === null) return;
+    let before: string | null = null;
+    try { before = localStorage.getItem(NOTIFY_ACCOUNT_KEY); } catch { /* private mode */ }
+    if (before && before !== String(account)) takeAwayAccountNotifications();
+    try { localStorage.setItem(NOTIFY_ACCOUNT_KEY, String(account)); } catch { /* private mode */ }
 }
 
 /** The notification plugin's toast, where the shell has none of its own:

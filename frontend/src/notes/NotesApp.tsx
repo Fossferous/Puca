@@ -29,6 +29,7 @@ import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api
 import { currentUserIdFromToken } from '../api/auth';
 import { signOutWebPush } from '../api/webPushLocal';
 import { askConfirm, closeAppDialogs } from '../api/appDialogs';
+import { notificationsAreFor } from '../api/desktopNotify';
 
 export function NotesApp() {
     return (
@@ -170,6 +171,11 @@ function SessionGate() {
     // lock, so this waits and then finds the marker that enrolment left.
     useEffect(() => {
         if (signedIn) void settlePendingDeviceRevoke(getToken(), currentUserIdFromToken());
+    }, [signedIn]);
+    // Notifications another account left on this browser (a reminder, the push
+    // worker's) go before this one is shown anything (api/desktopNotify.ts).
+    useEffect(() => {
+        if (signedIn) notificationsAreFor(currentUserIdFromToken());
     }, [signedIn]);
 
     const signOut = useCallback(async () => {

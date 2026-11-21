@@ -30,7 +30,11 @@
 //  - a 410 from the API forgets the secret;
 //  - CONTROL: the same push delivered to Notes' worker shows nothing — the
 //    notifications above came from sw.js, not from the rig;
-//  - the stand-in refuses a body that is not the constant.
+//  - the stand-in refuses a body that is not the constant;
+//  - a sign-out closes what the worker showed (api/webPushLocal.ts
+//    closeWorkerNotifications, the real module), from Púca's page and from
+//    Púca Notes' page, which another worker controls (CONTROL: that worker
+//    holds none of them).
 //
 // THE PAGE'S HALF (api/webPushAway.ts, the backgrounded phone): the real
 // module, bundled, in a page this worker controls, on a REAL WebSocket to a
@@ -382,6 +386,44 @@ pushState.target = 'push';
 // 6. The stand-in refuses anything but the constant: it is checking.
 const refusedBefore = pushState.refused;
 ck((await wake(Buffer.from('{"from":"alice"}'))) === 400 && pushState.refused === refusedBefore + 1, 'CONTROL: a payload that is not the constant is refused, never delivered');
+
+// 6b. A sign-out closes what the worker showed. Nothing else ever did: the
+// page has none of its own to close, so "alice sent you a message" stayed in
+// the browser's list after a sign-out, for whoever signed in next. The real
+// closeWorkerNotifications (api/webPushLocal.ts), which every sign-out and a
+// sign-in as somebody else run (api/desktopNotify.ts,
+// takeAwayAccountNotifications), bundled and run in each page that signs out:
+// Púca's ("/", the push worker's own) and Púca Notes' ("/notes/", controlled by
+// ANOTHER worker, so this asks whether the push worker is still found from
+// there). CONTROL: on the Notes page the worker that controls it holds none of
+// them, so closing "this page's worker's" notifications would close nothing.
+const CLOSE_BUNDLE = (await build({
+    stdin: {
+        contents: "import { closeWorkerNotifications } from './api/webPushLocal';\n(window as unknown as Record<string, unknown>).__closeWorker = closeWorkerNotifications;\n",
+        resolveDir: join(here, '..', 'src'), loader: 'ts', sourcefile: 'close-rig.ts',
+    },
+    bundle: true,
+    write: false,
+    format: 'iife',
+    platform: 'browser',
+    logLevel: 'error',
+})).outputFiles[0].text;
+await writeConfig(CFG);
+apiState.mode = 'ok';
+for (const [who, p] of [['Púca’s page', page], ['Púca Notes’ page', notesPage]]) {
+    await wake();
+    const up = await waitShown(1);
+    ck(up.length === 1 && up[0].title === 'alice sent you a message', `${who}: before its sign-out the worker’s notification is up`, JSON.stringify(up));
+    if (p === notesPage) {
+        const own = await p.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).length);
+        ck(own === 0, 'CONTROL: the Notes page’s own worker holds none of them');
+    }
+    await p.evaluate(CLOSE_BUNDLE);
+    await p.evaluate(() => window.__closeWorker());
+    const left = await shown();
+    ck(left.length === 0, `${who}: its sign-out closes it`, JSON.stringify(left));
+    await closeAll();
+}
 
 // ---- 7. The page's half: the backgrounded phone (api/webPushAway.ts) -------
 

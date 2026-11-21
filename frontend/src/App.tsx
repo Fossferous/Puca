@@ -20,6 +20,7 @@ import { resetReconnectCatchup } from './api/reconnectCatchup';
 import { initPushRegistration, teardownPushRegistration } from './api/pushRegistration';
 import { initWebPush, teardownWebPush } from './api/webPush';
 import { installSessionSync } from './api/sessionSync';
+import { notificationsAreFor } from './api/desktopNotify';
 
 // Module-level: the battery ask spans an async gap, and StrictMode runs the
 // effect twice — a ref would be per-mount, and two mounts must still yield
@@ -238,6 +239,14 @@ function App() {
     });
     return () => { unDiscard(); unArmed(); };
   }, []);
+
+  // Signed in, at start or by the form: notifications left in Windows'
+  // notification centre, Android's shade or the browser's list by ANOTHER
+  // account (its session ran out, or the app closed, with nobody signing out)
+  // go before this one is drawn anything (api/desktopNotify.ts).
+  useEffect(() => {
+    if (loggedIn) notificationsAreFor(currentUserIdFromToken());
+  }, [loggedIn]);
 
   // Android background delivery follows the AUTH state, not just the setting:
   // signed out there is no socket, so the keep-alive service would pin the

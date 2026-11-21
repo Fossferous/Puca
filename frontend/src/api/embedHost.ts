@@ -24,6 +24,7 @@
  * game and the Deck's controls), so the host says how long they have been
  * away, or Púca's AFK move would take a player out of the call mid-game.
  */
+import { registerLogoutCleanup } from './logoutHooks';
 
 export const EMBED_API_VERSION = 1;
 
@@ -195,6 +196,10 @@ const MAX_ACTIVATIONS = 20;
  *  a notification nobody tapped must not keep its closure forever. */
 const activations = new Map<string, () => void>();
 let notificationSeq = 0;
+// Sign-out: a tap on a notification the host still shows (Steam's toasts are
+// Steam's to keep) must not open the signed-out account's conversation in the
+// next one's session. The host's own notification stays; its tap does nothing.
+registerLogoutCleanup(() => { activations.clear(); });
 
 /** Whether notifications go to the host. desktopNotify.ts asks, so the
  *  browser's permission (there is no prompt to answer) never gates them. */
