@@ -99,6 +99,7 @@ const ATTACHED = {
     'e2e/android-shade-keys-live.mjs': { count: 1, why: EMULATOR },
     'e2e/android-share-live.mjs': { count: 1, why: EMULATOR },
     'e2e/android-stream-fullscreen-live.mjs': { count: 1, why: EMULATOR },
+    'e2e/android-typing-resume-live.mjs': { count: 1, why: EMULATOR },
     'e2e/csp-smoke-desktop.mjs': { count: 1, why: 'the desktop app this script starts, with --mute-audio in WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS (checked here too)' },
 };
 
