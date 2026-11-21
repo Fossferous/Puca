@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useR
 import { noteRender } from '../api/healthLog';
 import { SpeakingDiv, SpeakingLi } from './SpeakingClass';
 import { pruneExpiredTyping } from './stableState';
+import { noteTyping, clearTyper, typersIn, type TypingRow } from './typingIndicator';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -1636,8 +1637,10 @@ export function Chat({ onLogout }: ChatProps) {
         setVoiceUpdateTrigger(prev => prev + 1);
     }), []);
 
-    // Typing indicators
-    const [typingUsers, setTypingUsers] = useState<Map<number, { username: string; expiry: number }>>(new Map());
+    // Typing indicators: who is typing, in which room, until when. Shown only for
+    // the open channel, and a message ends its sender's (typingIndicator.ts).
+    const [typingUsers, setTypingUsers] = useState<Map<number, TypingRow>>(new Map());
+    const typingNames = typersIn(typingUsers, currentChannel ? `channel_${currentChannel.id}` : null);
     const lastTypingSent = useRef<number>(0);
 
     // Search state
@@ -2969,6 +2972,10 @@ export function Chat({ onLogout }: ChatProps) {
             };
 
             if (payload.content.startsWith('__VOICE_STATUS__')) return;
+            // They sent it, so they are no longer typing it. Here, before the
+            // decrypt's await, so it lands in frame order: a ping that came after
+            // this message (they started the next one) is not wiped by it.
+            if (payload.room_id === roomId) setTypingUsers(prev => clearTyper(prev, payload.sender.id));
             // Own-sender frames are NOT dropped: the server includes the sender
             // in the broadcast on purpose (multi-device sync — see
             // message_handlers.rs), and the reconcile below adopts the echo
@@ -3088,12 +3095,9 @@ export function Chat({ onLogout }: ChatProps) {
             // message you have chosen not to see.
             if (isBlocked(payload.user.id)) return;
 
-            const expiry = Date.now() + 5000;
-            setTypingUsers(prev => {
-                const newMap = new Map(prev);
-                newMap.set(payload.user.id, { username: payload.user.username, expiry });
-                return newMap;
-            });
+            const { id, username } = payload.user;
+            const now = Date.now();
+            setTypingUsers(prev => noteTyping(prev, id, username, payload.room_id, now));
         };
 
         wsClient.on('RoomJoined', handleRoomJoined);
@@ -7183,11 +7187,11 @@ export function Chat({ onLogout }: ChatProps) {
 
                 {/* Typing Indicator */}
                 {
-                    typingUsers.size > 0 && (
+                    typingNames.length > 0 && (
                         <div className="typing-indicator">
                             <span className="typing-dots">•••</span>
-                            {Array.from(typingUsers.values()).map(u => u.username).join(', ')}
-                            {typingUsers.size === 1 ? ' is typing...' : ' are typing...'}
+                            {typingNames.join(', ')}
+                            {typingNames.length === 1 ? ' is typing...' : ' are typing...'}
                         </div>
                     )
                 }

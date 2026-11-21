@@ -12,8 +12,8 @@ import type { MediaE2eeReason } from '../api/rtc/types';
 export interface TypingEntry { username: string; expiry: number }
 
 /** Drops expired "is typing" entries; the SAME map when none expired. */
-export function pruneExpiredTyping<K>(prev: Map<K, TypingEntry>, now: number): Map<K, TypingEntry> {
-    let next: Map<K, TypingEntry> | null = null;
+export function pruneExpiredTyping<K, V extends TypingEntry>(prev: Map<K, V>, now: number): Map<K, V> {
+    let next: Map<K, V> | null = null;
     for (const [id, data] of prev) {
         if (data.expiry < now) {
             next ??= new Map(prev);

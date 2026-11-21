@@ -125,7 +125,7 @@ A small module (`frontend/src/api/platform.ts`) detects which shell it's in and 
 
 **What it does.** Shows who's online and who's typing — but only to people who should see you.
 
-**How it works.** Presence is **in‑memory only** (no database table): when your WebSocket connects, the server marks you online and notifies a **scoped audience** — people who share a server with you *plus* your accepted friends — and notifies the same set when you disconnect. This deliberately avoids leaking your online status to strangers. Typing indicators are ephemeral WebSocket events that expire after a few seconds. Voice presence (who's in a call, sharing, or on camera) is tracked per room and broadcast as it changes.
+**How it works.** Presence is **in‑memory only** (no database table): when your WebSocket connects, the server marks you online and notifies a **scoped audience** — people who share a server with you *plus* your accepted friends — and notifies the same set when you disconnect. This deliberately avoids leaking your online status to strangers. Typing indicators are ephemeral WebSocket events: a typer is shown for five seconds after their last ping, only in the channel they are typing in, and no longer once their message arrives. Voice presence (who's in a call, sharing, or on camera) is tracked per room and broadcast as it changes.
 
 ---
 
