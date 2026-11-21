@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::auth::Claims;
 use crate::permissions::Permissions;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess};
+use crate::permissions::ChannelPermAccess;
 use crate::protocol::{ServerMessage, UserInfo};
 use crate::state::AppState;
 
@@ -47,21 +47,25 @@ pub(crate) const PRUNE_EDIT_HISTORY_SQL: &str = "DELETE FROM message_edits      
 /// 404 as a missing channel (hide its existence); non-members keep 403. Returns
 /// (owning server id, resolved effective permissions) on success so callers can
 /// check further bits without a second resolution.
+///
+/// A lookup that FAILED is a 503 to retry (src/try_again.rs), never that 404:
+/// "Channel not found" for a channel that is there, over a busy database.
 macro_rules! require_channel_view {
     ($state:expr, $channel_id:expr, $user_id:expr) => {
-        match get_user_channel_permissions(&$state.pool, $channel_id, $user_id).await {
-            ChannelPermAccess::Allowed { server_id, perms } => {
+        match crate::permissions::try_user_channel_permissions(&$state.pool, $channel_id, $user_id).await {
+            Ok(ChannelPermAccess::Allowed { server_id, perms }) => {
                 if !perms.has(Permissions::VIEW_CHANNEL) {
                     return (StatusCode::NOT_FOUND, "Channel not found").into_response();
                 }
                 (server_id, perms)
             }
-            ChannelPermAccess::NotFound => {
+            Ok(ChannelPermAccess::NotFound) => {
                 return (StatusCode::NOT_FOUND, "Channel not found").into_response()
             }
-            ChannelPermAccess::NotMember => {
+            Ok(ChannelPermAccess::NotMember) => {
                 return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
             }
+            Err(e) => return e.into_response(),
         }
     };
 }
@@ -244,16 +248,25 @@ pub async fn send_message(
 
     // Slowmode: enforce a minimum gap between a user's messages in this channel.
     // Moderators (Manage Messages) are exempt, the common convention for slowmode.
+    // FAIL CLOSED: a lookup that failed is not "no slowmode" or "no earlier
+    // message" (folded that way, a busy database switched slowmode off). A 503
+    // to retry (src/try_again.rs).
     let slowmode: Option<(i32,)> =
-        sqlx::query_as("SELECT slowmode_seconds FROM channels WHERE id = $1")
+        match sqlx::query_as("SELECT slowmode_seconds FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("send_message: slowmode lookup failed for channel {channel_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
 
     if let Some((secs,)) = slowmode {
         if secs > 0 && !perms.has(Permissions::MANAGE_MESSAGES) {
-            let recent: Option<(i64,)> = sqlx::query_as(
+            let recent: Option<(i64,)> = match sqlx::query_as(
                 "SELECT EXTRACT(EPOCH FROM (NOW() - created_at))::bigint \
                  FROM messages WHERE channel_id = $1 AND user_id = $2 \
                  ORDER BY created_at DESC LIMIT 1",
@@ -262,7 +275,13 @@ pub async fn send_message(
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::error!("send_message: slowmode last-message lookup failed for channel {channel_id}: {e:?}");
+                    return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+                }
+            };
 
             if let Some((elapsed,)) = recent {
                 if elapsed < secs as i64 {
@@ -301,18 +320,37 @@ pub async fn send_message(
         if !perms.has(Permissions::CREATE_CLIPS) {
             return (StatusCode::FORBIDDEN, "Missing Create Clips permission").into_response();
         }
-        let enabled: Option<bool> = sqlx::query_scalar("SELECT clips_enabled FROM servers WHERE id = $1")
-            .bind(&server_id).fetch_optional(&state.pool).await.unwrap_or(None);
+        // A lookup that FAILED is a 503 to retry (the approval is kept), not
+        // "Clips are turned off".
+        let enabled: Option<bool> = match sqlx::query_scalar("SELECT clips_enabled FROM servers WHERE id = $1")
+            .bind(&server_id).fetch_optional(&state.pool).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("send_message: clips_enabled lookup failed for server {server_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         if enabled != Some(true) {
             return (StatusCode::CONFLICT, "Clips are turned off in this server").into_response();
         }
+        // The parts THIS user uploaded under the proposal — the badge renders
+        // only if the message's manifest is a subset of these. Read BEFORE the
+        // proposal is consumed: a lookup that failed used to post the clip with
+        // an EMPTY part list, for good, and the badge never rendered. Now the
+        // approval is kept and the answer is a 503 to retry.
+        let part_ids: Vec<String> = match sqlx::query_scalar("SELECT id::text FROM uploaded_files WHERE clip_id = $1::uuid AND uploader_id = $2 ORDER BY clip_part_index")
+            .bind(clip_id).bind(claims.sub as i32).fetch_all(&state.pool).await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("send_message: clip part lookup failed for clip {clip_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         let Some((_, p)) = state.clip_proposals.remove(clip_id) else {
             return (StatusCode::CONFLICT, "That clip approval is no longer valid").into_response();
         };
-        // The parts THIS user uploaded under the proposal — the badge renders
-        // only if the message's manifest is a subset of these.
-        let part_ids: Vec<String> = sqlx::query_scalar("SELECT id::text FROM uploaded_files WHERE clip_id = $1::uuid AND uploader_id = $2 ORDER BY clip_part_index")
-            .bind(&p.clip_id).bind(claims.sub as i32).fetch_all(&state.pool).await.unwrap_or_default();
         clip_consent = Some(serde_json::json!({
             "proposal_id": p.clip_id,
             "approver_count": p.votes.len(),

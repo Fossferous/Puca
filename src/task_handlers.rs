@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::Claims;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::permissions::{try_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::try_again::Refusal;
 use crate::protocol::ServerMessage;
 use crate::state::AppState;
 
@@ -473,23 +474,24 @@ const TASK_COLUMNS: &str =
 /// requiring VIEW_CHANNEL as the baseline. The resolver itself gates on actual
 /// server membership first (a non-member never reaches the permission math), a
 /// member who is VIEW-denied gets the same 404 as a missing channel (hide its
-/// existence), and DB errors fail closed inside the resolver. Callers layer
-/// per-operation bits (CREATE_TASKS / COMPLETE_TASKS / MANAGE_TASKS) on top.
+/// existence), and a DB error fails closed as a 503 to retry (src/try_again.rs),
+/// never that 404. Callers layer per-operation bits (CREATE_TASKS /
+/// COMPLETE_TASKS / MANAGE_TASKS) on top.
 async fn check_channel_access(
     state: &AppState,
     channel_id: i64,
     claims: &Claims,
-) -> Result<Permissions, (StatusCode, &'static str)> {
-    match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+) -> Result<Permissions, Refusal> {
+    match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await? {
         ChannelPermAccess::Allowed { perms, .. } => {
             if perms.has(Permissions::VIEW_CHANNEL) {
                 Ok(perms)
             } else {
-                Err((StatusCode::NOT_FOUND, "Channel not found"))
+                Err((StatusCode::NOT_FOUND, "Channel not found").into())
             }
         }
-        ChannelPermAccess::NotFound => Err((StatusCode::NOT_FOUND, "Channel not found")),
-        ChannelPermAccess::NotMember => Err((StatusCode::FORBIDDEN, "Access denied")),
+        ChannelPermAccess::NotFound => Err((StatusCode::NOT_FOUND, "Channel not found").into()),
+        ChannelPermAccess::NotMember => Err((StatusCode::FORBIDDEN, "Access denied").into()),
     }
 }
 
@@ -558,7 +560,7 @@ async fn check_task_access(
     state: &AppState,
     task_id: i64,
     claims: &Claims,
-) -> Result<TaskAccess, (StatusCode, &'static str)> {
+) -> Result<TaskAccess, Refusal> {
     let scope: Option<(Option<i64>, Option<i64>, i64)> = match sqlx::query_as(
         "SELECT channel_id, list_id, created_by FROM channel_tasks WHERE id = $1",
     )
@@ -575,13 +577,14 @@ async fn check_task_access(
                 task_id,
                 e
             );
-            return Err((StatusCode::NOT_FOUND, "Task not found"));
+            // Not "task not found": a 503 to retry (src/try_again.rs).
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
         }
     };
 
     let (channel_id, list_id, created_by) = match scope {
         Some(s) => s,
-        None => return Err((StatusCode::NOT_FOUND, "Task not found")),
+        None => return Err(Refusal::Is(StatusCode::NOT_FOUND, "Task not found")),
     };
 
     let perms = if let Some(cid) = channel_id {
@@ -592,7 +595,7 @@ async fn check_task_access(
         check_list_writable(state, lid, claims).await?;
         None
     } else {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Task has no scope"));
+        return Err(Refusal::Is(StatusCode::INTERNAL_SERVER_ERROR, "Task has no scope"));
     };
     Ok(TaskAccess {
         channel_id,
@@ -613,21 +616,28 @@ async fn validate_parent(
     parent_id: i64,
     channel_id: Option<i64>,
     list_id: Option<i64>,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<(), Refusal> {
+    // A lookup that FAILED is a 503 to retry, not "Parent task not found".
     let parent: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
             .bind(parent_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("validate_parent: parent lookup failed for {parent_id}: {e:?}");
+                return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+            }
+        };
 
     match parent {
-        None => return Err((StatusCode::BAD_REQUEST, "Parent task not found")),
+        None => return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found")),
         Some((p_channel, p_list)) => {
             // Same message as a missing parent: a distinct one confirmed that a
             // guessed task id exists in some checklist the caller cannot see.
             if p_channel != channel_id || p_list != list_id {
-                return Err((StatusCode::BAD_REQUEST, "Parent task not found"));
+                return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found"));
             }
         }
     }
@@ -635,9 +645,9 @@ async fn validate_parent(
     // Depth of the parent = ancestors walked up to the root (cycle-safe via the
     // depth bound). A new child sits at parent depth + 1.
     // NOTE: depth must be bigint end-to-end — `1 AS depth` would be INT4 and
-    // the i64 decode fails SILENTLY through unwrap_or(None) (looks like a
-    // missing parent).
-    let depth: Option<(Option<i64>,)> = sqlx::query_as(
+    // the i64 decode fails (read as a failed lookup: a 503 to retry, never as
+    // a depth that fits, and no longer as a missing parent).
+    let depth: Option<(Option<i64>,)> = match sqlx::query_as(
         "WITH RECURSIVE chain AS ( \
              SELECT id, parent_id, 1::bigint AS depth FROM channel_tasks WHERE id = $1 \
              UNION ALL \
@@ -650,12 +660,18 @@ async fn validate_parent(
     .bind(MAX_TASK_DEPTH)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("validate_parent: depth lookup failed for {parent_id}: {e:?}");
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+        }
+    };
 
     match depth.and_then(|d| d.0) {
         Some(d) if d < MAX_TASK_DEPTH => Ok(()),
-        Some(_) => Err((StatusCode::BAD_REQUEST, "Tasks can only nest 5 levels deep")),
-        None => Err((StatusCode::BAD_REQUEST, "Parent task not found")),
+        Some(_) => Err(Refusal::Is(StatusCode::BAD_REQUEST, "Tasks can only nest 5 levels deep")),
+        None => Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found")),
     }
 }
 
@@ -670,7 +686,7 @@ async fn insert_task(
     list_id: Option<i64>,
     payload: &CreateTaskRequest,
     claims: &Claims,
-) -> Result<(TaskResponse, bool), (StatusCode, &'static str)> {
+) -> Result<(TaskResponse, bool), Refusal> {
     if let Some(key) = payload.op_key.as_deref() {
         validate_op_key(key)?;
         // A REPLAY IS ANSWERED, NOT RE-VALIDATED. Everything below judges a
@@ -694,20 +710,20 @@ async fn insert_task(
         }
     }
     if payload.description.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Description cannot be empty"));
+        return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Description cannot be empty"));
     }
     if payload.description.len() > MAX_TASK_LEN {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, "Task description too long"));
+        return Err(Refusal::Is(StatusCode::PAYLOAD_TOO_LARGE, "Task description too long"));
     }
     if payload.description.contains('\0') {
-        return Err((StatusCode::BAD_REQUEST, "Task contains invalid characters"));
+        return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Task contains invalid characters"));
     }
     if let Some(att) = payload.attachments.as_deref() {
         if att.len() > MAX_ATTACHMENTS_LEN {
-            return Err((StatusCode::BAD_REQUEST, "Attachments too large"));
+            return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Attachments too large"));
         }
         if att.contains('\0') {
-            return Err((
+            return Err(Refusal::Is(
                 StatusCode::BAD_REQUEST,
                 "Attachments contain invalid characters",
             ));
@@ -724,8 +740,10 @@ async fn insert_task(
     // M14: cap tasks per checklist scope. A small overshoot under concurrent
     // inserts is harmless; the point is to keep a single scope from growing
     // without bound. NOT DISTINCT FROM so the NULL channel_id/list_id (the other
-    // scope) matches the same way the position subquery below does.
-    let count: (i64,) = sqlx::query_as(
+    // scope) matches the same way the position subquery below does. A count
+    // that FAILED is not an empty checklist: folded into 0 it let the item past
+    // the cap. Refused with a 503 to retry (src/try_again.rs).
+    let count: (i64,) = match sqlx::query_as(
         "SELECT COUNT(*) FROM channel_tasks \
          WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2",
     )
@@ -733,9 +751,15 @@ async fn insert_task(
     .bind(list_id)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or((0,));
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("insert_task: checklist count failed: {e:?}");
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+        }
+    };
     if count.0 >= MAX_TASKS_PER_CHECKLIST {
-        return Err((
+        return Err(Refusal::Is(
             StatusCode::BAD_REQUEST,
             "This checklist has reached its task limit",
         ));

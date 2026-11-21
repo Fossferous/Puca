@@ -1636,7 +1636,7 @@ pub(crate) fn path_user_id(user_id: i64) -> Option<i32> {
 ///
 /// Gated like get_user_dm_keys, minus the block term: the caller themself, or
 /// a relationship the caller cannot manufacture
-/// (dm_handlers::users_share_identity_context — friends, ANY shared server,
+/// (dm_handlers::try_users_share_identity_context — friends, ANY shared server,
 /// or they already wrote to you; never a tombstone). A block does NOT refuse
 /// it: this key is what mesh voice media E2EE, the DTLS pin and existing DM
 /// history decrypt under, and a block evicts nobody from a shared call — see
@@ -1644,19 +1644,35 @@ pub(crate) fn path_user_id(user_id: i64) -> Option<i32> {
 /// but serving it to EVERY authenticated account made the route an existence
 /// oracle over the dense id space — tombstones included, which /users/search
 /// deliberately hides. Every refusal is the same 404 as an unallocated id.
+///
+/// A lookup that FAILS is a 503 to retry, never that 404 and never a key. The
+/// client believes a 404 here: read twice for its OWN account at sign-in, it
+/// refused the identity the password had just unlocked as "not the one this
+/// server publishes for you" (frontend/src/api/auth.ts, checkPublishedOwnKey),
+/// over a database that was only busy. Every shipped client takes a 503 as
+/// "no answer" (unchecked, asked again), so this needs no client change.
+/// It comes before anything about the target is known (the relationship
+/// lookup) or once the caller is already entitled to the answer (the key
+/// lookup), so it says nothing a 404 would hide.
 pub async fn get_user_public_key(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
     const NOT_FOUND: (StatusCode, &str) = (StatusCode::NOT_FOUND, "User not found");
+    const TRY_AGAIN: &str = "Could not look that key up right now, try again shortly";
     let Some(target) = path_user_id(user_id) else {
         return NOT_FOUND.into_response();
     };
-    if !crate::dm_handlers::users_share_identity_context(&state.pool, claims.sub, user_id).await {
-        return NOT_FOUND.into_response();
+    match crate::dm_handlers::try_users_share_identity_context(&state.pool, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("get_user_public_key: relationship lookup failed for {}: {:?}", user_id, e);
+            return crate::try_again::try_again_shortly(TRY_AGAIN);
+        }
     }
-    // Fail closed: a lookup that cannot answer is the same 404, never a key.
+    // Fail closed: a lookup that cannot answer is never a key.
     let result: Option<(Option<String>,)> =
         match sqlx::query_as("SELECT public_key FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(target)
@@ -1666,7 +1682,7 @@ pub async fn get_user_public_key(
             Ok(row) => row,
             Err(e) => {
                 tracing::error!("get_user_public_key: lookup failed for {}: {:?}", user_id, e);
-                return NOT_FOUND.into_response();
+                return crate::try_again::try_again_shortly(TRY_AGAIN);
             }
         };
 
@@ -1829,11 +1845,18 @@ pub struct DmKeysResponse {
 /// the identity key is public to any member, but a list of session keys says
 /// how many devices someone uses, which a stranger has no claim on. A bare
 /// conversation row is not enough, because the caller can create one.
+///
+/// A lookup that FAILS is a 503 to retry, not the 404 of a stranger, and not
+/// a 200 with the session list empty: that answer said "no v4 reader" and was
+/// cached by the client (dmKeys.ts) as the truth for its lifetime. Every
+/// shipped client sends v3 on any error here (dms.ts), so a 503 changes
+/// nothing on screen and needs no client change.
 pub async fn get_user_dm_keys(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    const TRY_AGAIN: &str = "Could not look those keys up right now, try again shortly";
     // Range BEFORE the self/other decision: 2^32 + claims.sub truncated to the
     // caller's own id and took the self branch below, while the gate inside
     // the other branch compared the untruncated value. Same 404 as a stranger.
@@ -1844,8 +1867,8 @@ pub async fn get_user_dm_keys(
     let mut attestation: Option<String> = None;
     if claims.sub != user_id {
         // user1_id/user2_id are BIGINT since migration 019: decode as i64, or
-        // the row silently reads as "no conversation" (unwrap_or below).
-        let shares: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+        // the row reads as a failed lookup.
+        let shares: Option<(i64, Option<String>, Option<String>)> = match sqlx::query_as(
             "SELECT user1_id, user1_sign_attest, user2_sign_attest FROM dm_conversations \
              WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1) LIMIT 1",
         )
@@ -1853,7 +1876,13 @@ pub async fn get_user_dm_keys(
         .bind(target)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("get_user_dm_keys: conversation lookup failed for {}: {:?}", user_id, e);
+                return crate::try_again::try_again_shortly(TRY_AGAIN);
+            }
+        };
         let Some((user1, a1, a2)) = shares else {
             return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
         };
@@ -1861,18 +1890,29 @@ pub async fn get_user_dm_keys(
         // with anybody (start_conversation). Require a relationship the caller
         // cannot manufacture, or a session census of any account (device count,
         // recency, protocol version) was one POST /dms away. Same 404 as above.
-        if !crate::dm_handlers::users_share_context(&state.pool, claims.sub, user_id).await {
-            return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
+        match crate::dm_handlers::users_share_context(&state.pool, claims.sub, user_id).await {
+            Ok(true) => {}
+            Ok(false) => return (StatusCode::NOT_FOUND, "No conversation with this user").into_response(),
+            Err(e) => {
+                tracing::error!("get_user_dm_keys: relationship lookup failed for {}: {:?}", user_id, e);
+                return crate::try_again::try_again_shortly(TRY_AGAIN);
+            }
         }
         attestation = if user1 == i64::from(target) { a1 } else { a2 };
     }
-    let account: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let account: Option<(Option<String>, Option<String>, Option<String>)> = match sqlx::query_as(
         "SELECT history_pubkey, history_pubkey_sig, account_sign_pub FROM users WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(target)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("get_user_dm_keys: account lookup failed for {}: {:?}", user_id, e);
+            return crate::try_again::try_again_shortly(TRY_AGAIN);
+        }
+    };
     let Some((history_pubkey, history_pubkey_sig, account_sign_pub)) = account else {
         return (StatusCode::NOT_FOUND, "User not found").into_response();
     };
@@ -1884,7 +1924,7 @@ pub async fn get_user_dm_keys(
     // sessions that never publish a key and never read a DM, and counting them
     // would hold every enrolled account on v3 for good. (device_id is NOT the
     // discriminator — every attested app session carries one.)
-    let rows: Vec<(Option<String>, Option<String>, Option<i16>)> = sqlx::query_as(
+    let rows: Vec<(Option<String>, Option<String>, Option<i16>)> = match sqlx::query_as(
         "SELECT dm_pubkey, dm_pubkey_sig, reads_up_to FROM token_sessions \
          WHERE user_id = $1 AND revoked_at IS NULL AND NOT headless \
            AND last_seen_at > NOW() - make_interval(days => $2)",
@@ -1893,7 +1933,13 @@ pub async fn get_user_dm_keys(
     .bind(DM_RECENT_SESSION_DAYS)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_user_dm_keys: session lookup failed for {}: {:?}", user_id, e);
+            return crate::try_again::try_again_shortly(TRY_AGAIN);
+        }
+    };
     let mut sessions: Vec<SignedDmKey> = rows
         .iter()
         .filter_map(|(p, g, _)| match (p, g) {
@@ -2087,12 +2133,21 @@ pub async fn update_public_key(
         return (StatusCode::BAD_REQUEST, "Malformed public key").into_response();
     }
 
+    // FAIL CLOSED: a lookup that failed is not "no key yet". Folded into None it
+    // skipped the refusal below and wrote over an established v3 identity key,
+    // the one write this route exists to refuse. A 503 to retry instead.
     let existing: Option<(Option<String>, Option<i32>)> =
-        sqlx::query_as("SELECT public_key, key_version FROM users WHERE id = $1")
+        match sqlx::query_as("SELECT public_key, key_version FROM users WHERE id = $1")
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("update_public_key: key lookup failed for user {}: {:?}", claims.sub, e);
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     if let Some((Some(current), key_version)) = existing {
         // Idempotent re-upload of the SAME key is fine; a CHANGE on a v3
         // account is the takeover path and is refused.
@@ -2309,11 +2364,20 @@ pub async fn delete_account(
     if let Err(r) = crate::recovery_handlers::require_password_proof(&state, claims.sub, claims.sst) {
         return r;
     }
-    let row: Option<(String,)> = sqlx::query_as("SELECT username FROM users WHERE id = $1")
+    // Both lookups FAIL CLOSED with a 503 to retry (src/try_again.rs): the
+    // count of owned servers used to fold a failure into zero, and an owner's
+    // account was then deleted out from under the servers it still owned.
+    let row: Option<(String,)> = match sqlx::query_as("SELECT username FROM users WHERE id = $1")
         .bind(claims.sub as i32)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("delete_account: account lookup failed for {}: {:?}", claims.sub, e);
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
     let Some((username,)) = row else {
         return (StatusCode::NOT_FOUND, "Account not found").into_response();
     };
@@ -2321,12 +2385,18 @@ pub async fn delete_account(
         return (StatusCode::BAD_REQUEST, "Username does not match").into_response();
     }
 
-    let owned: Option<(i64,)> = sqlx::query_as("SELECT COUNT(*) FROM servers WHERE owner_id = $1")
+    let owned: (i64,) = match sqlx::query_as("SELECT COUNT(*) FROM servers WHERE owner_id = $1")
         .bind(claims.sub as i32)
-        .fetch_optional(&state.pool)
+        .fetch_one(&state.pool)
         .await
-        .unwrap_or(None);
-    if owned.map(|(n,)| n).unwrap_or(0) > 0 {
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!("delete_account: owned-server count failed for {}: {:?}", claims.sub, e);
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
+    if owned.0 > 0 {
         return (
             StatusCode::CONFLICT,
             "You still own servers. Disband them (or transfer ownership) first.",

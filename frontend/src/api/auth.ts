@@ -796,8 +796,9 @@ export async function retryIdentityRestore(password: string): Promise<void> {
  *
  * - `match`: our key. Adopt.
  * - `mismatch`: another key, no key, a value that is not a well-formed X25519
- *   key, or "not found" twice. Never adopted. (The endpoint also answers 404
- *   when its own lookup fails, so a first 404 is read again before it counts.)
+ *   key, or "not found" twice. Never adopted. (An older server also answered
+ *   404 when its own lookup failed, so a first 404 is read again before it
+ *   counts; a current one answers that with a 503, which is `unchecked`.)
  * - `unchecked`: no answer from the endpoint: offline, a 5xx, a refusal of
  *   the request itself (401, 403, 429), a body that is not its JSON. Not
  *   evidence of anything: adopted, and the check is OWED — run again at the

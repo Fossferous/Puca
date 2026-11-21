@@ -1462,6 +1462,28 @@ administrator gets `403 Cannot change your own roles` when the target is
 themselves. Administrators are exempt because they can see every channel
 already — the check buys nothing against them.
 
+**A check the database cannot make refuses the request.** A permission,
+ownership or rank lookup, a quota, a rate limit or a block lookup that FAILS
+(a busy pool, a dropped connection) answers `503` with `Retry-After: 2`, and
+nothing is served, stored or sent ([`src/try_again.rs`](../src/try_again.rs)).
+Several used to fold the failure into a pass: with the server's owner
+unreadable for a moment, a moderator's kick, ban, timeout or role change
+reached the owner (`can_moderate` read them as "not the owner, no roles"); an
+upload skipped the storage quota and the clip-part cap; a blocked user's
+reaction to a DM went through; slowmode, the report limit, the
+verification-mail and password-reset limits and the reactions and checklist
+caps opened; an owner could delete their account while still owning
+servers; a new recovery code could be set without re-wrapping the v4 history
+key (stranding every v4 message); and `PATCH /keys/public` could write over an
+established identity key (each of those last three behind the password proof
+or recovery proof it also needs). Others folded it into
+a refusal the client believed, such as "Channel not found" for a channel that
+is there, or a 404 for your own public key that, read twice at sign-in, made
+the client refuse the identity your password had just unlocked. The real 404
+and 403 are unchanged. The forgot-password route keeps its one answer
+whichever way its limit lookup goes (it sends nothing when it cannot count),
+because a different answer there would say which addresses have an account.
+
 **Revoking CONNECT now removes you from the call, on both transports.** The
 eviction sweep that runs after a kick, ban or permission change
 (`broadcast_perms_changed_and_evict`, [`src/ws.rs`](../src/ws.rs)) used to

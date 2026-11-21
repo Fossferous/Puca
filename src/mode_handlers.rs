@@ -1137,10 +1137,11 @@ pub async fn call_everyone_back(
         Ok(b) => b,
         Err(e) => return failed(e),
     };
-    let caller_sees_home = matches!(
-        get_user_channel_permissions(&state.pool, home as i64, claims.sub).await,
-        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
-    );
+    // A lookup that FAILED is a 503 to retry, not "no main voice channel".
+    let caller_sees_home = match crate::permissions::try_user_channel_permissions(&state.pool, home as i64, claims.sub).await {
+        Ok(access) => matches!(access, ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)),
+        Err(e) => return e.into_response(),
+    };
     if elsewhere || !caller_sees_home {
         return (StatusCode::CONFLICT, "This mode has no main voice channel").into_response();
     }

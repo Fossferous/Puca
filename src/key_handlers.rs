@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::Claims;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::permissions::{try_user_channel_permissions, ChannelPermAccess, Permissions};
 use crate::state::AppState;
 
 // --- DTOs ---
@@ -149,16 +149,18 @@ pub async fn publish_channel_keys(
     // Key custody follows visibility: a member VIEW-denied on the channel can
     // neither publish nor fetch its keys, and sees the same 404 as a missing
     // channel (hide its existence).
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     if payload.keys.is_empty() {
@@ -436,16 +438,18 @@ pub async fn get_channel_keys(
 ) -> impl IntoResponse {
     // VIEW-gated: a member who cannot see the channel must not receive its
     // wrapped keys (404, hiding the channel's existence).
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     // A caller's CURRENT epoch is the newest one actually ADDRESSED TO THEM, not
@@ -580,16 +584,18 @@ pub async fn get_member_keys(
 ) -> impl IntoResponse {
     // Same VIEW gate as get_channel_keys: member public keys for wrapping are
     // only served to users who can see the channel.
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     let rows: Vec<(i32, Option<String>)> = sqlx::query_as(

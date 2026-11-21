@@ -22,6 +22,11 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::Claims;
 use crate::state::AppState;
+// The answer when the server cannot tell right now (src/try_again.rs): a 404
+// for a database fault says "there is no such file", and a client that
+// believes it (one that stops asking for a 404 for the rest of the session)
+// left a picture, icon or emoji blank over one busy moment.
+use crate::try_again::try_again_shortly;
 
 /// Per-user upload quota (M15). Coarse abuse ceilings, not exact accounting.
 const DEFAULT_MAX_USER_STORAGE_BYTES: i64 = 512 * 1024 * 1024; // 512 MB per user (attachments bucket)
@@ -339,16 +344,6 @@ pub async fn delete_file(
     }
 }
 
-/// The answer when the server cannot tell right now: 503 with `Retry-After: 2`,
-/// the shape GET /files' per-IP download ceiling already answers with. Still
-/// a refusal (nothing is served or deleted), but one a client may retry. A 404
-/// for a database fault says "there is no such file", and a client that
-/// believes it (one that stops asking for a 404 for the rest of the session)
-/// left a picture, icon or emoji blank over one busy moment.
-fn try_again_shortly(what: &'static str) -> axum::response::Response {
-    (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "2")], what).into_response()
-}
-
 /// Did this lookup fail because of the id the caller sent? Two codes say so:
 /// 22P02 when the id is not a uuid (the `::uuid` cast), and 22021 when it
 /// carries a NUL byte (`/files/%00`), which Postgres refuses in any text. Such
@@ -428,8 +423,18 @@ async fn clip_upload_gate(state: &AppState, claims: &Claims, clip_id: Option<&st
         if p.proposer != claims.sub { return Some((StatusCode::FORBIDDEN, "That clip is not yours").into_response()); }
         if p.approved_at.is_none() { return Some((StatusCode::FORBIDDEN, "That clip has not been approved yet").into_response()); }
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uploaded_files WHERE clip_id = $1::uuid")
-        .bind(cid).fetch_one(&state.pool).await.unwrap_or(0);
+    // A count that FAILED is not zero parts: folded into 0 it let the upload
+    // past the cap. Refused with a 503 the clip uploader retries (clipUpload.ts
+    // retries everything but a final refusal).
+    let n: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM uploaded_files WHERE clip_id = $1::uuid")
+        .bind(cid).fetch_one(&state.pool).await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!("clip_upload_gate: part count failed for clip {cid:?}: {e:?}");
+            return Some(try_again_shortly("Could not check that clip right now, try again shortly"));
+        }
+    };
     if n >= MAX_PARTS_PER_CLIP { return Some((StatusCode::PAYLOAD_TOO_LARGE, "Too many clip parts").into_response()); }
     None
 }
@@ -547,8 +552,13 @@ pub async fn upload_file(
         .get("x-puca-channel")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<i64>().ok());
+    // A permission lookup that FAILED is a 503 to retry, not the 403 "You
+    // can't attach files in that channel" of a real refusal.
     let attach_access = match attach_channel {
-        Some(cid) => Some(crate::permissions::get_user_channel_permissions(&state.pool, cid, claims.sub).await),
+        Some(cid) => match crate::permissions::try_user_channel_permissions(&state.pool, cid, claims.sub).await {
+            Ok(access) => Some(access),
+            Err(e) => return e.into_response(),
+        },
         None => None,
     };
     if let Err((code, msg)) = attach_gate(attach_access.as_ref()) {
@@ -619,11 +629,20 @@ pub async fn upload_file(
     // Idempotent clip parts: a retry after a lost response returns the SAME row.
     if is_clip {
         if let (Some(cid), Some(idx)) = (clip_id.as_deref(), part_index) {
-            let existing: Option<(String, String, String, i64)> = sqlx::query_as(
+            let existing: Result<Option<(String, String, String, i64)>, sqlx::Error> = sqlx::query_as(
                 "SELECT id::text, original_name, mime_type, size_bytes FROM uploaded_files WHERE clip_id = $1::uuid AND clip_part_index = $2 AND uploader_id = $3",
             )
             .bind(cid).bind(idx).bind(claims.sub as i32)
-            .fetch_optional(&state.pool).await.unwrap_or(None);
+            .fetch_optional(&state.pool).await;
+            // Not known is not "no such part": a retry after a lost response
+            // would store the part a second time.
+            let existing = match existing {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::error!("upload_file: clip part lookup failed for clip {cid:?} part {idx}: {e:?}");
+                    return try_again_shortly("Could not check that clip right now, try again shortly");
+                }
+            };
             if let Some((id, original_name, mime_type, size_bytes)) = existing {
                 // An idempotent retry returns the row that already exists; a capability
                 // is returned exactly once at mint time, and clip parts never mint one.
@@ -641,7 +660,11 @@ pub async fn upload_file(
     // Two buckets: attachments (unchanged 512 MB / 5000 files) and clip parts
     // (their own byte budget). `kind` is NOT NULL DEFAULT 'attachment' (050), so
     // the FILTERs are safe on every pre-existing row.
-    let usage: (i64, i64, i64) = sqlx::query_as(
+    //
+    // FAIL CLOSED: a sum that failed is not an empty account. Folded into
+    // (0, 0, 0) it let every upload through while the database was busy,
+    // whatever the account had stored. Refused with a 503 to retry.
+    let usage: (i64, i64, i64) = match sqlx::query_as(
         "SELECT COALESCE(SUM(size_bytes) FILTER (WHERE kind <> 'clip'), 0)::bigint, \
                 COUNT(*) FILTER (WHERE kind <> 'clip'), \
                 COALESCE(SUM(size_bytes) FILTER (WHERE kind = 'clip'), 0)::bigint \
@@ -650,7 +673,13 @@ pub async fn upload_file(
     .bind(claims.sub as i32)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or((0, 0, 0));
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("upload_file: quota sum failed for user {}: {e:?}", claims.sub);
+            return try_again_shortly("Could not check your storage right now, try again shortly");
+        }
+    };
     if is_clip {
         if usage.2 + size_bytes > clip_quota_bytes() {
             tracing::warn!("clip quota exceeded for user {} ({} bytes)", claims.sub, usage.2);
@@ -1375,35 +1404,18 @@ mod transient_fault_tests {
     //! them: no row, a malformed id, visibility genuinely denied, the blob gone.
     //!
     //! A fault on ONE lookup of a request, after the ones before it answered,
-    //! comes from `faulty_pool`: its connections resolve the named tables to
-    //! views that raise (as a cancelled statement does under load) and every
-    //! other name to the real table. Only that pool sees the fault.
+    //! comes from `faulty_pool` (src/fault_injection.rs): its connections
+    //! resolve the named tables to views that raise (as a cancelled statement
+    //! does under load) and every other name to the real table. Only that pool
+    //! sees the fault.
     use super::{delete_file, get_file};
-    use crate::auth::Claims;
-    use crate::state::AppState;
+    use crate::fault_injection::{app, assert_not_found, assert_retry, claims, drop_faults, faulty_delete_pool, faulty_pool, user};
     use axum::extract::{ConnectInfo, Path, State};
-    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::http::{HeaderMap, StatusCode};
     use axum::response::{IntoResponse, Response};
     use axum::Extension;
     use chrono::{DateTime, Utc};
-    use std::sync::Arc;
     use std::time::Duration;
-
-    fn claims(sub: i64) -> Claims {
-        Claims {
-            sub,
-            username: format!("u{sub}"),
-            exp: Utc::now().timestamp() + 3600,
-            tv: 0,
-            sst: 0,
-            sid: String::new(),
-            ls: false,
-        }
-    }
-
-    fn app(pool: &sqlx::PgPool) -> Arc<AppState> {
-        AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake))
-    }
 
     async fn fetch(pool: &sqlx::PgPool, id: &str, caller: i64) -> Response {
         get_file(
@@ -1419,90 +1431,6 @@ mod transient_fault_tests {
 
     async fn delete(pool: &sqlx::PgPool, id: &str, caller: i64) -> Response {
         delete_file(State(app(pool)), Path(id.to_string()), Extension(claims(caller))).await.into_response()
-    }
-
-    #[track_caller]
-    fn assert_retry(resp: &Response, why: &str) {
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{why}");
-        assert_eq!(
-            resp.headers().get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
-            Some("2"),
-            "{why}: Retry-After"
-        );
-    }
-
-    #[track_caller]
-    fn assert_not_found(resp: &Response, why: &str) {
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{why}");
-        assert!(resp.headers().get(header::RETRY_AFTER).is_none(), "{why}: a 404 is final, no Retry-After");
-    }
-
-    /// See the module comment. `tables` are names in `public`.
-    async fn faulty_pool(admin: &sqlx::PgPool, url: &str, tables: &[&str]) -> (sqlx::PgPool, String) {
-        let schema = format!("f503_{}", uuid::Uuid::new_v4().simple());
-        crate::migrator::test_ddl(admin, &format!("CREATE SCHEMA {schema}")).await;
-        for t in tables {
-            crate::migrator::test_ddl(
-                admin,
-                &format!(
-                    "CREATE FUNCTION {schema}.fault_{t}() RETURNS SETOF public.{t} LANGUAGE plpgsql AS \
-                     $$ BEGIN RAISE EXCEPTION 'injected fault on {t}' USING ERRCODE = 'query_canceled'; END $$"
-                ),
-            )
-            .await;
-            crate::migrator::test_ddl(admin, &format!("CREATE VIEW {schema}.{t} AS SELECT * FROM {schema}.fault_{t}()")).await;
-        }
-        let opts = url
-            .parse::<sqlx::postgres::PgConnectOptions>()
-            .expect("TEST_DATABASE_URL parses")
-            .options([("search_path", format!("{schema},public"))]);
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(opts)
-            .await
-            .expect("connect the faulty pool");
-        (pool, schema)
-    }
-
-    /// Like `faulty_pool`, but `table` READS normally (a plain view over the
-    /// real one) and only a DELETE through it fails.
-    async fn faulty_delete_pool(admin: &sqlx::PgPool, url: &str, table: &str) -> (sqlx::PgPool, String) {
-        let (pool, schema) = faulty_pool(admin, url, &[]).await;
-        crate::migrator::test_ddl(admin, &format!("CREATE VIEW {schema}.{table} AS SELECT * FROM public.{table}")).await;
-        crate::migrator::test_ddl(
-            admin,
-            &format!(
-                "CREATE FUNCTION {schema}.refuse_delete() RETURNS trigger LANGUAGE plpgsql AS \
-                 $$ BEGIN RAISE EXCEPTION 'injected fault on DELETE' USING ERRCODE = 'query_canceled'; END $$"
-            ),
-        )
-        .await;
-        crate::migrator::test_ddl(
-            admin,
-            &format!("CREATE TRIGGER refuse_delete INSTEAD OF DELETE ON {schema}.{table} FOR EACH ROW EXECUTE FUNCTION {schema}.refuse_delete()"),
-        )
-        .await;
-        (pool, schema)
-    }
-
-    async fn drop_faults(admin: &sqlx::PgPool, faulty: sqlx::PgPool, schema: &str) {
-        faulty.close().await;
-        crate::migrator::test_ddl(admin, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE")).await;
-    }
-
-    async fn user(pool: &sqlx::PgPool, role: &str) -> i64 {
-        let name = format!("f503_{role}_{}", uuid::Uuid::new_v4().simple());
-        let (id,): (i32,) = sqlx::query_as(
-            "INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
-        )
-        .bind(&name)
-        .bind(format!("{name}@test.invalid"))
-        .bind(b"s".as_ref())
-        .bind(b"v".as_ref())
-        .fetch_one(pool)
-        .await
-        .expect("insert user");
-        id as i64
     }
 
     /// An upload row with NO capability (so the visibility gate decides), and

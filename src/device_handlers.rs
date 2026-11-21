@@ -1555,36 +1555,54 @@ pub struct SigningKeyResponse {
 /// GET /users/:user_id/signing-key — fetch a user's published signing key.
 ///
 /// Gated like GET /users/:id/public-key: the caller themself, or a
-/// relationship the caller cannot manufacture (users_share_identity_context:
+/// relationship the caller cannot manufacture (try_users_share_identity_context:
 /// friends, any shared server, or they already wrote to you — never a blocked
 /// pair, never a tombstone). Ungated, the route enumerated the id space,
 /// tombstones included. One 404 for every refusal.
+///
+/// A lookup that FAILS is a 503 to retry (src/try_again.rs), not that 404.
+/// Shipped clients take any error as "no key, no session" and pin nothing
+/// (devices/shares.ts, pinnedSigningKeyFor), so a 503 needs no client change.
 pub async fn get_signing_key(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(user_id): Path<i64>,
-) -> Result<Json<SigningKeyResponse>, (StatusCode, String)> {
-    let not_found = || (StatusCode::NOT_FOUND, "user not found".to_string());
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    const TRY_AGAIN: &str = "Could not look that key up right now, try again shortly";
+    let not_found = || (StatusCode::NOT_FOUND, "user not found").into_response();
     // Range first: `as i32` wrapped 2^32 + N onto row N.
     let Some(target) = crate::handlers::path_user_id(user_id) else {
-        return Err(not_found());
+        return not_found();
     };
-    if !crate::dm_handlers::users_share_identity_context(&state.pool, claims.sub, user_id).await {
-        return Err(not_found());
+    match crate::dm_handlers::try_users_share_identity_context(&state.pool, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(e) => {
+            tracing::error!("get_signing_key: relationship lookup failed for {user_id}: {e:?}");
+            return crate::try_again::try_again_shortly(TRY_AGAIN);
+        }
     }
     let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT account_sign_pub FROM users WHERE id = $1 AND deleted_at IS NULL")
+        match sqlx::query_as("SELECT account_sign_pub FROM users WHERE id = $1 AND deleted_at IS NULL")
             .bind(target)
             .fetch_optional(&state.pool)
             .await
-            .map_err(db_error)?;
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("get_signing_key: lookup failed for {user_id}: {e:?}");
+                return crate::try_again::try_again_shortly(TRY_AGAIN);
+            }
+        };
     let Some((key,)) = row else {
-        return Err(not_found());
+        return not_found();
     };
-    Ok(Json(SigningKeyResponse {
+    Json(SigningKeyResponse {
         user_id,
         account_sign_pub: key,
-    }))
+    })
+    .into_response()
 }
 
 #[cfg(test)]

@@ -14,9 +14,10 @@ use std::sync::Arc;
 use crate::auth::Claims;
 use crate::permissions::{
     get_user_channel_permissions, get_user_channels_permissions, get_user_server_permissions,
-    ChannelPermAccess, Permissions,
+    try_user_channel_permissions, ChannelPermAccess, Permissions,
 };
 use crate::state::AppState;
+use crate::try_again::Refusal;
 
 // Re-export permission helpers from server_handlers for now
 pub use crate::permissions::user_has_permission;
@@ -1108,13 +1109,20 @@ pub async fn get_channel_feed(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    // 1. Get channel type and server_id to check permissions
+    // 1. Get channel type and server_id to check permissions. A lookup that
+    // FAILED is a 503 to retry, not "Channel not found" (src/try_again.rs).
     let channel: Option<(i32, Option<String>)> =
-        sqlx::query_as("SELECT type, server_id FROM channels WHERE id = $1")
+        match sqlx::query_as("SELECT type, server_id FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("get_channel_feed: channel lookup failed for channel {channel_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
 
     let (channel_type, server_id) = match channel {
         Some((t, Some(sid))) => (t, sid),
@@ -1123,14 +1131,16 @@ pub async fn get_channel_feed(
 
     // Reads require VIEW_CHANNEL on the collection: a member who is VIEW-denied
     // gets 404 (hide the channel's existence); non-members keep 403.
-    match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL) => {}
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    match crate::permissions::try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { perms, .. }) if perms.has(Permissions::VIEW_CHANNEL) => {}
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     }
 
     // 2. If not a collection (type 2), return bad request? Or just empty children?
@@ -1256,21 +1266,22 @@ pub struct PutOverwriteRequest {
 /// a manager denied a channel (on it, or on its collection: docs/USER_GUIDE.md, Collections and
 /// permissions) could rename it, read and rewrite its overwrites, or delete it with its messages,
 /// by number, and a 403 against a 404 told them which numbers were channels. A non-member is
-/// refused 403, as on the read routes. Fail closed: a lookup that fails reads as not found.
+/// refused 403, as on the read routes. Fail closed: a lookup that fails is a 503 to retry
+/// (src/try_again.rs), never the 404 of a channel that is not there.
 async fn require_manage_visible(
     pool: &sqlx::PgPool,
     channel_id: i64,
     user_id: i64,
-) -> Result<String, (StatusCode, &'static str)> {
-    let server_id = match get_user_channel_permissions(pool, channel_id, user_id).await {
+) -> Result<String, Refusal> {
+    let server_id = match try_user_channel_permissions(pool, channel_id, user_id).await? {
         ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => server_id,
         ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
-            return Err((StatusCode::NOT_FOUND, "Channel not found"))
+            return Err((StatusCode::NOT_FOUND, "Channel not found").into())
         }
-        ChannelPermAccess::NotMember => return Err((StatusCode::FORBIDDEN, "Not a member of this server")),
+        ChannelPermAccess::NotMember => return Err((StatusCode::FORBIDDEN, "Not a member of this server").into()),
     };
     if !user_has_permission(pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
-        return Err((StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission"));
+        return Err((StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into());
     }
     Ok(server_id)
 }
@@ -1303,7 +1314,7 @@ async fn require_manage_overwrites(
     state: &AppState,
     channel_id: i64,
     user_id: i64,
-) -> Result<OverwriteGate, (StatusCode, &'static str)> {
+) -> Result<OverwriteGate, Refusal> {
     let refused = match require_manage_visible(&state.pool, channel_id, user_id).await {
         Ok(server_id) => {
             // They see it: whatever save hid it from them is over.
@@ -1316,10 +1327,10 @@ async fn require_manage_overwrites(
         .overwrite_saves
         .get(&(user_id, channel_id))
         .is_some_and(|until| *until > std::time::Instant::now());
-    if !saving || refused.0 != StatusCode::NOT_FOUND {
+    if !saving || refused.status() != StatusCode::NOT_FOUND {
         return Err(refused);
     }
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, user_id).await {
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, user_id).await? {
         ChannelPermAccess::Allowed { server_id, .. } => server_id,
         _ => return Err(refused),
     };

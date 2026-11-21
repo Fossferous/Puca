@@ -1400,12 +1400,14 @@ pub async fn mark_channel_read(
     // non-members so a client can say "not a member", but nothing needs that
     // distinction on a write of read-state, and 403-vs-404 would confirm to an
     // outsider which channel ids exist.
-    match crate::permissions::get_user_channel_permissions(&state.pool, channel_id, claims.sub)
+    // A lookup that FAILED is a 503 to retry, not that 404.
+    match crate::permissions::try_user_channel_permissions(&state.pool, channel_id, claims.sub)
         .await
     {
-        crate::permissions::ChannelPermAccess::Allowed { perms, .. }
+        Ok(crate::permissions::ChannelPermAccess::Allowed { perms, .. })
             if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) => {}
-        _ => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+        Ok(_) => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Use channel_read_state table which tracks last_read_at timestamp

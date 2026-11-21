@@ -11,6 +11,7 @@ use crate::auth::Claims;
 use crate::permissions::{user_has_permission, Permissions};
 use crate::protocol::ServerMessage;
 use crate::state::AppState;
+use crate::try_again::{try_again_shortly, COULD_NOT_CHECK};
 
 // --- DTOs ---
 
@@ -140,12 +141,19 @@ pub async fn kick_member(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Reason too long").into_response();
     }
 
-    // Prevent kicking self or server owner
-    let owner: Option<(i32,)> = sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
+    // Prevent kicking self or server owner. A lookup that fails is not "no
+    // owner": folded into None it skipped this check (src/try_again.rs).
+    let owner: Option<(i32,)> = match sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
         .bind(&server_id)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("kick_member: owner lookup failed for server {server_id}: {e:?}");
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     if let Some((owner_id,)) = owner {
         if user_id == owner_id as i64 {
@@ -160,12 +168,14 @@ pub async fn kick_member(
     // Role hierarchy: a KICK_MEMBERS holder may only kick members ranked below
     // them, never an administrator or an equal-ranked moderator. (Owner is
     // already handled above; can_moderate re-covers it defensively.)
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
-        return (
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return (
             StatusCode::FORBIDDEN,
             "Cannot kick a member ranked at or above you",
         )
-            .into_response();
+            .into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Purge role assignments first so no permissions linger after removal
@@ -266,12 +276,19 @@ pub async fn ban_member(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Reason too long").into_response();
     }
 
-    // Prevent banning self or server owner
-    let owner: Option<(i32,)> = sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
+    // Prevent banning self or server owner. A lookup that fails is not "no
+    // owner": folded into None it skipped this check (src/try_again.rs).
+    let owner: Option<(i32,)> = match sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
         .bind(&server_id)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("ban_member: owner lookup failed for server {server_id}: {e:?}");
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     if let Some((owner_id,)) = owner {
         if user_id == owner_id as i64 {
@@ -285,12 +302,14 @@ pub async fn ban_member(
 
     // Role hierarchy: a BAN_MEMBERS holder may only ban members ranked below
     // them, never an administrator or an equal-ranked moderator.
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
-        return (
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return (
             StatusCode::FORBIDDEN,
             "Cannot ban a member ranked at or above you",
         )
-            .into_response();
+            .into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // The ban, and the membership and role assignments it ends, in ONE
@@ -482,12 +501,14 @@ pub async fn timeout_member(
     // or any administrator). can_moderate refuses acting on the owner, on
     // yourself (administrators included), and on a member ranked at or above a
     // non-administrator actor.
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
-        return (
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return (
             StatusCode::FORBIDDEN,
             "Cannot time out a member ranked at or above you",
         )
-            .into_response();
+            .into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Bound the duration to a sane range BEFORE building the Duration.
@@ -568,8 +589,10 @@ pub async fn set_member_custom_sounds(
     // can_moderate refuses the owner as a target (the previous guard), the
     // actor themself (administrators included), and anyone ranked at or above
     // a non-administrator actor.
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
-        return (StatusCode::FORBIDDEN, "Cannot moderate a member ranked at or above you").into_response();
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Cannot moderate a member ranked at or above you").into_response(),
+        Err(e) => return e.into_response(),
     }
     let result = sqlx::query(
         "UPDATE server_members SET custom_sounds_disabled = $1 WHERE server_id = $2 AND user_id = $3"
@@ -626,12 +649,14 @@ pub async fn remove_timeout(
     // themself (for administrators too — the review found the admin shortcut
     // used to run before the self check), and anyone ranked at or above a
     // non-administrator actor.
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
-        return (
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+        Ok(true) => {}
+        Ok(false) => return (
             StatusCode::FORBIDDEN,
             "Cannot lift the timeout of a member ranked at or above you",
         )
-            .into_response();
+            .into_response(),
+        Err(e) => return e.into_response(),
     }
 
     let result = sqlx::query("DELETE FROM member_timeouts WHERE server_id = $1 AND user_id = $2")
@@ -995,12 +1020,14 @@ pub(crate) async fn perform_voice_move(
 
     // Rank hierarchy, exactly as kick/ban: never act on the owner, an
     // administrator, or an equal-ranked moderator.
-    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
-        return (
+    match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return (
             StatusCode::FORBIDDEN,
             "Cannot move a member ranked at or above you",
         )
-            .into_response();
+            .into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Where are they now? Voice exclusivity guarantees at most one room.
@@ -1057,10 +1084,13 @@ pub(crate) async fn perform_voice_move(
     // it. Same answer as "not in a voice channel" so a hidden channel's
     // occupancy reads exactly like no call at all; this runs BEFORE anything
     // that depends on the destination, or the destination lookup itself would
-    // be the oracle. Fails closed: a DB error resolves to no VIEW.
+    // be the oracle. Fails closed: a DB error is a 503 to retry (it comes
+    // before anything about the channel is answered, so it is no oracle).
     let actor_source_access =
-        crate::permissions::get_user_channel_permissions(&state.pool, from_channel_id, claims.sub)
-            .await;
+        match crate::permissions::try_user_channel_permissions(&state.pool, from_channel_id, claims.sub).await {
+            Ok(access) => access,
+            Err(e) => return e.into_response(),
+        };
     if !actor_sees_channel(&actor_source_access) {
         return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
     }
@@ -1169,11 +1199,14 @@ pub(crate) async fn perform_voice_move(
     // moderator shove someone into a channel whose JoinRoom then rejects them,
     // which reads to everyone as "the move silently did nothing" while actually
     // having dropped them out of voice.
-    let target_allowed = matches!(
-        crate::permissions::get_user_channel_permissions(&state.pool, to_channel_id, user_id).await,
-        crate::permissions::ChannelPermAccess::Allowed { perms, .. }
-            if perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT)
-    );
+    let target_allowed = match crate::permissions::try_user_channel_permissions(&state.pool, to_channel_id, user_id).await {
+        Ok(access) => matches!(
+            access,
+            crate::permissions::ChannelPermAccess::Allowed { perms, .. }
+                if perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT)
+        ),
+        Err(e) => return e.into_response(),
+    };
     if !target_allowed {
         return (
             StatusCode::FORBIDDEN,
@@ -1485,10 +1518,16 @@ pub async fn create_report(
     // was a live existence (and deletion) oracle over hidden channels for any
     // member, and each hit parked the id in the mod queue. check_message_view
     // is the gate every other message-id-addressed route uses; VIEW-denied,
-    // nonexistent, DM (empty server id), another server's message and a DB
-    // error all collapse into the one 400 below, byte-identical.
+    // nonexistent, DM (empty server id) and another server's message all
+    // collapse into the one 400 below, byte-identical. A lookup that FAILED is
+    // a 503 to retry instead: it is not an answer about the id (the first
+    // lookup fails before anything about it is known), and the 400 told the
+    // reporter their message was not in this server.
     if let Some(mid) = payload.reported_message_id.as_deref() {
         let access = crate::permissions::check_message_view(&state.pool, mid, claims.sub).await;
+        if matches!(access, crate::permissions::ChannelAccess::Unavailable) {
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
         if !reported_message_in_scope(&access, &server_id) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1530,8 +1569,10 @@ pub async fn create_report(
     // mod queue (and the reports table) at will. Mirrors the mail-bomb throttle
     // from batch 4 — count this reporter's reports in this server in the last
     // hour and refuse past the cap. Legitimate reporting stays well under it.
+    // A count that FAILED is not zero: folded into 0 it opened the limiter.
+    // Refused with a 503 to retry (src/try_again.rs).
     const MAX_REPORTS_PER_HOUR: i64 = 15;
-    let recent: (i64,) = sqlx::query_as(
+    let recent: (i64,) = match sqlx::query_as(
         "SELECT COUNT(*) FROM reports \
          WHERE server_id = $1 AND reporter_id = $2 AND created_at > NOW() - INTERVAL '1 hour'",
     )
@@ -1539,7 +1580,13 @@ pub async fn create_report(
     .bind(claims.sub as i32)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or((0,));
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("create_report: rate count failed for user {} in {server_id}: {e:?}", claims.sub);
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
     if recent.0 >= MAX_REPORTS_PER_HOUR {
         return (
             StatusCode::TOO_MANY_REQUESTS,
