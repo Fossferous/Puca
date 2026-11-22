@@ -33,7 +33,11 @@ quota and clip-part cap, reactions, reports, slowmode, kick, ban, timeouts,
 custom sounds and role changes (the owner and rank checks), `DELETE /account`
 (the check that you own no servers), the wrap-material and recovery routes
 (the check that a new recovery code re-wraps the history key), and the mail
-routes. A list that could not be read is a `503` too, never an empty `200`:
+routes. Not yet: Call everyone back's own Move Members check, the Manage
+Channels check of the mode routes and switching a mode still read a failed
+lookup as a missing permission (a `403`), and Call everyone back answers a
+failed read of who is in the mode's rooms with a `500`; both refuse, neither
+lets a request through. A list that could not be read is a `503` too, never an empty `200`:
 a page of messages or of edits, the reminder feed, a channel's wrapped keys
 and its member keys, a server's channel list (which a failed read of the
 caller's roles used to answer with every channel left out), its unread counts

@@ -19,7 +19,8 @@
   Deleting a collection was refused as "also holds channels you cannot see",
   reordering channels or calling everyone back answered as done having done
   nothing, a mode's channels were refused as "not on this server", and Manage
-  Channels read as "missing".
+  Channels read as "missing" when creating, editing, deleting or reordering
+  channels.
   Others let the request past a check they could
   not make: an upload past your storage quota, a moderator's kick, ban,
   timeout or role change reaching the server owner, a blocked person's
@@ -27,8 +28,7 @@
   between its two kinds of call without ending the call in it, which left the
   people in it in two halves that could not hear each other. Each now answers "try again
   shortly" (503 with `Retry-After`) and changes nothing, and trying again
-  gets the real answer; the apps already take it as a passing error, not a
-  "no". Comes with the server update; no app update is needed.
+  gets the real answer. Comes with the server update; no app update is needed.
 
 ### Security
 
