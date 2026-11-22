@@ -8,12 +8,12 @@
   does the session that carries it on when someone signs in at that computer
   or it locks. A computer you connect to afterwards still starts with control
   on. Comes with the update (no new install, no server update).
-- **The keyboard you closed comes back in another program's text box on the
-  same line.** On a phone controlling a computer, closing the keyboard over a
-  web browser's address bar kept it closed for a classic Windows program's text
-  box at the same height after switching to it, so every tap there needed the
-  Keyboard button. It now comes up by itself there. Comes with the update (no
-  new install, no server update).
+- **A closed keyboard comes back in another program's text box.** On a phone
+  controlling a computer, closing the keyboard over a web browser's address
+  bar kept it closed for a classic Windows program's text box at the same
+  height after switching to it, so every tap there needed the Keyboard
+  button. It now comes up by itself there. Comes with the update (no new
+  install, no server update).
 - **Audio Hub names the computer when it asks for the passphrase.** Opening
   Audio Hub on a computer set up for unattended access asked for its
   passphrase calling it "This device" instead of its name, and using it did
