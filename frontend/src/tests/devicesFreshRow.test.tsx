@@ -247,8 +247,13 @@ describe('the Audio Hub button', () => {
         await mount();
         expect(audioHub()).toBeTruthy();
         await click(audioHub());
-        // The panel opens against the APP row, never the sign-in row.
-        expect(connectToDevice).toHaveBeenCalledWith('pc', { audioHub: true });
+        // The panel opens against the APP row, never the sign-in row, named
+        // and grouped as Control's connect is: an armed PC's passphrase
+        // dialog names it, and a proof here keeps the sign-in screen row's
+        // remembered passphrase alive (review of 0.9.867).
+        expect(connectToDevice).toHaveBeenCalledWith('pc', {
+            audioHub: true, peerName: 'PC', machineRows: ['pc', 'pc-signin'],
+        });
         expect(host!.querySelector('section.audio-hub-panel')).not.toBeNull();
     });
 

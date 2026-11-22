@@ -1630,6 +1630,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                 key={audioHubRow.id}
                                                 hostDevice={audioHubRow.id}
                                                 machineName={device.name}
+                                                machineRows={machine.rows.map(r => r.id)}
                                                 onClose={() => setAudioHubId(null)}
                                             />
                                         )}

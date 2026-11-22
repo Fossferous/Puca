@@ -103,13 +103,31 @@ afterEach(async () => {
 describe('the Audio Hub panel', () => {
     it('opens its own Audio Hub session and reads the status once it is live', async () => {
         await mount();
-        expect(connectToDevice).toHaveBeenCalledWith('pc-app', { audioHub: true });
+        expect(connectToDevice).toHaveBeenCalledWith('pc-app', { audioHub: true, peerName: 'Desk PC' });
         expect(sendAudioHubRequest).toHaveBeenCalledWith('sess-own', 'status');
         expect(text()).toContain('AirPods: L 64% · R 66%');
         expect(text()).toContain('XM6: connected');
         for (const label of ['AirPods to phone', 'AirPods to PC', 'XM6 to phone', 'XM6 to PC']) {
             expect(button(label), label).not.toBeNull();
         }
+    });
+
+    it("hands the session the PC's rows, and a re-render with a fresh rows array opens no second session", async () => {
+        host = document.createElement('div');
+        document.body.appendChild(host);
+        root = createRoot(host);
+        const draw = (rows: string[]) => root.render(
+            <DeviceAudioHubPanel hostDevice="pc-app" machineName="Desk PC" machineRows={rows} onClose={() => {}} />);
+        await act(async () => { draw(['pc-app', 'pc-signin']); });
+        await flush();
+        expect(connectToDevice).toHaveBeenCalledWith('pc-app', {
+            audioHub: true, peerName: 'Desk PC', machineRows: ['pc-app', 'pc-signin'],
+        });
+        // The card builds the array afresh on every render of the list.
+        await act(async () => { draw(['pc-app', 'pc-signin']); });
+        await flush();
+        expect(connectToDevice, 'one session, not one per render').toHaveBeenCalledTimes(1);
+        expect(endSession, 'and its own is not ended under it').not.toHaveBeenCalled();
     });
 
     it('shows no controls when Audio Hub is not running', async () => {

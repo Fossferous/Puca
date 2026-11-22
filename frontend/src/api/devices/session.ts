@@ -2161,9 +2161,9 @@ function teardown(
     // conservative direction (a session that died before the host's first
     // post-proof frame re-prompts next time) is one typed passphrase.
     //
-    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY (powerOffUnanswered: the
-    // proof sent, then neither the shutdown nor a refusal, whether the session
-    // ended or the answer deadline ran out on a link that read open).
+    // EXCEPT A POWER-OFF SESSION WITH NO ANSWER EITHER WAY (powerOffUnanswered:
+    // the proof sent, then neither the shutdown nor a refusal, whether the
+    // session ended or the answer deadline ran out on a link that read open).
     // There is no "first post-proof frame" to wait for there. Both hosts carry
     // a held power-off out on the proof and refuse a bad one with its reason
     // (the agent's "unattended access was refused" or its lockout, the app's
@@ -3471,9 +3471,19 @@ function heldUnproved(s: Internal, endReason: string): boolean {
  *    before teardown reads this.) Review of work/poweroff-locked, round 3.
  * Both hosts refuse a bad proof OUT LOUD (heldUnproved knows each way), and
  * that is 'failed' with the refusal, which still forgets.
+ *
+ * ONLY A POWER-OFF SESSION. A power-off that RODE a Control or Files session
+ * (requestForcePowerOff) went out on a session the host had already answered,
+ * which it does only past the proof, so its seed was confirmed then; the
+ * outcome stays on the session after the ride settles, and whatever proof
+ * that session sends later is judged by the ordinary rule (a still-'used'
+ * seed at teardown is forgotten), not kept because the ride was once called
+ * too old. Today's hosts ask for the proof once per session, before they
+ * answer, so this is the rule written down rather than a path they take
+ * (review of 0.9.867).
  */
 function powerOffUnanswered(s: Internal): boolean {
-    if (s.uaProofSent !== true) return false;
+    if (!s.powerOffOnly || s.uaProofSent !== true) return false;
     const p = s.powerOff;
     return p?.state === 'unknown' || (p?.state === 'failed' && p.reason === POWER_OFF_TOO_OLD_REASON);
 }
