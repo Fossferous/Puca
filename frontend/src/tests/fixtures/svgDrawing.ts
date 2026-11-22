@@ -93,11 +93,21 @@ const b64Of = (b: Uint8Array): string => {
  * `<text>` fallback says only that the text cannot be shown; Excalidraw
  * embeds its fonts as `data:` URLs in an `@font-face`. `font` is a real font
  * (fixtures/metadata/box-font.ttf, whose A, B and C are solid shapes), so a
- * drawing that lost it is plainly different. Nothing in it calls out or
- * runs: cleaning it must leave it drawn exactly the same.
+ * drawing that lost it is plainly different. draw.io draws its library
+ * shapes (Azure, Kubernetes and the other `img/lib/*.svg` icons) as an
+ * `<image>` of an SVG in a base64 `data:` URL, and an SVG put in a scene
+ * comes out the same way; ICON is one, with what an editor leaves in it
+ * (its export path, a comment), and ICON_PLAIN another, as a
+ * percent-encoded URL. Nothing in it calls out or runs: cleaning it must
+ * leave it drawn exactly the same.
  */
+export const ICON = `<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generator: SECRETCOMMENT-icon -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="18" height="18" viewBox="0 0 18 18" inkscape:export-filename="/home/jane/icons/vm.png"><defs><linearGradient id="vm-g" x1="9" y1="13" x2="9" y2="2" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#0078d4"/><stop offset="1" stop-color="#5ea0ef"/></linearGradient></defs><rect x="1" y="2" width="16" height="11" rx="1" fill="url(#vm-g)"/><path d="M6 15h6v2H6z" fill="#32bedd"/></svg>`;
+export const ICON_PLAIN = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><!-- SECRETCOMMENT-plain --><circle cx="9" cy="9" r="7" fill="#e3008c"/><path d="M5 9h8" stroke="#fff" stroke-width="2"/></svg>`;
+
 export function diagramSvg(font: Uint8Array): string {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80" viewBox="0 0 160 80" style="background-color: white;">
+    return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="160" height="80" viewBox="0 0 160 80" style="background-color: white;">
   <style>@font-face { font-family: "Box"; src: url(data:font/ttf;base64,${b64Of(font)}); }
     .excalidraw { font-family: "Box"; font-size: 16px; fill: #1e1e1e; }
     .node rect { fill: #ececff; stroke: #9370db; }</style>
@@ -105,5 +115,7 @@ export function diagramSvg(font: Uint8Array): string {
     <foreignObject x="2" y="2" width="76" height="30"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; width: 76px; height: 30px; text-align: center; vertical-align: middle; font: 12px sans-serif; color: #333;"><span class="nodeLabel"><p style="margin: 0;">Start <b>here</b></p></span></div></foreignObject></g>
   <switch><foreignObject x="82" y="2" width="76" height="30" requiredFeatures="http://www.w3.org/TR/SVG11/feature#Extensibility" style="overflow: visible; text-align: left;"><div xmlns="http://www.w3.org/1999/xhtml" style="display: flex; align-items: center; justify-content: center; width: 76px; height: 30px; background: #fff2cc; font: 11px sans-serif; color: #000;"><div style="display: inline-block; white-space: normal;">Decide</div></div></foreignObject><text x="120" y="20" font-size="9" text-anchor="middle">Text is not SVG - cannot display</text></switch>
   <text x="6" y="66" class="excalidraw">ABC ACB</text>
+  <g class="drawio-shape"><image x="118" y="44" width="18" height="18" xlink:href="data:image/svg+xml;base64,${b64Of(new TextEncoder().encode(ICON))}" preserveAspectRatio="none"/></g>
+  <image x="140" y="44" width="18" height="18" href="data:image/svg+xml;charset=utf-8,${encodeURIComponent(ICON_PLAIN)}"/>
 </svg>`;
 }

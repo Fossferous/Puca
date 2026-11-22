@@ -12,7 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cleanSvg, sniffSvg } from '../api/svgMetadata';
+import { cleanSvg, MAX_NESTING, sniffSvg } from '../api/svgMetadata';
 import { stripAttachmentMetadata } from '../api/fileMetadata';
 import { ImageMetadataError } from '../api/imageMetadata';
 import { contains, enc, indexOfBytes, jpeg, leaked } from './fixtures/photoMetadata';
@@ -86,6 +86,91 @@ describe('a diagram as Mermaid, draw.io and Excalidraw export one', () => {
         // Mermaid's and draw.io's labels are what a reader sees in it, once each.
         expect(out.match(/Start <b>here<\/b>|Decide/g)).toEqual(['Start <b>here</b>', 'Decide']);
         expect(clean(out)).toBe(out);
+    });
+    it("keeps draw.io's icons (an SVG in a data: URL, base64 or percent-encoded), each cleaned as a drawing of its own", () => {
+        const src = diagramSvg(boxFont);
+        expect(src, 'control: a base64 icon').toContain('xlink:href="data:image/svg+xml;base64,');
+        expect(src, 'control: a percent-encoded icon').toContain('href="data:image/svg+xml;charset=utf-8,%3Csvg');
+        expect(embedded(src).map(p => text(p.bytes)).join(), 'control: what its editor left in the icon').toContain('/home/jane/icons');
+        const out = clean(src);
+        expect(out).toMatch(/<image x="118" y="44" width="18" height="18" xlink:href="data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+" preserveAspectRatio="none"\/>/);
+        expect(out).toMatch(/<image x="140" y="44" width="18" height="18" href="data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+"\/>/);
+        const icons = embedded(out).filter(p => p.type === 'image/svg+xml').map(p => text(p.bytes));
+        expect(icons).toHaveLength(2);
+        expect(icons[0]).toContain('<linearGradient id="vm-g"');
+        expect(icons[0]).toContain('<rect x="1" y="2" width="16" height="11" rx="1" fill="url(#vm-g)"/>');
+        expect(icons[1]).toContain('<circle cx="9" cy="9" r="7" fill="#e3008c"/>');
+        for (const icon of icons) for (const gone of ['SECRETCOMMENT', 'inkscape', '/home/jane', '<!--']) expect(icon, gone).not.toContain(gone);
+        expect(clean(out)).toBe(out);
+    });
+});
+
+describe('an SVG embedded in an SVG (an <image>, a CSS url(), a foreignObject picture)', () => {
+    const photo = jpeg({ xmp: true, comment: true });
+    const inner = svg(`<!-- SECRETCOMMENT-inner --><metadata>SECRETXMP-creator-jane</metadata><script>alert(1)</script>
+        <rect id="kept" width="4" height="4" fill="#0a0" onclick="alert(2)"/><image width="1" height="1" href="https://t.example/inner.png"/>
+        <image width="2" height="2" href="data:image/jpeg;base64,${b64(photo)}"/>`, ' xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" sodipodi:docname="secret-name.svg"');
+    const innerB64 = `data:image/svg+xml;base64,${b64(utf8(inner))}`;
+    const check = (icon: string) => {
+        for (const gone of ['SECRETCOMMENT', 'SECRETXMP', '<script', 'onclick', 't.example', 'sodipodi', 'secret-name']) expect(icon, gone).not.toContain(gone);
+        expect(icon).toContain('<rect id="kept" width="4" height="4" fill="#0a0"/>');
+        const pics = embedded(icon);
+        expect(pics.map(p => p.type), 'its own photo is cleaned').toEqual(['image/jpeg']);
+        expect(leaked(pics[0].bytes)).toEqual([]);
+    };
+    it('in an <image>: kept, and cleaned of everything an SVG of its own would lose', () => {
+        const out = clean(svg(`<image width="4" height="4" href="${innerB64}"/>`));
+        const icons = embedded(out).filter(p => p.type === 'image/svg+xml');
+        expect(icons).toHaveLength(1);
+        check(text(icons[0].bytes));
+    });
+    it('in CSS and in a foreignObject\'s <img>: kept, and cleaned the same', () => {
+        const out = clean(svg(`<style>rect { fill: url("${innerB64}"); }</style><rect width="1" height="1" style="background-image: url(${innerB64})"/>
+            <foreignObject width="10" height="10"><div xmlns="http://www.w3.org/1999/xhtml"><img src="${innerB64}" alt="i"/></div></foreignObject>`));
+        const icons = embedded(out).filter(p => p.type === 'image/svg+xml');
+        expect(icons).toHaveLength(3);
+        for (const icon of icons) check(text(icon.bytes));
+    });
+    it(`followed ${MAX_NESTING} deep; one deeper is taken out`, () => {
+        const nest = (levels: number): string => (levels === 0
+            ? svg('<rect id="deepest" width="1" height="1"/><!-- SECRETCOMMENT-deep -->')
+            : svg(`<image width="4" height="4" href="data:image/svg+xml;base64,${b64(utf8(nest(levels - 1)))}"/>`));
+        const unwrap = (s: string): string[] => {
+            const chain = [s];
+            for (;;) {
+                const next = embedded(chain[chain.length - 1]).find(p => p.type === 'image/svg+xml');
+                if (!next) return chain;
+                chain.push(text(next.bytes));
+            }
+        };
+        const deep = unwrap(clean(nest(MAX_NESTING)));
+        expect(deep).toHaveLength(MAX_NESTING + 1);
+        expect(deep[MAX_NESTING]).toContain('<rect id="deepest"');
+        expect(deep.join()).not.toContain('SECRETCOMMENT');
+        const deeper = unwrap(clean(nest(MAX_NESTING + 1)));
+        expect(deeper, 'the drawing one deeper is gone').toHaveLength(MAX_NESTING + 1);
+        expect(deeper.join()).not.toContain('deepest');
+        expect(deeper[MAX_NESTING]).toContain('<image width="4" height="4"/>');
+    });
+    it('one the engine would not draw either (not well-formed, not an <svg>, compressed) is taken out, and the drawing is sent', () => {
+        for (const bad of [utf8('<svg xmlns="http://www.w3.org/2000/svg"><metadata>SECRETXMP-creator-jane</svg>'), utf8('<html xmlns="http://www.w3.org/1999/xhtml">SECRETXMP-creator-jane</html>'), Uint8Array.from([0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 3])]) {
+            const out = clean(svg(`<image width="4" height="4" href="data:image/svg+xml;base64,${b64(bad)}"/><rect width="1" height="1"/>`));
+            expect(out).toContain('<image width="4" height="4"/>');
+            expect(out).not.toContain('SECRETXMP');
+            expect(out).toContain('<rect');
+        }
+    });
+    it('a picture that is damaged inside it refuses the drawing, as it would at the top', async () => {
+        const bad = Uint8Array.from(jpeg({ comment: true }));
+        const com = indexOfBytes(bad, Uint8Array.from([0xFF, 0xFE]));
+        bad[com + 2] = 0xFF; bad[com + 3] = 0xFF;
+        const doc = svg(`<image width="4" height="4" href="data:image/svg+xml;base64,${b64(utf8(svg(`<image href="data:image/jpeg;base64,${b64(bad)}"/>`)))}"/>`);
+        await expect(stripAttachmentMetadata(enc(doc), { name: 'x.svg' })).rejects.toBeInstanceOf(ImageMetadataError);
+    });
+    it('SVG source in a URL that says it is something else is not kept (the engine draws an SVG only when told it is one)', () => {
+        const out = clean(svg(`<image width="4" height="4" href="data:image/png;base64,${b64(utf8(inner))}"/>`));
+        expect(embedded(out)).toEqual([]);
+        expect(out).not.toContain('SECRET');
     });
 });
 

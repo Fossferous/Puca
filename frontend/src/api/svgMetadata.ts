@@ -27,7 +27,7 @@
  *            animation that targets `href` (under any prefix), `xml:base` or
  *            an event attribute, or that names `javascript:`; `xml:base`;
  *            any `href` that is not a link to a part of the same file (`#…`)
- *            or an embedded PNG/JPEG/GIF/WebP — on a link (`<a>`), http(s)
+ *            or an embedded picture (below) — on a link (`<a>`), http(s)
  *            and mailto stay; in CSS (`<style>`, `style=` and every other
  *            attribute) `@import`, `image-set()` and its kin, and any `url(…)`
  *            that is not `#…`, an embedded picture or an embedded font, read
@@ -42,8 +42,13 @@
  *            writes them), told by its bytes; its own names are the font's.
  *   CLEANED  an embedded PNG, JPEG, GIF or WebP loses its metadata as a file
  *            of its own would (api/imageMetadata.ts, api/gifMetadata.ts),
- *            told by its bytes, not the type it claims; any other embedded
- *            picture goes.
+ *            told by its bytes, not the type it claims; an embedded SVG (a
+ *            `data:image/svg+xml` URL, base64 or percent-encoded: how draw.io
+ *            writes its library icons and Excalidraw an SVG placed in a
+ *            scene) is cleaned by this same function, as a drawing of its
+ *            own, to MAX_NESTING deep; one the engine would not draw either
+ *            (not well-formed, not an `<svg>`, compressed, or deeper) goes, as
+ *            does an embedded picture of any other kind.
  *
  * A file that is not well-formed XML, or whose root is not an SVG `<svg>`,
  * is refused (ImageMetadataError), as is a compressed one (`.svgz`): it would
@@ -118,15 +123,41 @@ function bytesToB64(b: Uint8Array): string {
     return btoa(s);
 }
 
-/** A base64 data: URL's payload (whitespace taken out), or null for any other kind. */
-function base64Of(url: string): string | null {
-    const m = /^data:[^,]*;base64,([A-Za-z0-9+/=\s]*)$/i.exec(url.trim());
-    return m ? m[1].replace(/\s+/g, '') : null;
+const SVG_TYPE = 'image/svg+xml';
+
+/** A data: URL as the URL standard reads one: its type, and its payload, base64 or percent-encoded. */
+interface DataUrl { type: string; base64: boolean; payload: string }
+
+/** A data: URL's parts, or null for any other URL (or base64 that is not). */
+function parseDataUrl(url: string): DataUrl | null {
+    const m = /^data:([^,]*),([\s\S]*)$/i.exec(url.trim());
+    if (!m) return null;
+    const params = m[1].split(';').map(x => x.trim());
+    const base64 = params.length > 1 && /^base64$/i.test(params[params.length - 1]);
+    if (base64 && !/^[A-Za-z0-9+/=\s]*$/.test(m[2])) return null;
+    return { type: params[0].toLowerCase(), base64, payload: base64 ? m[2].replace(/\s+/g, '') : m[2] };
 }
 
-/** The first bytes a base64 payload decodes to (enough for a magic number). */
-function headOf(b64: string): Uint8Array | null {
-    try { return b64ToBytes(b64.slice(0, 24)); } catch { return null; }
+const isHexByte = (c: number): boolean => (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
+
+/** The URL standard's percent-decode: the text as UTF-8, and each %XX the byte it names. */
+function percentDecode(s: string): Uint8Array {
+    const b = new TextEncoder().encode(s);
+    const out = new Uint8Array(b.length);
+    let n = 0;
+    for (let i = 0; i < b.length; i++) {
+        if (b[i] === 0x25 && i + 2 < b.length && isHexByte(b[i + 1]) && isHexByte(b[i + 2])) {
+            out[n++] = parseInt(String.fromCharCode(b[i + 1], b[i + 2]), 16);
+            i += 2;
+        } else out[n++] = b[i];
+    }
+    return out.subarray(0, n);
+}
+
+/** What a data: URL holds (only its first bytes, enough for a magic number, when `head`), or null. */
+function payloadBytes(d: DataUrl, head = false): Uint8Array | null {
+    if (!d.base64) return percentDecode(head ? d.payload.slice(0, 96) : d.payload);
+    try { return b64ToBytes(head ? d.payload.slice(0, 24) : d.payload); } catch { return null; }
 }
 
 type Picture = 'jpeg' | 'png' | 'webp' | 'gif';
@@ -140,32 +171,49 @@ function isFont(b: Uint8Array): boolean {
     return tag === 'wOFF' || tag === 'wOF2' || tag === 'OTTO' || tag === 'ttcf' || tag === 'true' || tag === 'typ1';
 }
 
+/** How deep a drawing embedded in a drawing is followed (an icon in an icon in a diagram is 2). */
+export const MAX_NESTING = 4;
+let nesting = 0;
+
+/** An embedded SVG cleaned as a drawing of its own, or null for one the engine would not draw either. */
+function cleanEmbeddedSvg(bytes: Uint8Array): Uint8Array | null {
+    if (nesting >= MAX_NESTING) return null;
+    nesting++;
+    try { return cleanSvgBytes(bytes, true); } finally { nesting--; }
+}
+
 /**
  * An embedded picture with its metadata taken off, or null when the URL is
- * not one this keeps. Told by its bytes: a JPEG that says it is a GIF is a
- * JPEG (and the engine would draw it as one), and a picture of any other
- * kind (AVIF, HEIC, TIFF…) is not kept, since its metadata would be.
+ * not one this keeps. A raster picture is told by its bytes: a JPEG that says
+ * it is a GIF is a JPEG (and the engine would draw it as one), and a picture
+ * of any other kind (AVIF, HEIC, TIFF…) is not kept, since its metadata would
+ * be. An SVG, which the engine draws only when the URL says it is one, is
+ * cleaned as a drawing (cleanEmbeddedSvg) and written back as base64.
  */
 function cleanDataImage(url: string): string | null {
-    const b64 = base64Of(url);
-    if (b64 === null) return null;
-    let bytes: Uint8Array;
-    try { bytes = b64ToBytes(b64); } catch { return null; }
+    const d = parseDataUrl(url);
+    if (!d) return null;
+    const bytes = payloadBytes(d);
+    if (!bytes) return null;
     const kind = pictureOf(bytes);
-    if (!kind) return null;
-    const out = kind === 'gif' ? stripGif(bytes) : stripImageMetadata(bytes);
-    return `data:image/${kind};base64,${bytesToB64(out)}`;
+    if (kind) {
+        const out = kind === 'gif' ? stripGif(bytes) : stripImageMetadata(bytes);
+        return `data:image/${kind};base64,${bytesToB64(out)}`;
+    }
+    if (d.type !== SVG_TYPE) return null;
+    const svg = cleanEmbeddedSvg(bytes);
+    return svg ? `data:${SVG_TYPE};base64,${bytesToB64(svg)}` : null;
 }
 
 /** What a CSS url() may keep: `#…`, an embedded picture (cleaned), an embedded font (as it is). */
 function cleanCssUrl(value: string): string | null {
     const v = value.trim();
     if (v.startsWith('#')) return value;
-    const b64 = base64Of(v);
-    if (b64 === null) return null;
-    const head = headOf(b64);
+    const d = parseDataUrl(v);
+    if (!d) return null;
+    const head = payloadBytes(d, true);
     if (!head) return null;
-    if (pictureOf(head)) return cleanDataImage(v);
+    if (pictureOf(head) || d.type === SVG_TYPE) return cleanDataImage(v);
     return isFont(head) ? value : null;
 }
 
@@ -396,12 +444,25 @@ function inForeignObject(el: Element): boolean {
  * ImageMetadataError for one that cannot be read.
  */
 export function cleanSvg(bytes: Uint8Array): Uint8Array {
-    if (isGzip(bytes)) fail('it is compressed (.svgz); save it as a plain .svg and send that');
+    return cleanSvgBytes(bytes, false)!;
+}
+
+/**
+ * The work of cleanSvg. `embedded`: a drawing inside a drawing, where one
+ * the engine would not draw (compressed, not well-formed, not an `<svg>`,
+ * in an encoding it cannot read) is null, to be taken out, rather than a
+ * refusal of the whole file; a damaged picture inside it still refuses the
+ * file, as it would at the top.
+ */
+function cleanSvgBytes(bytes: Uint8Array, embedded: boolean): Uint8Array | null {
+    if (isGzip(bytes)) return embedded ? null : fail('it is compressed (.svgz); save it as a plain .svg and send that');
     if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') fail('this device cannot read SVG here');
-    const doc = new DOMParser().parseFromString(decode(bytes), 'image/svg+xml');
+    let source: string;
+    try { source = decode(bytes); } catch (e) { if (embedded && e instanceof ImageMetadataError) return null; throw e; }
+    const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
     const root = doc.documentElement;
-    if (!root || doc.getElementsByTagName('parsererror').length > 0) fail('it is not well-formed');
-    if (root.namespaceURI !== SVG_NS || root.localName !== 'svg') fail('its root is not an SVG drawing');
+    if (!root || doc.getElementsByTagName('parsererror').length > 0) return embedded ? null : fail('it is not well-formed');
+    if (root.namespaceURI !== SVG_NS || root.localName !== 'svg') return embedded ? null : fail('its root is not an SVG drawing');
 
     // Collect first, then remove: a live walk would skip the node after each one removed.
     const doomed: Node[] = [];
