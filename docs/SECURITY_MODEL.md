@@ -575,7 +575,15 @@ the wipe took that record with everything else, so nothing ever took them away.
 And a recovery code is shown only to the account it was made for: a registration whose
 automatic sign-in failed used to leave its code for whoever signed in next on that form. A
 sign-in as somebody else does not take away one bound to its account, since nobody else is
-handed it and that sign-in may be the one that follows its own registration.
+handed it and that sign-in may be the one that follows its own registration. The same goes
+for the reminder that a code was never confirmed saved (the app closed before **Done**): the
+device keeps it per account, by username (`frontend/src/api/recoveryPrompt.ts`). It was one
+marker for the whole device, so whoever signed in next with no code of their own was told
+that theirs was never saved, and their **I already saved it** took the warning away from the
+account it was for. It is kept through a sign-out, as it always was, since it is that
+account's only warning until it signs in again; this device then holds that account's
+username until it does. A marker from an older version, which has no owner, goes to the
+first account to sign in.
 
 What this cannot promise: memory the page let go of is gone from the app, not wiped,
 until the JavaScript engine reuses it; what an operating system copies into its own

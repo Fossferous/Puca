@@ -14,13 +14,19 @@
  *    sign-in that follows. When that sign-in failed, the form stayed on
  *    screen with the code waiting, and the next person to sign in there, as
  *    anybody, was shown it: the code that unlocks the first account's keys.
+ *    Kept from them, the code still left them the device-wide marker that
+ *    some code was never saved: the next person was told THEIR code was never
+ *    saved, and their "I already saved it" took the first account's only
+ *    warning away.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { wsClient } from '../api/websocket';
-import { setPendingRecoveryCode } from '../api/recoveryPrompt';
+import {
+    consumePendingRecoveryCode, markRecoveryCodeUnacknowledged, recoveryCodeReminderDue, setPendingRecoveryCode,
+} from '../api/recoveryPrompt';
 
 const h = vi.hoisted(() => ({ onLoginSuccess: null as null | (() => void) }));
 vi.mock('../components/Chat', () => ({ Chat: () => <div>the chat</div> }));
@@ -65,6 +71,10 @@ beforeEach(() => {
     });
 });
 afterEach(() => {
+    // A code left waiting for its account is the module's, and outlives a test.
+    consumePendingRecoveryCode(ALICE.name);
+    consumePendingRecoveryCode(BOB.name);
+    sessionStorage.clear();
     act(() => root?.unmount());
     host?.remove();
     root = null;
@@ -136,6 +146,42 @@ describe('a sign-in as somebody else, before Chat has opened', () => {
         await settle(1_200);
         expect(document.body.textContent).not.toContain('harbor');
         expect(document.body.textContent).not.toContain('Save your recovery code');
+    });
+
+    it('is not told that the recovery code of an account whose sign-in after registering failed was never saved', async () => {
+        await startApp('/login');
+        // What register('Alice', …) leaves for the sign-in that follows it, which failed:
+        // her code, and the marker that she has not confirmed saving it.
+        setPendingRecoveryCode(ALICES_CODE, ALICE.name);
+        markRecoveryCodeUnacknowledged(ALICE.name);
+        await signInHereAs(BOB);
+        // The modal decides the reminder is owed 3 s after it mounts.
+        await settle(3_300);
+        expect(document.body.textContent).not.toContain('never saved');
+        expect(document.body.textContent).not.toContain('harbor');
+        expect(recoveryCodeReminderDue(ALICE.name), 'hers is kept for her own sign-in').toBe(true);
+    });
+
+    it('CONTROL: the account whose code was never saved is told so', async () => {
+        markRecoveryCodeUnacknowledged(ALICE.name);
+        await startApp('/login');
+        await signInHereAs(ALICE);
+        await settle(3_300);
+        expect(document.body.textContent).toContain('Your recovery code was never saved');
+    });
+
+    it("an account's \"I already saved it\" answers for that account only", async () => {
+        markRecoveryCodeUnacknowledged(ALICE.name);
+        markRecoveryCodeUnacknowledged(BOB.name);
+        await startApp('/login');
+        await signInHereAs(ALICE);
+        await settle(3_300);
+        const saved = [...document.querySelectorAll('button')].find(b => b.textContent === 'I already saved it');
+        expect(saved, 'the reminder is up').toBeTruthy();
+        await act(async () => { saved!.click(); });
+        expect(document.body.textContent).not.toContain('never saved');
+        expect(recoveryCodeReminderDue(ALICE.name)).toBe(false);
+        expect(recoveryCodeReminderDue(BOB.name), 'his warning is still his').toBe(true);
     });
 
     it('CONTROL: the account it was made for is shown it, whatever the case of its name', async () => {

@@ -436,11 +436,11 @@ export async function register(username: string, password: string, inviteCode?: 
     // sign-in that follows registration adopts it (dmKeys.ts).
     storePendingHistoryKey(username, history.priv);
     // Surfaced by RecoveryCodeModal after the user logs in. The marker
-    // outlives a reload; the code itself deliberately does not. Shown only to
-    // a session signed in as THIS account (api/recoveryPrompt.ts): the sign-in
-    // that follows can fail and leave the form to somebody else.
+    // outlives a reload; the code itself deliberately does not. Both are shown
+    // only to a session signed in as THIS account (api/recoveryPrompt.ts): the
+    // sign-in that follows can fail and leave the form to somebody else.
     setPendingRecoveryCode(recoveryCode, username);
-    markRecoveryCodeUnacknowledged();
+    markRecoveryCodeUnacknowledged(username);
 }
 
 /**

@@ -16,4 +16,7 @@
   Settings' Clear Local Storage & Reload, take your notifications away too: until now a deleted
   account's stayed for whoever signed in next. A new account's recovery code is
   shown only to that account: when the automatic sign-in after creating an account failed, the
-  next person to sign in on that screen was shown it. Arrives as an ordinary update.
+  next person to sign in on that screen was shown it. The reminder that a recovery code was
+  never saved is now that account's alone too: the next person to sign in on the device was
+  told their own code was never saved, and answering it took the warning away from the account
+  it was for. Arrives as an ordinary update.
