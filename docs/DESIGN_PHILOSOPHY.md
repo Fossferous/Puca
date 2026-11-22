@@ -41,7 +41,7 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 105 | `.friends-dashboard` | shares the chat slot, above chat-main |
 | 150 | `.sidebar`, `.member-sidebar` | slide-in side panels |
 | 200 | `.server-list-container` | server rail |
-| 250 | `.checklist-panel`, `.voice-panel-compact` | persistent drawers/bars |
+| 250 | `.checklist-panel`, `.voice-panel-compact`, `.device-stage-minimized-strip` | persistent drawers/bars (the last is a minimised remote-control session's "Return to" and the PC's name: above the bottom nav and the voice bar on a phone, along the window's foot on a desktop, with the panels' measured-height reservation; DeviceStageReturn.tsx) |
 | 300 | `.mobile-bottom-nav` | always on top of panels |
 | 400 | `.stream-stage`, `.camera-preview`, `.device-stage` | fullscreen media |
 | 1000+ | modals/pickers (component-local) | settings modal is 2000 |

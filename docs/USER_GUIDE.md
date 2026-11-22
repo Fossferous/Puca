@@ -1054,6 +1054,15 @@ mode**: tap to click, long-tap to right-click, double-tap and move to drag,
 move three fingers up or down to scroll, two fingers to move the picture,
 pinch to zoom.
 
+**Back to the chat, and back again.** **Chat** on a phone, and **More** >
+**Back to Púca (keep the session)** on a computer, put the stage away and
+keep the session: nothing you type or click goes to the other computer
+while it is away. A bar then says **Return to** and that computer's name;
+press it to go back. On a computer it runs along the bottom of the window,
+and the app moves up to make room for it. On a phone it sits above the tabs
+at the bottom (above the voice bar in a call), with the message box above
+it, and while the keyboard is up it steps aside, like the tabs.
+
 **When the keyboard opens by itself.** With **Open the keyboard when a text
 box is tapped** on, the keyboard comes up when a tap puts the computer's text
 cursor where you tapped: into a text box, or somewhere else in the text of

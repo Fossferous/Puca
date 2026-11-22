@@ -95,9 +95,10 @@ import { DeviceStageStats } from './DeviceStageStats';
 import { DeviceStageTypeText } from './DeviceStageTypeText';
 import { DeviceStageWindowPicker } from './DeviceStageWindowPicker';
 import { ShownWindowLabel } from './DeviceStageWindowChip';
+import { DeviceStageReturn } from './DeviceStageReturn';
 import { enterStageFullscreen, leaveStageFullscreen, onFullscreenChange, stageElementFullscreen } from './stageFullscreen';
 import {
-    CloseIcon, CrosshairIcon, LiveDotIcon, PlayIcon,
+    CloseIcon, CrosshairIcon, PlayIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
 import { useBackClose } from '../hooks/useBackClose';
@@ -3793,11 +3794,9 @@ export function DeviceStage() {
     }
 
     if (isMinimized) {
-        return (
-            <div className="device-stage-minimized" onClick={() => setIsMinimized(false)}>
-                <span><LiveDotIcon /> Return to remote device ({session.id})</span>
-            </div>
-        );
+        // The way back, named for the computer, in a strip the layout makes
+        // room for (DeviceStageReturn.tsx says where and why).
+        return <DeviceStageReturn peerName={session.peerName} onReturn={() => setIsMinimized(false)} />;
     }
 
     return (
