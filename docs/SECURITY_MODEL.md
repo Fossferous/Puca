@@ -1479,7 +1479,15 @@ established identity key (each of those last three behind the password proof
 or recovery proof it also needs). Others folded it into
 a refusal the client believed, such as "Channel not found" for a channel that
 is there, or a 404 for your own public key that, read twice at sign-in, made
-the client refuse the identity your password had just unlocked. The real 404
+the client refuse the identity your password had just unlocked. And some
+answered with something made up: `GET /channels/:id/keys` served a failed
+read of the channel's epochs as a channel with no keys yet (`current_epoch`
+0), which a device with no epoch floor answers by minting epoch 1, and on the
+409 that follows it could take up the superseded epoch-1 key that a removed
+member still holds; a failed read of the wrapped keys was `keys: []`. And a
+switch of a voice channel between mesh and SFU whose read of the channel
+failed committed without putting the call out, so the room went on in two
+halves. The real 404
 and 403 are unchanged. The forgot-password route keeps its one answer
 whichever way its limit lookup goes (it sends nothing when it cannot count),
 because a different answer there would say which addresses have an account.

@@ -17,7 +17,7 @@ use crate::permissions::{
     try_user_channel_permissions, ChannelPermAccess, Permissions,
 };
 use crate::state::AppState;
-use crate::try_again::Refusal;
+use crate::try_again::{Refusal, COULD_NOT_CHECK};
 
 // Re-export permission helpers from server_handlers for now
 pub use crate::permissions::user_has_permission;
@@ -337,10 +337,10 @@ pub async fn create_channel(
     // A collection hidden from the caller answers as one that is not there: a manager who
     // cannot see it neither learns it exists nor puts a channel in it (update_channel's rule).
     if let Some(parent_id) = parent_id {
-        if !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
-            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
-        {
-            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
+        match parent_may_hold(&state.pool, &server_id, claims.sub, parent_id, None).await {
+            Ok(true) => {}
+            Ok(false) => return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response(),
+            Err(e) => return e.into_response(),
         }
     }
     if let Some(category_id) = payload.category_id {
@@ -531,12 +531,22 @@ pub async fn update_channel(
     // detected afterwards. Read here rather than compared to the payload alone:
     // `sfu_mode: Some(true)` on a channel already true is not a change, and
     // putting a live call out for a no-op edit would be its own bug.
+    //
+    // A read that FAILS is a 503 and changes nothing (src/try_again.rs). Folded into "no
+    // row", a switch between mesh and SFU went on to commit and skipped putting the call
+    // out (the split room below), and the parent the caller sees read as none.
     let before: Option<(i32, bool, Option<i32>)> =
-        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false), parent_id FROM channels WHERE id = $1")
+        match sqlx::query_as("SELECT type, COALESCE(sfu_mode, false), parent_id FROM channels WHERE id = $1")
             .bind(channel_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("update_channel: reading channel {channel_id} as it stands failed: {e:?}");
+                return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
+            }
+        };
 
     // If reparenting, the new parent MUST belong to the same server. The FK only
     // enforces existence, not same-server — without this a caller with
@@ -557,18 +567,24 @@ pub async fn update_channel(
     // back inside a collection it cannot see, and that must not take the channel out of it.
     // Nor does the list name a parent in another server (rows from before the same-server
     // guard), so that is not one the caller sees here either.
+    //
+    // A visibility lookup that FAILS is a 503: read as "not seen", a "No parent (top level)"
+    // for a collection the caller does see was no change, and answered 200 having changed
+    // nothing.
     let parent_seen = match before.and_then(|(_, _, parent)| parent) {
-        Some(parent) if sees_channel_in(&state.pool, &server_id, parent as i64, claims.sub).await => Some(parent),
-        _ => None,
+        Some(parent) => match sees_channel_in(&state.pool, &server_id, parent as i64, claims.sub).await {
+            Ok(true) => Some(parent),
+            Ok(false) => None,
+            Err(e) => return e.into_response(),
+        },
+        None => None,
     };
     let parent_change = parent_change(payload.parent_id, parent_seen);
     if let Some(Some(parent_id)) = parent_change {
-        if parent_id as i64 == channel_id
-            || !parent_is_a_collection_here(&state.pool, parent_id, &server_id).await
-            || !sees_channel_in(&state.pool, &server_id, parent_id as i64, claims.sub).await
-            || parent_would_loop(&state.pool, &server_id, channel_id, parent_id as i64).await
-        {
-            return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response();
+        match parent_may_hold(&state.pool, &server_id, claims.sub, parent_id, Some(channel_id)).await {
+            Ok(true) => {}
+            Ok(false) => return (StatusCode::BAD_REQUEST, PARENT_REFUSED).into_response(),
+            Err(e) => return e.into_response(),
         }
     }
 
@@ -802,28 +818,59 @@ fn list_row_parent(
 /// Would making `parent_id` the parent of `channel_id` close a loop - is
 /// `channel_id` already one of the collections above `parent_id`? A loop makes
 /// no collection reachable and has the permission resolvers read each
-/// collection's rows once. A failed read says yes (refuse).
-async fn parent_would_loop(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, parent_id: i64) -> bool {
+/// collection's rows once. A failed read is `Err` (a 503, see [`parent_may_hold`]).
+async fn parent_would_loop(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, parent_id: i64) -> Result<bool, Refusal> {
     let rows: Result<Vec<(i64, i64)>, _> =
         sqlx::query_as("SELECT id::bigint, parent_id::bigint FROM channels WHERE server_id = $1 AND parent_id IS NOT NULL")
             .bind(server_id)
             .fetch_all(pool)
             .await;
     match rows {
-        Ok(rows) => crate::permissions::ancestor_chain(&rows.into_iter().collect(), parent_id).contains(&channel_id),
-        Err(_) => true,
+        Ok(rows) => Ok(crate::permissions::ancestor_chain(&rows.into_iter().collect(), parent_id).contains(&channel_id)),
+        Err(e) => {
+            tracing::error!("parent_would_loop: reading server {server_id}'s collections failed: {e:?}");
+            Err(Refusal::TryAgain(COULD_NOT_CHECK))
+        }
     }
 }
 
-/// Is this channel a collection of this server? A failed read says no.
-async fn parent_is_a_collection_here(pool: &sqlx::PgPool, parent_id: i32, server_id: &str) -> bool {
+/// Is this channel a collection of this server? A failed read is `Err` (a 503, see
+/// [`parent_may_hold`]).
+async fn parent_is_a_collection_here(pool: &sqlx::PgPool, parent_id: i32, server_id: &str) -> Result<bool, Refusal> {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = $3)")
         .bind(parent_id)
         .bind(server_id)
         .bind(COLLECTION)
         .fetch_one(pool)
         .await
-        .unwrap_or(false)
+        .map_err(|e| {
+            tracing::error!("parent_is_a_collection_here: reading channel {parent_id} failed: {e:?}");
+            Refusal::TryAgain(COULD_NOT_CHECK)
+        })
+}
+
+/// May `parent_id` hold a channel: a collection of this server that the caller can see,
+/// and, for an existing channel being moved (`moving`), neither that channel itself nor
+/// a collection under it. `Ok(false)` is the 400 of [`PARENT_REFUSED`]. A lookup that
+/// fails is `Err`, the 503 of src/try_again.rs: answered as that 400, it was a refusal the
+/// client shows ("must be a collection in the same server") for a parent it may use.
+async fn parent_may_hold(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+    parent_id: i32,
+    moving: Option<i64>,
+) -> Result<bool, Refusal> {
+    if moving == Some(parent_id as i64) || !parent_is_a_collection_here(pool, parent_id, server_id).await? {
+        return Ok(false);
+    }
+    if !sees_channel_in(pool, server_id, parent_id as i64, user_id).await? {
+        return Ok(false);
+    }
+    match moving {
+        Some(channel_id) => Ok(!parent_would_loop(pool, server_id, channel_id, parent_id as i64).await?),
+        None => Ok(true),
+    }
 }
 
 /// May a delete take these channels along? The foreign key cascades through everything
@@ -1120,7 +1167,7 @@ pub async fn get_channel_feed(
             Ok(row) => row,
             Err(e) => {
                 tracing::error!("get_channel_feed: channel lookup failed for channel {channel_id}: {e:?}");
-                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+                return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
             }
         };
 
@@ -1379,13 +1426,15 @@ async fn settle_save_window(state: &AppState, gate: &OverwriteGate, channel_id: 
     }
 }
 
-/// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup says no.
-async fn sees_channel_in(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, user_id: i64) -> bool {
-    matches!(
-        get_user_channel_permissions(pool, channel_id, user_id).await,
+/// May `user_id` see channel `channel_id`, a channel of `server_id`? A failed lookup is `Err`,
+/// the 503 of src/try_again.rs, never "no": as "no" it took a collection the caller sees for
+/// none (update_channel's `parent_seen`) and refused a parent they may use.
+async fn sees_channel_in(pool: &sqlx::PgPool, server_id: &str, channel_id: i64, user_id: i64) -> Result<bool, Refusal> {
+    Ok(matches!(
+        try_user_channel_permissions(pool, channel_id, user_id).await?,
         ChannelPermAccess::Allowed { server_id: in_server, perms }
             if in_server == server_id && perms.has(Permissions::VIEW_CHANNEL)
-    )
+    ))
 }
 
 /// List a channel's permission overwrites (managers only).

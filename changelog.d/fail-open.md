@@ -10,10 +10,14 @@
   instead: a channel or DM shown with no messages (and marked read), a
   search that stopped early, and a reminder feed with a channel's reminders
   left out, which made Púca Notes cancel their alarms until the next
-  refresh. Others let the request past a check they could
+  refresh, or a channel's encryption keys served as none, so its messages
+  showed as unreadable and a send was refused as "can't send securely".
+  Others let the request past a check they could
   not make: an upload past your storage quota, a moderator's kick, ban,
   timeout or role change reaching the server owner, a blocked person's
-  reaction to a DM, a message through slowmode. Each now answers "try again
+  reaction to a DM, a message through slowmode, and a voice channel switched
+  between its two kinds of call without ending the call in it, which left the
+  people in it in two halves that could not hear each other. Each now answers "try again
   shortly" (503 with `Retry-After`) and changes nothing, and trying again
   gets the real answer; the apps already take it as a passing error, not a
   "no". Comes with the server update; no app update is needed.
@@ -26,5 +30,8 @@
   and password-reset limits, the reaction and checklist caps, the DM block on
   reactions, the write-once identity key, the "you still own servers" check
   on account deletion and the history-key check on a new recovery code all
-  failed OPEN when their lookup failed. They fail closed now
+  failed OPEN when their lookup failed. And a channel whose keys could not be
+  read was served as a channel with no keys yet, which could lead a device
+  that had not opened the channel before back to an old channel key that
+  someone removed from the channel still holds. They fail closed now
   (docs/SECURITY_MODEL.md, section 12). Server update only.

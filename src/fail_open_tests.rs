@@ -1458,3 +1458,276 @@ async fn the_reminder_feed_is_a_503_when_a_channel_cannot_be_checked() {
     checks.retry(&faulted, "GET /task-reminders: a channel's permissions could not be read");
     checks.done();
 }
+
+// ---- a channel's keys, past the gate ---------------------------------------------------
+
+/// GET /channels/:id/keys and /member-keys, and POST /channels/:id/keys, after
+/// their permission gate answered. GET /keys served a failed epoch read as
+/// `current_epoch: 0`, the answer for a channel with no keys yet (a device with
+/// no epoch floor then mints epoch 1, and can adopt a superseded epoch-1 key on
+/// the 409), a failed read of the caller's wrapped keys as `keys: []` (history
+/// undecryptable, and a send refused as "cannot send securely"), the server's
+/// generation as -1 and the epoch's as 0. GET /member-keys served a failed
+/// member list as `200 []` and a failed viewer resolve as a 500. The publish
+/// read its epoch bound, the caller's own key and the epoch's first wrapper in
+/// a transaction the failure had already aborted, and answered "Invalid
+/// epoch", "must be your own identity key" or a 500 (its viewer resolve a
+/// 500 too). Each is a 503 now, and nothing is written.
+#[tokio::test]
+async fn a_channels_keys_are_a_503_when_a_lookup_past_the_gate_fails() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let (m, text) = (w.member, w.text);
+    for (who, key) in [(w.owner, "pk-owner"), (m, "pk-member")] {
+        sqlx::query("UPDATE users SET public_key = $1 WHERE id = $2").bind(key).bind(who as i32).execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE servers SET member_generation = 7 WHERE id = $1").bind(&w.sid).execute(&pool).await.unwrap();
+    for epoch in [1i32, 2] {
+        sqlx::query(
+            "INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation, sender_user_id) \
+             VALUES ($1, $2, $3, $4, 'pk-owner', 7, $5)",
+        )
+        .bind(text as i32)
+        .bind(epoch)
+        .bind(m as i32)
+        .bind(format!("wrapped-{epoch}"))
+        .bind(w.owner as i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let keys = |p: &sqlx::PgPool| {
+        let s = app(p);
+        async move { crate::key_handlers::get_channel_keys(State(s), Path(text), Extension(claims(m))).await.into_response() }
+    };
+    let member_keys = |p: &sqlx::PgPool| {
+        let s = app(p);
+        async move { crate::key_handlers::get_member_keys(State(s), Path(text), Extension(claims(m))).await.into_response() }
+    };
+    // Epoch 3 is the next one; epoch 2 is held, by the owner.
+    let publish = |p: &sqlx::PgPool, epoch: i32| {
+        let s = app(p);
+        let req = serde_json::from_value(json!({
+            "epoch": epoch,
+            "member_generation": 7,
+            "keys": [{ "recipient_id": m, "wrapped_key": format!("wrapped-{epoch}-again"), "sender_public_key": "pk-member" }],
+        }))
+        .unwrap();
+        async move { crate::key_handlers::publish_channel_keys(State(s), Path(text), Extension(claims(m)), Json(req)).await.into_response() }
+    };
+
+    let mut faulted: Vec<(&str, Response)> = Vec::new();
+    let (faulty, schema) = faulty_pool(&pool, &url, &["channel_keys"]).await;
+    faulted.push(("GET /channels/:id/keys: the current-epoch read", keys(&faulty).await));
+    faulted.push(("POST /channels/:id/keys: the epoch bound", publish(&faulty, 3).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_column_pool(&pool, &url, "servers", "member_generation").await;
+    faulted.push(("GET /channels/:id/keys: the server's member generation", keys(&faulty).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_column_pool(&pool, &url, "channel_keys", "member_generation").await;
+    faulted.push(("GET /channels/:id/keys: the generation the current epoch was minted for", keys(&faulty).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_column_pool(&pool, &url, "channel_keys", "wrapped_key").await;
+    faulted.push(("GET /channels/:id/keys: the caller's wrapped keys", keys(&faulty).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_column_pool(&pool, &url, "users", "public_key").await;
+    faulted.push(("GET /channels/:id/member-keys: the members and their keys", member_keys(&faulty).await));
+    faulted.push(("POST /channels/:id/keys: the caller's own identity key", publish(&faulty, 3).await));
+    drop_faults(&pool, faulty, &schema).await;
+    // Read only where a row of the epoch is: a publish of the held epoch 2.
+    let (faulty, schema) = faulty_column_pool(&pool, &url, "channel_keys", "sender_public_key").await;
+    faulted.push(("POST /channels/:id/keys: who established the epoch", publish(&faulty, 2).await));
+    drop_faults(&pool, faulty, &schema).await;
+    // The gate resolves the member's overwrites once; the viewer resolve after
+    // it reads them again. A pool each: the count is the pool's.
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "channel_permission_overwrites", 1).await;
+    faulted.push(("GET /channels/:id/member-keys: the channel's viewers", member_keys(&faulty).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "channel_permission_overwrites", 1).await;
+    faulted.push(("POST /channels/:id/keys: the channel's viewers", publish(&faulty, 3).await));
+    drop_faults(&pool, faulty, &schema).await;
+    let (written,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_keys WHERE channel_id = $1 AND epoch = 3")
+        .bind(text as i32)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let healthy_keys = keys(&pool).await;
+    let keys_status = healthy_keys.status();
+    let served: serde_json::Value = serde_json::from_str(&body_text(healthy_keys).await).unwrap_or_default();
+    let healthy_members = member_keys(&pool).await;
+    let members_status = healthy_members.status();
+    let listed: Vec<serde_json::Value> = serde_json::from_str(&body_text(healthy_members).await).unwrap_or_default();
+    let held = publish(&pool, 2).await.status();
+    let published = publish(&pool, 3).await.status();
+    let (stored,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_keys WHERE channel_id = $1 AND epoch = 3")
+        .bind(text as i32)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    drop_world(&pool, &w, &[]).await;
+
+    check_eq!(checks, keys_status, StatusCode::OK, "control: the member reads the channel's keys");
+    check_eq!(
+        checks,
+        (&served["current_epoch"], &served["max_epoch"], &served["current_generation"], &served["epoch_generation"]),
+        (&json!(2), &json!(2), &json!(7), &json!(7)),
+        "control: the epochs and generations a healthy read serves"
+    );
+    check_eq!(checks, served["keys"].as_array().map(Vec::len), Some(2), "control: both wrapped keys, got {served}");
+    check_eq!(checks, members_status, StatusCode::OK, "control: the member reads the member keys");
+    check!(
+        checks,
+        listed.iter().any(|k| k["user_id"] == json!(w.owner) && k["public_key"] == json!("pk-owner"))
+            && listed.iter().any(|k| k["user_id"] == json!(m) && k["public_key"] == json!("pk-member")),
+        "control: both members with their keys, got {listed:?}"
+    );
+    check_eq!(checks, written, 0, "nothing was published through a fault");
+    check_eq!(checks, held, StatusCode::CONFLICT, "control: a publish of the epoch the owner holds is refused 409");
+    check_eq!(checks, published, StatusCode::OK, "control: the member publishes the next epoch");
+    check_eq!(checks, stored, 1, "control: and its row is stored");
+    for (name, resp) in &faulted {
+        checks.retry(resp, name);
+    }
+    checks.done();
+}
+
+// ---- editing a channel, past the gate ---------------------------------------------------
+
+fn in_room(state: &AppState, user: i64, channel: i64) -> bool {
+    state.rooms.get(&format!("voice_{channel}")).is_some_and(|r| r.members.contains(&user))
+}
+
+async fn channel_row(pool: &sqlx::PgPool, channel: i64) -> (bool, Option<i32>) {
+    sqlx::query_as("SELECT COALESCE(sfu_mode, false), parent_id FROM channels WHERE id = $1")
+        .bind(channel as i32)
+        .fetch_one(pool)
+        .await
+        .expect("channel row")
+}
+
+/// PATCH /channels/:id after its gate answered, and POST /servers/:id/channels'
+/// parent check. The channel as it stood was read with a failure folded into
+/// "no row": a switch between mesh and SFU then committed and skipped putting
+/// the call out (the room splits in two, the 2026-09-08 failure the eviction
+/// exists for), and a parent the caller sees read as none, so "No parent (top
+/// level)" answered 200 and changed nothing. A failed check of a new parent
+/// (a collection here, one the caller can see, not a loop) answered the 400 a
+/// client shows as "must be a collection in the same server". Each is a 503
+/// now and changes nothing. The caller is the owner, whom the gate answers
+/// after one read of `channels`, so the reads of `channels` are counted:
+/// the gate's, the channel as it stands, the collection check, the
+/// visibility of the parent (the resolver's first read) and the loop check.
+#[tokio::test]
+async fn a_channel_edit_whose_lookup_fails_is_a_503_and_changes_nothing() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let (owner, sid, voice, loose, collection) = (w.owner, w.sid.clone(), w.voice, w.text, w.collection);
+    let (inside,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, parent_id) VALUES ($1, 'inside', 0, $2) RETURNING id")
+        .bind(&sid)
+        .bind(collection as i32)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let inside = inside as i64;
+    let edit = |s: Arc<AppState>, channel: i64, body: serde_json::Value| async move {
+        let req = serde_json::from_value(body).unwrap();
+        crate::channel_handlers::update_channel(State(s), Path(channel), Extension(claims(owner)), Json(req)).await.into_response()
+    };
+    let create = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let sid = sid.clone();
+        let req = serde_json::from_value(json!({ "name": "f503-new", "channel_type": 0, "parent_id": collection })).unwrap();
+        async move { crate::channel_handlers::create_channel(State(s), Path(sid), Extension(claims(owner)), Json(req)).await.into_response() }
+    };
+    let created = |p: &sqlx::PgPool| {
+        let (p, sid) = (p.clone(), sid.clone());
+        async move {
+            sqlx::query_scalar::<_, Option<i32>>("SELECT parent_id FROM channels WHERE server_id = $1 AND name = 'f503-new'")
+                .bind(sid)
+                .fetch_all(&p)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Mesh <-> SFU with the member in the call: the channel as it stands fails.
+    let (faulty, schema) = crate::fault_injection::faulty_once_pool(&pool, &url, "channels", 1).await;
+    let s = app(&faulty);
+    let rx = in_voice(&s, w.member, voice);
+    let transport = edit(s.clone(), voice, json!({ "sfu_mode": false })).await;
+    let still_in_call = in_room(&s, w.member, voice);
+    drop(rx);
+    drop_faults(&pool, faulty, &schema).await;
+    let transport_row = channel_row(&pool, voice).await;
+
+    // "No parent (top level)" for a channel in a collection the owner sees:
+    // the resolver's read for the collection fails (the third).
+    let (faulty, schema) = crate::fault_injection::faulty_once_pool(&pool, &url, "channels", 2).await;
+    let out = edit(app(&faulty), inside, json!({ "parent_id": null })).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let out_row = channel_row(&pool, inside).await;
+
+    // A top-level channel moved into the collection: the collection check, the
+    // parent's visibility, the loop check.
+    let mut into = Vec::new();
+    for (skip, what) in [(2, "the collection check"), (3, "the parent's visibility"), (4, "the loop check")] {
+        let (faulty, schema) = crate::fault_injection::faulty_once_pool(&pool, &url, "channels", skip).await;
+        into.push((what, edit(app(&faulty), loose, json!({ "parent_id": collection })).await));
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let into_row = channel_row(&pool, loose).await;
+
+    // Creating a channel in the collection: the collection check, the visibility.
+    let mut made = Vec::new();
+    for (skip, what) in [(0, "the collection check"), (1, "the parent's visibility")] {
+        let (faulty, schema) = crate::fault_injection::faulty_once_pool(&pool, &url, "channels", skip).await;
+        made.push((what, create(&faulty).await));
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let made_rows = created(&pool).await;
+
+    // Controls, on a healthy pool.
+    let s = app(&pool);
+    let rx = in_voice(&s, w.member, voice);
+    let transport_healthy = edit(s.clone(), voice, json!({ "sfu_mode": false })).await.status();
+    let put_out = !in_room(&s, w.member, voice);
+    drop(rx);
+    let transport_healthy_row = channel_row(&pool, voice).await;
+    let out_healthy = edit(app(&pool), inside, json!({ "parent_id": null })).await.status();
+    let out_healthy_row = channel_row(&pool, inside).await;
+    let into_healthy = edit(app(&pool), loose, json!({ "parent_id": collection })).await.status();
+    let into_healthy_row = channel_row(&pool, loose).await;
+    let made_healthy = create(&pool).await.status();
+    let made_healthy_rows = created(&pool).await;
+    drop_world(&pool, &w, &[]).await;
+
+    checks.retry(&transport, "PATCH /channels/:id (sfu_mode): the channel as it stands could not be read");
+    check_eq!(checks, transport_row.0, true, "the voice channel is still on SFU after the fault");
+    check!(checks, still_in_call, "and the call was left as it was");
+    check_eq!(checks, transport_healthy, StatusCode::OK, "control: the owner switches the channel to mesh");
+    check_eq!(checks, transport_healthy_row.0, false, "control: and it is on mesh");
+    check!(checks, put_out, "control: and the call in it was put out");
+
+    checks.retry(&out, "PATCH /channels/:id (parent_id null): the collection's visibility could not be read");
+    check_eq!(checks, out_row.1, Some(collection as i32), "the channel is still in its collection after the fault");
+    check_eq!(checks, out_healthy, StatusCode::OK, "control: the owner takes the channel out of its collection");
+    check_eq!(checks, out_healthy_row.1, None, "control: and it is at the top level");
+
+    for (what, resp) in &into {
+        checks.retry(resp, &format!("PATCH /channels/:id (into a collection): {what} could not be made"));
+    }
+    check_eq!(checks, into_row.1, None, "the channel is still at the top level after the faults");
+    check_eq!(checks, into_healthy, StatusCode::OK, "control: the owner moves the channel into the collection");
+    check_eq!(checks, into_healthy_row.1, Some(collection as i32), "control: and it is inside it");
+
+    for (what, resp) in &made {
+        checks.retry(resp, &format!("POST /servers/:id/channels (in a collection): {what} could not be made"));
+    }
+    check!(checks, made_rows.is_empty(), "no channel was created through a fault, got {made_rows:?}");
+    check_eq!(checks, made_healthy, StatusCode::OK, "control: the owner creates a channel in the collection");
+    check_eq!(checks, made_healthy_rows, vec![Some(collection as i32)], "control: and it is inside it");
+    checks.done();
+}

@@ -155,6 +155,74 @@ pub(crate) async fn faulty_after_pool(admin: &sqlx::PgPool, url: &str, table: &s
     (pool, schema)
 }
 
+/// Like [`faulty_after_pool`], but only ONE read fails: the one after the
+/// first `skip` reads (statements that scan `table`). Every read after it
+/// answers again, and an UPDATE goes through to the real table (an INSTEAD OF
+/// trigger hands it the new row by primary key). For a lookup that shares its
+/// table, and its columns, with the reads around it and the write after it:
+/// the shape of a check that is skipped when it fails while the write still
+/// lands.
+pub(crate) async fn faulty_once_pool(admin: &sqlx::PgPool, url: &str, table: &str, skip: u32) -> (sqlx::PgPool, String) {
+    let (pool, schema) = faulty_pool(admin, url, &[]).await;
+    crate::migrator::test_ddl(admin, &format!("CREATE SEQUENCE {schema}.reads")).await;
+    crate::migrator::test_ddl(
+        admin,
+        &format!(
+            "CREATE FUNCTION {schema}.fault_{table}() RETURNS SETOF public.{table} LANGUAGE plpgsql AS \
+             $$ BEGIN \
+                  IF nextval('{schema}.reads') = {} THEN \
+                    RAISE EXCEPTION 'injected fault on {table}' USING ERRCODE = 'query_canceled'; \
+                  END IF; \
+                  RETURN QUERY SELECT * FROM public.{table}; \
+                END $$",
+            skip + 1
+        ),
+    )
+    .await;
+    crate::migrator::test_ddl(admin, &format!("CREATE VIEW {schema}.{table} AS SELECT * FROM {schema}.fault_{table}()")).await;
+    let key: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname::text FROM pg_index i \
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+         WHERE i.indrelid = $1::regclass AND i.indisprimary",
+    )
+    .bind(format!("public.{table}"))
+    .fetch_all(admin)
+    .await
+    .expect("read the table's primary key");
+    assert!(!key.is_empty(), "faulty_once_pool: public.{table} has no primary key");
+    let cols: Vec<String> = sqlx::query_scalar(
+        "SELECT attname::text FROM pg_attribute \
+         WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '' ORDER BY attnum",
+    )
+    .bind(format!("public.{table}"))
+    .fetch_all(admin)
+    .await
+    .expect("read the table's columns");
+    let quoted = |names: &[&String], prefix: &str| -> String {
+        names.iter().map(|c| format!("{prefix}\"{c}\"")).collect::<Vec<_>>().join(", ")
+    };
+    let set: Vec<&String> = cols.iter().filter(|c| !key.contains(c)).collect();
+    let key: Vec<&String> = key.iter().collect();
+    crate::migrator::test_ddl(
+        admin,
+        &format!(
+            "CREATE FUNCTION {schema}.pass_update() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN UPDATE public.{table} SET ({}) = ROW({}) WHERE ROW({}) = ROW({}); RETURN NEW; END $$",
+            quoted(&set, ""),
+            quoted(&set, "NEW."),
+            quoted(&key, ""),
+            quoted(&key, "OLD."),
+        ),
+    )
+    .await;
+    crate::migrator::test_ddl(
+        admin,
+        &format!("CREATE TRIGGER pass_update INSTEAD OF UPDATE ON {schema}.{table} FOR EACH ROW EXECUTE FUNCTION {schema}.pass_update()"),
+    )
+    .await;
+    (pool, schema)
+}
+
 /// Like [`faulty_pool`] for ONE table whose READS fail while an INSERT into
 /// it still goes through (an INSTEAD OF trigger hands the row to the real
 /// table, with the real table's defaults). This is the shape of a guard that
