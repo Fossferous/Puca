@@ -59,7 +59,14 @@ export function consumePendingRecoveryCode(account?: string | null): string | nu
     return c;
 }
 
-registerLogoutCleanup(() => { pending = null; });
+// A sign-out takes it. Somebody else signing in after a session ran out
+// (api/logoutHooks.ts, 'account-change') takes only one bound to no account,
+// which was made in the last account's session: one bound to an account is
+// handed to nobody else, and that sign-in may be the very one that follows the
+// registration it was made for.
+registerLogoutCleanup((reason) => {
+    if (reason === 'sign-out' || pending?.owner === null) pending = null;
+});
 
 export function markRecoveryCodeUnacknowledged(): void {
     try { localStorage.setItem(UNACKED_KEY, '1'); } catch { /* private mode */ }

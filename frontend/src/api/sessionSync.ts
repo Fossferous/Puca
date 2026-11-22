@@ -103,6 +103,26 @@ export function clearSharedSessionCaches(): void {
 }
 
 /**
+ * Somebody else is signed in on this running app than the account whose
+ * session here last ended, and it ended WITHOUT a sign-out: it ran out
+ * (softExpireSession, here or in another document), which keeps everything for
+ * the same account signing back in. Nothing reloads at the sign-in that
+ * follows, so what this document holds of the last account goes now, before
+ * the next one is drawn anything: what clearSharedSessionCaches() drops, the
+ * sign-out hooks told why ('account-change': api/logoutHooks.ts), except the
+ * DM keys. Those are STORED per account (dmKeys.ts scoped()), and the sign-in
+ * that just happened stored the new account's, which clearDmKeys() would
+ * delete with the rest. Entry points with more per-account state (App.tsx:
+ * the authed-media file cache, the blocked-user set) clear theirs on top. The
+ * caller decides it is somebody else: this does not look.
+ */
+export function forgetPreviousAccount(): void {
+    clearChannelKeyCache();
+    clearBlobCache();
+    runLogoutCleanups('account-change');
+}
+
+/**
  * Pure transition, exported for the unit test: what one storage change means
  * given the sub this document last knew about.
  */

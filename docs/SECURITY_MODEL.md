@@ -540,14 +540,32 @@ sign-out the app no longer holds:
 A sign-out in another tab of the same browser (Púca or Púca Notes) runs the same hooks in
 this one ([`frontend/src/api/sessionSync.ts`](../frontend/src/api/sessionSync.ts)): they
 are registered per page, and only a page's own sign-out used to run them. A session that
-**ends without a sign-out** (it ran out, or the app was closed) keeps them for the same
-account signing back in, since that is not somebody else; but the notifications it left
-where the operating system keeps them belong to that account, so when a **different**
-account signs in, at start or on the form, they are taken away first
-(`notificationsAreFor` in
-[`frontend/src/api/desktopNotify.ts`](../frontend/src/api/desktopNotify.ts)). And a recovery
-code is shown only to the account it was made for: a registration whose automatic
-sign-in failed used to leave its code for whoever signed in next on that form.
+**ends without a sign-out** (it ran out, or the app was closed) keeps all of it for the same
+account signing back in, since that is not somebody else. When a **different** account
+signs in instead:
+
+- **on the same running app** (the session ran out and somebody else signs in on the form,
+  in that tab or another): what the app holds of the above in memory goes before they are
+  drawn anything. The hooks run as at a sign-out, and the unwrapped channel keys, the
+  decrypted attachments, the pictures fetched with the last account's credentials and the
+  people it blocked go with them (`accountSignedIn` in
+  [`frontend/src/App.tsx`](../frontend/src/App.tsx); Púca Notes' page runs the shared part,
+  `forgetPreviousAccount` in `sessionSync.ts`). Before, only the lists went: the next
+  account was shown the last one's clip approval request at once, and its unread counts
+  until the rail was read again; a tap on one of its Steam Deck toasts opened its
+  conversation in the new session; the people it had blocked were hidden from the new one
+  until its own list arrived; and what it had read stayed in memory. Kept, because by then
+  they are the new account's: the DM keys (stored per account, and the sign-in just stored
+  its own) and the E2EE identity the sign-in restored;
+- **after the app was closed**: what was in memory went with it, but the notifications it
+  left where the operating system keeps them belong to that account, so they are taken
+  away first, at start or on the form (`notificationsAreFor` in
+  [`frontend/src/api/desktopNotify.ts`](../frontend/src/api/desktopNotify.ts)).
+
+And a recovery code is shown only to the account it was made for: a registration whose
+automatic sign-in failed used to leave its code for whoever signed in next on that form. A
+sign-in as somebody else does not take away one bound to its account, since nobody else is
+handed it and that sign-in may be the one that follows its own registration.
 
 What this cannot promise: memory the page let go of is gone from the app, not wiped,
 until the JavaScript engine reuses it; what an operating system copies into its own
@@ -557,8 +575,9 @@ the trust-on-first-use pins of other people's keys (`verified_key_*`, `control_p
 which a sign-out must not reset, and this device's own settings and its **Stay signed
 in** answer, which hold no account.
 `frontend/src/tests/signOutForgetsReadContent.test.ts`,
-`signOutTakesNotificationsAway.test.ts` and `signInAsSomebodyElse.test.tsx` fill each of
-these and sign out through the real path.
+`signOutTakesNotificationsAway.test.ts`, `signInAsSomebodyElse.test.tsx` and
+`signInAfterExpiryForgetsLastAccount.test.tsx` fill each of these and sign out, or let the
+session run out and sign in as somebody else, through the real path.
 
 ### The honest limit
 
