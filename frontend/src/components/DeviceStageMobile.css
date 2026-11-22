@@ -640,10 +640,17 @@ html[data-fullscreen-bare] .device-stage-minimized-strip {
 
 /* DESKTOP LAYOUT (everything but mobile.css's phone layout): the app's
    columns stop above the strip, and so do the views that take the place
-   beside the server rail. 41 px is the strip at rest, before it is measured. */
+   beside the server rail. 41 px is the strip at rest, before it is measured.
+   The room is kept at the foot of `.app`, the window-high column the chat
+   is laid out in, and not by giving `.chat-container` a height: an update
+   banner pads that column down from the top (UpdateBanner.css, 52 to
+   132 px), and a chat container fixed at the window less the strip was
+   then taller than the column, shrank to it, and ended at the window's
+   foot again, under the strip (e2e/return-pill-live.mjs, `banner`). With
+   both paddings on the column, the chat fills what is left between them. */
 @media not all and (pointer: coarse), (min-width: 1025px) {
-    body:has(.device-stage-minimized-strip) .chat-container {
-        height: calc(100vh - var(--device-return-h, 41px));
+    body:has(.device-stage-minimized-strip) .app {
+        padding-bottom: var(--device-return-h, 41px);
     }
 
     body:has(.device-stage-minimized-strip) :is(.friends-dashboard, .devices-dashboard, .notes-desktop-view) {

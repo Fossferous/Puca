@@ -5,7 +5,7 @@
 // "Return to remote device (ds7babefb5bd2042d38d9c)" pill was drawn right over the message box,
 // "Blocks textbox", and named the session by its raw id. It was fixed 20 px from the bottom-right
 // corner at z 10000, over whatever was there. NEGATIVE CONTROL, this walk against a build from before
-// the fix: 52 of its 68 checks fail. At 390x844 with the keyboard up it covered 100% of the message
+// the fix: 70 of its 97 checks fail. At 390x844 with the keyboard up it covered 100% of the message
 // box and of Send; with it down, 53% of the bottom bar, and every tab but Servers (at 360x800 every
 // one) was the pill under a tap, so a tap on Chat, Channels or Devices brought the stage back instead;
 // sideways 11-22% of the box and 14-82% of Send; on a 1280x800 desktop 100% of Send and nearly half the
@@ -19,7 +19,15 @@
 //             hits, and nothing it should leave alone is covered: not one point of the message box,
 //             Send, the emoji button, the channel list's profile bar, the voice panel or the member
 //             list's column has the strip on top (elementFromPoint), and no box of those overlaps it;
-//             the views end above it.
+//             the chat's column (.chat-container) ends where the strip begins; the views end above it.
+//   banner    1280x800 with the desktop app's update banner up, the sign-in-screen service's, and both
+//             (their markup on the page with their own classes: the real stylesheet pads `.app` down
+//             52, 66 and 132 px under them), at rest and with a grown message box, and once more with
+//             them gone: the same checks as the desktop's. NEGATIVE CONTROL, the branch's first
+//             reservation (`.chat-container` fixed at the window less the strip, which the padded
+//             column shrank back to its own height): 12 of the section's 25 checks fail, the chat's
+//             column ending at the window's foot (800) under the strip (759), half of the message box,
+//             Send and the emoji button and two thirds of the profile bar under it.
 //   phone     390x844 and 360x800 upright, 844x390 sideways, real touches, as the Android app: with the
 //             keyboard down the strip sits between the message box and the bottom bar, every bottom-bar
 //             tab and the message box and Send uncovered, and a real tap on Chat lands on Chat; the
@@ -55,7 +63,7 @@
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5492 API=http://127.0.0.1:5491 OUT=<dir> node e2e/return-pill-live.mjs
-//   ONLY=desktop,phone,button  runs some sections.
+//   ONLY=desktop,banner,phone,button  runs some sections.
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -279,17 +287,27 @@ async function startAndMinimise(page, phone, name = PC) {
 }
 
 // ── desktop ─────────────────────────────────────────────────────────────────────────────────────
-if (want('desktop') || want('button')) await startAndMinimise(O, false);
+const DESK = ['composer', 'send', 'emoji', 'form', 'profile', 'voice', 'members'];
+/** The chat's column (`.chat-container`) and the strip: the column must end where the strip begins. */
+const column = (page) => page.evaluate(() => {
+    const c = document.querySelector('.chat-container');
+    const s = document.querySelector('.device-stage-minimized-strip');
+    if (!c || !s) return { column: !!c, strip: !!s };
+    const cb = c.getBoundingClientRect(), sb = s.getBoundingClientRect();
+    return { column: true, strip: true, top: Math.round(cb.top), bottom: Math.round(cb.bottom), stripTop: Math.round(sb.top), appPadTop: getComputedStyle(document.querySelector('.app')).paddingTop };
+});
+const deskCheck = async (tag) => {
+    const m = await measure(O);
+    const r = await reachable(O);
+    check(`desktop ${tag}: the way back is on screen and a press at its middle lands on it`, !!m.strip && r.ok, { strip: m.strip, ...r });
+    const bad = clear(m, DESK);
+    check(`desktop ${tag}: it covers none of ${present(m, DESK).join(', ')}`, !!m.strip && present(m, ['composer', 'send']).length === 2 && bad.length === 0, bad.length ? bad : m.on.send);
+    const col = await column(O);
+    check(`desktop ${tag}: the chat's column ends where the strip begins`, col.column && col.strip && Math.abs(col.bottom - col.stripTop) <= 1, col);
+    return m;
+};
+if (want('desktop') || want('button') || want('banner')) await startAndMinimise(O, false);
 if (want('desktop')) {
-    const DESK = ['composer', 'send', 'emoji', 'form', 'profile', 'voice', 'members'];
-    const deskCheck = async (tag) => {
-        const m = await measure(O);
-        const r = await reachable(O);
-        check(`desktop ${tag}: the way back is on screen and a press at its middle lands on it`, !!m.strip && r.ok, { strip: m.strip, ...r });
-        const bad = clear(m, DESK);
-        check(`desktop ${tag}: it covers none of ${present(m, DESK).join(', ')}`, !!m.strip && present(m, ['composer', 'send']).length === 2 && bad.length === 0, bad.length ? bad : m.on.send);
-        return m;
-    };
     await deskCheck('1280x800, in a channel, the member list beside it');
     await shot(O, 'desktop-channel');
     await O.locator('form.message-form textarea').fill('a line\n'.repeat(7));
@@ -335,6 +353,53 @@ if (want('desktop')) {
     await sleep(500);
     await O.locator('[data-testid="voice-leave"]').first().click().catch(() => {});
     await sleep(500);
+}
+
+// ── an update banner up (desktop) ───────────────────────────────────────────────────────────────
+// The desktop app's update banner (UpdateBanner.tsx, up after every release until Later) and the
+// sign-in-screen service's (ServiceUpdateBanner.tsx) are fixed along the top, and UpdateBanner.css
+// pads `.app` down under them: 52 px, 66 px, 132 px for both (`body:has(.update-banner) .app`). They
+// render only under the desktop shell, so the walk puts their markup on the page with their own
+// classes and the real stylesheet lays the app out round them. The strip's first reservation fixed
+// `.chat-container` at the window less the strip, and the padded column shrank it to its own height
+// instead: its foot stayed at the window's, under the strip, over the message box and Send.
+if (want('banner')) {
+    await O.setViewportSize({ width: 1280, height: 800 });
+    await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+    await sleep(600);
+    await chanRow(O).click();
+    await sleep(600);
+    for (const [label, banners] of [
+        ['the app-update banner', ['update-banner']],
+        ['the service banner', ['update-banner service-update-banner']],
+        ['both banners', ['update-banner', 'update-banner service-update-banner']],
+    ]) {
+        await O.evaluate((banners) => {
+            for (const cls of banners) {
+                const b = document.createElement('div');
+                b.className = cls;
+                b.dataset.walkBanner = '';
+                b.innerHTML = '<div class="update-banner-content"><span class="update-icon"></span><div class="update-text"><strong>A new version is ready</strong><span>Update when you are ready.</span></div></div>';
+                document.body.appendChild(b);
+            }
+        }, banners);
+        await sleep(500);
+        const pad = await O.evaluate(() => getComputedStyle(document.querySelector('.app')).paddingTop);
+        console.log(`INFO  ${label}: .app padding-top ${pad}`);
+        check(`banner: ${label} pads the app down (the stylesheet's rule applies)`, pad !== '0px', pad);
+        await deskCheck(`1280x800, ${label} up`);
+        await shot(O, `desktop-banner-${banners.length}-${banners[0].includes('service') ? 'service' : 'app'}`);
+        await O.locator('form.message-form textarea').fill('a line\n'.repeat(7));
+        await sleep(300);
+        await deskCheck(`1280x800, ${label} up, a grown message box`);
+        await O.locator('form.message-form textarea').fill('');
+        await O.evaluate(() => { for (const b of document.querySelectorAll('[data-walk-banner]')) b.remove(); });
+        await sleep(300);
+    }
+    // Banner gone: the app comes back up and still ends where the strip begins.
+    const after = await O.evaluate(() => getComputedStyle(document.querySelector('.app')).paddingTop);
+    check('banner: with the banner gone the app is not padded down', after === '0px', after);
+    await deskCheck('1280x800, the banner gone again');
 }
 
 // ── the button (desktop half) ───────────────────────────────────────────────────────────────────
