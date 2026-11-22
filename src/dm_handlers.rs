@@ -620,8 +620,9 @@ pub async fn get_messages(
     Query(query): Query<MessagesQuery>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    // Verify user is part of this conversation
-    let is_participant: Option<(i32,)> = sqlx::query_as(
+    // Verify user is part of this conversation. A lookup that FAILS is a 503
+    // to retry (src/try_again.rs), not "Not a participant".
+    let is_participant: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM dm_conversations WHERE id = $1 AND (user1_id = $2 OR user2_id = $3)",
     )
     .bind(&conversation_id)
@@ -629,7 +630,13 @@ pub async fn get_messages(
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("dm get_messages: participant lookup failed: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     if is_participant.is_none() {
         return (
@@ -639,7 +646,9 @@ pub async fn get_messages(
             .into_response();
     }
 
-    let messages: Vec<(String, String, i64, String, Option<String>, String, String)> = sqlx::query_as(
+    // A history query that FAILS is a 503, never the empty 200 of a
+    // conversation with nothing in it (as GET /channels/:id/messages).
+    let messages: Vec<(String, String, i64, String, Option<String>, String, String)> = match sqlx::query_as(
         r#"
         SELECT m.id, m.conversation_id, m.sender_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at
         FROM dm_messages m
@@ -655,7 +664,13 @@ pub async fn get_messages(
     .bind(query.limit.clamp(1, 200))
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("dm get_messages: history query failed: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load messages right now, try again shortly");
+        }
+    };
 
     // Reverse to get chronological order
     let response: Vec<DMMessageResponse> = messages

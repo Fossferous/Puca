@@ -18,13 +18,16 @@ stored or sent, and the client may retry. It is never the 404 or 403 of a real
 could not be made (`src/try_again.rs`). This holds for every route below that
 is gated on a channel's permissions (messages, channel keys and member keys,
 the collection feed, overwrites, read state, tasks, the SFU token, clips, voice
-moves and Call everyone back, uploads naming a channel), for the key routes
-under Users, `PATCH /keys/public`, `POST /upload`'s storage quota and clip-part
-cap, reactions, reports, slowmode, kick, ban, timeouts, custom sounds and role
-changes (the owner and rank checks), `DELETE /account` (the check that you
-own no servers), the wrap-material and recovery routes (the check that a new
-recovery code re-wraps the history key), and the mail routes. A 404 or 403
-still means what it says.
+moves and Call everyone back, uploads naming a channel), for the personal task
+lists (Púca Notes) and their items, `GET /task-reminders`, a DM's messages,
+the key routes under Users, `PATCH /keys/public`, `POST /upload`'s storage
+quota and clip-part cap, reactions, reports, slowmode, kick, ban, timeouts,
+custom sounds and role changes (the owner and rank checks), `DELETE /account`
+(the check that you own no servers), the wrap-material and recovery routes
+(the check that a new recovery code re-wraps the history key), and the mail
+routes. A list that could not be read is a `503` too, never an empty `200`:
+a page of messages or of edits, the reminder feed. A 404 or 403 still means
+what it says.
 
 ---
 
@@ -107,7 +110,7 @@ none. A backend that predates modes omits it, and a client must then offer none.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| GET | `/channels/:id/messages` | ✅ | Get messages (paginated) |
+| GET | `/channels/:id/messages` | ✅ | Get messages (paginated). A history query that fails is a `503` with `Retry-After: 2`, never an empty page (which a client takes for the start of the channel's history). |
 | POST | `/channels/:id/messages` | ✅ | Send message. A `reply_to_id` must name a message in **this** channel; one from any other channel (or a DM) is a 400. |
 | PATCH | `/channels/:id/messages/:message_id` | ✅ | Edit message |
 | DELETE | `/channels/:id/messages/:message_id` | ✅ | Delete message |
@@ -201,7 +204,7 @@ Both member lists, and `GET /friends`, also carry `status` (`online`, `idle` or 
 |--------|----------|------|-------------|
 | GET | `/dms` | ✅ | List DM conversations |
 | POST | `/dms` | ✅ | Create/get a DM conversation with a user. 404 for an id that does not exist **or** belongs to a deleted account (a tombstone is not DM-able). 403 `DMS_NOT_ACCEPTED` unless the recipient is a friend, has already written to you, or shares a server with you **and** has "Allow DMs from server members" on — a stranger who shares no server is refused whatever the flag says. A blocked pair gets the **same** 403 and body (since 0.9.5; a distinct "You cannot message this user" told the sender they were blocked). An existing conversation is still returned across a block — history stays readable; only sending is refused. |
-| GET | `/dms/:conversation_id/messages` | ✅ | Get DM messages |
+| GET | `/dms/:conversation_id/messages` | ✅ | Get DM messages. A participant lookup or history query that fails is a `503` with `Retry-After: 2`, never the 403 or an empty page. |
 | POST | `/dms/:conversation_id/messages` | ✅ | Send DM. 403 `DMS_NOT_ACCEPTED` when the consent rule above no longer holds, and the same 403 across a block. |
 | GET | `/users/:user_id/dm-keys` | ✅ | The signed per-device DM keys a sender wraps a v4 message to. Same relationship rule as `POST /dms` (friends, or a shared server while their "Allow DMs from server members" is on, or they already wrote to you), and 404 rather than 403 when it fails — how many devices someone uses is not a stranger's to count, and having opened a conversation yourself no longer satisfies the check. Never while either of you has blocked the other (until 0.9.5 a block left a former friend or server-mate polling the target's live session list). An id outside the 32-bit range is a 404, not an alias of your own account. A lookup that fails is a `503` with `Retry-After: 2` (it used to be a 404, or a 200 listing no sessions). |
 
@@ -308,6 +311,14 @@ refuses a `body` or `attachments` value that is not one (400).
 | POST | `/task-lists/:id/restore` | ✅ | Take a list out of the trash (a no-op 200 on a live list). 404 for anyone else's list. |
 | DELETE | `/task-lists/:id` | ✅ | Delete a list and its items immediately and for good, trashed or not. The uploads its sealed attachment refs name are not touched — the server cannot read them; clients delete those with `DELETE /files/:id` first. |
 
+A lookup of the list or of an item that FAILS is a `503` with `Retry-After: 2`
+on every list route above and on the items (`/task-lists/:id/tasks`, and
+`PATCH`, `DELETE`, `/move` and `/reorder` on `/tasks/:id`), never the 404
+`List not found` or `Task not found`: Púca Notes drops a queued edit that the
+server refuses with a 404, and retries one that gets a 503. A `/move` whose
+neighbour lookup fails is a 503 too, not the 200 of an item already at the
+edge.
+
 ## Task timing (calendar, repeats, snooze)
 
 Migration 066. `schedule` and `snooze` are client-sealed envelopes (never
@@ -326,7 +337,7 @@ see of them is in `docs/SECURITY_MODEL.md` §2.
 | GET | `/task-features` | ✅ | `{"version":1,"features":["schedule","snooze","updated_at","schedule_changed_at","expect_due_at","recurrence_aware","expect_schedules_as_of","reopen_subtree","reminder_feed_v2","op_key"]}`. Static. A server older than 066 answers 404, which clients read as "none of these" — the probe works for a note with no tasks, where a `[]` list response carries no keys to detect. |
 | PATCH | `/tasks/:task_id` | ✅ | Adds `schedule` (creator or MANAGE_TASKS, like the description; sealed cap 16 KiB), `snooze` (COMPLETE_TASKS or MANAGE_TASKS, like ticking; cap 1 KiB), `expect_due_at` (compare-and-swap on `due_at`: `""` = expect NULL; a mismatch is 409 and nothing is written), `recurrence_aware` (default false: completing an item whose subtree carries any schedule is **409** without it, so an older client cannot silently end a repeating series), `expect_schedules_as_of` (RFC3339: the newest `schedule_changed_at` the client saw on the item — and, for a completion, on its subtree; `updated_at` from a server older than 071, which is never behind it — echoed as the server rendered it. A completion is **409** when an open row with a schedule under it — or a row between that one and the item — changed after it; an advance (anything stamped that is not a completion) is **409** when the item itself changed after it, its repeat removed included, or when it has no schedule at all. The item's own row is judged again inside the write, so a change committed during the request is refused too, and nothing is written; a row deleted meanwhile is 404. Absent = no check; not RFC3339 = 400) and `reopen_subtree` (reopens everything under the item). The envelope downgrade guard covers `schedule` and `snooze`. |
 | POST | `/task-lists/:list_id/tasks` | ✅ | Also accepts `schedule` (as does `POST /channels/:channel_id/tasks`), so an item and its timing land in one request. Both create routes also accept `op_key`, with the same contract as `POST /task-lists`: a replay is answered with the item that create already made (same id, same position), and no `ChecklistUpdate` is broadcast for it; a key spent on a note is a 409 here, and vice versa. A replay is recognised **before** the request is judged as a new one, so a checklist standing at its 2000-item limit — or one whose parent item has since been deleted — still answers the retry with the item rather than a 400 the client would read as "it was never saved". |
-| GET | `/task-reminders` | ✅ | Each row adds `created_by` and its sealed `schedule` and `snooze`. The 100 most recent past-due rows and the 400 soonest upcoming ones are selected separately, so a pile of never-ticked past items cannot push every future reminder out of the feed. |
+| GET | `/task-reminders` | ✅ | Each row adds `created_by` and its sealed `schedule` and `snooze`. The 100 most recent past-due rows and the 400 soonest upcoming ones are selected separately, so a pile of never-ticked past items cannot push every future reminder out of the feed. A channel task is left out once its channel can no longer be seen; when a channel's permissions cannot be READ, the whole feed is a `503` with `Retry-After: 2`, never a `200` that leaves that channel's reminders out (Púca Notes and the web loop forget every reminder that a successful feed no longer lists). |
 
 ---
 

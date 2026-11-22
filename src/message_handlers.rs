@@ -548,7 +548,11 @@ pub async fn get_messages(
         },
         None => None,
     };
-    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+    // A history query that FAILS is a 503 to retry, never an empty 200: the
+    // client takes `[]` as "this channel has no messages" (it clears the view
+    // and marks the channel read), and an empty older page as the start of
+    // the history, so search presents what it has as everything.
+    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<String>, Option<serde_json::Value>)> = match sqlx::query_as(
         r#"
         SELECT m.id, m.channel_id, m.user_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at, m.reply_to_id,
                COALESCE(m.is_task, false) as is_task, COALESCE(m.is_completed, false) as is_completed, m.parent_message_id, m.key_epoch,
@@ -566,7 +570,13 @@ pub async fn get_messages(
     .bind(before)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_messages: history query failed for channel {channel_id}: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load messages right now, try again shortly");
+        }
+    };
 
     let response: Vec<MessageResponse> = messages
         .into_iter()
@@ -619,13 +629,20 @@ pub async fn edit_message(
     // Channel-scoped op: hide the channel (404) from VIEW-denied members.
     let (_server_id, _perms) = require_channel_view!(state, channel_id, claims.sub);
 
+    // A lookup that FAILS is a 503 to retry, not "Message not found".
     let msg: Option<(i32, String, bool)> =
-        sqlx::query_as("SELECT user_id, content, clip_consent IS NOT NULL FROM messages WHERE id = $1 AND channel_id = $2")
+        match sqlx::query_as("SELECT user_id, content, clip_consent IS NOT NULL FROM messages WHERE id = $1 AND channel_id = $2")
             .bind(&message_id)
             .bind(channel_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("edit_message: message lookup failed: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     // A clip message cannot be edited: its body IS the clip (key + part ids)
     // and the edit history would keep the old body forever, so a re-pointed
     // message would carry the consent badge for footage nobody approved.
@@ -766,7 +783,8 @@ pub async fn delete_message(
     // (allow or deny) actually apply to moderation, matching the editor UI.
     let (_server_id, perms) = require_channel_view!(state, channel_id, claims.sub);
 
-    let msg: Option<(i32, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+    // A lookup that FAILS is a 503 to retry, not "Message not found".
+    let msg: Option<(i32, Option<String>, Option<serde_json::Value>)> = match sqlx::query_as(
         "SELECT m.user_id, c.server_id, m.clip_consent FROM messages m
          JOIN channels c ON m.channel_id = c.id
          WHERE m.id = $1 AND m.channel_id = $2",
@@ -775,7 +793,13 @@ pub async fn delete_message(
     .bind(channel_id)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("delete_message: message lookup failed: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     match msg {
         Some((user_id, server_id, clip_consent)) => {
@@ -900,12 +924,12 @@ pub async fn get_message_edits(
         return (StatusCode::NOT_FOUND, "Message not found").into_response();
     }
 
-    // edited_at is a timestamp — cast to ::text so it decodes into String (otherwise
-    // query_as errors and .unwrap_or_default() silently drops the whole edit history).
+    // edited_at is a timestamp — cast to ::text so it decodes into String.
     // Join through `messages` so the history must belong to the channel that was
     // just authorized. Filtering on message_id alone meant any id could be
     // substituted — the VIEW check then guarded a channel the row need not be in.
-    let edits: Vec<(String, String)> = sqlx::query_as(
+    // A query that FAILS is a 503 to retry, never the 200 [] of "no edits".
+    let edits: Vec<(String, String)> = match sqlx::query_as(
         "SELECT e.old_content, (replace(e.edited_at::text, ' ', 'T') || 'Z') AS edited_at FROM message_edits e \
          JOIN messages m ON m.id = e.message_id \
          WHERE e.message_id = $1 AND m.channel_id = $2 ORDER BY e.edited_at DESC, e.id DESC"
@@ -915,7 +939,13 @@ pub async fn get_message_edits(
     .bind(channel_id as i32)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_message_edits: history query failed: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load the edit history right now, try again shortly");
+        }
+    };
 
     let response: Vec<EditHistoryResponse> = edits
         .into_iter()

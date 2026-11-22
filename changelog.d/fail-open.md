@@ -1,11 +1,16 @@
 ### Fixed
 
-- **A busy database no longer answers "not found" or waves a request
-  through.** When the server could not look something up for a moment, many
+- **A busy database no longer answers "not found" or waves a request through.**
+  When the server could not look something up for a moment, many
   routes answered as if the answer were "no": "Channel not found" for a
-  channel that is there, a clip prompt dropped as "no longer waiting", and a
+  channel that is there, a clip prompt dropped as "no longer waiting", a
   sign-in that refused your own encryption identity as "not the one this
-  server publishes for you". Others let the request past a check they could
+  server publishes for you", and an edit to a Púca Notes note thrown away as
+  "did not save" after "List not found". Some answered with an empty list
+  instead: a channel or DM shown with no messages (and marked read), a
+  search that stopped early, and a reminder feed with a channel's reminders
+  left out, which made Púca Notes cancel their alarms until the next
+  refresh. Others let the request past a check they could
   not make: an upload past your storage quota, a moderator's kick, ban,
   timeout or role change reaching the server owner, a blocked person's
   reaction to a DM, a message through slowmode. Each now answers "try again

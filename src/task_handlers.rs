@@ -497,23 +497,34 @@ async fn check_channel_access(
 
 /// Confirm the caller owns the given personal list. `Ok(true)` = it is in
 /// the trash (readable, not writable — see check_list_writable).
+///
+/// A lookup that FAILS is a 503 to retry (src/try_again.rs), never the 404
+/// of a list that is not there: Púca Notes' outbox takes a 404 as a definite
+/// refusal and drops the queued edit ("did not save"), where it retries a 503.
 async fn check_list_owner(
     state: &AppState,
     list_id: i64,
     claims: &Claims,
-) -> Result<bool, (StatusCode, &'static str)> {
-    let owner: Option<(i64, bool)> = sqlx::query_as("SELECT owner_id, trashed_at IS NOT NULL FROM task_lists WHERE id = $1")
-        .bind(list_id)
-        .fetch_optional(&state.pool)
-        .await
-        .unwrap_or(None);
+) -> Result<bool, Refusal> {
+    let owner: Option<(i64, bool)> =
+        match sqlx::query_as("SELECT owner_id, trashed_at IS NOT NULL FROM task_lists WHERE id = $1")
+            .bind(list_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("check_list_owner: list lookup failed for {list_id}: {e:?}");
+                return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+            }
+        };
 
     match owner {
-        None => Err((StatusCode::NOT_FOUND, "List not found")),
+        None => Err(Refusal::Is(StatusCode::NOT_FOUND, "List not found")),
         Some((owner_id, trashed)) if owner_id == claims.sub => Ok(trashed),
         // Same answer as a missing list: a 403 here told any account which
         // sequential list ids belong to someone (see check_channel_access).
-        Some(_) => Err((StatusCode::NOT_FOUND, "List not found")),
+        Some(_) => Err(Refusal::Is(StatusCode::NOT_FOUND, "List not found")),
     }
 }
 
@@ -524,11 +535,33 @@ async fn check_list_writable(
     state: &AppState,
     list_id: i64,
     claims: &Claims,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<(), Refusal> {
     if check_list_owner(state, list_id, claims).await? {
-        return Err((StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE));
+        return Err(Refusal::Is(StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE));
     }
     Ok(())
+}
+
+/// A task's scope (channel_id, list_id), read again by the reorder routes
+/// after check_task_access. A lookup that fails is a 503 to retry, not the
+/// 404 of a task that is not there.
+async fn task_scope(
+    state: &AppState,
+    task_id: i64,
+    route: &str,
+) -> Result<(Option<i64>, Option<i64>), axum::response::Response> {
+    match sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(Some(scope)) => Ok(scope),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Task not found").into_response()),
+        Err(e) => {
+            tracing::error!("{route}: scope lookup failed for {task_id}: {e:?}");
+            Err(crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK))
+        }
+    }
 }
 
 /// Everything a task-scoped handler needs to authorize an operation.
@@ -1258,15 +1291,9 @@ pub async fn move_task(
     // per-checklist advisory lock and do the read+swap as ONE serialized unit.
     // Previously the position reads ran OUTSIDE the swap transaction, so two
     // concurrent moves could read stale positions and corrupt sibling ordering.
-    let scope: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    let (channel_id, list_id) = match scope {
-        Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, "Task not found").into_response(),
+    let (channel_id, list_id) = match task_scope(&state, task_id, "move_task").await {
+        Ok(s) => s,
+        Err(resp) => return resp,
     };
 
     let mut tx = match state.pool.begin().await {
@@ -1297,13 +1324,21 @@ pub async fn move_task(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
     }
 
-    // Read the moving task's current row inside the lock.
+    // Read the moving task's current row inside the lock. A read that FAILS
+    // is a 503 to retry, not "Task not found" (src/try_again.rs).
     let me: Option<(Option<i64>, bool, i64)> =
-        sqlx::query_as("SELECT parent_id, is_completed, position FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT parent_id, is_completed, position FROM channel_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("move_task: row lookup failed for {task_id}: {e:?}");
+                let _ = tx.rollback().await;
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
 
     let (parent_id, is_completed, position) = match me {
         Some(m) => m,
@@ -1327,7 +1362,9 @@ pub async fn move_task(
          ORDER BY position ASC, id ASC LIMIT 1"
     };
 
-    let neighbor: Option<(i64, i64)> = sqlx::query_as(neighbor_sql)
+    // A neighbour lookup that FAILS is not "already at the edge": that 200
+    // said the move was done when nothing moved.
+    let neighbor: Option<(i64, i64)> = match sqlx::query_as(neighbor_sql)
         .bind(channel_id)
         .bind(list_id)
         .bind(parent_id)
@@ -1336,7 +1373,14 @@ pub async fn move_task(
         .bind(task_id)
         .fetch_optional(&mut *tx)
         .await
-        .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("move_task: neighbour lookup failed for {task_id}: {e:?}");
+            let _ = tx.rollback().await;
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     let (neighbor_id, neighbor_pos) = match neighbor {
         Some(n) => n,
@@ -1406,15 +1450,9 @@ pub async fn reorder_task(
             .into_response();
     }
 
-    let scope: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    let (channel_id, list_id) = match scope {
-        Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, "Task not found").into_response(),
+    let (channel_id, list_id) = match task_scope(&state, task_id, "reorder_task").await {
+        Ok(s) => s,
+        Err(resp) => return resp,
     };
 
     let mut tx = match state.pool.begin().await {
@@ -1442,13 +1480,21 @@ pub async fn reorder_task(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
     }
 
-    // The moving task's group membership, read inside the lock.
+    // The moving task's group membership, read inside the lock. A read that
+    // FAILS is a 503 to retry, not "Task not found".
     let me: Option<(Option<i64>, bool)> =
-        sqlx::query_as("SELECT parent_id, is_completed FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT parent_id, is_completed FROM channel_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("reorder_task: row lookup failed for {task_id}: {e:?}");
+                let _ = tx.rollback().await;
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     let (parent_id, is_completed) = match me {
         Some(m) => m,
         None => {
@@ -2508,8 +2554,12 @@ pub async fn list_task_reminders(
     };
 
     // Resolve each distinct channel ONCE through the real permission math
-    // (membership + role bits + per-channel overwrites). Fail closed: a
-    // channel that can't be resolved yields no reminders.
+    // (membership + role bits + per-channel overwrites). A channel the caller
+    // may not see (gone, left, VIEW-denied) yields no reminders. A channel
+    // whose permissions could not be READ is a 503 for the whole feed, never
+    // a 200 that leaves its reminders out: Púca Notes' ReminderMerge drops
+    // every id a successful fetch no longer lists, alarms and marks with it,
+    // and the web loop prunes them the same way (src/try_again.rs).
     let mut channel_visible: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for (id, channel_id, list_id, due_at, created_by, schedule, snooze) in rows {
@@ -2517,7 +2567,11 @@ pub async fn list_task_reminders(
             let visible = match channel_visible.get(&cid) {
                 Some(v) => *v,
                 None => {
-                    let v = check_channel_access(&state, cid, &claims).await.is_ok();
+                    let v = match check_channel_access(&state, cid, &claims).await {
+                        Ok(_) => true,
+                        Err(Refusal::Is(..)) => false,
+                        Err(retry @ Refusal::TryAgain(_)) => return retry.into_response(),
+                    };
                     channel_visible.insert(cid, v);
                     v
                 }

@@ -1151,3 +1151,310 @@ async fn deleting_an_account_fails_closed() {
     check!(checks, owner_alive, "the owner's account is still there");
     checks.done();
 }
+
+// ---- personal lists (Púca Notes) ---------------------------------------------------
+
+/// A personal list of `owner`'s with one item per description, at positions
+/// 1, 2, ... in that order.
+async fn personal_list(pool: &sqlx::PgPool, owner: i64, items: &[&str]) -> (i64, Vec<i64>) {
+    let (list,): (i64,) = sqlx::query_as("INSERT INTO task_lists (owner_id, title) VALUES ($1, 'f503 note') RETURNING id")
+        .bind(owner)
+        .fetch_one(pool)
+        .await
+        .expect("list");
+    let mut ids = Vec::new();
+    for (i, description) in items.iter().enumerate() {
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO channel_tasks (list_id, description, created_by, position) VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(list)
+        .bind(*description)
+        .bind(owner)
+        .bind(i as i64 + 1)
+        .fetch_one(pool)
+        .await
+        .expect("item");
+        ids.push(id);
+    }
+    (list, ids)
+}
+
+/// Every write to a personal list goes through check_list_owner, which folded
+/// a failed lookup of the list into the 404 "List not found". Púca Notes'
+/// outbox takes a 404 as a definite refusal and DROPS the queued edit (the
+/// "did not save" toast), where it retries a 503.
+#[tokio::test]
+async fn personal_list_routes_answer_a_failed_list_lookup_with_a_503_not_a_404() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let owner = user(&pool, "note").await;
+    let (list, items) = personal_list(&pool, owner, &["first", "second"]).await;
+    let (spare, _) = personal_list(&pool, owner, &[]).await;
+    let (first, second) = (items[0], items[1]);
+
+    fn body<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+        serde_json::from_value(v).expect("request body")
+    }
+    let routes = |p: &sqlx::PgPool| {
+        let p = p.clone();
+        async move {
+            let c = || Extension(claims(owner));
+            let s = || State(app(&p));
+            vec![
+                ("GET /task-lists/:id/tasks", crate::task_handlers::list_list_tasks(s(), Path(list), c()).await.into_response()),
+                ("PATCH /tasks/:id", crate::task_handlers::update_task(s(), Path(first), c(), Json(body(json!({ "is_completed": true })))).await.into_response()),
+                ("POST /task-lists/:id/tasks", crate::task_handlers::create_list_task(s(), Path(list), c(), Json(body(json!({ "description": "third" })))).await.into_response()),
+                ("PATCH /task-lists/:id", crate::task_handlers::rename_task_list(s(), Path(list), c(), Json(body(json!({ "title": "renamed" })))).await.into_response()),
+                ("POST /tasks/:id/move", crate::task_handlers::move_task(s(), Path(second), c(), Json(body(json!({ "direction": "up" })))).await.into_response()),
+                ("POST /tasks/:id/reorder", crate::task_handlers::reorder_task(s(), Path(second), c(), Json(body(json!({ "after_id": null })))).await.into_response()),
+                ("DELETE /tasks/:id", crate::task_handlers::delete_task(s(), Path(first), c()).await.into_response()),
+                ("DELETE /task-lists/:id", crate::task_handlers::delete_task_list(s(), Path(spare), c()).await.into_response()),
+            ]
+        }
+    };
+    let (faulty, schema) = faulty_pool(&pool, &url, &["task_lists"]).await;
+    let faulted = routes(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let untouched: (i64, i64, String, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM channel_tasks WHERE list_id = $1 AND NOT is_completed), \
+                (SELECT COUNT(*) FROM task_lists WHERE id = $2), \
+                (SELECT title FROM task_lists WHERE id = $1), \
+                (SELECT position FROM channel_tasks WHERE id = $3)",
+    )
+    .bind(list)
+    .bind(spare)
+    .bind(second)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let healthy = routes(&pool).await;
+    let _ = sqlx::query("DELETE FROM task_lists WHERE id = ANY($1)").bind(vec![list, spare]).execute(&pool).await;
+    drop_users(&pool, &[owner]).await;
+
+    check_eq!(checks, untouched, (2, 1, "f503 note".to_string(), 2), "nothing was changed, made or deleted through the fault");
+    for ((name, faulted), (_, healthy)) in faulted.iter().zip(&healthy) {
+        check!(checks, healthy.status().is_success(), "control, {name}: the owner's ordinary answer on a healthy pool, got {}", healthy.status());
+        checks.retry(faulted, &format!("{name}: the list lookup failed"));
+    }
+    checks.done();
+}
+
+/// move_task and reorder_task read the task again after check_task_access:
+/// its scope, then its row inside the lock, then (move) the neighbour it
+/// swaps with. The first two folded a failure into the 404 "Task not found",
+/// and the neighbour's into "already at the edge", a 200 for a move that did
+/// not happen.
+#[tokio::test]
+async fn a_move_whose_later_read_fails_is_a_503_and_moves_nothing() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let owner = user(&pool, "mv").await;
+    let (list, items) = personal_list(&pool, owner, &["first", "second"]).await;
+    let second = items[1];
+    let mv = |p: &sqlx::PgPool| {
+        let s = app(p);
+        async move {
+            let req = serde_json::from_value(json!({ "direction": "up" })).unwrap();
+            crate::task_handlers::move_task(State(s), Path(second), Extension(claims(owner)), Json(req)).await.into_response()
+        }
+    };
+    let reorder = |p: &sqlx::PgPool| {
+        let s = app(p);
+        async move {
+            let req = serde_json::from_value(json!({ "after_id": null })).unwrap();
+            crate::task_handlers::reorder_task(State(s), Path(second), Extension(claims(owner)), Json(req)).await.into_response()
+        }
+    };
+    // Reads of channel_tasks, in order: check_task_access, the scope, the
+    // row inside the lock, the neighbour. `ok` lets the first `ok` answer.
+    let mut faulted = Vec::new();
+    for (ok, what) in [(1, "the scope"), (2, "the task's row"), (3, "the neighbour")] {
+        let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "channel_tasks", ok).await;
+        faulted.push((format!("POST /tasks/:id/move: {what} could not be read"), mv(&faulty).await));
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    for (ok, what) in [(1, "the scope"), (2, "the task's row")] {
+        let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "channel_tasks", ok).await;
+        faulted.push((format!("POST /tasks/:id/reorder: {what} could not be read"), reorder(&faulty).await));
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let order = |p: sqlx::PgPool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT id FROM channel_tasks WHERE list_id = $1 ORDER BY position, id")
+            .bind(list)
+            .fetch_all(&p)
+            .await
+            .unwrap()
+    };
+    let before = order(pool.clone()).await;
+    let moved = mv(&pool).await.status();
+    let after = order(pool.clone()).await;
+    let _ = sqlx::query("DELETE FROM task_lists WHERE id = $1").bind(list).execute(&pool).await;
+    drop_users(&pool, &[owner]).await;
+
+    check_eq!(checks, before, items.clone(), "nothing moved through the fault");
+    check_eq!(checks, moved, StatusCode::OK, "control: on a healthy pool the item moves up");
+    check_eq!(checks, after, vec![items[1], items[0]], "control: and it did move (it had a neighbour to swap with)");
+    for (name, resp) in &faulted {
+        checks.retry(resp, name);
+    }
+    checks.done();
+}
+
+// ---- channel history ---------------------------------------------------------------
+
+/// GET /channels/:id/messages folded a failed history query into `200 []`:
+/// the client clears the channel, marks it read, stops scrolling back and
+/// search takes the partial history as all of it. Edit and delete folded the
+/// message lookup into "Message not found", and the edit history into "no
+/// edits".
+#[tokio::test]
+async fn channel_history_answers_a_failed_query_with_a_503_not_an_empty_page() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let msg = channel_message(&pool, w.text, w.member).await;
+    let (m, text) = (w.member, w.text);
+    let history = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let q = serde_json::from_value(json!({})).unwrap();
+        async move { crate::message_handlers::get_messages(State(s), Path(text), Query(q), Extension(claims(m))).await.into_response() }
+    };
+    let edits = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let id = msg.clone();
+        async move { crate::message_handlers::get_message_edits(State(s), Path((text, id)), Extension(claims(m))).await.into_response() }
+    };
+    let edit = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let id = msg.clone();
+        let req = serde_json::from_value(json!({ "content": "hello again" })).unwrap();
+        async move { crate::message_handlers::edit_message(State(s), Path((text, id)), Extension(claims(m)), Json(req)).await.into_response() }
+    };
+    let delete = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let id = msg.clone();
+        async move { crate::message_handlers::delete_message(State(s), Path((text, id)), Extension(claims(m))).await.into_response() }
+    };
+
+    // The same history in a DM between the member and a friend.
+    let friend = user(&pool, "dmf").await;
+    let conv = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO dm_conversations (id, user1_id, user2_id) VALUES ($1, $2, $3)")
+        .bind(&conv)
+        .bind(m.min(friend))
+        .bind(m.max(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let dm = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO dm_messages (id, conversation_id, sender_id, content) VALUES ($1, $2, $3, 'hi')")
+        .bind(&dm)
+        .bind(&conv)
+        .bind(friend)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let dm_history = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let q = serde_json::from_value(json!({})).unwrap();
+        let conv = conv.clone();
+        async move { crate::dm_handlers::get_messages(State(s), Path(conv), Query(q), Extension(claims(m))).await.into_response() }
+    };
+
+    let (faulty, schema) = faulty_pool(&pool, &url, &["messages"]).await;
+    let history_faulted = history(&faulty).await;
+    let edit_faulted = edit(&faulty).await;
+    let delete_faulted = delete(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_pool(&pool, &url, &["message_edits"]).await;
+    let edits_faulted = edits(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_pool(&pool, &url, &["dm_conversations"]).await;
+    let dm_participant_faulted = dm_history(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_pool(&pool, &url, &["dm_messages"]).await;
+    let dm_history_faulted = dm_history(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let kept: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE id = $1").bind(&msg).fetch_optional(&pool).await.unwrap();
+
+    let history_healthy = history(&pool).await;
+    let history_status = history_healthy.status();
+    let page: Vec<serde_json::Value> = serde_json::from_str(&body_text(history_healthy).await).unwrap_or_default();
+    let dm_healthy = dm_history(&pool).await;
+    let dm_status = dm_healthy.status();
+    let dm_page: Vec<serde_json::Value> = serde_json::from_str(&body_text(dm_healthy).await).unwrap_or_default();
+    let edits_healthy = edits(&pool).await.status();
+    let edit_healthy = edit(&pool).await.status();
+    let delete_healthy = delete(&pool).await.status();
+    let _ = sqlx::query("DELETE FROM dm_conversations WHERE id = $1").bind(&conv).execute(&pool).await;
+    drop_world(&pool, &w, &[friend]).await;
+
+    check_eq!(checks, kept, Some("hello".to_string()), "the message was neither edited nor deleted through the fault");
+    check_eq!(checks, history_status, StatusCode::OK, "control: the member reads the channel's history");
+    check!(checks, page.iter().any(|row| row["id"] == json!(msg)), "control: and it holds the message, got {page:?}");
+    check_eq!(checks, dm_status, StatusCode::OK, "control: the member reads the DM's history");
+    check!(checks, dm_page.iter().any(|row| row["id"] == json!(dm)), "control: and it holds the DM, got {dm_page:?}");
+    checks.retry(&dm_participant_faulted, "GET /dms/:id/messages: the participant lookup failed");
+    checks.retry(&dm_history_faulted, "GET /dms/:id/messages: the history query failed");
+    check_eq!(checks, edits_healthy, StatusCode::OK, "control: the member reads the message's edit history");
+    check_eq!(checks, edit_healthy, StatusCode::OK, "control: the author edits the message");
+    check!(checks, delete_healthy.is_success(), "control: the author deletes the message, got {delete_healthy}");
+    checks.retry(&history_faulted, "GET /channels/:id/messages: the history query failed");
+    checks.retry(&edits_faulted, "GET /channels/:id/messages/:mid/edits: the history query failed");
+    checks.retry(&edit_faulted, "PATCH /channels/:id/messages/:mid: the message lookup failed");
+    checks.retry(&delete_faulted, "DELETE /channels/:id/messages/:mid: the message lookup failed");
+    checks.done();
+}
+
+// ---- the reminder feed ---------------------------------------------------------------
+
+/// GET /task-reminders resolves each channel its rows name and leaves out the
+/// rows of a channel the caller may not see. A channel whose permissions
+/// could not be READ was left out the same way, in a 200: Púca Notes'
+/// ReminderMerge then drops every id the feed no longer lists, alarms and
+/// marks with it. Now the whole feed is a 503; a channel the caller really
+/// cannot see (here, one in a server they are not in) is still left out.
+#[tokio::test]
+async fn the_reminder_feed_is_a_503_when_a_channel_cannot_be_checked() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let elsewhere = world(&pool).await;
+    let due = |channel: i64| {
+        let pool = pool.clone();
+        let creator = w.member;
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "INSERT INTO channel_tasks (channel_id, description, created_by, position, due_at) \
+                 VALUES ($1, 'f503 reminder', $2, 1, NOW() + INTERVAL '1 day') RETURNING id",
+            )
+            .bind(channel)
+            .bind(creator)
+            .fetch_one(&pool)
+            .await
+            .expect("due task")
+        }
+    };
+    let seen = due(w.text).await;
+    let not_a_member = due(elsewhere.text).await;
+    let feed = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let m = w.member;
+        async move { crate::task_handlers::list_task_reminders(State(s), Extension(claims(m))).await.into_response() }
+    };
+    let (faulty, schema) = faulty_pool(&pool, &url, &["channel_permission_overwrites"]).await;
+    let faulted = feed(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let healthy = feed(&pool).await;
+    let healthy_status = healthy.status();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body_text(healthy).await).unwrap_or_default();
+    let ids: Vec<i64> = rows.iter().filter_map(|r| r["id"].as_i64()).collect();
+    drop_world(&pool, &elsewhere, &[]).await;
+    drop_world(&pool, &w, &[]).await;
+
+    check_eq!(checks, healthy_status, StatusCode::OK, "control: the feed answers on a healthy pool");
+    check!(checks, ids.contains(&seen), "control: it lists the reminder in the member's channel, got {ids:?}");
+    check!(checks, !ids.contains(&not_a_member), "control: and leaves out the one in a server they are not in, got {ids:?}");
+    checks.retry(&faulted, "GET /task-reminders: a channel's permissions could not be read");
+    checks.done();
+}
