@@ -594,6 +594,34 @@ describe('closing the keyboard sticks on its line', () => {
         expect(panel(), "the first close's line raises").toBeTruthy();
     });
 
+    it("the raise onto another line ENDS the close: straight back on the first close's line raises again, until a new close", async () => {
+        // The sink drops the record when it lets a raise through (review of
+        // 0.9.867: nothing pinned it; the test above closes again before it
+        // goes back, and that new close replaces the old one either way).
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session());
+        await raiseByTap();
+        await act(async () => { kbButton().click(); });
+        await flush();
+        vi.setSystemTime(Date.now() + 2_000);
+        await pressAt(0.5, 0.8 + 9 / 1080);
+        await caret('ds-1', WIN32(0.5, 0.8));
+        expect(panel(), 'another line: raised (the premise)').toBeTruthy();
+        // Back on the line of the first close, with no close since: the
+        // keyboard is asked for again, not held back by the close it ended.
+        h.showMobileKeyboard.mockClear();
+        await pressAt(0.3, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.3, 0.5));
+        expect(h.showMobileKeyboard, "the first close's line, right after: not held").toHaveBeenCalled();
+        // Only a NEW close holds it again, on its own line.
+        await act(async () => { kbButton().click(); });
+        await flush();
+        expect(panel(), 'precondition: closed again').toBeNull();
+        await pressAt(0.6, 0.5 + 9 / 1080);
+        await caret('ds-1', WIN32(0.6, 0.5));
+        expect(panel(), 'the new close holds on its line').toBeNull();
+    });
+
     it("Android's Back under the open bar is a close too; the keyboard coming up again ends it", async () => {
         h.inset = { visible: true, top: 500, source: 'native' };
         await mountWith(session());
@@ -741,6 +769,29 @@ describe('after a close, a tap straight into another text box opens it', () => {
     const CHROMIUM = (x: number, y: number) => ({
         vis: true, x, y, w: 1 / 2560, h: 24 / 1440, src: 'msaa', mon: 0, surf: 1, seq: 1, rev: 2,
     });
+    it("another program's text box on the SAME row: a browser's address bar closed, a Win32 program's text box after its taskbar button", async () => {
+        // Review of 0.9.867: two maximised windows put their address bars on
+        // the same screen row, and the line test is only a row. Chromium's
+        // caret is MSAA's, a classic program's text box a Win32 one: another
+        // tier is another program's text box, and the close is over.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountWith(session({ monitors: WIDE }));
+        await closeOver(CHROMIUM(0.5, 0.05), { ...HIDDEN, rev: 2 });
+        later(2_000);
+        // CONTROL: further along the browser's address bar, the close holds.
+        await pressAt(0.6, 0.05 + 12 / 1440);
+        await caret('ds-1', CHROMIUM(0.6, 0.05));
+        expect(panel(), 'the address bar again').toBeNull();
+        await pressAt(0.4, 0.98);                    // its taskbar button; the caret is held 1.2 s
+        later(600);
+        await caret('ds-1', { ...CHROMIUM(0.3, 0.05), src: 'win32', w: 1 / 2560 });  // it comes forward, its text box on that row
+        expect(panel(), 'CONTROL: a window coming forward is no tap into its text').toBeNull();
+        later(2_000);
+        await pressAt(0.2, 0.05 + 12 / 1440);
+        await caret('ds-1', { ...CHROMIUM(0.2, 0.05), src: 'win32', w: 1 / 2560 });
+        expect(panel(), "a tap into its text box, on the row the browser's was closed on").toBeTruthy();
+    });
+
     it("a current host's Chromium: the address bar closed, a link, then a text box on the page within 1.2 s", async () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         await mountWith(session({ monitors: WIDE }));

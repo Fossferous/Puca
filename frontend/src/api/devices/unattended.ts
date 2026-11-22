@@ -371,8 +371,10 @@ export function confirmUaSeed(deviceId: string, now: number = Date.now()): void 
  * offline. Here the grouping can do no such thing: at worst a wrong grouping
  * keeps a seed this device holds for ITS OWN host alive a little longer (one
  * it proved there, or one it offered there and heard no refusal of: a
- * power-off whose answer was lost, session.ts teardown), which the expiry
- * never was a security bound against, and which that host still checks.
+ * power-off session whose answer was lost, or whose answer deadline ran out
+ * with no end arriving at all and called the PC too old; session.ts
+ * teardown, powerOffUnanswered), which the expiry never was a security bound
+ * against, and which that host still checks.
  *
  * Never creates an entry, never touches a seed or a salt, and never brings a
  * lapsed one back (it is dead: `rememberedUaSeed` drops it on the next read).

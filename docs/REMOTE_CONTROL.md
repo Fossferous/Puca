@@ -441,7 +441,16 @@ the focused element's box as `field`). The rules, and what each one is for:
   page after its address bar would never bring the keyboard back until it
   was opened by hand. Another line of
   the same text arrives the same way and raises too, as before 2026-11-20;
-  a text box beside the closed one on its line is held. The close also ends
+  a text box beside the closed one on its line is held, unless another tier
+  measures its caret (`src`: win32, msaa, uia, the close's caret against the
+  new one): that is another program's text box, and the line is only a
+  screen row, which maximised windows share (a browser's address bar closed,
+  then a classic Win32 program's text box on that row after its taskbar
+  button). One program's text box is measured by one tier while it has the
+  focus (tier 1 owns a window it has answered for, and the sampler keeps a
+  held caret's tier). Two windows of programs measured the same way (two
+  maximised Chromium windows' address bars) still look like one text box
+  here: the caret frame names no window. The close also ends
   when the keyboard comes up (the button, "Tap to type"), when a measured
   caret appears where there was none (the focus left the text and a text
   box took it), and with the caret tracking (a monitor switch); a report

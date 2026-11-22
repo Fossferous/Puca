@@ -109,11 +109,17 @@ export interface DeviceAudioHubPanelProps {
     /** The PC's APP row — the Púca desktop app, which is what talks to Audio
      *  Hub. Never the sign-in-screen row. */
     hostDevice: string;
+    /** The PC's name, as its card shows it. Also what the session's
+     *  passphrase dialog calls it. */
     machineName: string;
+    /** Every device row of that PC (machines.ts `Machine.rows`), handed to
+     *  the session as Control hands it: a session proved here keeps the lock
+     *  screen row's remembered passphrase alive too. */
+    machineRows?: readonly string[];
     onClose: () => void;
 }
 
-export function DeviceAudioHubPanel({ hostDevice, machineName, onClose }: DeviceAudioHubPanelProps) {
+export function DeviceAudioHubPanel({ hostDevice, machineName, machineRows, onClose }: DeviceAudioHubPanelProps) {
     const [view, setView] = useState<View>({ k: 'connecting' });
     const [busy, setBusy] = useState<AudioHubOp | null>(null);
     const [notice, setNotice] = useState<Notice | null>(null);
@@ -122,6 +128,12 @@ export function DeviceAudioHubPanel({ hostDevice, machineName, onClose }: Device
     /** The session requests go out on — ours or one already open. */
     const sessionId = useRef<string | null>(null);
     const mounted = useRef(true);
+    /** The PC's name and rows, read when the session is opened. A ref, not a
+     *  dependency of `connect`: the card hands a fresh rows array on every
+     *  render, and `connect` changing would end this panel's session and
+     *  open another each time. */
+    const aboutRef = useRef({ name: machineName, rows: machineRows });
+    useEffect(() => { aboutRef.current = { name: machineName, rows: machineRows }; }, [machineName, machineRows]);
     const rereadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** A status read is outstanding — keeps a session update from sending a
@@ -202,7 +214,15 @@ export function DeviceAudioHubPanel({ hostDevice, machineName, onClose }: Device
         if (mounted.current) setView({ k: 'connecting' });
         try {
             pendingRead.current = true;
-            const id = await connectToDevice(hostDevice, { audioHub: true });
+            // Named and grouped as Control's connect is (DevicesView
+            // startControl): an armed PC asks for its passphrase by name, and
+            // a proof here renews the PC's other row's remembered one.
+            const { name, rows } = aboutRef.current;
+            const id = await connectToDevice(hostDevice, {
+                audioHub: true,
+                peerName: name,
+                ...(rows ? { machineRows: rows } : {}),
+            });
             ownSession.current = id;
             sessionId.current = id;
             // The status read goes out from the session subscription below,

@@ -1087,12 +1087,21 @@ function updateTrayIndicator(): void {
     })();
 }
 
-function emit(): void {
-    // An explicit projection, not a spread: Internal carries session keys and
-    // pending offers, and handing those to every subscriber would put secrets in
-    // React state. The cost is that a new PUBLIC field must be added here too —
-    // which the typechecker enforces, and did.
-    const snapshot: DeviceControlSession[] = [...sessions.values()].map(s => ({
+/**
+ * What leaves this module about the sessions: an explicit projection, not a
+ * spread and not the objects themselves. Internal carries the session keys
+ * (`key`, `inputKey`), this side's ephemeral private key (`eph`), the peer
+ * connection and pending offers, and handing those out would put secrets in
+ * React state. The cost is that a new PUBLIC field must be added here too —
+ * which the typechecker enforces, and did.
+ *
+ * EVERY way out goes through here: emit()'s snapshots, the FIRST call a new
+ * subscriber gets (which handed over the Internal objects themselves until
+ * 2026-11-22, so a screen that subscribed held the keys in its state from its
+ * first render), and activeSessions() (the same).
+ */
+function publicSessions(): DeviceControlSession[] {
+    return [...sessions.values()].map(s => ({
         id: s.id, role: s.role, peerDevice: s.peerDevice, phase: s.phase,
         stream: s.stream, captureSize: s.captureSize, error: s.error,
         monitors: s.monitors, activeMonitor: s.activeMonitor,
@@ -1125,6 +1134,10 @@ function emit(): void {
         windowNotice: s.windowNotice,
         windowFront: s.windowFront,
     }));
+}
+
+function emit(): void {
+    const snapshot = publicSessions();
     listeners.forEach(l => l(snapshot));
     updateTrayIndicator();
     // Android: a session that is active OR STILL CONNECTING (either role)
@@ -1142,12 +1155,12 @@ function emit(): void {
 
 export function subscribeSessions(l: Listener): () => void {
     listeners.add(l);
-    l([...sessions.values()]);
+    l(publicSessions());
     return () => { listeners.delete(l); };
 }
 
 export function activeSessions(): DeviceControlSession[] {
-    return [...sessions.values()];
+    return publicSessions();
 }
 
 function newId(): string {
@@ -2148,9 +2161,9 @@ function teardown(
     // conservative direction (a session that died before the host's first
     // post-proof frame re-prompts next time) is one typed passphrase.
     //
-    // EXCEPT A POWER-OFF WITH NO ANSWER EITHER WAY (powerOffUnanswered: the
-    // proof sent, then neither the shutdown nor a refusal, whether the session
-    // ended or the answer deadline ran out on a link that read open).
+    // EXCEPT A POWER-OFF SESSION WITH NO ANSWER EITHER WAY (powerOffUnanswered:
+    // the proof sent, then neither the shutdown nor a refusal, whether the
+    // session ended or the answer deadline ran out on a link that read open).
     // There is no "first post-proof frame" to wait for there. Both hosts carry
     // a held power-off out on the proof and refuse a bad one with its reason
     // (the agent's "unattended access was refused" or its lockout, the app's
@@ -3458,9 +3471,19 @@ function heldUnproved(s: Internal, endReason: string): boolean {
  *    before teardown reads this.) Review of work/poweroff-locked, round 3.
  * Both hosts refuse a bad proof OUT LOUD (heldUnproved knows each way), and
  * that is 'failed' with the refusal, which still forgets.
+ *
+ * ONLY A POWER-OFF SESSION. A power-off that RODE a Control or Files session
+ * (requestForcePowerOff) went out on a session the host had already answered,
+ * which it does only past the proof, so its seed was confirmed then; the
+ * outcome stays on the session after the ride settles, and whatever proof
+ * that session sends later is judged by the ordinary rule (a still-'used'
+ * seed at teardown is forgotten), not kept because the ride was once called
+ * too old. Today's hosts ask for the proof once per session, before they
+ * answer, so this is the rule written down rather than a path they take
+ * (review of 0.9.867).
  */
 function powerOffUnanswered(s: Internal): boolean {
-    if (s.uaProofSent !== true) return false;
+    if (!s.powerOffOnly || s.uaProofSent !== true) return false;
     const p = s.powerOff;
     return p?.state === 'unknown' || (p?.state === 'failed' && p.reason === POWER_OFF_TOO_OLD_REASON);
 }

@@ -1072,7 +1072,12 @@ comes back, not its screen, and when the session moves by itself because
 someone signed in at that computer or it locked, it stays put away too.
 While you are back in Púca, another computer you are still connected to
 never comes up over it by itself either: if the session you put away ends,
-or that other computer locks, it is its bar you see.
+or that other computer locks, it is its bar you see. A session you paused
+(**Pause control**) stays paused in the same way: when it comes back onto the
+stage after another computer's session ends, or moves by itself because
+someone signed in at that computer or it locked, it is still paused, and its
+keys stay off the notification, until you press **Resume**. A computer you
+connect to afterwards starts with control on, as before.
 
 **When the keyboard opens by itself.** With **Open the keyboard when a text
 box is tapped** on, the keyboard comes up when a tap puts the computer's text
@@ -1087,8 +1092,12 @@ on (a text box beside it on that line counts as that line). It comes up by
 itself again when a tap puts the cursor on another line: in another text box
 (the next field of a form, another app, a text box on a web page after its
 address bar) or on another line of the same text, which Púca on the computer
-cannot tell apart. It also comes up again once the cursor has left the text
-and a text box takes it, and when you open it. The keyboard going down
+cannot tell apart. It comes up too for a text box on that same line in an app
+whose cursor Púca on the computer finds another way: a classic Windows
+program's text box after a web browser's address bar, say, both at the top
+of the screen (two web browser windows look like one app to it). It also
+comes up again once the cursor has left the text and a text box takes it,
+and when you open it. The keyboard going down
 because you switched to another app, locked the phone or turned it is not
 closing it: back in Púca, the next tap into the text brings it up.
 (In Chrome, Edge and other Chromium-based apps on a computer whose

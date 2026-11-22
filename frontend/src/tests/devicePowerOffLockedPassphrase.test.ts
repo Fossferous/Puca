@@ -591,3 +591,107 @@ describe('Power off of a locked PC whose answer never reached the phone', { time
         expect(promptsFor(SIGNIN)).toBe(2);
     });
 });
+
+/**
+ * A Control session to a stand-in host, opened the way the card's Control
+ * opens one (connectToDevice with the PC's name and rows). The host checks
+ * each proof against `record()` (read at the check, so a test can change
+ * what it accepts), and answers the offer once one is good: the answer is
+ * what lets the card's Power off ride the session.
+ */
+async function openControlSession(host: StandIn, machineRows: string[], record: () => UaRecord = () => host.record) {
+    const { connectToDevice } = await import('../api/devices/session');
+    const before = sent.length;
+    const id = await connectToDevice(host.id, { peerName: 'Desk-PC', machineRows });
+    const connect = sent.slice(before).find(m => m.type === 'DeviceConnect')!;
+    const hostEph = generateControlEphemeral();
+    const key = deriveDeviceControlKey(new Uint8Array(32).fill(3), hostEph.priv, connect.payload!.eph as string)!;
+    handlers.get('DeviceConnectAnswered')!({ payload: { session_id: id, accepted: true, eph: hostEph.pubEncoded } });
+    let n = 0;
+    const signal = async (obj: Record<string, unknown>) => {
+        const sealed = await sealControl(key, JSON.stringify({ sid: id, n: n++, ...obj }));
+        handlers.get('DeviceSignalled')!({ payload: { session_id: id, payload: sealed } });
+    };
+    /** Every frame this session's controller sealed, opened as the host would. */
+    const frames = async (): Promise<Record<string, unknown>[]> => {
+        const out: Record<string, unknown>[] = [];
+        for (const m of sent) {
+            if (m.type !== 'DeviceSignal' || m.payload?.session_id !== id) continue;
+            const plain = await openControl(key, m.payload!.payload as string);
+            if (plain) out.push(JSON.parse(plain) as Record<string, unknown>);
+        }
+        return out;
+    };
+    const proofs = async () => (await frames()).filter(f => f.kind === 'ua-response');
+    const ended = () => sent.slice(before).some(m => m.type === 'DeviceEnd' && m.payload?.session_id === id);
+    /** Ask for the proof and check it: true accepted (and the offer
+     *  answered), false refused out loud (the session ended with the
+     *  refusal), null: no proof came. */
+    const challenge = async (): Promise<boolean | null> => {
+        const had = (await proofs()).length;
+        const nonce = crypto.getRandomValues(new Uint8Array(32));
+        await signal({ kind: 'ua-challenge', nonce: b64(nonce), salt: b64(Uint8Array.from(record().salt)) });
+        await spinUntil('a proof, or the session given up', async () => ended() || (await proofs()).length > had);
+        const proof = (await proofs())[had];
+        if (!proof) return null;
+        const ok = ed25519.verify(unb64(proof.sig as string), challengeMessage(id, nonce), Uint8Array.from(record().verifying_key));
+        verdicts.push({ host: host.id, ok });
+        if (ok) await signal({ kind: 'answer', sdp: 'v=0\r\n' });
+        else handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: 'unattended access was refused' } });
+        return ok;
+    };
+    return { id, challenge, frames };
+}
+
+/**
+ * A Power off that RODE a Control session (the card reuses one that is open:
+ * powerOff.ts, requestForcePowerOff) keeps its outcome on that session after
+ * it settles. Called too old by the answer deadline, that outcome used to
+ * read as "a power-off whose answer never came" at the session's teardown,
+ * however much later, and kept a seed the host had refused out loud in the
+ * meantime (review of 0.9.867). The keep is meant for a POWER-OFF session,
+ * which has no answer of its own to confirm the seed; a ridden one was
+ * answered, past the proof, before it could carry the request. Today's hosts
+ * ask for the proof once per session, before they answer, so the refused
+ * proof here comes from a stand-in that asks again: the rule, not a path a
+ * shipped host takes.
+ */
+describe('a Power off that rode a Control session', { timeout: 60_000 }, () => {
+    it('HARDENING: called too old, it keeps no seed the host later refuses on that session', async () => {
+        const { powerOffDevice } = await import('../api/devices/powerOff');
+        const { powerOffSessionFor, POWER_OFF_ANSWER_TIMEOUT_MS } = await import('../api/devices/session');
+        // The person's Control session: the passphrase typed, proved, answered.
+        let accepts: UaRecord = app.record;
+        const c = await openControlSession(app, PC_ROWS, () => accepts);
+        expect(await c.challenge(), 'premise: the typed passphrase was proved').toBe(true);
+        await spinUntil('the card may ride it', () => powerOffSessionFor(APP) === c.id);
+        expect(promptsFor(APP)).toBe(1);
+        // The card's Power off rides it, and this host never answers the
+        // request: the deadline calls it too old, and the session goes on.
+        const now = Date.now();
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+        vi.setSystemTime(now);
+        try {
+            const run = powerOffDevice({ hostDevice: APP, name: 'Desk-PC', machineRows: PC_ROWS });
+            await spinUntil('the power-off request on that session', async () => (await c.frames()).some(f => f.kind === 'power'));
+            await vi.advanceTimersByTimeAsync(POWER_OFF_ANSWER_TIMEOUT_MS + 100);
+            const out = await run;
+            expect(out.kind, 'premise: called too old').toBe('refused');
+            expect(out.text).toMatch(/too old/);
+        } finally {
+            const t = Date.now();
+            vi.useFakeTimers({ toFake: ['Date'] });
+            vi.setSystemTime(t);
+        }
+        expect(powerOffSessionFor(APP), 'premise: the Control session goes on').toBe(c.id);
+        // The host asks again and refuses what this phone remembered, out loud.
+        accepts = { ...app.record, verifying_key: Array.from(ed25519.getPublicKey(crypto.getRandomValues(new Uint8Array(32)))) };
+        expect(await c.challenge(), 'premise: refused').toBe(false);
+        expect(promptsFor(APP), 'premise: the remembered seed was offered, not asked for').toBe(1);
+        // That refusal was heard: the next Control asks for the passphrase.
+        accepts = app.record;
+        const again = await openControlSession(app, PC_ROWS, () => accepts);
+        expect(await again.challenge()).toBe(true);
+        expect(promptsFor(APP), 'the refused seed was forgotten').toBe(2);
+    });
+});

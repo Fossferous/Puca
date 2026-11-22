@@ -33,7 +33,8 @@
  *    before review) turns "a caret the tap moved to ANOTHER line goes
  *    through" red; letting it hold nothing, or let a current host's caret go
  *    after 5 s, turns "along the line it was closed on" red; dropping its
- *    surface check turns "a report from another surface" red.
+ *    surface check turns "a report from another surface" red, and its tier
+ *    check "a caret ANOTHER TIER measures" red.
  *  - letting it hold an OLDER host's Chromium caret for good (as it did on
  *    2026-11-20 before review) turns "an older host's Chromium caret" red;
  *    keying that rule on the close's caret instead of the one the tap moved
@@ -321,7 +322,7 @@ describe('closing the keyboard sticks on its line', () => {
         // Chromium caret (rev 2), whose hide would have arrived.
         expect(held({ report: { ...CARET, x: 0.7, y: 0.3 + 20 / 1080 } })).toBe(true);
         const shown = { ...CARET, src: 'msaa', rev: CARET_REV_HIDDEN_MSAA };
-        expect(held({ before: shown, report: { ...shown, x: 0.6 } })).toBe(true);
+        expect(held({ close: { ...close, caret: shown }, before: shown, report: { ...shown, x: 0.6 } })).toBe(true);
         // POSITIVE CONTROL: with no close standing, the same raise goes.
         expect(held({ close: null })).toBe(false);
     });
@@ -342,6 +343,32 @@ describe('closing the keyboard sticks on its line', () => {
         // Back's close the same.
         expect(held({ report: MOVED_WIN32, close: { ...close, by: 'ime' } })).toBe(false);
         expect(held({ close: { ...close, by: 'ime' } })).toBe(true);
+    });
+
+    it("a caret ANOTHER TIER measures, on the line it was closed on, goes through: another program's text box", () => {
+        // Review of 0.9.867: the line is only a screen row, and maximised
+        // windows put their text boxes on the same rows. Closed over a
+        // browser's address bar (Chromium's MSAA caret), then a classic
+        // program's text box on that row (a Win32 caret) tapped after its
+        // taskbar button: held for good, though it is another program's.
+        const BAR: CaretState = { ...CARET, src: 'msaa', rev: CARET_REV_HIDDEN_MSAA };
+        const closedOverBar: ManualClose = { at: T0, caret: BAR, by: 'button' };
+        const EXPLORER: CaretState = { ...CARET, x: 0.2, src: 'win32' };
+        expect(held({ close: closedOverBar, before: BAR, report: EXPLORER })).toBe(false);
+        // ...and each way between every pair of tiers.
+        for (const [a, b] of [['win32', 'msaa'], ['win32', 'uia'], ['msaa', 'uia'], ['uia', 'win32']] as const) {
+            expect(held({ close: { ...close, caret: { ...CARET, src: a } }, before: { ...CARET, src: b }, report: { ...ALONG, src: b } }),
+                `${a} at the close, ${b} tapped along its line`).toBe(false);
+        }
+        // CONTROL: the same tier on that line is still held (the text box it
+        // was closed over, or one beside it in the same program), from every
+        // tier; Back's close the same.
+        for (const src of ['win32', 'msaa', 'uia'] as const) {
+            const at = { ...CARET, src, rev: CARET_REV_HIDDEN_MSAA };
+            expect(held({ close: { ...close, caret: at }, before: at, report: { ...at, x: 0.5 } }), src).toBe(true);
+        }
+        expect(held({ close: { ...closedOverBar, by: 'ime' }, before: BAR, report: EXPLORER })).toBe(false);
+        expect(held({ close: { ...closedOverBar, by: 'ime' }, before: BAR, report: { ...BAR, x: 0.5 } })).toBe(true);
     });
 
     it("a report from another surface than the close's caret is not compared with its line", () => {
@@ -474,13 +501,17 @@ describe("an older host's Chromium caret: its hide may never arrive", () => {
 
     it('it is the caret the tap MOVED that decides, not the one at the close', () => {
         // Closed over Notepad (a Win32 caret, which does go away); the focus
-        // then went to Chrome's address bar on that line, then to the page,
-        // then to the address bar again. The hide that went unheard is
-        // Chrome's.
-        expect(held({ close: { at: T0, caret: CARET, by: 'button' } })).toBe(false);
+        // then went to the older host's Chrome on that line, whose hide went
+        // unheard, and a tap moved the caret from Chrome's to Notepad's again.
+        // Keyed on the close's caret (Win32: no 5 s rule) that was held for
+        // good.
+        expect(held({ close: { at: T0, caret: CARET, by: 'button' }, before: OLD_BAR, report: { ...CARET, x: 0.5 } })).toBe(false);
         // ...and the other way round: closed over the older host's Chromium
-        // caret, then a Win32 caret moved along that line sticks.
-        expect(held({ before: CARET, report: { ...CARET, x: 0.5 } })).toBe(true);
+        // caret, then a tap moved a Win32 caret (one whose hide is always
+        // heard) to that line's Chromium text: no 5 s rule, it sticks.
+        // (Another tier at the close and after the tap is another program's
+        // text box, held on no line: "closing the keyboard sticks on its line".)
+        expect(held({ before: CARET, report: OLD_BAR_AGAIN })).toBe(true);
     });
 
     it('a broken close time fails open', () => {
