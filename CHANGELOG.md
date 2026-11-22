@@ -4,6 +4,55 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.870 — 2026-11-23
+
+Decrypted copies the app makes leave the disk once let go, pictures and videos lose their hidden metadata in every format, and remote-control fixes
+### Fixed
+
+- **A remote-control session you paused stays paused.** With **Pause control**
+  on for one computer, connecting to a second one and then leaving it (or it
+  going offline) brought the first back with control on, and on Android with
+  its pinned keys back on the notification, also when it came back put away
+  behind the chat. It now comes back paused until you press **Resume**, and so
+  does the session that carries it on when someone signs in at that computer
+  or it locks. A computer you connect to afterwards still starts with control
+  on. Comes with the update (no new install, no server update).
+- **A closed keyboard comes back in another program's text box.** On a phone
+  controlling a computer, closing the keyboard over a web browser's address
+  bar kept it closed for a classic Windows program's text box at the same
+  height after switching to it, so every tap there needed the Keyboard
+  button. It now comes up by itself there. Comes with the update (no new
+  install, no server update).
+- **Audio Hub names the computer when it asks for the passphrase.** Opening
+  Audio Hub on a computer set up for unattended access asked for its
+  passphrase calling it "This device" instead of its name, and using it did
+  not keep the computer's sign-in screen passphrase remembered the way Control
+  does. Comes with the update (no new install, no server update).
+
+### Security
+
+- **Kept internal details out of the app's own session list.** Comes with the
+  update (no new install, no server update).
+- **Videos, GIFs, TIFFs, HEIC and AVIF photos and SVG drawings lose their hidden details before they are sent.**
+  Until now only JPEG, PNG and WebP photos had their location, camera and time taken off. Now a
+  phone video's recording place, camera and date (MP4, MOV, WebM, MKV), a dashcam's GPS track,
+  a GIF's comments and XMP, a TIFF's camera and GPS tags, a HEIC or AVIF photo's EXIF and XMP
+  (and a Samsung photo's own trailer), and an SVG's editor notes, file path and anything in it
+  that would run or reach out when it is opened go too. The picture or the video itself is not
+  re-encoded: it is the same, frame for frame, and a drawing keeps its labels, embedded fonts and
+  icons (a Mermaid, draw.io or Excalidraw diagram looks the same wherever it is opened). The copy
+  of the diagram draw.io and Excalidraw put inside a drawing goes with the rest, because draw.io's
+  names the website, browser and system it was drawn on and when: the drawing arrives as a
+  picture, and to edit it someone needs the original `.drawio` or `.excalidraw` file. A GIF
+  with stray bytes after its last frame is sent as the browsers show it, and a large TIFF or GIF
+  sent directly to someone is not loaded into memory whole. A file that claims to be one of
+  these but cannot be read is not sent, and its chip says why. Comes with the update.
+- **Pictures waiting to be sent no longer stay on your disk after you stop looking at them.**
+  A Púca Notes picture still waiting for a connection, a picture pasted into the message box,
+  and a clip you save with Download could stay on the device's storage, unencrypted, for some
+  time after nothing showed them. Now they go within seconds of being closed, sent or saved,
+  and the desktop app saves a clip without that extra copy at all. Comes with the update.
+
 ## 0.9.869 — 2026-11-22
 
 The way back to a computer you put away no longer covers the message box, and names the computer
