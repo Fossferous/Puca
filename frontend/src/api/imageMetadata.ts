@@ -40,15 +40,27 @@
  * and it goes through, as does a PNG missing only some of its last chunk's
  * CRC. Padding between a JPEG's segments is skipped as every decoder skips it
  * (it is never copied, so nothing in it can reach the output). A WebP's chunk
- * sizes must add up; one cut short is refused. Anything that is not one of the three formats — GIF, SVG, AVIF,
- * a PDF, a video — is returned untouched; the caller does not need to know the
- * type first, the bytes decide.
+ * sizes must add up; one cut short is refused. Anything that is not one of the
+ * three formats is returned untouched here; api/fileMetadata.ts is the door
+ * every file passes, and hands the other formats (GIF, TIFF, SVG, HEIC, AVIF,
+ * video) to their own strippers. The bytes decide, not the declared type.
  */
 
-/** A file that claims to be a JPEG, PNG or WebP and cannot be taken apart. */
+/**
+ * A file that claims to be a format whose metadata is removed before it is
+ * sent (a JPEG, PNG or WebP here; a GIF, TIFF, SVG, HEIF/AVIF, MP4/MOV or
+ * WebM/MKV in api/fileMetadata.ts) and cannot be taken apart. The message is
+ * shown on the file's chip, so it says what to do.
+ */
 export class ImageMetadataError extends Error {
-    constructor(format: string, why: string) {
-        super(`This ${format} photo looks damaged (${why}), so its location and camera details could not be safely removed and it was not sent. Re-save or re-export it as a new image and try again.`);
+    constructor(format: string, why: string, what: 'photo' | 'picture' | 'video' | 'drawing' = 'photo') {
+        super(what === 'photo'
+            ? `This ${format} photo looks damaged (${why}), so its location and camera details could not be safely removed and it was not sent. Re-save or re-export it as a new image and try again.`
+            : what === 'video'
+                ? `This ${format} video looks damaged (${why}), so its location and recording details could not be safely removed and it was not sent. Re-save or re-export it and try again.`
+                : what === 'drawing'
+                    ? `This ${format} drawing could not be read (${why}), so the details and scripts it may hold could not be safely removed and it was not sent. Export it again as a new file and try again.`
+                    : `This ${format} picture looks damaged (${why}), so the details stored in it could not be safely removed and it was not sent. Re-save or re-export it as a new image and try again.`);
         this.name = 'ImageMetadataError';
     }
 }
@@ -78,35 +90,7 @@ export function stripImageMetadata(bytes: Uint8Array): Uint8Array {
     }
 }
 
-/** The same for a File; the name and type are kept. Another type is returned as it came. */
-export async function stripFileMetadata(file: File): Promise<File> {
-    // Only what is, or may be, a picture is read: a 25 MB video is not pulled into memory for this.
-    if (file.type && !/^image\/(jpeg|jpg|pjpeg|png|webp|x-png)$/i.test(file.type)) return file;
-    if (!file.type) {
-        // No declared type (a .mkv, a .heic from Windows, a 4 GB archive sent peer to peer): its
-        // first bytes say whether it is one of the three, before anything large is read.
-        let head: Uint8Array;
-        try { head = await readBytes(file.slice(0, 12)); } catch { return file; }
-        if (!sniffStrippable(head)) return file;
-    }
-    const bytes = await readBytes(file);
-    const out = stripImageMetadata(bytes);
-    if (out === bytes) return file;
-    return new File([out as BlobPart], file.name, { type: file.type, lastModified: file.lastModified });
-}
-
 // ---------------------------------------------------------------- helpers
-
-/** A blob's bytes; FileReader where the engine's Blob has no arrayBuffer() (jsdom). */
-function readBytes(b: Blob): Promise<Uint8Array> {
-    if (typeof b.arrayBuffer === 'function') return b.arrayBuffer().then(x => new Uint8Array(x));
-    return new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(new Uint8Array(r.result as ArrayBuffer));
-        r.onerror = () => rej(r.error);
-        r.readAsArrayBuffer(b);
-    });
-}
 
 function ascii(b: Uint8Array, at: number, n: number): string {
     let s = '';

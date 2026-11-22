@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ImageMetadataError, orientationOfTiff, sniffStrippable, stripFileMetadata, stripImageMetadata } from '../api/imageMetadata';
+import { ImageMetadataError, orientationOfTiff, sniffStrippable, stripImageMetadata } from '../api/imageMetadata';
+import { stripFileMetadata } from '../api/fileMetadata';
 import {
     FRAME_BYTES, IDAT_BYTES, SCAN, VP8_BYTES, cat, contains, enc, exifTiff, indexOfBytes, jpeg, jpegSegments, jseg, leaked,
     pchunk, png, pngChunks, riff, riffChunkList, wchunk, webp, SECRET_COMMENT, SECRET_IPTC, SECRET_XMP,
@@ -346,13 +347,15 @@ describe('stripFileMetadata', () => {
         expect(out.size).toBeLessThan(file.size);
     });
 
-    it('hands back the same File for a type that is not a picture, and reads a typeless one', async () => {
+    it('hands back the same File for a type that cannot hold any of these, and reads a typeless one', async () => {
         const video = new File(['x'], 'a.mp4', { type: 'video/mp4' });
-        expect(await stripFileMetadata(video)).toBe(video);
+        expect(await stripFileMetadata(video), 'too short to be an MP4: as it came').toBe(video);
+        const text = new File([Uint8Array.from(jpeg({ comment: true }))], 'notes.txt', { type: 'text/plain' });
+        expect(await stripFileMetadata(text), 'declared text: never opened').toBe(text);
+        const sealed = new File([Uint8Array.from(jpeg({ comment: true }))], 'attachment.enc', { type: 'application/octet-stream' });
+        expect(await stripFileMetadata(sealed), "an attachment's ciphertext: never opened").toBe(sealed);
         const typeless = new File([Uint8Array.from(jpeg({ comment: true }))], 'photo');
         expect(leaked(new Uint8Array(await (await stripFileMetadata(typeless)).arrayBuffer()))).toEqual([]);
-        const gif = new File(['GIF89a....'], 'a.gif', { type: 'image/gif' });
-        expect(await stripFileMetadata(gif)).toBe(gif);
     });
 });
 
@@ -423,7 +426,7 @@ describe('malformed input never crashes the send', () => {
 });
 
 describe('a big file with no declared type is not read whole to find out what it is', () => {
-    it('looks at the first 12 bytes only, unless they say JPEG / PNG / WebP', async () => {
+    it('looks at its first 4 KB only, unless they say it is a picture', async () => {
         const big = new File([new Uint8Array(4096)], 'archive.bin');
         let whole = 0;
         const real = big.arrayBuffer.bind(big);
