@@ -10,7 +10,8 @@
  *
  * Now the composer keeps a list of these records; the markdown is built ONLY
  * at send time by buildOutgoingContent. Everything here is pure so it can be
- * table-tested; object-URL lifecycle (create/revoke) belongs to the caller.
+ * table-tested; the thumbnails' lifecycle belongs to the caller
+ * (api/composerPreviews.ts).
  */
 
 export interface PendingAttachment {
@@ -23,7 +24,8 @@ export interface PendingAttachment {
     href?: string;
     /** Object URL for an IMAGE thumbnail, or null for every other type (a
      *  video blob in the chip's <img> paints an empty square — non-images get
-     *  the file icon instead). Created and revoked by the caller. */
+     *  the file icon instead), and null until it is ready. Made and let go of
+     *  by the caller (api/composerPreviews.ts). */
     previewUrl: string | null;
     spoiler: boolean;
     /** Why it failed, for the chip's tooltip. */
@@ -62,6 +64,11 @@ export function replaceFile(
     return list.map(a => (a.localId === localId
         ? { ...a, name: file.name || a.name, mime: file.type || 'application/octet-stream', previewUrl }
         : a));
+}
+
+/** The chip's thumbnail URL is ready (api/composerPreviews.ts). */
+export function setPreviewUrl(list: PendingAttachment[], localId: string, previewUrl: string | null): PendingAttachment[] {
+    return list.map(a => (a.localId === localId ? { ...a, previewUrl } : a));
 }
 
 /** Back to 'uploading' (a retry); clears the old error. */

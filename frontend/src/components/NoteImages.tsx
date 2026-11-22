@@ -32,17 +32,18 @@
  * tools), and on phones a second picker opens the camera directly
  * (`capture`), the first the photo library.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
 import { acquireAttachmentUrl, audioMimeFor, isPlaylistBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItemNoun, galleryItems } from '../api/noteMedia';
 import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
-import { parkedObjectUrl } from '../api/parkedPreview';
+import { acquireParkedUrl } from '../api/parkedPreview';
 import { saveAttachment } from '../api/saveAttachment';
 import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CheckCircleIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import { followOutputDeviceRef } from './settingsStore';
 import { useHeldAttachmentUrl } from './useHeldAttachmentUrl';
+import { useHeldParkedUrl } from './useHeldParkedUrl';
 import { AttachmentImg } from './AttachmentImg';
 import { isHeifType, jpegName } from '../api/heif';
 import './NoteImages.css';
@@ -75,7 +76,9 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
                         release = hold.release;
                         url = hold.url;
                     } else {
-                        url = await parkedObjectUrl(refItem.href);
+                        const hold = await acquireParkedUrl(refItem.href);
+                        if (hold) release = hold.release;
+                        url = hold?.url ?? null;
                     }
                     if (!url) throw new Error('nothing to save');
                     const res = await saveAttachment(url, refItem.name, folder);
@@ -98,25 +101,17 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
 }
 
 function Picture({ refItem, onOpen, zoomed, folder }: { refItem: TaskAttachmentRef; onOpen: (url: string, type: string | null) => void; zoomed: boolean; folder?: string }) {
-    const [parkedUrl, setParkedUrl] = useState<string | null>(null);
-    const [parkedFailed, setParkedFailed] = useState(false);
     const href = refItem.href;
     const parked = isParkedRef(refItem);
     const p = parseEncAttachment(href);
     // Kept while it is open in the lightbox, whatever else happens.
     const held = useHeldAttachmentUrl(p ? { id: p.id, key: p.key, mime: p.mime, cap: p.cap } : null, { keep: zoomed });
-    useEffect(() => {
-        // A parked ref has no server file: its plaintext comes from this
-        // device's own sealed copy, and null there means the bytes are gone.
-        if (parseEncAttachment(href) || !parseParkedRef(href)) return;
-        let cancelled = false;
-        parkedObjectUrl(href)
-            .then(u => { if (u === null) throw new Error('those bytes are no longer on this device'); if (!cancelled) setParkedUrl(u); })
-            .catch(() => { if (!cancelled) setParkedFailed(true); });
-        return () => { cancelled = true; };
-    }, [href]);
-    const url = p ? held.url : parkedUrl;
-    const failed = p ? held.failed : parkedFailed;
+    // A parked ref has no server file: its plaintext comes from this device's
+    // own sealed copy, held the same way, and `failed` there means the bytes
+    // are gone.
+    const parkedHeld = useHeldParkedUrl(!p && parseParkedRef(href) ? href : null, { keep: zoomed });
+    const url = p ? held.url : parkedHeld.url;
+    const failed = p ? held.failed : parkedHeld.failed;
     if ((!parseEncAttachment(href) && !parked) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }

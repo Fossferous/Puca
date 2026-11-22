@@ -7,13 +7,13 @@
  * sealed copy instead of the server (api/parkedPreview.ts), so a photo note
  * taken on a plane looks like a photo note.
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { parseEncAttachment } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type GalleryItem } from '../../api/noteMedia';
 import { parseParkedRef } from '../../api/parkedMedia';
-import { parkedObjectUrl } from '../../api/parkedPreview';
 import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
+import { useHeldParkedUrl } from '../../components/useHeldParkedUrl';
 import { AttachmentImg } from '../../components/AttachmentImg';
 import { NoteFormattedText } from '../../components/NoteFormattedText';
 import { findRanges, snippetAround } from '../model/noteSearch';
@@ -21,24 +21,17 @@ import { Highlight } from './Highlight';
 import '../noteContent.css';
 
 function HeroImage({ item, visible }: { item: GalleryItem; visible: boolean }) {
-    const [parkedUrl, setParkedUrl] = useState<string | null>(null);
     const href = item.ref.href;
     const p = parseEncAttachment(href);
     // Decrypted once the card is on screen, then shown for as long as the
     // card is mounted (and the app on screen: useHeldAttachmentUrl); a
-    // failure shows in the editor's gallery.
+    // failure shows in the editor's gallery. A parked picture (not uploaded
+    // yet) is held the same way, from this device's own sealed copy.
     const [reached, setReached] = useState(visible);
     if (visible && !reached) setReached(true);
     const held = useHeldAttachmentUrl(p ? { id: p.id, key: p.key, mime: p.mime, cap: p.cap } : null, { enabled: reached });
-    useEffect(() => {
-        if (!visible || parkedUrl || parseEncAttachment(href) || !parseParkedRef(href)) return;
-        let cancelled = false;
-        parkedObjectUrl(href)
-            .then(u => { if (!cancelled && u) setParkedUrl(u); })
-            .catch(() => { /* the gallery in the editor shows the failure */ });
-        return () => { cancelled = true; };
-    }, [visible, href, parkedUrl]);
-    const url = p ? held.url : parkedUrl;
+    const parkedHeld = useHeldParkedUrl(!p && parseParkedRef(href) ? href : null, { enabled: reached });
+    const url = p ? held.url : parkedHeld.url;
     if (!url) return <span className="notes-hero-pending" />;
     // One this device cannot show (a HEIC outside WebKit with no decoder in
     // the app) leaves the hero: the editor's gallery offers it as a file.

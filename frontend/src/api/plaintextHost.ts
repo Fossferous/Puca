@@ -109,6 +109,18 @@ export function __setCollectionNudge(f: (() => void) | null): void {
     lastNudge = -Infinity;
 }
 
+/**
+ * The page has just dropped a plaintext Blob of its own (a file pasted into
+ * the message box that was sent or removed, a clip handed to the browser's
+ * download): have its garbage collected soon, so the engine deletes any file
+ * it paged that Blob to within seconds rather than at the page's next
+ * collection, minutes later on an idle page. The same nudge a release here
+ * makes; cheap, and coalesced with any other within a few seconds.
+ */
+export function letGoOfPlaintext(): void {
+    scheduleCollection();
+}
+
 /** Plaintext was let go: nudge the collector once things settle. */
 function scheduleCollection(): void {
     if (nudgeTimer !== null) clearTimeout(nudgeTimer);
@@ -243,6 +255,17 @@ function pageLease(blob: Blob): PlainLease {
 export async function hostPlaintext(buf: ArrayBuffer, type: string): Promise<PlainLease> {
     const blob = new Blob([buf], { type });
     freeNow(buf);
+    return hostBlob(blob);
+}
+
+/**
+ * A blob: URL for a Blob the page already has (a file pasted or dropped into
+ * the message box, a clip being saved), registered by a plaintext host worker
+ * like hostPlaintext's. The caller should keep no reference of its own that
+ * outlives what it needs the Blob for (an upload that reads it is fine): the
+ * lease is what keeps it alive, and `release` lets it go at once.
+ */
+export function hostPlaintextBlob(blob: Blob): Promise<PlainLease> {
     return hostBlob(blob);
 }
 

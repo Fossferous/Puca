@@ -319,16 +319,15 @@ export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { chan
 }
 
 /**
- * Open ciphertext this device sealed and never uploaded, as an object URL.
- * Same `safeBlobType` rule as a fetched attachment: a parked PDF is an
- * opaque binary blob, never an in-origin document.
+ * Open ciphertext this device sealed and never uploaded (nonce || ciphertext)
+ * to its plaintext, as bytes: api/parkedPreview.ts hosts them like any
+ * decrypted attachment (api/plaintextHost.ts), typed by `safeBlobType` (a
+ * parked PDF is opaque bytes, never an in-origin document), and lets them go
+ * when nothing shows them. Never a page Blob: one of those stays on disk
+ * (blob_storage) until the page next collects garbage.
  */
-export async function decryptParkedBlobUrl(bytes: Uint8Array, keyB64url: string, mime: string): Promise<string> {
-    const nonce = bytes.slice(0, 12);
-    const ct = bytes.slice(12);
-    const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
-    return URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
+export async function openParkedBytes(bytes: Uint8Array, keyB64url: string): Promise<ArrayBuffer> {
+    return openSealed(bytes, keyB64url);
 }
 
 /**

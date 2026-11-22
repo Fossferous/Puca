@@ -114,9 +114,11 @@ import {
     pendingAttachment,
     removeAttachment,
     replaceFile,
+    setPreviewUrl,
     toggleSpoiler as toggleChipSpoiler,
     type PendingAttachment,
 } from '../api/composerAttachments';
+import { createComposerPreviews, type ComposerPreviews } from '../api/composerPreviews';
 import { ComposerAttachments } from './ComposerAttachments';
 import { ApiError, isNetworkError } from '../api/client';
 import { decodeJwtPayload } from '../api/auth';
@@ -1052,6 +1054,14 @@ export function Chat({ onLogout }: ChatProps) {
     useUnsentWork('chat-composer', input.trim().length > 0 || pendingAttachments.length > 0);
     /** The original File per chip, kept for retry. A ref: files aren't render data. */
     const pendingFilesRef = useRef(new Map<string, File>());
+    /** The chips' thumbnails, hosted off the page and let go of with the chip,
+     *  so a pasted picture does not stay on disk after it is sent
+     *  (api/composerPreviews.ts). Made once, on first use. */
+    const previewsRef = useRef<ComposerPreviews | null>(null);
+    const chipPreviews = useCallback((): ComposerPreviews => {
+        previewsRef.current ??= createComposerPreviews((localId, url) => setPendingAttachments(prev => setPreviewUrl(prev, localId, url)));
+        return previewsRef.current;
+    }, []);
     /** Chips abandoned WHILE their upload was still in flight (X mid-spinner,
      *  conversation switch, unmount). The upload cannot be cancelled — when it
      *  lands, its .then consults this set and discards the ciphertext instead
@@ -1131,26 +1141,24 @@ export function Chat({ onLogout }: ChatProps) {
             }
             if (sent !== file) {
                 pendingFilesRef.current.set(localId, sent);
-                const preview = sent.type.startsWith('image/') && !isHeifType(sent.type) ? URL.createObjectURL(sent) : null;
-                setPendingAttachments((prev) => {
-                    const old = prev.find(a => a.localId === localId)?.previewUrl;
-                    if (old) URL.revokeObjectURL(old);
-                    return replaceFile(prev, localId, sent, preview);
-                });
+                setPendingAttachments(prev => replaceFile(prev, localId, sent, null));
+                if (sent.type.startsWith('image/') && !isHeifType(sent.type)) chipPreviews().show(localId, sent);
+                else chipPreviews().drop(localId);
             }
             settleUpload(localId, sent);
         }, (err: unknown) => {
             if (abandonedUploadsRef.current.delete(localId) || !pendingFilesRef.current.has(localId)) return;
             setPendingAttachments(prev => markFailed(prev, localId, err instanceof Error ? err.message : `Couldn't send "${file.name}".`));
         });
-    }, [settleUpload]);
+    }, [settleUpload, chipPreviews]);
 
     const enqueueUpload = useCallback((file: File, opts?: { spoiler?: boolean }) => {
-        const chip = pendingAttachment(file, !mayBeHeif(file) && file.type.startsWith('image/') ? URL.createObjectURL(file) : null, opts?.spoiler ?? false);
+        const chip = pendingAttachment(file, null, opts?.spoiler ?? false);
         pendingFilesRef.current.set(chip.localId, file);
         setPendingAttachments(prev => [...prev, chip]);
+        if (!mayBeHeif(file) && file.type.startsWith('image/')) chipPreviews().show(chip.localId, file);
         prepareAndSettle(chip.localId, file);
-    }, [prepareAndSettle]);
+    }, [prepareAndSettle, chipPreviews]);
 
     const retryUpload = useCallback((localId: string) => {
         const file = pendingFilesRef.current.get(localId);
@@ -1163,7 +1171,6 @@ export function Chat({ onLogout }: ChatProps) {
 
     const removePendingAttachment = useCallback((localId: string) => {
         const chip = pendingAttachmentsRef.current.find(a => a.localId === localId);
-        if (chip?.previewUrl) URL.revokeObjectURL(chip.previewUrl);
         // A ready chip's ciphertext already sits on the server against the
         // quota — removing the chip means it will never be referenced. One
         // still UPLOADING has no href yet; flag it so settleUpload discards
@@ -1172,8 +1179,9 @@ export function Chat({ onLogout }: ChatProps) {
         const fileId = chip?.href && !chip.mayBeSent ? parseEncAttachment(chip.href)?.id : null;
         if (fileId) discardUpload(fileId);
         pendingFilesRef.current.delete(localId);
+        chipPreviews().drop(localId);
         setPendingAttachments(prev => removeAttachment(prev, localId));
-    }, []);
+    }, [chipPreviews]);
 
     /** Drop every chip. `discardUploads` distinguishes "the message took
      *  them" (false — they are referenced now) from "abandoned" (true —
@@ -1181,7 +1189,6 @@ export function Chat({ onLogout }: ChatProps) {
      *  abandonedUploadsRef). */
     const clearComposerAttachments = useCallback((opts: { discardUploads: boolean }) => {
         for (const chip of pendingAttachmentsRef.current) {
-            if (chip.previewUrl) URL.revokeObjectURL(chip.previewUrl);
             if (opts.discardUploads) {
                 if (chip.status === 'uploading') abandonedUploadsRef.current.add(chip.localId);
                 if (chip.href && !chip.mayBeSent) {
@@ -1191,8 +1198,9 @@ export function Chat({ onLogout }: ChatProps) {
             }
         }
         pendingFilesRef.current.clear();
+        chipPreviews().dropAll();
         setPendingAttachments([]);
-    }, []);
+    }, [chipPreviews]);
 
     /** The send-time clear: the message took the READY chips; FAILED chips
      *  stay in the strip with their warning and Retry — clearing them too
@@ -1201,12 +1209,12 @@ export function Chat({ onLogout }: ChatProps) {
     const takeSentAttachments = useCallback(() => {
         for (const chip of pendingAttachmentsRef.current) {
             if (chip.status !== 'failed') {
-                if (chip.previewUrl) URL.revokeObjectURL(chip.previewUrl);
                 pendingFilesRef.current.delete(chip.localId);
+                chipPreviews().drop(chip.localId);
             }
         }
         setPendingAttachments(prev => prev.filter(a => a.status === 'failed'));
-    }, []);
+    }, [chipPreviews]);
 
     // Abandoned on unmount (logout/navigation): reclaim like any abandonment.
     useEffect(() => () => clearComposerAttachments({ discardUploads: true }), [clearComposerAttachments]);
