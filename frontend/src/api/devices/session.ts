@@ -1087,12 +1087,21 @@ function updateTrayIndicator(): void {
     })();
 }
 
-function emit(): void {
-    // An explicit projection, not a spread: Internal carries session keys and
-    // pending offers, and handing those to every subscriber would put secrets in
-    // React state. The cost is that a new PUBLIC field must be added here too —
-    // which the typechecker enforces, and did.
-    const snapshot: DeviceControlSession[] = [...sessions.values()].map(s => ({
+/**
+ * What leaves this module about the sessions: an explicit projection, not a
+ * spread and not the objects themselves. Internal carries the session keys
+ * (`key`, `inputKey`), this side's ephemeral private key (`eph`), the peer
+ * connection and pending offers, and handing those out would put secrets in
+ * React state. The cost is that a new PUBLIC field must be added here too —
+ * which the typechecker enforces, and did.
+ *
+ * EVERY way out goes through here: emit()'s snapshots, the FIRST call a new
+ * subscriber gets (which handed over the Internal objects themselves until
+ * 2026-11-22, so a screen that subscribed held the keys in its state from its
+ * first render), and activeSessions() (the same).
+ */
+function publicSessions(): DeviceControlSession[] {
+    return [...sessions.values()].map(s => ({
         id: s.id, role: s.role, peerDevice: s.peerDevice, phase: s.phase,
         stream: s.stream, captureSize: s.captureSize, error: s.error,
         monitors: s.monitors, activeMonitor: s.activeMonitor,
@@ -1125,6 +1134,10 @@ function emit(): void {
         windowNotice: s.windowNotice,
         windowFront: s.windowFront,
     }));
+}
+
+function emit(): void {
+    const snapshot = publicSessions();
     listeners.forEach(l => l(snapshot));
     updateTrayIndicator();
     // Android: a session that is active OR STILL CONNECTING (either role)
@@ -1142,12 +1155,12 @@ function emit(): void {
 
 export function subscribeSessions(l: Listener): () => void {
     listeners.add(l);
-    l([...sessions.values()]);
+    l(publicSessions());
     return () => { listeners.delete(l); };
 }
 
 export function activeSessions(): DeviceControlSession[] {
-    return [...sessions.values()];
+    return publicSessions();
 }
 
 function newId(): string {
