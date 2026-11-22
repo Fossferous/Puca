@@ -537,19 +537,30 @@
        z 10000, over the composer's Send on a desktop and over the message box
        itself on a phone with the keyboard up. Now a strip the layout makes
        room for. On a desktop: along the bottom of the window, with the app's
-       columns ending above it (the reservations below). In the persistent
-       bars' z band (docs/DESIGN_PHILOSOPHY.md): over nothing, and under every
-       dialog, which is the foreground while it is open. That z holds only
-       because the strip is DRAWN INSIDE `.chat-container` (chatRoot.ts): on
-       a phone that element is a stacking context holding every dialog Chat
-       opens, and from outside it z 250 was over all of them, the profile
-       sheet's foot and Create Channel's backdrop included
-       (e2e/return-pill-live.mjs, `dialogs`). */
+       columns ending above it (the reservations below).
+       Z 95, BELOW EVERY PANEL AND VIEW (docs/DESIGN_PHILOSOPHY.md): over
+       nothing, and under every dialog, which is the foreground while it is
+       open. Nothing has to be under it: every panel and view ends above it.
+       It was in the persistent bars' 250, which is over the panels (100 to
+       200) and the views beside the rail (100, 105 on a phone), and those are
+       fixed, so each a stacking context of its own: a dialog drawn INSIDE
+       one counts as the view's z, whatever its own. The Devices view's Share
+       (z 1200 inside a view at 100) had the strip, bright and pressable,
+       over its backdrop on a desktop and over the foot of its sheet on a
+       phone, and a press there brought the remote screen back over the
+       dialog; Notes' dialogs in the desktop app are drawn inside its view
+       the same way (portalTarget.ts). Above the panel overlay (90, the dim
+       layer over the chat while a side panel is open), as the bottom bar is.
+       The z holds only because the strip is DRAWN INSIDE `.chat-container`
+       (chatRoot.ts): on a phone that element is a stacking context holding
+       every dialog Chat opens, and from outside it any z above 0 was over
+       all of them, the profile sheet's foot and Create Channel's backdrop
+       included (e2e/return-pill-live.mjs, `dialogs`). */
     position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 250;
+    z-index: 95;
     display: flex;
     justify-content: center;
     padding: 4px 12px;

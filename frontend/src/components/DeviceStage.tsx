@@ -492,7 +492,15 @@ export function DeviceStage() {
     // rotation. Width says how much room there is; it says nothing about
     // whether the user is holding a finger or a mouse.
     const [isMobile, setIsMobile] = useState(() => detectCoarsePointer());
-    const [isMinimized, setIsMinimized] = useState(false);
+    /** The sessions put away to the app (Chat, Back to Púca), by id: put
+     *  away is a SESSION's, not the stage's. It was one boolean, cleared
+     *  whenever a different id took the stage, so a session put away earlier
+     *  that came back onto the stage when a newer one ended was put back on
+     *  screen over the chat, control armed, with nobody asking (the review of
+     *  2026-11-22). An id is taken out by its own way back; an ended one
+     *  stays, a handful of strings at most, because a follow can carry it on
+     *  up to two minutes later (`handoverFrom`, below). */
+    const [putAway, setPutAway] = useState<ReadonlySet<string>>(() => new Set());
     // Session recording was a menu item that toggled this flag and its own
     // label. There is no MediaRecorder anywhere in the app and nothing was
     // ever written to disk, so "Stop session recording" was offering to stop
@@ -678,6 +686,8 @@ export function DeviceStage() {
     const session = [...sessions].reverse().find(
         s => s.role === 'controller' && s.phase !== 'ended' && !s.filesOnly,
     ) ?? null;
+    /** The session on the stage was put away: only its way back is drawn. */
+    const isMinimized = session !== null && putAway.has(session.id);
 
     // Android's BACK closes the phone's open menu, the type-text box and the
     // pinned-keys editor first (they take it themselves); the stage itself is
@@ -751,13 +761,26 @@ export function DeviceStage() {
         // the mouse): left set when its session ended, it came back up, with
         // its Back layer, on the next session.
         setActiveMobileMenu(null);
-        // And the stage put away (Chat, Back to Púca): only the strip's own
-        // press undid it, so after a session ended while away, the next
-        // Connect showed only a "Return to" bar, and a second PC connected
-        // while the first was away came up as that bar too. A session that
-        // newly takes the stage is shown; the same one coming through again
-        // (a reconnect, its next snapshot) keeps the same id and stays away.
-        setIsMinimized(false);
+        // Put away is the session's own (`putAway`, by id), so nothing is
+        // reset here: a session that newly opens is not in it and is shown
+        // (a Connect after one ended while away, a second PC connected while
+        // the first is away), one put away earlier that comes back onto the
+        // stage when a newer one ends stays away, and the same one coming
+        // through again (a reconnect, its next snapshot) keeps its id.
+        // A session a FOLLOW opened (somebody signed in at the PC's sign-in
+        // screen, the PC locked: it carries on the one before by itself, under
+        // a new id) is where the person left that one: put away, it is put
+        // away too, rather than popping up over the chat.
+        const from = session.handoverFrom;
+        if (from !== null && putAway.has(from)) {
+            const id = session.id;
+            setPutAway(prev => {
+                const next = new Set(prev);
+                next.delete(from);
+                next.add(id);
+                return next;
+            });
+        }
     }
 
     const sessionActiveId = session?.id ?? null;
@@ -3243,6 +3266,7 @@ export function DeviceStage() {
      *  there now, a captured mouse is let go, and fullscreen ends (a
      *  fullscreen window showing the chat is no use). */
     const minimizeStage = useCallback(() => {
+        if (sessionActiveId === null) return;
         releaseAllRef.current();
         if (document.pointerLockElement) document.exitPointerLock();
         if (fullscreenRef.current) {
@@ -3250,8 +3274,18 @@ export function DeviceStage() {
             setFullscreen(false);
             void leaveStageFullscreen();
         }
-        setIsMinimized(true);
-    }, []);
+        setPutAway(prev => new Set(prev).add(sessionActiveId));
+    }, [sessionActiveId]);
+    /** The way back: this session out of `putAway`, the stage drawn again. */
+    const returnToStage = useCallback(() => {
+        if (sessionActiveId === null) return;
+        setPutAway(prev => {
+            if (!prev.has(sessionActiveId)) return prev;
+            const next = new Set(prev);
+            next.delete(sessionActiveId);
+            return next;
+        });
+    }, [sessionActiveId]);
     // A session that ends, or a stage that goes away, leaves fullscreen: the
     // app must not be left covering the screen with nothing to leave it by.
     useEffect(() => () => {
@@ -3803,7 +3837,7 @@ export function DeviceStage() {
     if (isMinimized) {
         // The way back, named for the computer, in a strip the layout makes
         // room for (DeviceStageReturn.tsx says where and why).
-        return <DeviceStageReturn peerName={session.peerName} onReturn={() => setIsMinimized(false)} />;
+        return <DeviceStageReturn peerName={session.peerName} onReturn={returnToStage} />;
     }
 
     return (

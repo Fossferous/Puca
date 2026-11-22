@@ -13,9 +13,9 @@
  * chat app is free of controls, so it no longer floats over one: it is a bar
  * that the layout makes room for, the way the voice bar is (DeviceStageMobile.css):
  *  - on a phone, a persistent bar above the bottom bar (and above the voice
- *    bar or the own-call banner when one is up), in the voice bar's z band,
- *    with every panel ending above its MEASURED height, so the composer sits
- *    over it and nothing sits under it. While the soft keyboard is up it
+ *    bar or the own-call banner when one is up), with every panel ending
+ *    above its MEASURED height, so the composer sits over it and nothing
+ *    sits under it. While the soft keyboard is up it
  *    steps aside with the bottom bar (api/keyboardUp.ts): the way back to a
  *    screen you are not looking at is no use mid-sentence, and sideways the
  *    keyboard leaves too little room to spare a row for it;
@@ -27,14 +27,23 @@
  * reservations, measured like the voice bar's (VoicePanel.tsx): 0 while it is
  * hidden, gone when the stage comes back.
  *
+ * UNDER EVERYTHING BUT THE PAGE: z 95, below every panel and view (they all
+ * end above it, so nothing needs to be under it), and so below whatever one
+ * of them draws over its place. Those are fixed, each a stacking context of
+ * its own, and a dialog drawn inside one counts as the view's z: at the
+ * persistent bars' 250 the strip was over the Devices view's Share dialog
+ * (its backdrop on a desktop, its sheet's foot on a phone), and a press meant
+ * for the dialog brought the remote screen back (the review of 2026-11-22,
+ * round 2; DeviceStageMobile.css has the rest).
+ *
  * DRAWN INSIDE CHAT'S ROOT (chatRoot.ts), though it is mounted beside Chat
  * (RcGlobals): on a phone `.chat-container` is a stacking context holding
- * every dialog Chat opens, and a strip outside it at z 250 was drawn over all
- * of them (the member profile sheet's foot, Edit Channel's, a band of
- * Settings, Create Channel's backdrop), so a tap meant for a dialog brought
- * the remote screen back. Inside it, the strip is under every dialog and
- * backdrop, as the persistent bars' row in docs/DESIGN_PHILOSOPHY.md's table
- * says. With no Chat on the page it is drawn where it is mounted.
+ * every dialog Chat opens, and a strip outside it at any z above 0 was drawn
+ * over all of them (the member profile sheet's foot, Edit Channel's, a band
+ * of Settings, Create Channel's backdrop), so a tap meant for a dialog
+ * brought the remote screen back. Inside it, the strip is under every dialog
+ * and backdrop, as its row in docs/DESIGN_PHILOSOPHY.md's table says. With no
+ * Chat on the page it is drawn where it is mounted.
  */
 import { useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';

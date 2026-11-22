@@ -58,6 +58,12 @@
 //             10 of the section's 36 checks fail, 64 of 64 points on the strip over each phone dialog, a
 //             tap on the profile sheet's foot or on Create Channel's backdrop bringing the stage back,
 //             Settings' Delete Account under it.
+//             And a dialog drawn INSIDE a view, the Devices view's Share, on the desktop and the phone:
+//             the same checks, and a real press where the strip is staying in the dialog. The view is
+//             fixed, so a stacking context of its own (z 100, 105 on a phone) whose dialogs count as its
+//             z. NEGATIVE CONTROL, the strip at z 250 (over every panel and view): 4 of the section's
+//             checks fail, 64 of 64 points on the strip over the dialog on both, and a press there
+//             bringing the stage back over it.
 //
 // It CANNOT see: a real phone's keyboard (the Android app's is played as mobile-ui-sweep-walk.mjs plays
 // it; an iPhone's, a shrunk visual viewport that keyboardUp.ts reads into the same attribute, is not
@@ -740,6 +746,62 @@ async function closeDialog(page, sel, closers) {
     if (await page.locator(sel).count()) { await page.keyboard.press('Escape').catch(() => {}); await sleep(400); }
     return !await page.locator(sel).count();
 }
+/**
+ * A dialog drawn INSIDE a view rather than at the chat's top level: the Devices view's Share
+ * (DeviceShareModal, opened from a device's Share button). The view is fixed, so a stacking context of
+ * its own (z 100 on a desktop, 105 on a phone), and the dialog's z 1200 counts as the view's: with the
+ * strip at z 250 it was the strip, bright and pressable, over the dialog's backdrop on a desktop and
+ * over the foot of its sheet on a phone (the review of 2026-11-22, round 2). The same checks as every
+ * other dialog's, and a real press where the strip is: the dialog's, the session still put away.
+ */
+async function deviceShareCheck(page, tag, phone) {
+    await until(() => page.locator('.devices-dashboard').count(), 6000);
+    const share = page.locator('.devices-dashboard button.device-btn', { hasText: /^Share$/ }).first();
+    const has = !!await until(() => share.count(), 12000);
+    check(`${tag}: a device in the Devices view offers Share (the premise)`, has);
+    if (!has) return;
+    await share.scrollIntoViewIfNeeded().catch(() => {});
+    if (phone) await tap(page, share); else await share.click();
+    const open = !!await until(() => page.locator('.share-modal').count(), 6000);
+    check(`${tag}: the Devices view's Share dialog opened`, open);
+    if (!open) return;
+    await sleep(500);
+    await dialogCheck(page, `${tag} Devices Share`, '.share-modal-backdrop');
+    await shot(page, `${tag.replace(/ /g, '-')}-devices-share`);
+    // Where the strip's middle is, the dialog's (its backdrop, or its sheet's own words): never one
+    // of its controls, a press there would do what the control does.
+    const at = await page.evaluate(() => {
+        const s = document.querySelector('.device-stage-minimized-strip');
+        const r = s?.getBoundingClientRect();
+        if (!s || !r || !r.width || !r.height) return null;
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const h = document.elementFromPoint(x, y);
+        const onStrip = !!h && s.contains(h);
+        const control = !onStrip && !!h && !!h.closest('button, input, select, textarea, a[href], label, [role="button"]');
+        return { x, y, strip: onStrip, control, hit: h ? `${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').split(' ')[0]}` : 'nothing' };
+    });
+    if (at && !at.control) {
+        if (phone) await page.touchscreen.tap(at.x, at.y); else await page.mouse.click(at.x, at.y);
+        await sleep(500);
+        const away = await stillAway(page);
+        const stillOpen = await page.locator('.share-modal').count() === 1;
+        check(`${tag} Devices Share: a real ${phone ? 'tap' : 'click'} where the way back is stays in the dialog (the dialog open, the session put away)`, !at.strip && away && stillOpen, { hit: at.hit, away, stillOpen });
+    } else console.log(`INFO  ${tag} Devices Share: the strip's middle is ${at ? 'a control of the dialog (' + at.hit + ')' : 'not on screen'}; no press`);
+    if (phone) {
+        // Not this walk's to judge, said for the record: the sheet is drawn inside the Devices view (z 105),
+        // so the bottom bar (300) is over its foot as well.
+        const nav = await page.evaluate(() => {
+            const d = document.querySelector('.share-modal')?.getBoundingClientRect();
+            const n = document.querySelector('.mobile-bottom-nav')?.getBoundingClientRect();
+            if (!d || !n) return null;
+            const h = document.elementFromPoint(d.left + d.width / 2, d.bottom - 4);
+            return { underNavPx: Math.max(0, Math.round(Math.min(d.bottom, n.bottom) - Math.max(d.top, n.top))), footHit: h ? `${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').split(' ')[0]}` : 'nothing' };
+        });
+        console.log(`INFO  ${tag} Devices Share: the bottom bar over the sheet's foot: ${JSON.stringify(nav)}`);
+    }
+    await ensureMinimised(page, phone);
+    check(`${tag}: the Devices view's Share dialog closed`, await closeDialog(page, '.share-modal', ['.share-modal-close']));
+}
 if (want('dialogs')) {
     // The desktop: the dialogs are in the page's own stacking order, and the strip is under them.
     await O.setViewportSize({ width: 1280, height: 800 });
@@ -766,6 +828,13 @@ if (want('dialogs')) {
     await tapBackdropOverStrip(O, 'dialogs desktop Create Channel', '.modal-overlay', '.modal-overlay .modal', false);
     await closeDialog(O, '.modal-overlay .modal', ['.modal-overlay .modal button:text-is("Cancel")']);
     await ensureMinimised(O, false);
+    // A dialog drawn inside a view: the Devices view's Share.
+    await O.locator('.server-icon.devices-button').click();
+    await deviceShareCheck(O, 'dialogs desktop', false);
+    await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+    await sleep(600);
+    await chanRow(O).click();
+    await sleep(400);
 
     // The phone, keyboard down, the way back above the bottom bar.
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2, userAgent: ANDROID_UA });
@@ -869,6 +938,9 @@ if (want('dialogs')) {
         check(`dialogs phone: ${label} closed`, await closeDialog(P, inner, closers));
         await ensureMinimised(P, true);
     }
+    // A dialog drawn inside a view: the Devices view's Share (a sheet along the bottom at 390 px).
+    await navTo('Devices');
+    await deviceShareCheck(P, 'dialogs phone', true);
     // Every dialog gone: the way back is still up and reachable.
     await navTo('Chat');
     const post = await reachable(P);

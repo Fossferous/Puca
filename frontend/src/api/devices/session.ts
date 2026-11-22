@@ -531,6 +531,14 @@ export interface DeviceControlSession {
      *  messages that name the PC — "Work Laptop's screen is off…". Null when the
      *  caller did not say, and the messages then say "That PC". */
     peerName: string | null;
+    /** CONTROLLER: the session this one carries on, when a FOLLOW opened it
+     *  and not a person: somebody signed in at the PC's sign-in screen, or it
+     *  locked (wakeSession.ts followToDesktop / followToSignIn, from the
+     *  handovers and pollLockedFollow below). Null for every session a person
+     *  opened. The stage keeps a followed session where the person left the
+     *  one before it: put away to the chat, it stays put away (DeviceStage
+     *  `putAway`). Display only; nothing here or on the wire reads it. */
+    handoverFrom: string | null;
     /** CONTROLLER: the host said it has no screen switched on and is starting
      *  its virtual screen (a `screen-state` notice; noScreen.ts). Host-asserted
      *  only, like `secureDesktop`. The stage puts it in place of "Waiting for
@@ -1106,6 +1114,7 @@ function emit(): void {
         caretOpen: s.caretOpen,
         powerNotice: s.powerNotice,
         peerName: s.peerName,
+        handoverFrom: s.handoverFrom,
         hostScreen: s.hostScreen,
         shareUser: s.share ? { id: s.share.peerUser, username: s.share.peerUsername } : null,
         viewOnly: s.share ? !s.share.capabilities.includes('control') : false,
@@ -2870,7 +2879,7 @@ export async function pollLockedFollow(): Promise<void> {
             // would refuse the very follow this enables with "already in a
             // session". followToSignIn re-lists and re-checks for itself.
             teardown(s, 'that machine is locked — moving to its sign-in screen', true, true);
-            followMachineToSignIn(s.peerDevice);
+            followMachineToSignIn(s.peerDevice, s.id);
         }
     } catch {
         // A failed device-list read must not disturb the session; the next
@@ -4427,22 +4436,25 @@ async function applyPendingIce(s: Internal): Promise<void> {
  * where the app has to start from nothing. Imported lazily: wakeSession
  * imports `connectToDevice` from this file, and a static import back would
  * make the two modules a cycle.
+ *
+ * `from` is the session being carried on: the one it opens says so
+ * (`handoverFrom`), so the stage can keep it where the person left that one.
  */
-function followMachineToDesktop(signInRowId: string): void {
+function followMachineToDesktop(signInRowId: string, from: string): void {
     const userId = currentUserId();
     if (userId == null) return;
     void import('./wakeSession')
-        .then(m => m.followToDesktop(signInRowId, userId))
+        .then(m => m.followToDesktop(signInRowId, userId, from))
         .catch(() => { /* the user is back at the list and can reconnect */ });
 }
 
 /** The mirror: after a Lock we asked for, follow the machine to its sign-in
  *  screen row (see `LOCK_HANDOVER_REASON` and wakeSession.followToSignIn). */
-function followMachineToSignIn(appRowId: string): void {
+function followMachineToSignIn(appRowId: string, from: string): void {
     const userId = currentUserId();
     if (userId == null) return;
     void import('./wakeSession')
-        .then(m => m.followToSignIn(appRowId, userId))
+        .then(m => m.followToSignIn(appRowId, userId, from))
         .catch(() => { /* the user is back at the list and can reconnect */ });
 }
 
@@ -4494,6 +4506,10 @@ export async function connectToDevice(
          *  screen's own passphrase, by name (`Internal.peerSignIn`). Display
          *  only. */
         signIn?: boolean;
+        /** The session this connect carries on: given only by a follow
+         *  (wakeSession.ts), never by a person's Connect. Display only
+         *  (`DeviceControlSession.handoverFrom`). */
+        handoverFrom?: string;
     },
 ): Promise<string> {
     const myDevice = thisDeviceId();
@@ -4552,6 +4568,7 @@ export async function connectToDevice(
         remoteCursor: null,
         powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
         peerName: opts?.peerName?.trim() || null,
+        handoverFrom: opts?.handoverFrom || null,
         hostScreen: null,
     };
     sessions.set(id, s);
@@ -5289,6 +5306,7 @@ export function installDeviceSessions(): void {
                 remoteCursor: null,
                 powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
                 peerName: null,
+                handoverFrom: null,
                 hostScreen: null,
             };
             sessions.set(s.id, s);
@@ -5983,7 +6001,7 @@ export function installDeviceSessions(): void {
             // NOT for a session opened only to power off: following it would
             // open a Control session nobody asked for, on a PC somebody has
             // just signed in to. The card says what happened instead.
-            if (!s.powerOffOnly) followMachineToDesktop(host);
+            if (!s.powerOffOnly) followMachineToDesktop(host, s.id);
             return;
         }
         // WE ASKED THAT MACHINE TO LOCK, AND IT DID — the mirror handover: the
@@ -6006,7 +6024,7 @@ export function installDeviceSessions(): void {
             // offer, so it takes it for a screen session and hands it over at
             // a lock — and following would open a Control session nobody
             // asked for. The card says what happened instead.
-            if (!s.powerOffOnly) followMachineToSignIn(host);
+            if (!s.powerOffOnly) followMachineToSignIn(host, s.id);
             return;
         }
         // NO SCREEN ON THAT PC — a code (noScreen.ts), shown as a sentence

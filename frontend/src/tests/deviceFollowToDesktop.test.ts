@@ -48,12 +48,12 @@ const connected: string[] = [];
 const connectedRows: Array<readonly string[] | undefined> = [];
 /** Whether each successful connect was told it reached the sign-in row, and
  *  the PC's name (the passphrase dialog asks for that screen's passphrase). */
-const connectedAbout: Array<{ signIn?: boolean; peerName?: string }> = [];
+const connectedAbout: Array<{ signIn?: boolean; peerName?: string; handoverFrom?: string }> = [];
 /** How many of the NEXT connect attempts should reject (the unlock-transition
  *  race: the target's first capture-open lands on the still-secure desktop). */
 let connectFails = 0;
 vi.mock('../api/devices/session', () => ({
-    connectToDevice: (id: string, opts?: { machineRows?: readonly string[]; signIn?: boolean; peerName?: string }) => {
+    connectToDevice: (id: string, opts?: { machineRows?: readonly string[]; signIn?: boolean; peerName?: string; handoverFrom?: string }) => {
         if (connectFails > 0) {
             connectFails--;
             return Promise.reject(new Error(
@@ -64,6 +64,7 @@ vi.mock('../api/devices/session', () => ({
         connectedAbout.push({
             ...(opts?.signIn !== undefined ? { signIn: opts.signIn } : {}),
             ...(opts?.peerName !== undefined ? { peerName: opts.peerName } : {}),
+            ...(opts?.handoverFrom !== undefined ? { handoverFrom: opts.handoverFrom } : {}),
         });
         return Promise.resolve();
     },
@@ -361,5 +362,37 @@ describe('following a machine from its desktop to its sign-in screen (after Lock
         await followToSignIn('pc', 1);
         await vi.advanceTimersByTimeAsync(0);
         expect(latest.get('pc')?.phase).toBe('following');
+    });
+});
+
+/**
+ * A follow carries a session on by itself, under a new id: the connect it
+ * makes names the session it carries on (`handoverFrom`), so the stage keeps
+ * the new one where the person left that one. A session the person put away
+ * to the chat used to pop back up over it when somebody signed in at that
+ * PC's sign-in screen (the review of 2026-11-22, round 2).
+ */
+describe('a follow names the session it carries on', () => {
+    it('to the desktop, after a sign-in', async () => {
+        devices = [appRow(true), signInRow(false)];
+        await followToDesktop('pc-signin', 1, 'ds-signin');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(connected).toEqual(['pc']);
+        expect(connectedAbout).toEqual([{ peerName: 'PC', handoverFrom: 'ds-signin' }]);
+    });
+
+    it('to the sign-in screen, after a Lock', async () => {
+        devices = [appRow(false), signInRow(true)];
+        await followToSignIn('pc', 1, 'ds-desktop');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(connected).toEqual(['pc-signin']);
+        expect(connectedAbout).toEqual([{ signIn: true, peerName: 'PC', handoverFrom: 'ds-desktop' }]);
+    });
+
+    it('CONTROL: a follow told no session (an older caller) names none', async () => {
+        devices = [appRow(true), signInRow(false)];
+        await followToDesktop('pc-signin', 1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(connectedAbout).toEqual([{ peerName: 'PC' }]);
     });
 });

@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
     storage: new Map<string, string>(),
     /** Held Back layers, oldest first (api/mobileApp.ts interceptBack). */
     layers: [] as Array<() => void>,
+    /** Every input the stage sent, by session. */
+    sent: [] as Array<{ id: string; ev: unknown }>,
 }));
 
 vi.mock('../api/devices/session', () => ({
@@ -35,7 +37,7 @@ vi.mock('../api/devices/session', () => ({
     },
     subscribeCaret: () => () => {},
     setCaretTracking: () => {},
-    sendInput: () => {},
+    sendInput: (id: string, ev: unknown) => { h.sent.push({ id, ev }); },
     requestMonitor: () => {},
     requestKeyframe: () => true,
     setCursorOwned: () => {},
@@ -114,6 +116,7 @@ beforeEach(() => {
     h.listeners.clear();
     h.snapshot = [];
     h.layers = [];
+    h.sent = [];
 });
 
 let root: Root | null = null;
@@ -146,7 +149,7 @@ function session(over: Snapshot = {}): Snapshot {
         filesChannel: null, fileRoot: null, fileScopeKind: null, filesOnly: false,
         privacyActive: false, cursorOwned: false, reconnecting: false,
         awaitingMedia: false, mediaRestarting: false, secureDesktop: false,
-        shareUser: null, viewOnly: false, unattended: true,
+        shareUser: null, viewOnly: false, unattended: true, handoverFrom: null,
         ...over,
     };
 }
@@ -315,5 +318,92 @@ describe('a session that newly takes the stage is shown, not put away', () => {
         await publish([session({ id: 'ds-a', peerName: 'Office PC' })]);
         expect(wayBack(), 'back: still put away').toBeTruthy();
         expect(host!.querySelector('.device-stage'), 'the stage stays away').toBeNull();
+    });
+});
+
+/**
+ * Put away belongs to the SESSION that was put away, not to the stage (the
+ * review of 2026-11-22, round 2). It was one boolean, cleared whenever a
+ * different session id took the stage: PC A put away, PC B connected (shown),
+ * B put away too, then B ended, and A, falling back onto the stage, was put
+ * back on screen over the chat with nobody asking, control armed, so the next
+ * tap aimed at the chat went to PC A. And the follows that carry a session on
+ * by themselves (somebody signing in at a put-away PC's sign-in screen, a
+ * Lock, the locked-poll: wakeSession.followToDesktop / followToSignIn) open a
+ * new session with a new id, which popped up the same way.
+ */
+describe('put away is the session\'s own: an older one coming back stays away', () => {
+    const keyInChat = async () => {
+        const before = h.sent.length;
+        const ev = new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', bubbles: true, cancelable: true });
+        await act(async () => { window.dispatchEvent(ev); });
+        return h.sent.slice(before);
+    };
+
+    it('A put away, B connected and put away, B ends: A is still put away and nothing goes to it', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        await tap(toolbarButton('Chat'));
+        const b = session({ id: 'ds-b', peerName: 'Den laptop' });
+        await publish([a, b]);
+        expect(host!.querySelector('.device-stage'), "B's session is on the stage (the premise)").toBeTruthy();
+        await tap(toolbarButton('Chat'));
+        expect(wayBack()!.textContent!.trim()).toBe('Return to Den laptop');
+        await publish([a]);
+        expect(host!.querySelector('.device-stage'), "A's stage is not put back over the chat").toBeNull();
+        expect(wayBack()?.textContent?.trim(), 'the way back now names A').toBe('Return to Office PC');
+        expect(await keyInChat(), 'a key typed in the chat goes to no PC').toEqual([]);
+        await tap(wayBack()!);
+        expect(host!.querySelector('.device-stage'), 'its own press brings A back').toBeTruthy();
+    });
+
+    it('A put away, B on screen and ended there: A is still put away', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        await tap(toolbarButton('Chat'));
+        await publish([a, session({ id: 'ds-b', peerName: 'Den laptop' })]);
+        expect(host!.querySelector('.device-stage'), "B's session is on the stage (the premise)").toBeTruthy();
+        await publish([a]);
+        expect(host!.querySelector('.device-stage'), 'A was put away and stays away').toBeNull();
+        expect(wayBack()?.textContent?.trim()).toBe('Return to Office PC');
+        expect(await keyInChat()).toEqual([]);
+    });
+
+    it('CONTROL: A never put away comes back on screen when B ends', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        await publish([a, session({ id: 'ds-b', peerName: 'Den laptop' })]);
+        await tap(toolbarButton('Chat'));
+        expect(wayBack()!.textContent!.trim(), 'B put away (the premise)').toBe('Return to Den laptop');
+        await publish([a]);
+        expect(host!.querySelector('.device-stage'), 'A was on the stage before B, and is again').toBeTruthy();
+        expect(wayBack()).toBeNull();
+    });
+
+    it('a session handed over from a put-away one (a sign-in, a Lock) is put away too, named for its PC', async () => {
+        await mountWith(session({ id: 'ds-a', peerName: 'Office PC (sign-in screen)' }));
+        await tap(toolbarButton('Chat'));
+        // The sign-in screen's session ends with the handover, and the follow
+        // opens the desktop's a moment (or up to two minutes) later.
+        await publish([]);
+        expect(wayBack(), 'nothing on screen between the two').toBeNull();
+        await publish([session({ id: 'ds-a2', peerName: 'Office PC', handoverFrom: 'ds-a' })]);
+        expect(host!.querySelector('.device-stage'), 'the follow does not pop up over the chat').toBeNull();
+        expect(wayBack()?.textContent?.trim()).toBe('Return to Office PC');
+        expect(await keyInChat(), 'and nothing goes to it').toEqual([]);
+        await tap(wayBack()!);
+        expect(host!.querySelector('.device-stage'), 'its press brings the followed session back').toBeTruthy();
+        // And a follow of THAT one, once it is on screen again, is on screen.
+        await publish([session({ id: 'ds-a3', peerName: 'Office PC (sign-in screen)', handoverFrom: 'ds-a2' })]);
+        expect(host!.querySelector('.device-stage'), 'a follow of a session on screen is on screen').toBeTruthy();
+        expect(wayBack()).toBeNull();
+    });
+
+    it('CONTROL: a follow of a session that was on screen opens on screen', async () => {
+        await mountWith(session({ id: 'ds-a', peerName: 'Office PC' }));
+        await publish([]);
+        await publish([session({ id: 'ds-a2', peerName: 'Office PC (sign-in screen)', handoverFrom: 'ds-a' })]);
+        expect(host!.querySelector('.device-stage')).toBeTruthy();
+        expect(wayBack()).toBeNull();
     });
 });

@@ -10,12 +10,15 @@
  * table), and the whole of it sits at level 0 of the page. An element
  * outside it with any z-index above 0 is therefore drawn over ALL of Chat,
  * every dialog and backdrop included, and a z from that table means nothing
- * there: the strip at z 250 beside Chat covered the foot of the member
- * profile sheet, of Edit Channel and of Settings, and took the taps meant for
- * them (e2e/return-pill-live.mjs, `dialogs`). Rendered into this element
- * instead, a bar is one more entry in the table: over the panels, under the
- * bottom bar's z and every dialog. On a desktop `.chat-container` is no
- * stacking context, and drawing into it changes nothing.
+ * there: the strip, at z 250 beside Chat then, covered the foot of the
+ * member profile sheet, of Edit Channel and of Settings, and took the taps
+ * meant for them (e2e/return-pill-live.mjs, `dialogs`). Rendered into this
+ * element instead, a bar is one more entry in the table, and its z means
+ * what the table says: the strip's 95 is under every panel and view, under
+ * the bottom bar and under every dialog, one drawn inside a view included
+ * (DeviceStageMobile.css says why that takes 95 and not 250). On a desktop
+ * `.chat-container` is no stacking context, and drawing into it changes
+ * nothing.
  *
  * Chat hands its element over with a ref (`setChatRoot`), so nothing has to
  * look for it by class name, and when there is no Chat on the page (still

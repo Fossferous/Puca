@@ -37,11 +37,12 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | z | who | notes |
 |---|-----|-------|
 | 90 | `.mobile-panel-overlay` | tap-to-dismiss scrim |
+| 95 | `.device-stage-minimized-strip` | a minimised remote-control session's "Return to" and the PC's name, a bar the layout makes room for: above the bottom nav and the voice bar on a phone, along the window's foot on a desktop, with every panel and view ending above its measured height. Under every panel and view (nothing needs to be under it), and so under whatever one of them draws over its place: a panel or view is fixed, a stacking context of its own, and a dialog drawn inside one counts as that panel's z (the Devices view's Share, Notes' dialogs in the desktop app); at 250 the strip was over them. Over the scrim, as the bottom nav is. DeviceStageReturn.tsx, drawn inside `.chat-container` through chatRoot.ts though RcGlobals mounts it: see below the table |
 | 100 | `.chat-main` | the "chat" slot |
 | 105 | `.friends-dashboard` | shares the chat slot, above chat-main |
 | 150 | `.sidebar`, `.member-sidebar` | slide-in side panels |
 | 200 | `.server-list-container` | server rail |
-| 250 | `.checklist-panel`, `.voice-panel-compact`, `.device-stage-minimized-strip` | persistent drawers/bars (the last is a minimised remote-control session's "Return to" and the PC's name: above the bottom nav and the voice bar on a phone, along the window's foot on a desktop, with the panels' measured-height reservation; DeviceStageReturn.tsx, drawn inside `.chat-container` through chatRoot.ts though RcGlobals mounts it: see below the table) |
+| 250 | `.checklist-panel`, `.voice-panel-compact` | persistent drawers/bars |
 | 300 | `.mobile-bottom-nav` | always on top of panels |
 | 400 | `.stream-stage`, `.camera-preview`, `.device-stage` | fullscreen media |
 | 1000+ | modals/pickers (component-local) | settings modal is 2000 |
@@ -63,11 +64,19 @@ panels, the bottom nav, its dialogs at 1000 to 2000) is stacked inside it, and
 the whole of it sits at level 0 of the page. An element outside it (mounted
 beside Chat in App.tsx or RcGlobals, or portaled to `<body>`) with any z-index
 above 0 is drawn over ALL of Chat, every dialog and backdrop included. So a
-persistent bar mounted outside Chat that must sit in this table's 250 band is
-drawn inside Chat's root: `useChatRoot()` (components/chatRoot.ts) gives the
+persistent bar mounted outside Chat that must sit in one of this table's bands
+is drawn inside Chat's root: `useChatRoot()` (components/chatRoot.ts) gives the
 element, as DeviceStageReturn.tsx does (e2e/return-pill-live.mjs, `dialogs`,
 measures the strip under the profile sheet, Edit Channel, Create Channel,
-Settings and Server Settings). `.voice-panel-compact` and `.own-voice-banner`
+Settings, Server Settings and the Devices view's Share).
+
+**A panel or view is a stacking context too.** Every panel above (and on a
+desktop the Friends, Devices and Notes views beside the rail, at 100) is
+fixed, so a dialog drawn inside one, not portaled out of it, is stacked at
+that panel's z whatever its own: the Devices view's Share at z 1200 counts as
+105 on a phone, under the bottom nav (300), whose bar still covers its sheet's
+foot. A bar that must be under such a dialog sits below every panel, as the
+strip does at 95. `.voice-panel-compact` and `.own-voice-banner`
 are still portaled to `<body>` on a phone at z 250 (the sidebar's transform
 would trap them), and so are drawn over Chat's dialogs while they are up: the
 voice bar over the foot of the full-screen Settings, measured 2026-11-22.

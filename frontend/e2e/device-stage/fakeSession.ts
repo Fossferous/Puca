@@ -227,7 +227,7 @@ function session(): DeviceControlSession {
         id: SID, role: 'controller', peerDevice: 'dev-host',
         phase: state.endedWith === null ? 'active' : 'ended',
         stream, captureSize: null, error: state.endedWith ?? state.hostError,
-        peerName: state.peerName, hostScreen: state.hostScreen,
+        peerName: state.peerName, handoverFrom: null, hostScreen: state.hostScreen,
         monitors: MONITORS.map(m => ({ ...m })),
         activeMonitor: state.activeMonitor,
         unattended: state.unattended,

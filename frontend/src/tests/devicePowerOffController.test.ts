@@ -556,6 +556,9 @@ describe('an armed PC (the passphrase)', () => {
         handlers.get('DeviceEnded')!({ payload: { session_id: id, reason: HANDOVER_REASON } });
         await settle();
         expect(followToDesktop).toHaveBeenCalled();
+        // Naming the session it carries on (the stage keeps the one it opens
+        // where the person left this one: put away stays put away).
+        expect(followToDesktop.mock.calls[0]?.[2], 'the session handed over').toBe(id);
     });
 
     it('the deadline falling due while the passphrase is being STRETCHED is no verdict: the proof still goes, and the clock starts from it', async () => {
