@@ -601,7 +601,17 @@ export function DeviceStage() {
     const movesSincePressRef = useRef(0);
 
     const [sessions, setSessions] = useState<DeviceControlSession[]>([]);
-    const [controlEnabled, setControlEnabled] = useState(true);
+    /** The sessions the person PAUSED (Pause control, Ctrl+Alt+Home; the
+     *  banner's Resume takes one out), by id: a pause is the session's, like
+     *  put away. It was one flag, turned back on whenever a different id took
+     *  the stage, so a session paused earlier that came back onto it when a
+     *  newer one ended (put away, behind the chat) came back with control on,
+     *  and on Android its keys back in the notification, with nobody asking
+     *  (the review of 0.9.869). A session that newly opens is not in it, so
+     *  pausing once still pauses nothing that comes after. Ended ids stay,
+     *  a handful of strings at most: a follow carries a pause on as it
+     *  carries put away (`handoverFrom`, below). */
+    const [pausedIds, setPausedIds] = useState<ReadonlySet<string>>(() => new Set());
     const [armedFor, setArmedFor] = useState<string | null>(null);
     /** The sessions OLDER than the one on the stage (listed before it when it
      *  came on), recorded as it does: when a put-away one ends, the one that
@@ -694,6 +704,8 @@ export function DeviceStage() {
     ) ?? null;
     /** The session on the stage was put away: only its way back is drawn. */
     const isMinimized = session !== null && putAway.has(session.id);
+    /** Input goes over: the session on the stage is not one the person paused. */
+    const controlEnabled = session === null || !pausedIds.has(session.id);
 
     // Android's BACK closes the phone's open menu, the type-text box and the
     // pinned-keys editor first (they take it themselves); the stage itself is
@@ -748,14 +760,16 @@ export function DeviceStage() {
         }
     }, []);
 
-    // Re-arm control for a NEW session, so pausing once does not silently
-    // disable input for every session afterwards. Adjusted during render rather
+    // A NEW SESSION ON THE STAGE starts clean. Adjusted during render rather
     // than in an effect: an effect here would render once with the previous
-    // session's paused state before correcting itself, and React explicitly
-    // recommends this pattern over a cascading setState.
+    // session's state before correcting itself, and React explicitly
+    // recommends this pattern over a cascading setState. The pause is not
+    // reset here: it is the session's own (`pausedIds`), so a session that
+    // newly opens is not paused (pausing once does not silently disable input
+    // for every session afterwards), and one paused earlier that comes back
+    // onto the stage is still paused.
     if (session && session.id !== armedFor) {
         setArmedFor(session.id);
-        setControlEnabled(true);
         // The pinned-keys editor belongs to the session it was opened in; a
         // new one must not start with it up (and the keys held back by it).
         setPinsEditorOpen(false);
@@ -796,6 +810,12 @@ export function DeviceStage() {
         // and left the list (and `olderThanShown`) before it arrives, up to two
         // minutes later. A follow is never a connection the person made.
         const followOfAway = from !== null && (putAway.has(from) || stageWasAway);
+        // A follow of a session the person paused is paused too: it carries
+        // that one on, and the person said they were only watching it.
+        if (from !== null && pausedIds.has(from) && !pausedIds.has(session.id)) {
+            const id = session.id;
+            setPausedIds(prev => new Set(prev).add(id));
+        }
         const at = sessions.findIndex(s => s.id === session.id);
         setOlderThanShown(new Set(sessions.slice(0, Math.max(0, at)).map(s => s.id)));
         if (fellBack || followOfAway) {
@@ -1062,12 +1082,20 @@ export function DeviceStage() {
      *  A captured mouse is let go too: paused input goes nowhere, and a lock
      *  that stayed would trap the cursor in a picture that ignores it. */
     const setControl = useCallback((on: boolean) => {
+        const id = sessionActiveId;
+        if (id === null) return;
         if (!on) {
             releaseAllRef.current();
             if (document.pointerLockElement) document.exitPointerLock();
         }
-        setControlEnabled(on);
-    }, []);
+        setPausedIds(prev => {
+            if (prev.has(id) === !on) return prev;
+            const next = new Set(prev);
+            if (on) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    }, [sessionActiveId]);
 
     const adjustFpsSens = (delta: number) => {
         setFpsSens(s => {

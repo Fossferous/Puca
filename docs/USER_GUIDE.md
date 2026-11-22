@@ -1072,7 +1072,12 @@ comes back, not its screen, and when the session moves by itself because
 someone signed in at that computer or it locked, it stays put away too.
 While you are back in Púca, another computer you are still connected to
 never comes up over it by itself either: if the session you put away ends,
-or that other computer locks, it is its bar you see.
+or that other computer locks, it is its bar you see. A session you paused
+(**Pause control**) stays paused in the same way: when it comes back onto the
+stage after another computer's session ends, or moves by itself because
+someone signed in at that computer or it locked, it is still paused, and its
+keys stay off the notification, until you press **Resume**. A computer you
+connect to afterwards starts with control on, as before.
 
 **When the keyboard opens by itself.** With **Open the keyboard when a text
 box is tapped** on, the keyboard comes up when a tap puts the computer's text
