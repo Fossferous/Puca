@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::auth::Claims;
 use crate::moderation_handlers::{log_audit_action, log_audit_row, perform_voice_move, VoiceMoveRequest};
 use crate::permissions::{
-    get_user_channel_permissions, get_user_channels_permissions, get_user_server_permissions, user_has_permission,
+    get_user_channel_permissions, get_user_channels_permissions, user_has_permission,
     ChannelPermAccess, Permissions,
 };
 use crate::protocol::ServerMessage;
@@ -309,21 +309,27 @@ pub async fn list_modes(
     Path(server_id): Path<String>,
     Extension(claims): Extension<Claims>,
 ) -> Response {
+    // Every failure here is a lookup that failed: the 503 of src/try_again.rs.
     match is_member(&state.pool, &server_id, claims.sub).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::FORBIDDEN, "Not a member of this server").into_response(),
         Err(e) => {
             tracing::error!("list_modes: membership check failed: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list modes").into_response();
+            return could_not_check();
         }
     }
     match read_modes(&state, &server_id, claims.sub).await {
         Ok(body) => Json(body).into_response(),
         Err(e) => {
             tracing::error!("list_modes: read for server {} failed: {:?}", server_id, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list modes").into_response()
+            could_not_check()
         }
     }
+}
+
+/// The 503 of src/try_again.rs, for a lookup that failed.
+fn could_not_check() -> Response {
+    crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK)
 }
 
 async fn read_modes(state: &AppState, server_id: &str, user_id: i64) -> Result<ModesResponse, sqlx::Error> {
@@ -374,7 +380,8 @@ async fn read_modes(state: &AppState, server_id: &str, user_id: i64) -> Result<M
         })
         .collect();
 
-    let server_perms = get_user_server_permissions(&state.pool, server_id, user_id).await;
+    // Strict: folded, a failed read here was a 200 with every switch hidden.
+    let server_perms = crate::permissions::read_user_server_permissions(&state.pool, server_id, user_id).await?;
     Ok(ModesResponse {
         active_mode_id: active.map(|m| m as i64),
         can_switch: server_perms.has(Permissions::SWITCH_MODES),
@@ -454,12 +461,12 @@ async fn check_edit(state: &AppState, server_id: &str, caller: i64, edit: ModeEd
             .await
             .map_err(|e| {
                 tracing::error!("modes: channel read for server {} failed: {:?}", server_id, e);
-                refuse(StatusCode::INTERNAL_SERVER_ERROR, "Could not verify the channels")
+                could_not_check()
             })?;
     let ids: Vec<i64> = rows.iter().map(|r| r.0 as i64).collect();
     let perms = get_user_channels_permissions(&state.pool, server_id, caller, &ids).await.map_err(|e| {
         tracing::error!("modes: permission resolve for server {} failed: {:?}", server_id, e);
-        refuse(StatusCode::INTERNAL_SERVER_ERROR, "Could not verify the channels")
+        could_not_check()
     })?;
     let visible: HashMap<i32, (i32, bool)> = rows
         .into_iter()
@@ -1153,9 +1160,14 @@ pub async fn call_everyone_back(
     // hidden from the mover, so that it reads like no call at all, and counting
     // those as `skipped` would have told them someone was in there.
     let source_ids: Vec<i64> = sources.iter().map(|&c| c as i64).collect();
+    // A failed read of the caller's view is a 503 to retry, not the 200 of a call-back
+    // that found nobody to move.
     let source_perms = match get_user_channels_permissions(&state.pool, &server_id, claims.sub, &source_ids).await {
         Ok(p) => p,
-        Err(e) => return failed(e),
+        Err(e) => {
+            tracing::error!("call_everyone_back: resolving the caller's view failed: {:?}", e);
+            return could_not_check();
+        }
     };
     let mut targets: Vec<UserId> = sources
         .into_iter()

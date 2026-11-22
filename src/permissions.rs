@@ -503,36 +503,117 @@ mod tests {
 
 /// Get a user's effective permissions in a server by combining all their role permissions.
 /// Returns ADMINISTRATOR if user is the server owner.
+///
+/// Each lookup that FAILS reads as its own "no" here (logged): not the owner,
+/// not a member, no roles. That can only refuse. Where the refusal is answered
+/// as a fact (a 403 "Missing permission", a list with nothing in it), use
+/// [`try_user_server_permissions`], which answers `Err`.
 pub async fn get_user_server_permissions(
     pool: &sqlx::PgPool,
     server_id: &str,
     user_id: i64,
 ) -> Permissions {
-    // Check if user is server owner (owners have all permissions)
+    let folded = |what: &str, e: sqlx::Error| {
+        tracing::error!("get_user_server_permissions: {what} lookup failed for server {server_id} user {user_id}: {e}")
+    };
+    let owner = server_owner_row(pool, server_id, user_id).await.unwrap_or_else(|e| {
+        folded("owner", e);
+        false
+    });
+    if owner {
+        return Permissions::ADMINISTRATOR;
+    }
+    let member = server_member_row(pool, server_id, user_id).await.unwrap_or_else(|e| {
+        folded("membership", e);
+        false
+    });
+    if !member {
+        return Permissions::empty();
+    }
+    server_role_bits(pool, server_id, user_id)
+        .await
+        .unwrap_or_else(|e| {
+            folded("role", e);
+            Permissions::empty()
+        })
+        .server_capped()
+}
+
+/// [`get_user_server_permissions`] with a lookup that FAILED returned as
+/// `Err(LookupFailed)` (logged here), for a REST handler that answers it with
+/// the 503 of src/try_again.rs instead of the 403 of a real "no".
+pub(crate) async fn try_user_server_permissions(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+) -> Result<Permissions, LookupFailed> {
+    read_user_server_permissions(pool, server_id, user_id).await.map_err(|e| {
+        tracing::error!("server permissions: lookup failed for server {server_id} user {user_id}: {e}");
+        LookupFailed
+    })
+}
+
+/// [`user_has_permission`], with a lookup that FAILED returned as `Err`.
+pub(crate) async fn try_user_has_permission(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+    required: Permissions,
+) -> Result<bool, LookupFailed> {
+    Ok(try_user_server_permissions(pool, server_id, user_id).await?.has(required))
+}
+
+/// The server permissions as the database answered them: `Err` when the
+/// owner, membership or role lookup failed. Read through the folding
+/// [`get_user_server_permissions`], a failure made the bulk channel resolver
+/// answer with every channel denied, or judge the owner as a plain member,
+/// where the single-channel resolver answers `Err`.
+pub(crate) async fn read_user_server_permissions(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+) -> Result<Permissions, sqlx::Error> {
+    if server_owner_row(pool, server_id, user_id).await? {
+        return Ok(Permissions::ADMINISTRATOR);
+    }
+    if !server_member_row(pool, server_id, user_id).await? {
+        return Ok(Permissions::empty());
+    }
+    // A stream-only member holds the cap and nothing else server-wide.
+    Ok(server_role_bits(pool, server_id, user_id).await?.server_capped())
+}
+
+/// Is `user_id` the owner of `server_id`? Owners have all permissions.
+async fn server_owner_row(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<bool, sqlx::Error> {
     // Cast user_id to i32 since owner_id is INTEGER in PostgreSQL
     let is_owner: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM servers WHERE id = $1 AND owner_id = $2")
             .bind(server_id)
             .bind(user_id as i32)
             .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+            .await?;
+    Ok(is_owner.is_some())
+}
 
-    if is_owner.is_some() {
-        return Permissions::ADMINISTRATOR;
-    }
+/// A non-member gets NO permissions — not even the default @everyone role.
+/// Without this gate the `OR sr.is_default = true` clause of
+/// [`server_role_bits`] hands every authenticated user the @everyone bits
+/// (VIEW_CHANNEL, SEND_MESSAGES, …) for ANY server, and a kicked/banned user
+/// keeps whatever roles were never purged from member_roles. Membership
+/// (server_members) is the source of truth; roles only layer on top of it.
+async fn server_member_row(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<bool, sqlx::Error> {
+    let member: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
+            .bind(server_id)
+            .bind(user_id as i32)
+            .fetch_optional(pool)
+            .await?;
+    Ok(member.is_some())
+}
 
-    // A non-member gets NO permissions — not even the default @everyone role.
-    // Without this gate the `OR sr.is_default = true` clause below hands every
-    // authenticated user the @everyone bits (VIEW_CHANNEL, SEND_MESSAGES, …) for
-    // ANY server, and a kicked/banned user keeps whatever roles were never
-    // purged from member_roles. Membership (server_members) is the source of
-    // truth; roles only layer on top of it.
-    if !is_server_member(pool, server_id, user_id).await {
-        return Permissions::empty();
-    }
-
-    // Get all role permissions for this user in this server.
+/// The OR of every role this member holds in this server, the @everyone role
+/// included. The caller applies the stream-only cap (`server_capped`).
+async fn server_role_bits(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<Permissions, sqlx::Error> {
     // `AND mr.server_id = sr.server_id` is load-bearing: without it a member_roles
     // row pairing THIS server with a role from ANOTHER server would match, letting
     // an attacker inherit a foreign server's role permissions here (cross-server
@@ -550,17 +631,14 @@ pub async fn get_user_server_permissions(
     .bind(server_id)
     .bind(user_id as i32)
     .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Combine all permissions with bitwise OR
     let mut combined = Permissions::empty();
     for (perm_bits,) in role_perms {
         combined |= Permissions::from_bits_truncate(perm_bits as u64);
     }
-
-    // A stream-only member holds the cap and nothing else server-wide.
-    combined.server_capped()
+    Ok(combined)
 }
 
 /// Check if user has a specific permission in a server
@@ -1178,7 +1256,12 @@ pub(crate) async fn try_user_channel_permissions(
 /// server, fetching all relevant overwrites in a single query (no N+1). Every
 /// requested channel id gets an entry. Callers must have verified the channels
 /// belong to `server_id`. FAIL CLOSED: DB errors bubble up as Err so callers
-/// refuse the request rather than defaulting open.
+/// refuse the request rather than defaulting open, and every one of them is a
+/// lookup that failed: a REST caller answers it with the 503 of
+/// src/try_again.rs. That includes the base (owner, membership, roles): read
+/// through the folding get_user_server_permissions, a failure there was `Ok`
+/// with every channel denied, or the owner judged as a plain member, where
+/// [`try_user_channel_permissions`] answers `Err`.
 pub async fn get_user_channels_permissions(
     pool: &sqlx::PgPool,
     server_id: &str,
@@ -1191,8 +1274,7 @@ pub async fn get_user_channels_permissions(
     }
 
     // Owner -> ADMINISTRATOR; non-member -> empty; else OR of role permissions.
-    // (get_user_server_permissions already fails closed to empty on DB errors.)
-    let base = get_user_server_permissions(pool, server_id, user_id).await;
+    let base = read_user_server_permissions(pool, server_id, user_id).await?;
 
     if base.is_admin() {
         for &cid in channel_ids {
@@ -1420,15 +1502,9 @@ pub async fn stream_only_member_ids(
         .collect())
 }
 
-/// Membership probe shared by the channel- and message-scoped checks.
-/// DB errors are logged and mapped to `false` — fail closed, but LOUDLY: a
-/// silent `unwrap_or(None)` here turned transient pool/decode failures into
-/// "not a member" with nothing in the logs.
-async fn is_server_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> bool {
-    server_membership(pool, server_id, user_id).await.unwrap_or(false)
-}
-
-/// Membership as the database answered it: None when the lookup failed.
+/// Membership as the database answered it: None when the lookup failed (logged
+/// here). (Its folding sibling `is_server_member`, which read a failure as
+/// "not a member", is gone with its last caller.)
 async fn server_membership(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Option<bool> {
     match sqlx::query_as::<_, (i32,)>(
         "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",

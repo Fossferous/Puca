@@ -1731,3 +1731,458 @@ async fn a_channel_edit_whose_lookup_fails_is_a_503_and_changes_nothing() {
     check_eq!(checks, made_healthy_rows, vec![Some(collection as i32)], "control: and it is inside it");
     checks.done();
 }
+
+// ---- the bulk channel resolver, and the routes on it ------------------------------------
+
+/// A member of `w`'s server holding `bits` through a role of their own (position 1).
+async fn staff(pool: &sqlx::PgPool, w: &World, bits: Permissions) -> i64 {
+    let who = user(pool, "staff").await;
+    sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&w.sid).bind(who as i32).execute(pool).await.unwrap();
+    let (role,): (i64,) = sqlx::query_as(
+        "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, 'Staff', '#99AAB5', $2, 1, false) RETURNING id",
+    )
+    .bind(&w.sid)
+    .bind(bits.bits() as i64)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)").bind(&w.sid).bind(who as i32).bind(role).execute(pool).await.unwrap();
+    who
+}
+
+/// A text channel inside `w`'s collection, and whether @everyone is denied it.
+async fn child_of_collection(pool: &sqlx::PgPool, w: &World, hidden: bool) -> i64 {
+    let (id,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, parent_id) VALUES ($1, 'inside', 0, $2) RETURNING id")
+        .bind(&w.sid)
+        .bind(w.collection as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    if hidden {
+        let (everyone,): (i64,) = sqlx::query_as("SELECT id FROM server_roles WHERE server_id = $1 AND is_default").bind(&w.sid).fetch_one(pool).await.unwrap();
+        // i64, as every other site of this text binds it (scripts/check-sql-bind-types.py).
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+            .bind(id as i64)
+            .bind(everyone)
+            .bind(Permissions::VIEW_CHANNEL.bits() as i64)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    id as i64
+}
+
+async fn json_of(resp: Response) -> serde_json::Value {
+    serde_json::from_str(&body_text(resp).await).unwrap_or(serde_json::Value::Null)
+}
+
+/// get_user_channels_permissions read its base (owner, membership, roles)
+/// through get_user_server_permissions, which folds a failed lookup into "not
+/// the owner" or "no permissions". The bulk resolver then answered `Ok` with
+/// every channel denied, or with the owner judged as a plain member, where
+/// try_user_channel_permissions answers `Err`. Each table the base reads,
+/// faulted in turn, for a member and for the owner: the two resolvers agree.
+#[tokio::test]
+async fn the_bulk_channel_resolver_fails_where_the_single_one_does() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let ids = [w.text, w.voice, w.collection];
+    let either = |ok: bool| if ok { "Ok" } else { "Err" };
+    for table in ["servers", "server_members", "server_roles", "member_roles"] {
+        let (faulty, schema) = faulty_pool(&pool, &url, &[table]).await;
+        for (who, name) in [(w.member, "member"), (w.owner, "owner")] {
+            let single = crate::permissions::try_user_channel_permissions(&faulty, w.text, who).await;
+            let bulk = crate::permissions::get_user_channels_permissions(&faulty, &w.sid, who, &ids).await;
+            let server = crate::permissions::try_user_server_permissions(&faulty, &w.sid, who).await;
+            match (&single, &bulk) {
+                (Err(_), Err(_)) => {}
+                (Ok(crate::permissions::ChannelPermAccess::Allowed { perms, .. }), Ok(map)) => {
+                    check_eq!(checks, map.get(&w.text).copied(), Some(*perms), "{table} faulted, the {name}: the two resolvers agree");
+                }
+                _ => check!(
+                    checks,
+                    false,
+                    "{table} faulted, the {name}: the single resolver answered {} and the bulk one {}",
+                    either(single.is_ok()),
+                    either(bulk.is_ok())
+                ),
+            }
+            if who == w.member {
+                check!(checks, bulk.is_err(), "{table} faulted: the member's base could not be read, so the bulk resolver is Err");
+                check!(checks, server.is_err(), "{table} faulted: so is try_user_server_permissions");
+            }
+        }
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let member = crate::permissions::get_user_channels_permissions(&pool, &w.sid, w.member, &ids).await.expect("member");
+    let owner = crate::permissions::get_user_channels_permissions(&pool, &w.sid, w.owner, &ids).await.expect("owner");
+    let member_server = crate::permissions::try_user_server_permissions(&pool, &w.sid, w.member).await;
+    drop_world(&pool, &w, &[]).await;
+
+    check!(checks, member[&w.text].has(Permissions::VIEW_CHANNEL) && !member[&w.text].is_admin(), "control: the member sees the text channel, as a member");
+    check!(checks, ids.iter().all(|c| owner[c].is_admin()), "control: the owner is an administrator in every channel");
+    check_eq!(checks, member_server, Ok(Permissions::DEFAULT_MEMBER), "control: the member's server permissions are @everyone's");
+    checks.done();
+}
+
+async fn list_channels_as(pool: &sqlx::PgPool, sid: &str, who: i64) -> Response {
+    crate::channel_handlers::list_channels(State(app(pool)), Path(sid.to_string()), Extension(claims(who))).await.into_response()
+}
+
+/// GET /servers/:id/channels, the most-used channel route. Its own membership
+/// check read a failure as "not a member" (403), and the bulk resolver's base
+/// as every channel denied: a 200 listing nothing, or, for the owner, the list
+/// a plain member gets. Its other reads were 500s. Each is a 503 now.
+#[tokio::test]
+async fn the_channel_list_is_a_503_when_a_lookup_fails() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let mut faulted = Vec::new();
+    for (table, who, what) in [
+        ("server_members", w.member, "the membership check"),
+        ("member_roles", w.member, "the member's roles"),
+        ("server_roles", w.member, "the server's roles"),
+        ("servers", w.owner, "the owner check"),
+        ("channels", w.member, "the channel list"),
+        ("channel_permission_overwrites", w.member, "the overwrites"),
+        ("server_mode_channels", w.member, "the channels' modes"),
+    ] {
+        let (faulty, schema) = faulty_pool(&pool, &url, &[table]).await;
+        faulted.push((table, what, list_channels_as(&faulty, &w.sid, who).await));
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let member_list = json_of(list_channels_as(&pool, &w.sid, w.member).await).await;
+    let owner_list = json_of(list_channels_as(&pool, &w.sid, w.owner).await).await;
+    let stranger = user(&pool, "str").await;
+    let stranger_list = list_channels_as(&pool, &w.sid, stranger).await.status();
+    drop_world(&pool, &w, &[stranger]).await;
+
+    for (table, what, resp) in &faulted {
+        checks.retry(resp, &format!("GET /servers/:id/channels: {what} ({table}) could not be read"));
+    }
+    let admin = |c: &serde_json::Value| c["my_permissions"].as_i64().is_some_and(|b| b as u64 & Permissions::ADMINISTRATOR.bits() != 0);
+    check_eq!(checks, member_list.as_array().map(Vec::len), Some(3), "control: the member is listed every channel");
+    check!(
+        checks,
+        owner_list.as_array().is_some_and(|a| a.len() == 3 && a.iter().all(admin)),
+        "control: the owner is listed every channel as an administrator, got {owner_list}"
+    );
+    check_eq!(checks, stranger_list, StatusCode::FORBIDDEN, "control: a stranger still gets the real 403");
+    checks.done();
+}
+
+/// GET /channels/:id/feed past its gate: the children, the bulk resolver's
+/// base and each child's messages folded into a feed with them left out (a
+/// 200 of nothing). The gate reads member_roles once for the member, the bulk
+/// resolver's base a second time; the feed reads `channels` for the
+/// collection, the gate for the same, then for the children.
+#[tokio::test]
+async fn the_collection_feed_is_a_503_when_a_read_past_its_gate_fails() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let child = child_of_collection(&pool, &w, false).await;
+    let _ = channel_message(&pool, child, w.owner).await;
+    let feed = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let (coll, m) = (w.collection, w.member);
+        async move { crate::channel_handlers::get_channel_feed(State(s), Path(coll), Extension(claims(m))).await.into_response() }
+    };
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 1).await;
+    let base = feed(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = crate::fault_injection::faulty_once_pool(&pool, &url, "channels", 2).await;
+    let children = feed(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = faulty_pool(&pool, &url, &["messages"]).await;
+    let messages = feed(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let healthy = json_of(feed(&pool).await).await;
+    drop_world(&pool, &w, &[]).await;
+
+    checks.retry(&base, "GET /channels/:id/feed: the member's base permissions could not be read");
+    checks.retry(&children, "GET /channels/:id/feed: the collection's children could not be read");
+    checks.retry(&messages, "GET /channels/:id/feed: a child's messages could not be read");
+    let kids = healthy["children"].as_array().cloned().unwrap_or_default();
+    check!(
+        checks,
+        kids.len() == 1 && kids[0]["id"].as_i64() == Some(child) && kids[0]["messages"].as_array().map(Vec::len) == Some(1),
+        "control: the feed holds the child and its message, got {healthy}"
+    );
+    checks.done();
+}
+
+async fn channel_exists(pool: &sqlx::PgPool, id: i64) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = $1)").bind(id as i32).fetch_one(pool).await.unwrap()
+}
+
+async fn positions(pool: &sqlx::PgPool, sid: &str) -> Vec<(i32, i32)> {
+    sqlx::query_as("SELECT id, position FROM channels WHERE server_id = $1 ORDER BY id").bind(sid).fetch_all(pool).await.unwrap()
+}
+
+/// DELETE /channels/:id and POST /servers/:id/channels/reorder. Through the
+/// folded base, a failed read of the caller's view made a delete answer the
+/// 409 "would take a channel you cannot see" and a reorder a 200 that had
+/// moved nothing, and the Manage Channels check of both answered its 403.
+/// Each is a 503 now and changes nothing. A manager (Manage Channels through
+/// a role) and the owner; the reads counted are member_roles' (the manager's
+/// roles: the delete gate's resolver, then the Manage Channels check; for a
+/// reorder, that check, then the bulk resolver) and `servers`' (the owner:
+/// the delete gate's join, the Manage Channels check, then the bulk resolver).
+#[tokio::test]
+async fn a_delete_or_a_reorder_whose_view_cannot_be_read_is_a_503_and_changes_nothing() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let manager = staff(&pool, &w, Permissions::MANAGE_CHANNELS).await;
+    let hidden = child_of_collection(&pool, &w, true).await;
+    let reorder = |p: &sqlx::PgPool, who: i64| {
+        let s = app(p);
+        let sid = w.sid.clone();
+        let req = serde_json::from_value(json!({ "channel_ids": [w.collection, w.voice, w.text] })).unwrap();
+        async move { crate::channel_handlers::reorder_channels(State(s), Path(sid), Extension(claims(who)), Json(req)).await.into_response() }
+    };
+    let delete = |p: &sqlx::PgPool, who: i64| {
+        let s = app(p);
+        let coll = w.collection;
+        async move { crate::channel_handlers::delete_channel(State(s), Path(coll), Extension(claims(who))).await.into_response() }
+    };
+    let before = positions(&pool, &w.sid).await;
+
+    let (faulty, schema) = faulty_pool(&pool, &url, &["member_roles"]).await;
+    let reorder_gate = reorder(&faulty, manager).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 1).await;
+    let reorder_view = reorder(&faulty, manager).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let after_faults = positions(&pool, &w.sid).await;
+
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 1).await;
+    let delete_gate = delete(&faulty, manager).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "servers", 2).await;
+    let delete_view = delete(&faulty, w.owner).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let kept = (channel_exists(&pool, w.collection).await, channel_exists(&pool, hidden).await);
+
+    // Controls, on a healthy pool.
+    let reorder_healthy = reorder(&pool, manager).await.status();
+    let after_healthy = positions(&pool, &w.sid).await;
+    let delete_manager = delete(&pool, manager).await.status();
+    let delete_owner = delete(&pool, w.owner).await.status();
+    let gone = (channel_exists(&pool, w.collection).await, channel_exists(&pool, hidden).await);
+    drop_world(&pool, &w, &[manager]).await;
+
+    checks.retry(&reorder_gate, "reorder: the manager's Manage Channels could not be read");
+    checks.retry(&reorder_view, "reorder: the manager's view of the channels could not be read");
+    check_eq!(checks, after_faults, before.clone(), "no channel moved through a fault");
+    checks.retry(&delete_gate, "delete: the manager's Manage Channels could not be read");
+    checks.retry(&delete_view, "delete: the owner's view of what goes along could not be read");
+    check_eq!(checks, kept, (true, true), "nothing was deleted through a fault");
+
+    check_eq!(checks, reorder_healthy, StatusCode::OK, "control: the manager reorders the channels");
+    let at = |rows: &[(i32, i32)], id: i64| rows.iter().find(|r| r.0 as i64 == id).map(|r| r.1);
+    check_eq!(
+        checks,
+        (at(&after_healthy, w.collection), at(&after_healthy, w.voice), at(&after_healthy, w.text)),
+        (Some(0), Some(1), Some(2)),
+        "control: in the order asked for"
+    );
+    check_eq!(checks, delete_manager, StatusCode::CONFLICT, "control: a manager who cannot see a channel inside gets the real 409");
+    check_eq!(checks, delete_owner, StatusCode::NO_CONTENT, "control: the owner deletes the collection");
+    check_eq!(checks, gone, (false, false), "control: and what was in it");
+    checks.done();
+}
+
+/// GET /servers/:id/unread, GET /unread, POST /servers/:id/read and GET
+/// /servers/:id/voice-users. Each checked membership with a failure read as
+/// "not a member" (403), and resolved the channels through the folded base,
+/// so a failure there was a 200 with every channel left out: nothing unread,
+/// the server's bubble off the rail, nothing marked read, nobody in voice.
+/// Their own lists folded the same way (an empty count list, an empty channel
+/// list). Each is a 503 now, and nothing is marked read.
+#[tokio::test]
+async fn the_server_unread_read_and_voice_routes_are_a_503_when_a_lookup_fails() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let _ = channel_message(&pool, w.text, w.owner).await;
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Unread,
+        AllUnread,
+        MarkRead,
+        VoiceUsers,
+    }
+    let call = |p: &sqlx::PgPool, route: Route| {
+        let s = app(p);
+        let (sid, m) = (w.sid.clone(), w.member);
+        let rx = in_voice(&s, m, w.voice);
+        if let Some(mut room) = s.rooms.get_mut(&format!("voice_{}", w.voice)) {
+            room.streamers.push(m);
+        }
+        async move {
+            let r = match route {
+                Route::Unread => crate::server_handlers::get_unread_counts(State(s), Path(sid), Extension(claims(m))).await.into_response(),
+                Route::AllUnread => crate::server_handlers::get_all_unread_counts(State(s), Extension(claims(m))).await.into_response(),
+                Route::MarkRead => crate::server_handlers::mark_server_read(State(s), Path(sid), Extension(claims(m))).await.into_response(),
+                Route::VoiceUsers => crate::server_handlers::get_voice_users(State(s), Path(sid), Extension(claims(m))).await.into_response(),
+            };
+            drop(rx);
+            r
+        }
+    };
+    let read_rows = || {
+        let p = pool.clone();
+        let m = w.member;
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channel_read_state WHERE user_id = $1").bind(m as i32).fetch_one(&p).await.unwrap()
+        }
+    };
+    let all = [Route::Unread, Route::AllUnread, Route::MarkRead, Route::VoiceUsers];
+    let mut faulted = Vec::new();
+    for (table, routes, what) in [
+        ("member_roles", &all[..], "the member's base permissions"),
+        ("server_members", &all[..], "the membership check"),
+        ("channel_read_state", &[Route::Unread, Route::AllUnread][..], "the unread counts"),
+        ("channels", &all[..], "the channel list"),
+    ] {
+        let (faulty, schema) = faulty_pool(&pool, &url, &[table]).await;
+        for &route in routes {
+            faulted.push((format!("{route:?}: {what} ({table})"), call(&faulty, route).await));
+        }
+        drop_faults(&pool, faulty, &schema).await;
+    }
+    let marked_through_faults = read_rows().await;
+
+    let unread = json_of(call(&pool, Route::Unread).await).await;
+    let all_unread = json_of(call(&pool, Route::AllUnread).await).await;
+    let voice = json_of(call(&pool, Route::VoiceUsers).await).await;
+    let marked = call(&pool, Route::MarkRead).await.status();
+    let marked_rows = read_rows().await;
+    drop_world(&pool, &w, &[]).await;
+
+    for (what, resp) in &faulted {
+        checks.retry(resp, &format!("{what} could not be read"));
+    }
+    check_eq!(checks, marked_through_faults, 0, "nothing was marked read through a fault");
+    let text_unread = unread["channels"]
+        .as_array()
+        .and_then(|a| a.iter().find(|c| c["channel_id"].as_i64() == Some(w.text)))
+        .and_then(|c| c["unread_count"].as_i64());
+    check_eq!(checks, text_unread, Some(1), "control: the member has the owner's message unread, got {unread}");
+    let server_unread = all_unread["servers"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["server_id"].as_str() == Some(w.sid.as_str())))
+        .and_then(|s| s["unread_count"].as_i64());
+    check_eq!(checks, server_unread, Some(1), "control: and the rail's bubble for the server says so, got {all_unread}");
+    check!(
+        checks,
+        voice["voice_users"].as_array().is_some_and(|a| a.iter().any(|u| u["user_id"].as_i64() == Some(w.member))),
+        "control: the member is listed in voice, got {voice}"
+    );
+    check_eq!(checks, marked, StatusCode::OK, "control: the member marks the server read");
+    check!(checks, marked_rows > 0, "control: and it is marked read");
+    checks.done();
+}
+
+/// The modes: GET /servers/:id/modes, a mode's channel check (POST
+/// /servers/:id/modes) and Call everyone back. Through the folded base, a
+/// failed read of the caller's view listed a mode with its channels and main
+/// channel left out (and, read again for the switches, every switch hidden),
+/// refused a mode's channels with the 400 "not on this server", and called
+/// nobody back with a 200. A staff member holding Manage Channels and Move
+/// Members; the reads counted are member_roles' (their roles).
+#[tokio::test]
+async fn the_mode_routes_are_a_503_when_the_callers_view_cannot_be_read() {
+    let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+    let mut checks = Checks::default();
+    let w = world(&pool).await;
+    let lead = staff(&pool, &w, Permissions::MANAGE_CHANNELS | Permissions::MOVE_MEMBERS).await;
+    let (other,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 'other', 1) RETURNING id")
+        .bind(&w.sid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (mode,): (i32,) = sqlx::query_as("INSERT INTO server_modes (server_id, name, home_channel_id) VALUES ($1, 'f503', $2) RETURNING id")
+        .bind(&w.sid)
+        .bind(w.voice as i32)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO server_mode_channels (mode_id, channel_id) VALUES ($1, $2)").bind(mode).bind(other).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE servers SET active_mode_id = $1 WHERE id = $2").bind(mode).bind(&w.sid).execute(&pool).await.unwrap();
+
+    let list = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let sid = w.sid.clone();
+        async move { crate::mode_handlers::list_modes(State(s), Path(sid), Extension(claims(lead))).await.into_response() }
+    };
+    let create = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let sid = w.sid.clone();
+        let edit = serde_json::from_value(json!({ "name": "f503-new", "channel_ids": [w.text] })).unwrap();
+        async move { crate::mode_handlers::create_mode(State(s), Path(sid), Extension(claims(lead)), Json(edit)).await.into_response() }
+    };
+    let call_back = |p: &sqlx::PgPool| {
+        let s = app(p);
+        let sid = w.sid.clone();
+        let rx = in_voice(&s, w.member, other as i64);
+        async move {
+            let r = crate::mode_handlers::call_everyone_back(State(s), Path(sid), Extension(claims(lead))).await.into_response();
+            drop(rx);
+            r
+        }
+    };
+    let created = || {
+        let (p, sid) = (pool.clone(), w.sid.clone());
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM server_modes WHERE server_id = $1 AND name = 'f503-new'").bind(sid).fetch_one(&p).await.unwrap()
+        }
+    };
+
+    // The bulk resolver's base is the first read of member_roles in a listing,
+    // the switches the second.
+    let (faulty, schema) = faulty_pool(&pool, &url, &["member_roles"]).await;
+    let list_view = list(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 1).await;
+    let list_switches = list(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    // After Manage Channels (the first read).
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 1).await;
+    let create_view = create(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+    let created_through_fault = created().await;
+    // After Move Members and the main channel's resolution (the first two).
+    let (faulty, schema) = crate::fault_injection::faulty_after_pool(&pool, &url, "member_roles", 2).await;
+    let call_back_view = call_back(&faulty).await;
+    drop_faults(&pool, faulty, &schema).await;
+
+    let listed = json_of(list(&pool).await).await;
+    let called_back = json_of(call_back(&pool).await).await;
+    let create_healthy = create(&pool).await.status();
+    let created_healthy = created().await;
+    let _ = sqlx::query("UPDATE servers SET active_mode_id = NULL WHERE id = $1").bind(&w.sid).execute(&pool).await;
+    drop_world(&pool, &w, &[lead]).await;
+
+    checks.retry(&list_view, "GET /servers/:id/modes: the caller's view of the mode's channels could not be read");
+    checks.retry(&list_switches, "GET /servers/:id/modes: the caller's server permissions (the switches) could not be read");
+    checks.retry(&create_view, "POST /servers/:id/modes: the caller's view of the mode's channels could not be read");
+    check_eq!(checks, created_through_fault, 0, "no mode was created through a fault");
+    checks.retry(&call_back_view, "call everyone back: the caller's view of the mode's rooms could not be read");
+
+    let the_mode = listed["modes"].as_array().and_then(|a| a.iter().find(|m| m["id"].as_i64() == Some(mode as i64))).cloned();
+    check!(
+        checks,
+        the_mode.as_ref().is_some_and(|m| m["channel_ids"] == json!([other]) && m["home_channel_id"].as_i64() == Some(w.voice))
+            && listed["can_call_back"] == json!(true),
+        "control: the mode is listed with its channel and main channel, and Call everyone back offered, got {listed}"
+    );
+    check_eq!(checks, called_back["moved"].as_i64(), Some(1), "control: the member is called back, got {called_back}");
+    check_eq!(checks, create_healthy, StatusCode::CREATED, "control: the mode is created");
+    check_eq!(checks, created_healthy, 1, "control: once");
+    checks.done();
+}

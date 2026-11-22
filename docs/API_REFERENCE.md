@@ -18,9 +18,15 @@ stored or sent, and the client may retry. It is never the 404 or 403 of a real
 could not be made (`src/try_again.rs`). This holds for every route that is
 gated on a channel's permissions (messages, editing a channel and its parent's
 checks, `GET` and `POST /channels/:id/keys` and `GET /channels/:id/member-keys`
-for every lookup they make, the collection feed, overwrites, read state, tasks,
-the SFU token, clips, voice moves and Call everyone back, uploads naming a
-channel), for creating a channel inside a collection, for the personal task
+for every lookup they make, the collection feed and every read past its gate,
+overwrites, read state, tasks, the SFU token, clips, voice moves and Call
+everyone back, uploads naming a channel), for the routes that judge many
+channels at once (`GET /servers/:id/channels` for every lookup it makes, its
+membership check included, `GET /servers/:id/unread`, `GET /unread`,
+`POST /servers/:id/read`, `GET /servers/:id/voice-users`, the channels a delete
+takes along, a reorder, `GET /servers/:id/modes` and a mode's channels), for
+the Manage Channels check of creating, editing, deleting and reordering
+channels and of their overwrites, for creating a channel inside a collection, for the personal task
 lists (Púca Notes) and their items, `GET /task-reminders`, a DM's messages,
 the key routes under Users, `PATCH /keys/public`, `POST /upload`'s storage
 quota and clip-part cap, reactions, reports, slowmode, kick, ban, timeouts,
@@ -29,7 +35,9 @@ custom sounds and role changes (the owner and rank checks), `DELETE /account`
 (the check that a new recovery code re-wraps the history key), and the mail
 routes. A list that could not be read is a `503` too, never an empty `200`:
 a page of messages or of edits, the reminder feed, a channel's wrapped keys
-and its member keys; and so is a value that could not be read, never one made
+and its member keys, a server's channel list (which a failed read of the
+caller's roles used to answer with every channel left out), its unread counts
+and voice users, and a collection's feed; and so is a value that could not be read, never one made
 up (a channel's current epoch served as 0, the answer for a channel with no
 keys yet, which a client answers by minting the first one). A 404 or 403
 still means what it says.

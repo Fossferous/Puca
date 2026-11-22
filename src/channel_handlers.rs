@@ -14,13 +14,10 @@ use std::sync::Arc;
 use crate::auth::Claims;
 use crate::permissions::{
     get_user_channel_permissions, get_user_channels_permissions, get_user_server_permissions,
-    try_user_channel_permissions, ChannelPermAccess, Permissions,
+    try_user_channel_permissions, try_user_has_permission, ChannelPermAccess, Permissions,
 };
 use crate::state::AppState;
 use crate::try_again::{Refusal, COULD_NOT_CHECK};
-
-// Re-export permission helpers from server_handlers for now
-pub use crate::permissions::user_has_permission;
 
 /// Caps for user-supplied channel text (bytes). Names/descriptions are stored
 /// and (for names) fanned out to every online member, so bound them.
@@ -156,6 +153,11 @@ pub async fn list_channels(
         claims.sub
     );
 
+    // Every lookup below that FAILS is the 503 of src/try_again.rs, never an answer: a
+    // failed membership check read as "not a member" (a 403), and a failed read of the
+    // caller's permissions as a list with every channel left out (a 200 of nothing).
+    let retry = || crate::try_again::try_again_shortly(COULD_NOT_CHECK);
+
     // Verify user is member of server (use i32 for PostgreSQL INT4)
     let is_member_result = sqlx::query_as::<_, (i32,)>(
         "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",
@@ -172,7 +174,7 @@ pub async fn list_channels(
         }
         Err(e) => {
             tracing::error!("  Membership check failed: {:?}", e);
-            None
+            return retry();
         }
     };
 
@@ -199,7 +201,7 @@ pub async fn list_channels(
         }
         Err(e) => {
             tracing::error!("  Failed to fetch channels: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list channels").into_response();
+            return retry();
         }
     };
 
@@ -219,7 +221,7 @@ pub async fn list_channels(
         Ok(m) => m,
         Err(e) => {
             tracing::error!("  Failed to resolve channel permissions: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list channels").into_response();
+            return retry();
         }
     };
 
@@ -227,7 +229,7 @@ pub async fn list_channels(
         Ok(m) => m,
         Err(e) => {
             tracing::error!("  Failed to read channel modes: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list channels").into_response();
+            return retry();
         }
     };
 
@@ -300,16 +302,12 @@ pub async fn create_channel(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateChannelRequest>,
 ) -> impl IntoResponse {
-    // Check user has MANAGE_CHANNELS permission
-    if !user_has_permission(
-        &state.pool,
-        &server_id,
-        claims.sub,
-        Permissions::MANAGE_CHANNELS,
-    )
-    .await
-    {
-        return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response();
+    // Check user has MANAGE_CHANNELS permission. A lookup that FAILED is a 503 to retry,
+    // not the 403 of a real "no".
+    match try_user_has_permission(&state.pool, &server_id, claims.sub, Permissions::MANAGE_CHANNELS).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Cap the name before it is stored and fanned out to every online member
@@ -878,19 +876,21 @@ async fn parent_may_hold(
 /// asks first can only name the rows its own list holds. So a channel hidden from the
 /// caller would go without their having been told, and they could not have told anyone.
 /// Fail closed: a resolver error refuses, and so does a channel it did not answer for. An
-/// empty list is a plain delete, of a channel with nothing under it.
+/// empty list is a plain delete, of a channel with nothing under it. A resolver error is
+/// the 503 of src/try_again.rs: the caller's view could not be read, which says nothing
+/// about what goes with the channel (read as "nothing visible" it was the 409 above).
 fn may_delete_along(
     under: &[i64],
     perms: Result<std::collections::HashMap<i64, Permissions>, sqlx::Error>,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<(), Refusal> {
     let perms = perms.map_err(|e| {
         tracing::error!("delete_channel: resolving what goes with it failed: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel")
+        Refusal::TryAgain(COULD_NOT_CHECK)
     })?;
     if under.iter().all(|id| perms.get(id).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL))) {
         return Ok(());
     }
-    Err((
+    Err(Refusal::Is(
         StatusCode::CONFLICT,
         "This collection also holds channels you cannot see, and they would be deleted with it, so nothing was deleted. Your channel list is incomplete: ask someone who can see every channel to delete it.",
     ))
@@ -1057,16 +1057,11 @@ pub async fn reorder_channels(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<ReorderChannelsRequest>,
 ) -> impl IntoResponse {
-    // Check manage channels permission
-    if !user_has_permission(
-        &state.pool,
-        &server_id,
-        claims.sub,
-        Permissions::MANAGE_CHANNELS,
-    )
-    .await
-    {
-        return (StatusCode::FORBIDDEN, "Missing manage channels permission").into_response();
+    // Check manage channels permission. A lookup that FAILED is a 503 to retry, not the 403.
+    match try_user_has_permission(&state.pool, &server_id, claims.sub, Permissions::MANAGE_CHANNELS).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Missing manage channels permission").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Bound the work: this does one DB round-trip per element, so an oversized
@@ -1082,12 +1077,14 @@ pub async fn reorder_channels(
 
     // Only channels the caller can see move: one hidden from them is not theirs to change, and
     // a client's list never holds one (update_channel's rule). Skipped, not refused, so the
-    // answer says nothing about which numbers are channels. Fail closed.
+    // answer says nothing about which numbers are channels. Fail closed, with the 503 of
+    // src/try_again.rs: the caller's view could not be read (read as "sees none of them",
+    // it was a 200 that had moved nothing).
     let seen = match get_user_channels_permissions(&state.pool, &server_id, claims.sub, &payload.channel_ids).await {
         Ok(perms) => perms,
         Err(e) => {
             tracing::error!("reorder_channels: resolving the caller's view failed: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to reorder channels").into_response();
+            return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
         }
     };
     let visible = |id: &i64| seen.get(id).is_some_and(|p| p.has(Permissions::VIEW_CHANNEL));
@@ -1202,18 +1199,26 @@ pub async fn get_channel_feed(
     // 3. Find child channels (capped — the loop below runs one query per child,
     // so an unbounded child count would be an N+1 round-trip amplifier). Text only:
     // a feed is for reading, and a voice room under the collection has its own row.
-    let children: Vec<(i32, String)> = sqlx::query_as(
+    // A read that FAILS here or below is the 503 of src/try_again.rs, never a feed
+    // with a child or its messages left out (a 200 a client shows as "nothing here").
+    let children: Vec<(i32, String)> = match sqlx::query_as(
         "SELECT id, name FROM channels WHERE parent_id = $1 AND type = 0 ORDER BY position ASC LIMIT $2",
     )
     .bind(channel_id)
     .bind(MAX_FEED_CHILDREN as i64)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_channel_feed: children of {channel_id} could not be read: {e:?}");
+            return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     // Children carry their OWN overwrites — a VIEW-denied child must not leak
     // its messages through the parent's feed. One bulk query for all children;
-    // fail closed (deny all) on resolver error.
+    // fail closed on resolver error: nothing is served.
     let child_ids: Vec<i64> = children.iter().map(|(id, _)| *id as i64).collect();
     let child_perms = match get_user_channels_permissions(
         &state.pool,
@@ -1226,7 +1231,7 @@ pub async fn get_channel_feed(
         Ok(m) => m,
         Err(e) => {
             tracing::error!("Failed to resolve feed child permissions: {:?}", e);
-            std::collections::HashMap::new()
+            return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
         }
     };
 
@@ -1244,7 +1249,7 @@ pub async fn get_channel_feed(
             continue;
         }
         // 4. Fetch last 5 messages for each child
-        let messages: Vec<(String, i32, i32, String, Option<String>, String, String)> = sqlx::query_as(
+        let messages: Vec<(String, i32, i32, String, Option<String>, String, String)> = match sqlx::query_as(
             r#"
             SELECT m.id, m.channel_id, m.user_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at
             FROM messages m
@@ -1257,7 +1262,13 @@ pub async fn get_channel_feed(
         .bind(child_id)
         .fetch_all(&state.pool)
         .await
-        .unwrap_or_default();
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("get_channel_feed: messages of {child_id} could not be read: {e:?}");
+                return crate::try_again::try_again_shortly(COULD_NOT_CHECK);
+            }
+        };
 
         let feed_messages: Vec<FeedMessage> = messages
             .into_iter()
@@ -1327,7 +1338,8 @@ async fn require_manage_visible(
         }
         ChannelPermAccess::NotMember => return Err((StatusCode::FORBIDDEN, "Not a member of this server").into()),
     };
-    if !user_has_permission(pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
+    // A failed lookup is the 503 (`?`), not "Missing MANAGE_CHANNELS permission".
+    if !try_user_has_permission(pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await? {
         return Err((StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into());
     }
     Ok(server_id)
@@ -1381,7 +1393,7 @@ async fn require_manage_overwrites(
         ChannelPermAccess::Allowed { server_id, .. } => server_id,
         _ => return Err(refused),
     };
-    if !user_has_permission(&state.pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await {
+    if !try_user_has_permission(&state.pool, &server_id, user_id, Permissions::MANAGE_CHANNELS).await? {
         return Err(refused);
     }
     Ok(OverwriteGate { server_id, sees: false })
@@ -1731,7 +1743,7 @@ mod tests {
     fn a_delete_takes_along_only_what_the_caller_can_see() {
         use std::collections::HashMap;
         let answered = |rows: &[(i64, Permissions)]| Ok(rows.iter().copied().collect::<HashMap<_, _>>());
-        let status = |under: &[i64], perms| may_delete_along(under, perms).map_err(|(s, _)| s);
+        let status = |under: &[i64], perms| may_delete_along(under, perms).map_err(|r| r.status());
 
         assert_eq!(status(&[], answered(&[])), Ok(()), "nothing under it: a plain delete");
         assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::VIEW_CHANNEL)])), Ok(()));
@@ -1739,9 +1751,16 @@ mod tests {
 
         assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL), (2, Permissions::empty())])), Err(StatusCode::CONFLICT));
         assert_eq!(status(&[1, 2], answered(&[(1, Permissions::VIEW_CHANNEL)])), Err(StatusCode::CONFLICT), "no answer is no");
-        assert_eq!(status(&[1], Err(sqlx::Error::PoolTimedOut)), Err(StatusCode::INTERNAL_SERVER_ERROR), "a resolver error refuses");
+        // A resolver error refuses, as a 503 to retry: the caller's view was not read.
+        assert_eq!(
+            may_delete_along(&[1], Err(sqlx::Error::PoolTimedOut)),
+            Err(Refusal::TryAgain(COULD_NOT_CHECK)),
+            "a resolver error refuses with a 503"
+        );
 
-        let (_, sentence) = may_delete_along(&[1], answered(&[])).unwrap_err();
+        let Err(Refusal::Is(_, sentence)) = may_delete_along(&[1], answered(&[])) else {
+            panic!("a channel the caller cannot see is the 409's sentence")
+        };
         assert!(sentence.contains("nothing was deleted") && sentence.contains("ask someone who can see every channel"), "{sentence}");
     }
 
