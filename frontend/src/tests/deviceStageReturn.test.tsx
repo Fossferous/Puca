@@ -222,6 +222,30 @@ describe('minimised to the chat, the stage is a button named for the PC', () => 
         }
     });
 
+    it('Enter held on it brings the stage back and its repeats press nothing over there; a key held on the stage still repeats (CONTROL)', async () => {
+        await mountWith(session({ peerName: 'Office PC' }));
+        await tap(toolbarButton('Chat'));
+        // The press itself: the button takes it (a keydown that activates it),
+        // which jsdom does not turn into a click, so the click stands for it.
+        await tap(wayBack()!);
+        expect(host!.querySelector('.device-stage'), 'the stage is back').toBeTruthy();
+        const enterSent = () => h.sent.filter(s => (s.ev as { t?: string; code?: string }).t === 'key'
+            && (s.ev as { code?: string }).code === 'Enter');
+        const before = enterSent().length;
+        for (let i = 0; i < 5; i++) {
+            const rep = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true, bubbles: true, cancelable: true });
+            await act(async () => { window.dispatchEvent(rep); });
+        }
+        await act(async () => { window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); });
+        expect(enterSent().length - before, 'the held Enter that pressed the button sends nothing, down or up').toBe(0);
+        // CONTROL: Enter pressed and held on the stage goes over, and so do its repeats.
+        await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); });
+        await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true, bubbles: true, cancelable: true })); });
+        await act(async () => { window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); });
+        const downs = enterSent().slice(before).map(s => (s.ev as { down?: boolean }).down);
+        expect(downs, 'a press on the stage, its repeat and its release').toEqual([true, true, false]);
+    });
+
     it('publishes its height for the reservations while it is up, and takes it away when the stage comes back or the session ends', async () => {
         document.documentElement.style.removeProperty('--device-return-h');
         await mountWith(session({ peerName: 'Office PC' }));

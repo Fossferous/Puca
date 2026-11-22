@@ -3801,6 +3801,14 @@ export function DeviceStage() {
             // leave voice to send that combo remotely.
             if (matchesRegisteredHotkey(e)) return;
             if (!isInjectableKey(e.code)) return;
+            // A REPEAT of a key whose press never went over is no press either.
+            // Enter held on "Return to <PC>" brings the stage back on its first
+            // keydown (taken by the button, the stage minimised then), and its
+            // auto-repeats then reached the machine as Enter presses, which can
+            // confirm a dialog over there: a held Enter presses nothing (0.9.869's
+            // review). A key held ON the stage went over at its first keydown,
+            // so its repeats still do; its release is decided above, as ever.
+            if (e.repeat && !heldKeysRef.current.has(e.code)) return;
             e.preventDefault();
             // Track held keys so the blur/hide release-all can free them on
             // the host — alt-tab mid-press otherwise strands the key down.
