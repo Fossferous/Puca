@@ -791,7 +791,11 @@ export function DeviceStage() {
         const stageWasAway = previous !== null && putAway.has(previous);
         const from = session.handoverFrom;
         const fellBack = stageWasAway && olderThanShown.has(session.id);
-        const followOfAway = from !== null && (putAway.has(from) || (stageWasAway && olderThanShown.has(from)));
+        // Any follow while the stage is put away, not only one of a session
+        // older than the one shown: the session it carries on may have ended
+        // and left the list (and `olderThanShown`) before it arrives, up to two
+        // minutes later. A follow is never a connection the person made.
+        const followOfAway = from !== null && (putAway.has(from) || stageWasAway);
         const at = sessions.findIndex(s => s.id === session.id);
         setOlderThanShown(new Set(sessions.slice(0, Math.max(0, at)).map(s => s.id)));
         if (fellBack || followOfAway) {

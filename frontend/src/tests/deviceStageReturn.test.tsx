@@ -235,6 +235,7 @@ describe('minimised to the chat, the stage is a button named for the PC', () => 
         for (let i = 0; i < 5; i++) {
             const rep = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true, bubbles: true, cancelable: true });
             await act(async () => { window.dispatchEvent(rep); });
+            expect(rep.defaultPrevented, 'a dropped repeat still belongs to the stage: no local default runs').toBe(true);
         }
         await act(async () => { window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); });
         expect(enterSent().length - before, 'the held Enter that pressed the button sends nothing, down or up').toBe(0);
@@ -446,6 +447,25 @@ describe('put away is the session\'s own: an older one coming back stays away', 
         await publish([session({ id: 'ds-a3', peerName: 'Office PC (sign-in screen)', handoverFrom: 'ds-a2' })]);
         expect(host!.querySelector('.device-stage'), 'a follow of a session on screen is on screen').toBeTruthy();
         expect(wayBack()).toBeNull();
+    });
+
+    it('a follow of a hidden session that ended before the stage changed is put away too', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        const b = session({ id: 'ds-b', peerName: 'Den laptop' });
+        await mountWith(a);
+        await publish([a, b]);
+        await tap(toolbarButton('Chat'));
+        expect(wayBack()!.textContent!.trim(), 'B put away (the premise)').toBe('Return to Den laptop');
+        // Someone signs in at A: A ends, its follow waits. Then B locks: B ends
+        // and its follow B2 takes the stage (put away, as B was).
+        await publish([b]);
+        const b2 = session({ id: 'ds-b2', peerName: 'Den laptop (sign-in screen)', handoverFrom: 'ds-b' });
+        await publish([b2]);
+        expect(host!.querySelector('.device-stage'), "B2 follows B's put away (the premise)").toBeNull();
+        // A's follow arrives last, when A has long left the list.
+        await publish([b2, session({ id: 'ds-a2', peerName: 'Office PC', handoverFrom: 'ds-a' })]);
+        expect(host!.querySelector('.device-stage'), "A's follow does not draw over the chat").toBeNull();
+        expect(await keyInChat(), 'and nothing goes to any PC').toEqual([]);
     });
 
     it('CONTROL: a follow of a session that was on screen opens on screen', async () => {
