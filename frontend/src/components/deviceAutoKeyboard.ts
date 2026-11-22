@@ -362,6 +362,19 @@ export function hideMayGoUnheard(caret: CaretState | null): boolean {
  *  - the caret's surface changing (a monitor switch: the record is the
  *    tracking's, and tracking starts again). A report from a surface other
  *    than the close caret's is not compared with its line, and not held;
+ *  - A CARET ANOTHER TIER MEASURES (`src`: win32, msaa, uia) than the one at
+ *    the close: that is another program's text box, whatever row it is on.
+ *    The line is only a screen row, and maximised windows put their text on
+ *    the same rows: closed over a browser's address bar (Chromium's MSAA
+ *    caret), a tap into a classic program's text box on that row (a Win32
+ *    caret) after its taskbar button was held for good, on the line it was
+ *    closed on (review of 0.9.867). One program's text box is measured by
+ *    one tier while it has the focus (puca-input's caret.rs: tier 1 owns a
+ *    window it has answered for, and a held caret keeps the tier that
+ *    measured it), so this costs a hold nothing it was meant for. Two
+ *    windows of programs measured the same way (two maximised Chromium
+ *    windows' address bars) still look like one text box: the caret frame
+ *    names no window, and only the host could say;
  *  - for a close from a fall of the IME, the app leaving the screen or
  *    coming back, the window's focus going or coming, or the screen turning,
  *    within IME_FALL_LIFECYCLE_MS after it (imeCloseTakenBack): the IME went
@@ -395,6 +408,9 @@ export function heldByManualClose(input: {
     if (!at || !isMeasuredCaret(at)) return true;
     if ((at.surf !== null && report.surf !== null && at.surf !== report.surf)
         || (at.mon !== null && report.mon !== null && at.mon !== report.mon)) return false;
+    // Another tier, another program's text box (both are measured carets, so
+    // both name one).
+    if (at.src !== report.src) return false;
     // "On the line of the caret at the close": the press's own tolerance,
     // with the new caret's centre standing in for the finger.
     return pressOnCaretLine({ x: report.x, y: report.y + report.h / 2 }, at, surface);

@@ -2329,7 +2329,8 @@ export function DeviceStage() {
      *  (heldByManualClose), with the caret known then: it holds on that
      *  caret's line. Nothing expires it (only an older host's Chromium caret
      *  is held for 5 s at most: hideMayGoUnheard): dropped when a tap moves
-     *  the caret to another line (the sink below raises), when the keyboard
+     *  the caret to another line or into a text box another tier measures
+     *  (the sink below raises), when the keyboard
      *  comes up (asked for, or for any reason), when a text box takes the
      *  focus (textBoxTookFocus, in the tracking subscription below), on a
      *  surface change (the tracking cleanup below), and, for Back's, when the
@@ -2608,9 +2609,10 @@ export function DeviceStage() {
             // THE USER'S CLOSE OUTRANKS THE TAP on the line it was closed
             // over: a caret the tap moved along it is the interaction the
             // close was FOR (read what it covered, tap along it again). A
-            // caret moved to another line goes through and ends the close: a
-            // tap straight into another text box looks just like that. The
-            // press is spent either way.
+            // caret moved to another line, or to one another tier measures
+            // (another program's text box on that row), goes through and ends
+            // the close: a tap straight into another text box looks just like
+            // that. The press is spent either way.
             if (heldByManualClose({
                 close: manualKbCloseRef.current, verdict, before, report: r, now: Date.now(),
                 surface: surfaceSizeRef.current,
