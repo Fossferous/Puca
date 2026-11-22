@@ -511,8 +511,12 @@ What Púca does about it, since 0.9.834:
 - **Let go means gone from the disk, within seconds.** A decrypted file is registered by a
   small worker that is stopped when the file is let go, and the app then makes the page
   collect its garbage, so the engine deletes the file within about two seconds instead of
-  minutes later (`frontend/src/api/plaintextHost.ts`). That needs every blob written into
-  the same file to go too, so nothing the app keeps for the whole session is a blob:
+  minutes later (`frontend/src/api/plaintextHost.ts`). Small files share a worker; one let go
+  while others in its worker are still shown is not stopped with it, so that worker is made
+  to collect its garbage at the same moment as the page (its own copy of the file is garbage
+  it would otherwise keep, and the file with it, for as long as the others were shown).
+  That needs every blob written into the same file to go too, so nothing the app keeps for
+  the whole session is a blob:
   avatars, server icons and custom emoji are `data:` URLs (`frontend/src/api/authedMedia.ts`;
   as blobs, an avatar written into the same file as two pictures kept their plaintext on
   disk after they were let go, on screen, in the background and after a kill). Both are

@@ -15,9 +15,10 @@
  * lets it go when it stops; while any hold is out the same URL is shared, so
  * a picture on a card and in the editor is decrypted once. The URL is
  * registered by a plaintext host worker (api/plaintextHost.ts), never by the
- * page: when the last hold goes, the worker goes, the page is made to collect
- * its garbage, and any file Chromium paged the plaintext to (blob_storage) is
- * gone within seconds. Until 2026-11-22 a parked preview was a page Blob
+ * page: when the last hold goes, the worker goes (or, a small picture in a
+ * worker shared with others still shown, it is made to collect its garbage),
+ * the page is made to collect its own, and any file Chromium paged the
+ * plaintext to (blob_storage) is gone within seconds. Until 2026-11-22 a parked preview was a page Blob
  * cached until the picture uploaded or the account signed out: decrypted the
  * whole time a note waited for a connection, shown or not, and on disk under
  * memory pressure (e2e/plaintext-disk-real-browser.mjs measures both).

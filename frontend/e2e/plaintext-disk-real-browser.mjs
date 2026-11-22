@@ -58,6 +58,15 @@
 //      thumbnail as URL.createObjectURL(file); the clip as a page Blob whose
 //      URL is revoked 30 s later) are on disk under pressure, the desktop
 //      clip too, and still there after the same moment.
+//  11. SMALL files (under BIG_LEASE_BYTES, so in a host worker SHARED with
+//      others) let go of while three pictures in that same worker are still
+//      shown: two parked Notes pictures whose cards close, then two pasted
+//      pictures whose chips go, each group paged into a file of its own
+//      (checked: the premise). Each is gone from the disk within 3.5 s while
+//      the three shown stay (the worker is made to collect its garbage with
+//      the page, api/plaintextHost.ts); NEGATIVE CONTROL, in a browser of its
+//      own: with that worker's `collect` a no-op, as it was, all four are
+//      still on disk at the same moments, and go only with the worker.
 //
 // Each numbered group that needs memory pressure runs in a browser of its
 // own, all at once: Chromium pages blobs out on a simulated pressure event
@@ -70,7 +79,10 @@
 //
 //   cd frontend && node e2e/plaintext-disk-real-browser.mjs
 //
-// CHANNEL=msedge by default (an H.264 decoder for the fixture).
+// CHANNEL=msedge by default (an H.264 decoder for the fixture). ONLY=<name>[,<name>]
+// runs just those groups (the names given to `only(...)` below: release, sign-out,
+// avatars, avatars-as-blobs, previews-and-clip, previews-and-clip-as-they-were,
+// small-beside-shown, small-beside-shown-as-it-was).
 import { chromium } from '@playwright/test';
 import { build } from 'esbuild';
 import http from 'node:http';
@@ -114,6 +126,17 @@ const mainJs = await bundle({
     format: 'iife',
 });
 const plaintextWorkerJs = await bundle({ entryPoints: [path.join(src, 'api', 'plaintextHost.worker.ts')], format: 'esm' });
+/** 11's NEGATIVE CONTROL: the same worker with `collect` doing nothing, as it was before it had one. */
+const plaintextNoCollectWorkerJs = await bundle({
+    entryPoints: [path.join(src, 'api', 'plaintextHost.worker.ts')], format: 'esm',
+    plugins: [{
+        name: 'no-collect',
+        setup(b) {
+            b.onResolve({ filter: /^\.\/collectGarbage$/ }, (a) => ({ path: a.path, namespace: 'no-collect' }));
+            b.onLoad({ filter: /.*/, namespace: 'no-collect' }, () => ({ loader: 'ts', contents: 'export const nudgeCollection = () => {};' }));
+        },
+    }],
+});
 /** 9 and 10: the real modules with the app's own config (the API at this rig's origin), built once it listens. */
 let extraJs = '';
 const writerWorkerJs = await bundle({ entryPoints: [path.join(src, 'api', 'cipherWriter.worker.ts')], format: 'esm' });
@@ -147,6 +170,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/main.js') return send('text/javascript', mainJs);
     if (req.url === '/extra.js') return send('text/javascript', extraJs);
     if (req.url === '/w/plaintext.js') return send('text/javascript', plaintextWorkerJs);
+    if (req.url === '/w/plaintext-no-collect.js') return send('text/javascript', plaintextNoCollectWorkerJs);
     if (req.url === '/w/writer.js') return send('text/javascript', writerWorkerJs);
     if (req.url === '/fixture.mp4') return send('video/mp4', fixture);
     // /files/<id>, as the app's server answers it: authenticated, never cached.
@@ -173,8 +197,8 @@ extraJs = await bundle({
             import { downloadClipBytes } from './api/clips/clipPlayback';
             import { saveAttachment } from './api/saveAttachment';
             import { sealPart, newClipSecrets } from './api/clips/clipCrypto';
-            import { __setPlaintextWorkerFactory, plaintextHostStats } from './api/plaintextHost';
-            window.__xc = { parked, oldParked, parkedHref, createComposerPreviews, saveClip, clipFileName, DOWNLOAD_HANDOFF_MS, downloadClipBytes, saveAttachment, sealPart, newClipSecrets, __setPlaintextWorkerFactory, plaintextHostStats };`,
+            import { __setPlaintextWorkerFactory, plaintextHostStats, hostPlaintext } from './api/plaintextHost';
+            window.__xc = { parked, oldParked, parkedHref, createComposerPreviews, saveClip, clipFileName, DOWNLOAD_HANDOFF_MS, downloadClipBytes, saveAttachment, sealPart, newClipSecrets, __setPlaintextWorkerFactory, plaintextHostStats, hostPlaintext };`,
         resolveDir: src, loader: 'ts', sourcefile: 'extra.ts',
     },
     define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env': JSON.stringify({ VITE_API_URL: origin }), __APP_VERSION__: '"0"', __RC_ENABLED__: 'true' },
@@ -204,6 +228,24 @@ function onDisk(dir, marks) {
     };
     walk(dir);
     return [...found];
+}
+
+/** Which of `marks` each file under `dir` holds, file by file (sorted): what Chromium paged together. */
+function filesOnDisk(dir, marks) {
+    const files = [];
+    const walk = (d) => {
+        if (!fs.existsSync(d)) return;
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            const p = path.join(d, e.name);
+            if (e.isDirectory()) { walk(p); continue; }
+            let buf;
+            try { buf = fs.readFileSync(p); } catch { continue; }
+            const has = marks.filter((m) => buf.indexOf(Buffer.from(m)) >= 0);
+            if (has.length) files.push(has);
+        }
+    };
+    walk(dir);
+    return files.sort((x, y) => String(x).localeCompare(String(y)));
 }
 
 const CHANNEL = process.env.CHANNEL || 'msedge';
@@ -424,9 +466,129 @@ async function previewsAndClip({ page, ready, pressure, at, since, BS }, asTheyW
     return { M, paged, left, has, shown, got, shell, stats };
 }
 
+/**
+ * 11: SMALL files let go of while others in their shared host worker are still
+ * shown. Three small decrypted pictures stay on screen the whole time; two
+ * parked Notes pictures and two pictures pasted into the message box, each
+ * under BIG_LEASE_BYTES, go into the same shared host worker
+ * (api/plaintextHost.ts). Made in that order, each let settle before the next,
+ * so Chromium pages them out in that order (least recently used first, a file
+ * of at least 4 MiB at a time under pressure): the three shown, the two parked
+ * and the two pasted, each group of 4.5 MiB in a file of its own. The checks
+ * read which file each went into (a file is deleted only once every blob in it
+ * is gone, so one shared with something still held is said, not counted), and
+ * need at least one file of parked pictures only and one of pasted ones only.
+ * Then the parked pictures' cards close (the page nudges nothing else then),
+ * and later both chips go, with the three still shown throughout. Which of
+ * them is on disk 3.5 s after each.
+ * `worker` is the host worker's script: the real one, or (the NEGATIVE
+ * CONTROL) one whose `collect` does nothing, as the worker was before it had
+ * one.
+ */
+async function smallBesideShown({ page, ready, pressure, BS }, worker) {
+    await ready();
+    await page.evaluate(async (worker) => {
+        await new Promise((r) => { const s = document.createElement('script'); s.src = '/extra.js'; s.onload = r; document.head.append(s); });
+        window.__xc.__setPlaintextWorkerFactory(() => new Worker(worker, { type: 'module' }));
+    }, worker);
+    const M = {
+        shown: ['PUCA-XB-SHOWN-0-', 'PUCA-XB-SHOWN-1-', 'PUCA-XB-SHOWN-2-'],
+        parked: ['PUCA-XB-SMALL-PARKED-A-', 'PUCA-XB-SMALL-PARKED-B-'],
+        pasted: ['PUCA-XB-SMALL-PASTE-A-', 'PUCA-XB-SMALL-PASTE-B-'],
+    };
+    const shown = await page.evaluate(async (M) => {
+        const xc = window.__xc;
+        // Each blob reaches the browser process before the next is made, so they are paged in that order.
+        const settle = () => new Promise((r) => setTimeout(r, 300));
+        window.__shown = [];
+        // (this bundle's own plaintextHost, the one the previews below use: one module, one shared worker)
+        for (const m of M.shown) { window.__shown.push(await xc.hostPlaintext(window.__mark(m, 1.5).buffer, 'image/jpeg')); await settle(); }
+        // Parked records as notesBlobs.ts keeps them (see previewsAndClip).
+        const recs = new Map();
+        for (const [i, m] of M.parked.entries()) {
+            const keyBytes = crypto.getRandomValues(new Uint8Array(32));
+            const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+            const nonce = crypto.getRandomValues(new Uint8Array(12));
+            const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, window.__mark(m, i ? 2.5 : 2)));
+            const sealed = new Uint8Array(12 + ct.length); sealed.set(nonce); sealed.set(ct, 12);
+            let b = ''; for (let j = 0; j < sealed.length; j += 0x8000) b += String.fromCharCode(...sealed.subarray(j, j + 0x8000));
+            recs.set(`pk-small-${i}`, { data: btoa(b), key: btoa(String.fromCharCode(...keyBytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), mime: 'image/jpeg' });
+        }
+        xc.parked.setParkedReader(async (id) => recs.get(id) ?? null);
+        window.__parkedHolds = [];
+        for (const id of recs.keys()) { window.__parkedHolds.push(await xc.parked.acquireParkedUrl(xc.parkedHref(id, 'image/jpeg'))); await settle(); }
+        window.__files = new Map();
+        for (const [i, m] of M.pasted.entries()) { window.__files.set(`att_${i}`, new File([window.__mark(m, i ? 2.5 : 2)], `${i}.png`, { type: 'image/png' })); await settle(); }
+        const thumbs = new Map();
+        await new Promise((r) => {
+            window.__previews = xc.createComposerPreviews((id, url) => { thumbs.set(id, url); if (thumbs.size === 2) r(); });
+            for (const [id, f] of window.__files) window.__previews.show(id, f);
+        });
+        return { workers: xc.plaintextHostStats().workers, urls: [...window.__parkedHolds.map((h) => h?.url), ...thumbs.values()].map((u) => String(u).slice(0, 5)) };
+    }, M);
+    await pressure();
+    const all = [...M.shown, ...M.parked, ...M.pasted];
+    const paged = onDisk(BS, all);
+    const files = filesOnDisk(BS, all);
+    // The parked pictures' cards close: nothing but the parked previews lets go.
+    await page.evaluate(() => { for (const h of window.__parkedHolds) h.release(); window.__parkedHolds = null; });
+    await sleep(3500);
+    const afterParked = onDisk(BS, all);
+    // Past the page's at-most-one-nudge-in-5-s, so the chips' nudge is not held back by the last one.
+    await sleep(3000);
+    await page.evaluate(() => { window.__files.clear(); window.__previews.drop('att_0'); window.__previews.drop('att_1'); });
+    await sleep(3500);
+    const afterPasted = onDisk(BS, all);
+    const stats = await page.evaluate(() => window.__xc.plaintextHostStats());
+    await page.evaluate(() => { for (const l of window.__shown) l.release(); });
+    await sleep(3500);
+    return { M, shown, paged, files, afterParked, afterPasted, stats, end: onDisk(BS, all) };
+}
+
+/**
+ * 11's files, read: the marks in files of parked pictures only, of pasted ones
+ * only, of either (all let go of by the end), and of the shown ones only; and
+ * whether the premise holds (no let-go picture in a file with a shown one, and
+ * at least one file of each let-go group alone).
+ */
+function byFile(r) {
+    const only = (f, set) => f.every((m) => set.includes(m));
+    const letGo = [...r.M.parked, ...r.M.pasted];
+    const pick = (set) => r.files.filter((f) => only(f, set)).flat();
+    const parkedOnly = pick(r.M.parked), pastedOnly = pick(r.M.pasted);
+    const mixedWithShown = r.files.some((f) => f.some((m) => r.M.shown.includes(m)) && f.some((m) => letGo.includes(m)));
+    return {
+        parkedOnly, pastedOnly, letGoOnly: pick(letGo), shownOnly: pick(r.M.shown),
+        premise: !mixedWithShown && parkedOnly.length > 0 && pastedOnly.length > 0,
+    };
+}
+
+const ONLY = (process.env.ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
+const only = (name, run) => (ONLY.length === 0 || ONLY.includes(name) ? scenario(name, run) : Promise.resolve());
+
 await Promise.all([
+    // 11: small ones let go of beside others still shown.
+    only('small-beside-shown', async (s) => {
+        const r = await smallBesideShown(s, '/w/plaintext.js');
+        const g = byFile(r);
+        console.log('INFO', 'paged into files (each list one file):', JSON.stringify(r.files));
+        ck(g.premise, 'CONTROL SETUP: nothing let go of shares a file with what stays shown, and a file holds parked pictures only, another pasted ones only', JSON.stringify(r.files));
+        ck(r.shown.workers === 1 && r.shown.urls.join() === 'blob:,blob:,blob:,blob:', 'CONTROL SETUP: three pictures shown, two parked ones and two pasted ones, all in ONE shared host worker', JSON.stringify(r.shown));
+        ck(g.parkedOnly.every((m) => !r.afterParked.includes(m)), 'parked pictures whose cards closed, beside pictures still shown in their worker: gone from the disk within 3.5 s', JSON.stringify(r.afterParked));
+        ck(g.pastedOnly.every((m) => r.afterParked.includes(m)), 'CONTROL: the pasted ones, their chips still there, are still on disk then', JSON.stringify(r.afterParked));
+        ck(g.letGoOnly.every((m) => !r.afterPasted.includes(m)), 'pasted pictures whose chips went, beside pictures still shown in their worker: gone from the disk within 3.5 s', JSON.stringify(r.afterPasted));
+        ck(g.shownOnly.length > 0 && g.shownOnly.every((m) => r.afterPasted.includes(m)) && r.stats.workers === 1, 'CONTROL: the three still shown are still on disk, in their worker', JSON.stringify(r.stats));
+        ck(r.end.length === 0, 'and once they are let go of too, nothing is left', JSON.stringify(r.end));
+    }),
+    only('small-beside-shown-as-it-was', async (s) => {
+        const r = await smallBesideShown(s, '/w/plaintext-no-collect.js');
+        const g = byFile(r);
+        ck(g.premise, 'CONTROL SETUP: the same files as above', JSON.stringify(r.files));
+        ck(g.parkedOnly.every((m) => r.afterParked.includes(m)) && g.letGoOnly.every((m) => r.afterPasted.includes(m)), 'NEGATIVE CONTROL: with a host worker that does not collect its garbage (as it was), the parked and pasted pictures let go of beside others still shown are still on disk at the same moments', JSON.stringify([r.afterParked, r.afterPasted]));
+        ck(r.end.length === 0, 'CONTROL: once the worker goes (the last of them let go of), nothing is left', JSON.stringify(r.end));
+    }),
     // 1-6.
-    scenario('release', async ({ page, ready, pressure, BS, FSDIR }) => {
+    only('release', async ({ page, ready, pressure, BS, FSDIR }) => {
         // 6 (setup): a directory an earlier page left, with no lock on it.
         await page.evaluate(async () => {
             const root = await navigator.storage.getDirectory();
@@ -505,7 +667,7 @@ await Promise.all([
     }),
 
     // 7: sign-out takes plaintext that is ON DISK off it.
-    scenario('sign-out', async ({ page, ready, pressure, BS, FSDIR }) => {
+    only('sign-out', async ({ page, ready, pressure, BS, FSDIR }) => {
         await ready();
         await page.evaluate(async () => {
             window.__last = await window.__xb.hostPlaintext(window.__mark('PUCA-XB-SIGNOUT-PLAIN', 24).buffer, 'video/mp4');
@@ -525,7 +687,7 @@ await Promise.all([
     }),
 
     // 8: avatars, emoji and server icons never keep a released picture on disk.
-    scenario('avatars', async (s) => {
+    only('avatars', async (s) => {
         await s.ready();
         const img = await s.page.evaluate(async () => {
             const url = await window.__xb.fetchFileUrl('av-real');
@@ -543,7 +705,7 @@ await Promise.all([
         ck(r.AV.every((m) => !r.paged.includes(m)), 'the avatars are not in blob_storage, even under pressure');
         ck(r.left.length === 0, 'released: no picture is left on disk beside the avatars', JSON.stringify(r.left));
     }),
-    scenario('avatars-as-blobs', async (s) => {
+    only('avatars-as-blobs', async (s) => {
         await s.ready();
         const r = await picturesBesideAvatars(s, 'pageBlobs');
         ck(r.AV.every((m) => r.paged.includes(m)), 'CONTROL SETUP: avatars kept as page blobs are on disk under pressure', JSON.stringify(r.paged));
@@ -551,7 +713,7 @@ await Promise.all([
     }),
 
     // 9: what the app makes besides a fetched attachment: let go means gone.
-    scenario('previews-and-clip', async (s) => {
+    only('previews-and-clip', async (s) => {
         const r = await previewsAndClip(s, false);
         ck(r.shown.parkedUrl === 'blob:' && r.shown.thumbScheme === 'blob:' && r.shown.thumbW === 32, "a parked picture and the message box's thumbnails get blob: URLs that decode", JSON.stringify(r.shown));
         ck(r.has(r.paged, r.M.parked) && r.has(r.paged, r.M.paste) && r.has(r.paged, r.M.webClip), 'POSITIVE CONTROL: shown (a browser download in its handoff), under memory pressure, each is on disk', JSON.stringify(r.paged));
@@ -564,7 +726,7 @@ await Promise.all([
         ck(r.stats.workers === 0 && r.stats.parked.entries === 0, 'no host worker is left, and no parked preview', JSON.stringify(r.stats));
     }),
     // 10: the same, the way it was done before.
-    scenario('previews-and-clip-as-they-were', async (s) => {
+    only('previews-and-clip-as-they-were', async (s) => {
         const r = await previewsAndClip(s, true);
         ck(r.has(r.paged, r.M.parked) && r.has(r.paged, r.M.paste) && r.has(r.paged, r.M.webClip), 'CONTROL SETUP: done the old way, each is on disk under pressure', JSON.stringify(r.paged));
         ck(r.has(r.paged, r.M.deskClip), 'CONTROL: the old desktop Download made a page Blob of the clip, on disk under pressure', JSON.stringify(r.paged));

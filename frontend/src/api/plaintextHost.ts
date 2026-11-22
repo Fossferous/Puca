@@ -39,7 +39,13 @@
  * share one, a few at a time, so a channel of pictures does not start a
  * worker per picture (an idle worker is about 0.75 MB in the WebView;
  * started in parallel, 20 took 171 ms on the emulator). A small one taken
- * back while others in its worker are still shown lives until they go too.
+ * back while others in its worker are still shown cannot go with the worker:
+ * its URL is revoked there, but the worker's own copy of the Blob object (the
+ * one the page's message handed it) is garbage it does not collect while it
+ * idles, which kept the file on disk for as long as the others were shown
+ * (measured). So the next collection the page makes of its own also tells
+ * every such worker to collect its garbage (`collect`, the same nudge, in the
+ * worker's own V8 isolate): gone within seconds like the rest.
  *
  * The page makes the Blob, not the worker, for memory: bytes that ever pass
  * through a worker stay resident in it until it is terminated (measured in
@@ -58,40 +64,13 @@ export interface PlainLease {
     release(): void;
 }
 
-/**
- * Give an ArrayBuffer's memory back NOW: detach it (the ES2024
- * `transfer(0)`), which the engine frees at once, rather than whenever the
- * page next collects garbage (measured in the Android WebView: four 22 MB
- * buffers detached this way, -88 MB of renderer memory with no GC; merely
- * dropped, -10 MB). Only for a buffer nothing else will read. A no-op where
- * the engine has no `transfer`, or on a buffer already detached.
- */
-export function freeNow(buf: ArrayBuffer | null | undefined): void {
-    try {
-        (buf as (ArrayBuffer & { transfer?: (n: number) => ArrayBuffer }) | null | undefined)?.transfer?.(0);
-    } catch { /* already detached */ }
-}
+import { freeNow, nudgeCollection } from './collectGarbage';
 
-/**
- * Make the page collect garbage soon. There is no API for it; what V8 does
- * is start a full collection when the memory held outside its heap grows by
- * more than its soft limit (64 MB) since the last one, so this asks for
- * 6 x 16 MB of buffers, touching one byte each, and frees them at once
- * (freeNow). Measured: 80 MB this way, every page-made Blob garbage-
- * collected within 2 s in headless Edge and in the Android WebView; 48 MB,
- * none; 9-13 ms of the main thread on the emulator, a few pages of memory.
- */
-function defaultNudge(): void {
-    const held: ArrayBuffer[] = [];
-    try {
-        for (let i = 0; i < 6; i++) {
-            const a = new ArrayBuffer(16 * 1024 * 1024);
-            new Uint8Array(a)[0] = 1;
-            held.push(a);
-        }
-    } catch { /* address space is short (a 32-bit phone): what we got */ }
-    for (const a of held) freeNow(a);
-}
+// Where it always was, for the modules that import it from here.
+export { freeNow };
+
+/** Make the page collect garbage soon (api/collectGarbage.ts says how). */
+const defaultNudge = nudgeCollection;
 
 /** After the last release in a burst... */
 const NUDGE_AFTER_MS = 1000;
@@ -131,6 +110,12 @@ function scheduleCollection(): void {
         if (!hidden && wait > 0) { nudgeTimer = setTimeout(run, wait); return; }
         lastNudge = Date.now();
         try { nudge(); } catch { /* best effort */ }
+        // A shared worker that let go of a file and lives on: it collects too.
+        for (const h of hosts) {
+            if (h.dead || !h.collect) continue;
+            h.collect = false;
+            try { h.worker.postMessage({ op: 'collect' }); } catch { /* gone */ }
+        }
     }, NUDGE_AFTER_MS);
 }
 
@@ -154,6 +139,8 @@ interface Host {
     shared: boolean;
     pending: Map<number, { resolve: (url: string) => void; reject: (e: Error) => void }>;
     dead: boolean;
+    /** It let go of a file and lives on: ask it to collect its garbage at the next nudge. */
+    collect: boolean;
 }
 
 const defaultFactory = (): WorkerLike | null =>
@@ -196,7 +183,7 @@ function startHost(shared: boolean): Host | null {
     let ready!: () => void;
     let failed!: (e: Error) => void;
     const h: Host = {
-        worker: w, live: 0, accepted: 0, acceptedBytes: 0, shared, pending: new Map(), dead: false,
+        worker: w, live: 0, accepted: 0, acceptedBytes: 0, shared, pending: new Map(), dead: false, collect: false,
         ready: new Promise<void>((res, rej) => { ready = res; failed = rej; }),
     };
     h.ready.catch(() => { /* handled by whoever awaits it */ });
@@ -315,9 +302,13 @@ function workerLease(h: Host, id: number, url: string, bytes: number): PlainLeas
             liveBytes -= bytes;
             h.live = Math.max(0, h.live - 1);
             if (h.dead) return;
-            // Its URL stops resolving now; its bytes go when the worker does.
+            // Its URL stops resolving now; its bytes go when the worker does,
+            // or, while others in it are still shown, when the worker and the
+            // page next collect their garbage (both made to, a moment later).
             try { h.worker.postMessage({ op: 'drop', id }); } catch { /* gone */ }
-            if (h.live === 0) retire(h);
+            if (h.live === 0) { retire(h); return; }
+            h.collect = true;
+            scheduleCollection();
         },
     };
 }
