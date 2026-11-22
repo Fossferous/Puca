@@ -30,9 +30,10 @@ starts ticked in the desktop and Android apps and unticked in a browser, and
 the device remembers your answer (Púca Notes shares it). **Sign out** ends
 either kind at once, and so do **Sign out of every device** and a password
 change. Signing out also takes your notifications away (in Windows'
-notification centre, on an Android phone and in the browser), and if your
-session ran out instead and somebody else signs in on that device, they go
-when that person signs in.
+notification centre, on an Android phone and in the browser), and so do
+deleting your account and Settings > Advanced > **Clear Local Storage &
+Reload**; if your session ran out instead and somebody else signs in on that
+device, they go when that person signs in.
 
 ### Forgot your password?
 On the sign-in screen, click **Forgot your password? Use your recovery code**:

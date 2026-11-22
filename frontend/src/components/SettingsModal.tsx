@@ -33,7 +33,7 @@ import { isTouchDevice, pointInSelection, screenShareOffered, settingsSections, 
 import { nativeScreenShareAvailable } from '../api/nativeScreenShare';
 import { isIosDevice } from './shareAvailability';
 
-import { sendTestNotification } from '../api/desktopNotify';
+import { sendTestNotification, wipeLocalStorageTakingNotificationsAway } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
     mobileBatteryStatus, mobileNotificationStatus, openMobileNotificationSettings,
@@ -458,7 +458,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         try {
             await deleteAccount(username, deletePassword);
             // Every session is dead server-side; scrub this device and restart.
-            localStorage.clear();
+            // Not a sign-out: the account's notifications go with the wipe
+            // (api/desktopNotify.ts), or the next account to sign in has them.
+            await wipeLocalStorageTakingNotificationsAway();
             window.location.reload();
         } catch (err) {
             setDeleteError(err instanceof Error ? err.message : 'Failed to delete account.');
@@ -3453,7 +3455,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 + 'substituted key would not be flagged.\n\nContinue?',
                                             );
                                             if (!ok) return;
-                                            localStorage.clear();
+                                            await wipeLocalStorageTakingNotificationsAway();
                                             window.location.reload();
                                         }}
                                     >

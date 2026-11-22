@@ -562,6 +562,16 @@ signs in instead:
   away first, at start or on the form (`notificationsAreFor` in
   [`frontend/src/api/desktopNotify.ts`](../frontend/src/api/desktopNotify.ts)).
 
+**Deleting the account**, and Settings' **Clear Local Storage & Reload**, are not
+sign-outs: they wipe everything the app stored on the device and reload, which empties its
+memory but not what the operating system shows. So the notifications are taken away first
+(`wipeLocalStorageTakingNotificationsAway` in `desktopNotify.ts`), and the wipe waits until
+the desktop shell, Android and the push worker have each answered, because a reload drops a
+call still on its way. One that has not answered within 1.5 seconds does not hold the wipe
+up; the wipe then keeps the record of whose notifications they are (a user id), so the next
+account to sign in takes them away. Before, a deleted account's notifications stayed, and
+the wipe took that record with everything else, so nothing ever took them away.
+
 And a recovery code is shown only to the account it was made for: a registration whose
 automatic sign-in failed used to leave its code for whoever signed in next on that form. A
 sign-in as somebody else does not take away one bound to its account, since nobody else is
@@ -575,9 +585,10 @@ the trust-on-first-use pins of other people's keys (`verified_key_*`, `control_p
 which a sign-out must not reset, and this device's own settings and its **Stay signed
 in** answer, which hold no account.
 `frontend/src/tests/signOutForgetsReadContent.test.ts`,
-`signOutTakesNotificationsAway.test.ts`, `signInAsSomebodyElse.test.tsx` and
-`signInAfterExpiryForgetsLastAccount.test.tsx` fill each of these and sign out, or let the
-session run out and sign in as somebody else, through the real path.
+`signOutTakesNotificationsAway.test.ts`, `signInAsSomebodyElse.test.tsx`,
+`signInAfterExpiryForgetsLastAccount.test.tsx` and
+`deleteAccountTakesNotificationsAway.test.tsx` fill each of these and sign out, let the
+session run out and sign in as somebody else, or delete the account, through the real path.
 
 ### The honest limit
 
@@ -1456,7 +1467,9 @@ DM session key and signature are nulled, so an honest server stops serving them 
 database copy taken afterwards holds nothing to replay; the SRP salt and verifier are replaced with fresh RANDOM bytes
 (not zeroes — a zero verifier is forgeable); `deleted_at` is set and
 `token_version` is bumped, which revokes every outstanding JWT. Every live
-socket for the account is hung up after the commit.
+socket for the account is hung up after the commit. On the device you delete it from,
+the app takes the account's notifications away and wipes what it stored there (*What a
+sign-out takes away from the running app*, above).
 
 **Deleted outright.** Push/device tokens, the web app's push subscriptions
 (each browser's push address and the mutes mirrored with it), notification preferences, friends,

@@ -12,6 +12,8 @@
   they were shown your clip approval request and your unread counts at once, a tap on one of
   your Steam Deck notifications opened your conversation, and the people you had blocked were
   hidden from them until their own list arrived. If the app was closed without signing out, the
-  notifications you were left go when somebody else signs in. A new account's recovery code is
+  notifications you were left go when somebody else signs in. Deleting your account, and
+  Settings' Clear Local Storage & Reload, take your notifications away too: until now a deleted
+  account's stayed for whoever signed in next. A new account's recovery code is
   shown only to that account: when the automatic sign-in after creating an account failed, the
   next person to sign in on that screen was shown it. Arrives as an ordinary update.
