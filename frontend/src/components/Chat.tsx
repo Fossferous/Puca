@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useR
 import { noteRender } from '../api/healthLog';
 import { SpeakingDiv, SpeakingLi } from './SpeakingClass';
 import { pruneExpiredTyping } from './stableState';
-import { noteTyping, clearTyper, typersIn, type TypingRow } from './typingIndicator';
+import { noteTyping, clearTyper, typersIn, RunClock, RUN_TICK_MS, type TypingRow } from './typingIndicator';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -1642,6 +1642,19 @@ export function Chat({ onLogout }: ChatProps) {
     const [typingUsers, setTypingUsers] = useState<Map<number, TypingRow>>(new Map());
     const typingNames = typersIn(typingUsers, currentChannel ? `channel_${currentChannel.id}` : null);
     const lastTypingSent = useRef<number>(0);
+    // Whether the page has just started again after being stopped (an app switched
+    // away from), so a typing ping that waited through it is not shown as new
+    // (typingIndicator.ts, HELD PINGS). Its own timer, whatever channel is open.
+    const runClockRef = useRef<RunClock | null>(null);
+    useEffect(() => {
+        const clock = new RunClock(Date.now());
+        runClockRef.current = clock;
+        const id = setInterval(() => clock.tick(Date.now()), RUN_TICK_MS);
+        return () => {
+            clearInterval(id);
+            if (runClockRef.current === clock) runClockRef.current = null;
+        };
+    }, []);
 
     // Search state
     const [searchQuery, setSearchQuery] = useState('');
@@ -3097,7 +3110,10 @@ export function Chat({ onLogout }: ChatProps) {
 
             const { id, username } = payload.user;
             const now = Date.now();
-            setTypingUsers(prev => noteTyping(prev, id, username, payload.room_id, now));
+            // A ping that waited while the page was stopped counts from when it
+            // stopped, not from now (typingIndicator.ts, HELD PINGS).
+            const since = runClockRef.current?.waitingSince(now) ?? now;
+            setTypingUsers(prev => noteTyping(prev, id, username, payload.room_id, now, since));
         };
 
         wsClient.on('RoomJoined', handleRoomJoined);

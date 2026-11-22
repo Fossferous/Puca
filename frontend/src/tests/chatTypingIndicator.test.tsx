@@ -168,6 +168,43 @@ describe('"is typing" names only people typing now', () => {
         expect(indicator()).not.toContain('bob');
     });
 
+    // A page stopped with its socket left open (an iPhone app switched away from):
+    // no timer runs, and the frames sent meanwhile are handed over in one burst when
+    // it runs again (typingIndicator.ts, HELD PINGS). Played with the page's
+    // intervals and clock faked: the clock moves 30 s and no interval fires.
+    it('a ping that waited while the page was stopped, after their message, does not bring them back (frames before the late tick, as Edge)', async () => {
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+        await mountChat();
+        await typing('channel_10', 2, 'bob');
+        expect(indicator(), 'POSITIVE CONTROL: a ping shows its typer').toContain('bob is typing');
+        vi.setSystemTime(Date.now() + 30_000);
+        // Running again: "brb", sent at once, then a ping for the next one, 29 s ago.
+        await message('channel_10', 2, 'bob', 'brb', 5);
+        expect(document.querySelector('.messages-container')?.textContent).toContain('brb');
+        await typing('channel_10', 2, 'bob');
+        expect(indicator(), 'the ping waited 29 s: nobody is typing').toBeNull();
+        await act(async () => { vi.advanceTimersByTime(1_000); });
+        expect(indicator()).toBeNull();
+        // CONTROL: running for a while again, a ping is shown at once.
+        await act(async () => { vi.advanceTimersByTime(2_000); });
+        await typing('channel_10', 2, 'bob');
+        expect(indicator()).toContain('bob is typing');
+    });
+
+    it('a ping that waited while the page was stopped, with no message, is not shown (the late tick first)', async () => {
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+        await mountChat();
+        vi.setSystemTime(Date.now() + 30_000);
+        await act(async () => { vi.advanceTimersByTime(1_000); });
+        // They typed and gave up on it 28 s ago.
+        await typing('channel_10', 2, 'bob');
+        expect(indicator(), 'nobody is typing').toBeNull();
+        // CONTROL: a ping a couple of seconds later is a live one.
+        await act(async () => { vi.advanceTimersByTime(2_000); });
+        await typing('channel_10', 2, 'bob');
+        expect(indicator()).toContain('bob is typing');
+    });
+
     it('still goes by itself five seconds after the last ping', async () => {
         await mountChat();
         await typing('channel_10', 2, 'bob');
