@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::Claims;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::permissions::{try_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::try_again::Refusal;
 use crate::protocol::ServerMessage;
 use crate::state::AppState;
 
@@ -473,45 +474,57 @@ const TASK_COLUMNS: &str =
 /// requiring VIEW_CHANNEL as the baseline. The resolver itself gates on actual
 /// server membership first (a non-member never reaches the permission math), a
 /// member who is VIEW-denied gets the same 404 as a missing channel (hide its
-/// existence), and DB errors fail closed inside the resolver. Callers layer
-/// per-operation bits (CREATE_TASKS / COMPLETE_TASKS / MANAGE_TASKS) on top.
+/// existence), and a DB error fails closed as a 503 to retry (src/try_again.rs),
+/// never that 404. Callers layer per-operation bits (CREATE_TASKS /
+/// COMPLETE_TASKS / MANAGE_TASKS) on top.
 async fn check_channel_access(
     state: &AppState,
     channel_id: i64,
     claims: &Claims,
-) -> Result<Permissions, (StatusCode, &'static str)> {
-    match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+) -> Result<Permissions, Refusal> {
+    match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await? {
         ChannelPermAccess::Allowed { perms, .. } => {
             if perms.has(Permissions::VIEW_CHANNEL) {
                 Ok(perms)
             } else {
-                Err((StatusCode::NOT_FOUND, "Channel not found"))
+                Err((StatusCode::NOT_FOUND, "Channel not found").into())
             }
         }
-        ChannelPermAccess::NotFound => Err((StatusCode::NOT_FOUND, "Channel not found")),
-        ChannelPermAccess::NotMember => Err((StatusCode::FORBIDDEN, "Access denied")),
+        ChannelPermAccess::NotFound => Err((StatusCode::NOT_FOUND, "Channel not found").into()),
+        ChannelPermAccess::NotMember => Err((StatusCode::FORBIDDEN, "Access denied").into()),
     }
 }
 
 /// Confirm the caller owns the given personal list. `Ok(true)` = it is in
 /// the trash (readable, not writable — see check_list_writable).
+///
+/// A lookup that FAILS is a 503 to retry (src/try_again.rs), never the 404
+/// of a list that is not there: Púca Notes' outbox takes a 404 as a definite
+/// refusal and drops the queued edit ("did not save"), where it retries a 503.
 async fn check_list_owner(
     state: &AppState,
     list_id: i64,
     claims: &Claims,
-) -> Result<bool, (StatusCode, &'static str)> {
-    let owner: Option<(i64, bool)> = sqlx::query_as("SELECT owner_id, trashed_at IS NOT NULL FROM task_lists WHERE id = $1")
-        .bind(list_id)
-        .fetch_optional(&state.pool)
-        .await
-        .unwrap_or(None);
+) -> Result<bool, Refusal> {
+    let owner: Option<(i64, bool)> =
+        match sqlx::query_as("SELECT owner_id, trashed_at IS NOT NULL FROM task_lists WHERE id = $1")
+            .bind(list_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("check_list_owner: list lookup failed for {list_id}: {e:?}");
+                return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+            }
+        };
 
     match owner {
-        None => Err((StatusCode::NOT_FOUND, "List not found")),
+        None => Err(Refusal::Is(StatusCode::NOT_FOUND, "List not found")),
         Some((owner_id, trashed)) if owner_id == claims.sub => Ok(trashed),
         // Same answer as a missing list: a 403 here told any account which
         // sequential list ids belong to someone (see check_channel_access).
-        Some(_) => Err((StatusCode::NOT_FOUND, "List not found")),
+        Some(_) => Err(Refusal::Is(StatusCode::NOT_FOUND, "List not found")),
     }
 }
 
@@ -522,11 +535,33 @@ async fn check_list_writable(
     state: &AppState,
     list_id: i64,
     claims: &Claims,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<(), Refusal> {
     if check_list_owner(state, list_id, claims).await? {
-        return Err((StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE));
+        return Err(Refusal::Is(StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE));
     }
     Ok(())
+}
+
+/// A task's scope (channel_id, list_id), read again by the reorder routes
+/// after check_task_access. A lookup that fails is a 503 to retry, not the
+/// 404 of a task that is not there.
+async fn task_scope(
+    state: &AppState,
+    task_id: i64,
+    route: &str,
+) -> Result<(Option<i64>, Option<i64>), axum::response::Response> {
+    match sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(Some(scope)) => Ok(scope),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Task not found").into_response()),
+        Err(e) => {
+            tracing::error!("{route}: scope lookup failed for {task_id}: {e:?}");
+            Err(crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK))
+        }
+    }
 }
 
 /// Everything a task-scoped handler needs to authorize an operation.
@@ -558,7 +593,7 @@ async fn check_task_access(
     state: &AppState,
     task_id: i64,
     claims: &Claims,
-) -> Result<TaskAccess, (StatusCode, &'static str)> {
+) -> Result<TaskAccess, Refusal> {
     let scope: Option<(Option<i64>, Option<i64>, i64)> = match sqlx::query_as(
         "SELECT channel_id, list_id, created_by FROM channel_tasks WHERE id = $1",
     )
@@ -575,13 +610,14 @@ async fn check_task_access(
                 task_id,
                 e
             );
-            return Err((StatusCode::NOT_FOUND, "Task not found"));
+            // Not "task not found": a 503 to retry (src/try_again.rs).
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
         }
     };
 
     let (channel_id, list_id, created_by) = match scope {
         Some(s) => s,
-        None => return Err((StatusCode::NOT_FOUND, "Task not found")),
+        None => return Err(Refusal::Is(StatusCode::NOT_FOUND, "Task not found")),
     };
 
     let perms = if let Some(cid) = channel_id {
@@ -592,7 +628,7 @@ async fn check_task_access(
         check_list_writable(state, lid, claims).await?;
         None
     } else {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Task has no scope"));
+        return Err(Refusal::Is(StatusCode::INTERNAL_SERVER_ERROR, "Task has no scope"));
     };
     Ok(TaskAccess {
         channel_id,
@@ -613,21 +649,28 @@ async fn validate_parent(
     parent_id: i64,
     channel_id: Option<i64>,
     list_id: Option<i64>,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<(), Refusal> {
+    // A lookup that FAILED is a 503 to retry, not "Parent task not found".
     let parent: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
             .bind(parent_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("validate_parent: parent lookup failed for {parent_id}: {e:?}");
+                return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+            }
+        };
 
     match parent {
-        None => return Err((StatusCode::BAD_REQUEST, "Parent task not found")),
+        None => return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found")),
         Some((p_channel, p_list)) => {
             // Same message as a missing parent: a distinct one confirmed that a
             // guessed task id exists in some checklist the caller cannot see.
             if p_channel != channel_id || p_list != list_id {
-                return Err((StatusCode::BAD_REQUEST, "Parent task not found"));
+                return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found"));
             }
         }
     }
@@ -635,9 +678,9 @@ async fn validate_parent(
     // Depth of the parent = ancestors walked up to the root (cycle-safe via the
     // depth bound). A new child sits at parent depth + 1.
     // NOTE: depth must be bigint end-to-end — `1 AS depth` would be INT4 and
-    // the i64 decode fails SILENTLY through unwrap_or(None) (looks like a
-    // missing parent).
-    let depth: Option<(Option<i64>,)> = sqlx::query_as(
+    // the i64 decode fails (read as a failed lookup: a 503 to retry, never as
+    // a depth that fits, and no longer as a missing parent).
+    let depth: Option<(Option<i64>,)> = match sqlx::query_as(
         "WITH RECURSIVE chain AS ( \
              SELECT id, parent_id, 1::bigint AS depth FROM channel_tasks WHERE id = $1 \
              UNION ALL \
@@ -650,12 +693,18 @@ async fn validate_parent(
     .bind(MAX_TASK_DEPTH)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("validate_parent: depth lookup failed for {parent_id}: {e:?}");
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+        }
+    };
 
     match depth.and_then(|d| d.0) {
         Some(d) if d < MAX_TASK_DEPTH => Ok(()),
-        Some(_) => Err((StatusCode::BAD_REQUEST, "Tasks can only nest 5 levels deep")),
-        None => Err((StatusCode::BAD_REQUEST, "Parent task not found")),
+        Some(_) => Err(Refusal::Is(StatusCode::BAD_REQUEST, "Tasks can only nest 5 levels deep")),
+        None => Err(Refusal::Is(StatusCode::BAD_REQUEST, "Parent task not found")),
     }
 }
 
@@ -670,7 +719,7 @@ async fn insert_task(
     list_id: Option<i64>,
     payload: &CreateTaskRequest,
     claims: &Claims,
-) -> Result<(TaskResponse, bool), (StatusCode, &'static str)> {
+) -> Result<(TaskResponse, bool), Refusal> {
     if let Some(key) = payload.op_key.as_deref() {
         validate_op_key(key)?;
         // A REPLAY IS ANSWERED, NOT RE-VALIDATED. Everything below judges a
@@ -694,20 +743,20 @@ async fn insert_task(
         }
     }
     if payload.description.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Description cannot be empty"));
+        return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Description cannot be empty"));
     }
     if payload.description.len() > MAX_TASK_LEN {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, "Task description too long"));
+        return Err(Refusal::Is(StatusCode::PAYLOAD_TOO_LARGE, "Task description too long"));
     }
     if payload.description.contains('\0') {
-        return Err((StatusCode::BAD_REQUEST, "Task contains invalid characters"));
+        return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Task contains invalid characters"));
     }
     if let Some(att) = payload.attachments.as_deref() {
         if att.len() > MAX_ATTACHMENTS_LEN {
-            return Err((StatusCode::BAD_REQUEST, "Attachments too large"));
+            return Err(Refusal::Is(StatusCode::BAD_REQUEST, "Attachments too large"));
         }
         if att.contains('\0') {
-            return Err((
+            return Err(Refusal::Is(
                 StatusCode::BAD_REQUEST,
                 "Attachments contain invalid characters",
             ));
@@ -724,8 +773,10 @@ async fn insert_task(
     // M14: cap tasks per checklist scope. A small overshoot under concurrent
     // inserts is harmless; the point is to keep a single scope from growing
     // without bound. NOT DISTINCT FROM so the NULL channel_id/list_id (the other
-    // scope) matches the same way the position subquery below does.
-    let count: (i64,) = sqlx::query_as(
+    // scope) matches the same way the position subquery below does. A count
+    // that FAILED is not an empty checklist: folded into 0 it let the item past
+    // the cap. Refused with a 503 to retry (src/try_again.rs).
+    let count: (i64,) = match sqlx::query_as(
         "SELECT COUNT(*) FROM channel_tasks \
          WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2",
     )
@@ -733,9 +784,15 @@ async fn insert_task(
     .bind(list_id)
     .fetch_one(&state.pool)
     .await
-    .unwrap_or((0,));
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("insert_task: checklist count failed: {e:?}");
+            return Err(Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK));
+        }
+    };
     if count.0 >= MAX_TASKS_PER_CHECKLIST {
-        return Err((
+        return Err(Refusal::Is(
             StatusCode::BAD_REQUEST,
             "This checklist has reached its task limit",
         ));
@@ -1234,15 +1291,9 @@ pub async fn move_task(
     // per-checklist advisory lock and do the read+swap as ONE serialized unit.
     // Previously the position reads ran OUTSIDE the swap transaction, so two
     // concurrent moves could read stale positions and corrupt sibling ordering.
-    let scope: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    let (channel_id, list_id) = match scope {
-        Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, "Task not found").into_response(),
+    let (channel_id, list_id) = match task_scope(&state, task_id, "move_task").await {
+        Ok(s) => s,
+        Err(resp) => return resp,
     };
 
     let mut tx = match state.pool.begin().await {
@@ -1273,13 +1324,21 @@ pub async fn move_task(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
     }
 
-    // Read the moving task's current row inside the lock.
+    // Read the moving task's current row inside the lock. A read that FAILS
+    // is a 503 to retry, not "Task not found" (src/try_again.rs).
     let me: Option<(Option<i64>, bool, i64)> =
-        sqlx::query_as("SELECT parent_id, is_completed, position FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT parent_id, is_completed, position FROM channel_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("move_task: row lookup failed for {task_id}: {e:?}");
+                let _ = tx.rollback().await;
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
 
     let (parent_id, is_completed, position) = match me {
         Some(m) => m,
@@ -1303,7 +1362,9 @@ pub async fn move_task(
          ORDER BY position ASC, id ASC LIMIT 1"
     };
 
-    let neighbor: Option<(i64, i64)> = sqlx::query_as(neighbor_sql)
+    // A neighbour lookup that FAILS is not "already at the edge": that 200
+    // said the move was done when nothing moved.
+    let neighbor: Option<(i64, i64)> = match sqlx::query_as(neighbor_sql)
         .bind(channel_id)
         .bind(list_id)
         .bind(parent_id)
@@ -1312,7 +1373,14 @@ pub async fn move_task(
         .bind(task_id)
         .fetch_optional(&mut *tx)
         .await
-        .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("move_task: neighbour lookup failed for {task_id}: {e:?}");
+            let _ = tx.rollback().await;
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     let (neighbor_id, neighbor_pos) = match neighbor {
         Some(n) => n,
@@ -1382,15 +1450,9 @@ pub async fn reorder_task(
             .into_response();
     }
 
-    let scope: Option<(Option<i64>, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    let (channel_id, list_id) = match scope {
-        Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, "Task not found").into_response(),
+    let (channel_id, list_id) = match task_scope(&state, task_id, "reorder_task").await {
+        Ok(s) => s,
+        Err(resp) => return resp,
     };
 
     let mut tx = match state.pool.begin().await {
@@ -1418,13 +1480,21 @@ pub async fn reorder_task(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
     }
 
-    // The moving task's group membership, read inside the lock.
+    // The moving task's group membership, read inside the lock. A read that
+    // FAILS is a 503 to retry, not "Task not found".
     let me: Option<(Option<i64>, bool)> =
-        sqlx::query_as("SELECT parent_id, is_completed FROM channel_tasks WHERE id = $1")
+        match sqlx::query_as("SELECT parent_id, is_completed FROM channel_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("reorder_task: row lookup failed for {task_id}: {e:?}");
+                let _ = tx.rollback().await;
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     let (parent_id, is_completed) = match me {
         Some(m) => m,
         None => {
@@ -2484,8 +2554,12 @@ pub async fn list_task_reminders(
     };
 
     // Resolve each distinct channel ONCE through the real permission math
-    // (membership + role bits + per-channel overwrites). Fail closed: a
-    // channel that can't be resolved yields no reminders.
+    // (membership + role bits + per-channel overwrites). A channel the caller
+    // may not see (gone, left, VIEW-denied) yields no reminders. A channel
+    // whose permissions could not be READ is a 503 for the whole feed, never
+    // a 200 that leaves its reminders out: Púca Notes' ReminderMerge drops
+    // every id a successful fetch no longer lists, alarms and marks with it,
+    // and the web loop prunes them the same way (src/try_again.rs).
     let mut channel_visible: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for (id, channel_id, list_id, due_at, created_by, schedule, snooze) in rows {
@@ -2493,7 +2567,11 @@ pub async fn list_task_reminders(
             let visible = match channel_visible.get(&cid) {
                 Some(v) => *v,
                 None => {
-                    let v = check_channel_access(&state, cid, &claims).await.is_ok();
+                    let v = match check_channel_access(&state, cid, &claims).await {
+                        Ok(_) => true,
+                        Err(Refusal::Is(..)) => false,
+                        Err(retry @ Refusal::TryAgain(_)) => return retry.into_response(),
+                    };
                     channel_visible.insert(cid, v);
                     v
                 }

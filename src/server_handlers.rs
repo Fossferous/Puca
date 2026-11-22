@@ -1400,12 +1400,14 @@ pub async fn mark_channel_read(
     // non-members so a client can say "not a member", but nothing needs that
     // distinction on a write of read-state, and 403-vs-404 would confirm to an
     // outsider which channel ids exist.
-    match crate::permissions::get_user_channel_permissions(&state.pool, channel_id, claims.sub)
+    // A lookup that FAILED is a 503 to retry, not that 404.
+    match crate::permissions::try_user_channel_permissions(&state.pool, channel_id, claims.sub)
         .await
     {
-        crate::permissions::ChannelPermAccess::Allowed { perms, .. }
+        Ok(crate::permissions::ChannelPermAccess::Allowed { perms, .. })
             if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) => {}
-        _ => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+        Ok(_) => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Use channel_read_state table which tracks last_read_at timestamp
@@ -1428,6 +1430,32 @@ pub async fn mark_channel_read(
     }
 }
 
+/// The 503 of src/try_again.rs, for a lookup that failed.
+fn could_not_check() -> axum::response::Response {
+    crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK)
+}
+
+/// Is `user_id` a member of `server_id`? A lookup that fails is `Err` (logged), never
+/// "not a member": the routes below answered that with the 403 of a real "no".
+async fn is_server_member(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+) -> Result<bool, crate::permissions::LookupFailed> {
+    match sqlx::query_as::<_, (i32,)>("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
+        .bind(server_id)
+        .bind(user_id as i32)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => Ok(row.is_some()),
+        Err(e) => {
+            tracing::error!("membership lookup failed for server {} user {}: {:?}", server_id, user_id, e);
+            Err(crate::permissions::LookupFailed)
+        }
+    }
+}
+
 /// Get unread counts for all channels in a server
 pub async fn get_unread_counts(
     State(state): State<Arc<AppState>>,
@@ -1435,15 +1463,12 @@ pub async fn get_unread_counts(
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     // Access control: only members may read a server's channel/unread structure.
-    let is_member: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
-            .bind(&server_id)
-            .bind(claims.sub as i32)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    if is_member.is_none() {
-        return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
+    // Every lookup here that FAILS is the 503 of src/try_again.rs: as "not a member" it
+    // was a 403, and as an empty count list a 200 saying nothing is unread.
+    match is_server_member(&state.pool, &server_id, claims.sub).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Not a member of this server").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Get all channels in the server and count unread messages for each.
@@ -1478,7 +1503,7 @@ pub async fn get_unread_counts(
                 server_id,
                 e
             );
-            Vec::new()
+            return could_not_check();
         }
     };
 
@@ -1501,11 +1526,7 @@ pub async fn get_unread_counts(
                 server_id,
                 e
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to resolve permissions",
-            )
-                .into_response();
+            return could_not_check();
         }
     };
 
@@ -1555,13 +1576,13 @@ pub async fn get_all_unread_counts(
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!("get_all_unread_counts query failed: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load unread counts")
-                .into_response();
+            return could_not_check();
         }
     };
 
     // Group by server, then permission-filter per server. Fail closed on a
-    // resolver error by contributing nothing for that server.
+    // resolver error with the 503 of src/try_again.rs: leaving that server out
+    // was a 200 reading as "nothing unread there", its bubble taken off the rail.
     let mut by_server: std::collections::HashMap<String, Vec<(i64, i64)>> =
         std::collections::HashMap::new();
     for (server_id, channel_id, unread) in rows {
@@ -1591,7 +1612,7 @@ pub async fn get_all_unread_counts(
                     server_id,
                     e
                 );
-                continue;
+                return could_not_check();
             }
         };
         let permitted: Vec<UnreadCountResponse> = channels
@@ -1625,15 +1646,12 @@ pub async fn mark_server_read(
     Path(server_id): Path<String>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let is_member: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
-            .bind(&server_id)
-            .bind(claims.sub as i32)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    if is_member.is_none() {
-        return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
+    // A lookup that FAILS is the 503 of src/try_again.rs: as "not a member" it was a 403,
+    // and as "sees no channel" a 200 that had marked nothing read.
+    match is_server_member(&state.pool, &server_id, claims.sub).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Not a member of this server").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Only channels the caller can VIEW — the same gate mark_channel_read
@@ -1652,7 +1670,7 @@ pub async fn mark_server_read(
         Ok(ids) => ids,
         Err(e) => {
             tracing::error!("mark_server_read: channel list failed for server {}: {:?}", server_id, e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to mark read").into_response();
+            return could_not_check();
         }
     };
     let perms = match crate::permissions::get_user_channels_permissions(
@@ -1666,11 +1684,7 @@ pub async fn mark_server_read(
         Ok(map) => map,
         Err(e) => {
             tracing::error!("mark_server_read: permission resolve failed for server {}: {:?}", server_id, e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to resolve permissions",
-            )
-                .into_response();
+            return could_not_check();
         }
     };
     let viewable: Vec<i64> = channel_ids
@@ -1735,17 +1749,12 @@ pub async fn get_voice_users(
 ) -> impl IntoResponse {
     // Verify user is a member of the server (i32: server_members.user_id is INT4) —
     // otherwise any authenticated user could see who is in voice on any server.
-    let is_member = sqlx::query_as::<_, (i32,)>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",
-    )
-    .bind(&server_id)
-    .bind(claims.sub as i32)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
-
-    if is_member.is_none() {
-        return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
+    // A lookup that FAILS is the 503 of src/try_again.rs: as "not a member" it was a
+    // 403, and as an empty channel list a 200 saying nobody is in voice.
+    match is_server_member(&state.pool, &server_id, claims.sub).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "Not a member of this server").into_response(),
+        Err(e) => return e.into_response(),
     }
 
     // Voice rooms are keyed per-channel as `voice_<channelId>` and ONLY that
@@ -1756,11 +1765,17 @@ pub async fn get_voice_users(
     // channels.id is SERIAL (INT4) — decode as i32, not i64 (an INT4→i64 decode
     // fails at runtime and unwrap_or_default would silently blank voice presence).
     let channels: Vec<(i32, String)> =
-        sqlx::query_as("SELECT id, name FROM channels WHERE server_id = $1")
+        match sqlx::query_as("SELECT id, name FROM channels WHERE server_id = $1")
             .bind(&server_id)
             .fetch_all(&state.pool)
             .await
-            .unwrap_or_default();
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("get_voice_users: channel list failed for server {}: {:?}", server_id, e);
+                return could_not_check();
+            }
+        };
 
     // Only surface voice presence for channels the caller can VIEW — a hidden
     // channel's occupants would otherwise leak through the sidebar roster.
@@ -1780,11 +1795,7 @@ pub async fn get_voice_users(
                 server_id,
                 e
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to resolve permissions",
-            )
-                .into_response();
+            return could_not_check();
         }
     };
     let accepted_rooms: std::collections::HashSet<String> = channels

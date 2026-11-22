@@ -54,7 +54,7 @@ pub async fn send_verification_email(
     State(state): State<Arc<AppState>>,
     axum::Extension(claims): axum::Extension<crate::auth::Claims>,
     Json(payload): Json<SendVerificationRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let email_service = match &state.email_service {
         Some(svc) => svc,
         None => {
@@ -63,24 +63,28 @@ pub async fn send_verification_email(
                 Json(MessageResponse {
                     message: "Email service not configured".to_string(),
                 }),
-            )
+            ).into_response()
         }
     };
 
-    // Get user info
+    // Get user info. A lookup that FAILED is a 503 to retry, not "User not found".
     let user = match sqlx::query("SELECT id, username FROM users WHERE id = $1")
         .bind(claims.sub as i32)
         .fetch_optional(&state.pool)
         .await
     {
         Ok(Some(u)) => u,
-        _ => {
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(MessageResponse {
                     message: "User not found".to_string(),
                 }),
-            )
+            ).into_response()
+        }
+        Err(e) => {
+            tracing::error!("send_verification_email: user lookup failed for {}: {e:?}", claims.sub);
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
         }
     };
 
@@ -100,7 +104,7 @@ pub async fn send_verification_email(
             Json(MessageResponse {
                 message: "That doesn't look like an email address".to_string(),
             }),
-        );
+        ).into_response();
     }
 
     // Rate limit outbound verification mail, per SENDER and per TARGET address.
@@ -109,26 +113,36 @@ pub async fn send_verification_email(
     // relay as a spam cannon) — the per-IP API limiter does not bound per-target
     // volume. There is no created_at column, but expires_at is set to now+24h at
     // insert, so `expires_at > NOW() + INTERVAL '23 hours'` counts tokens minted
-    // in the last hour. Best-effort (a failed count opens the gate rather than
-    // blocking a legitimate user).
+    // in the last hour. FAIL CLOSED: a count that failed is not zero. It used to
+    // open the gate ("rather than blocking a legitimate user"), which made a
+    // busy database the way past the limiter; it is a 503 to retry instead
+    // (src/try_again.rs), which costs a legitimate user one retry.
     const MAX_PER_USER_PER_HOUR: i64 = 5;
     const MAX_PER_ADDRESS_PER_HOUR: i64 = 3;
-    let recent_user: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM email_verification_tokens \
-         WHERE user_id = $1 AND expires_at > NOW() + INTERVAL '23 hours'",
-    )
-    .bind(claims.sub as i32)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or((0,));
-    let recent_addr: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM email_verification_tokens \
-         WHERE pending_email = $1 AND expires_at > NOW() + INTERVAL '23 hours'",
-    )
-    .bind(email)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or((0,));
+    let counts = async {
+        let recent_user: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM email_verification_tokens \
+             WHERE user_id = $1 AND expires_at > NOW() + INTERVAL '23 hours'",
+        )
+        .bind(claims.sub as i32)
+        .fetch_one(&state.pool)
+        .await?;
+        let recent_addr: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM email_verification_tokens \
+             WHERE pending_email = $1 AND expires_at > NOW() + INTERVAL '23 hours'",
+        )
+        .bind(email)
+        .fetch_one(&state.pool)
+        .await?;
+        Ok::<_, sqlx::Error>((recent_user, recent_addr))
+    };
+    let (recent_user, recent_addr) = match counts.await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("send_verification_email: rate count failed for user {}: {e:?}", claims.sub);
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
     if recent_user.0 >= MAX_PER_USER_PER_HOUR || recent_addr.0 >= MAX_PER_ADDRESS_PER_HOUR {
         tracing::warn!(
             "verification-email throttle hit: user {} (recent {}), addr recent {}",
@@ -141,7 +155,7 @@ pub async fn send_verification_email(
             Json(MessageResponse {
                 message: "Too many verification emails were just requested. Please wait a while and try again.".to_string(),
             }),
-        );
+        ).into_response();
     }
 
     // The address rides on the TOKEN, not on users.email. The old flow wrote
@@ -170,7 +184,7 @@ pub async fn send_verification_email(
             Json(MessageResponse {
                 message: "Failed to create verification token".to_string(),
             }),
-        );
+        ).into_response();
     }
 
     // Send email
@@ -190,7 +204,7 @@ pub async fn send_verification_email(
             Json(MessageResponse {
                 message: "Failed to send verification email".to_string(),
             }),
-        );
+        ).into_response();
     }
 
     (
@@ -198,7 +212,7 @@ pub async fn send_verification_email(
         Json(MessageResponse {
             message: "Verification email sent — your current email stays active until you confirm the new one.".to_string(),
         }),
-    )
+    ).into_response()
 }
 
 /// Verify email with token
@@ -309,7 +323,7 @@ pub async fn verify_email(
 pub async fn forgot_password(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ForgotPasswordRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let email_service = match &state.email_service {
         Some(svc) => svc,
         None => {
@@ -320,7 +334,7 @@ pub async fn forgot_password(
                     message: "If an account exists with that email, a reset link has been sent"
                         .to_string(),
                 }),
-            );
+            ).into_response();
         }
     };
 
@@ -330,8 +344,18 @@ pub async fn forgot_password(
             .bind(&payload.email)
             .fetch_optional(&state.pool)
             .await;
+    // A lookup that FAILED sent nothing and still said "a reset link has been
+    // sent". A 503 to retry instead: it comes before anything about the address
+    // is known, so it says nothing about whether an account has it.
+    let user = match user {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::error!("forgot_password: account lookup failed: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
-    if let Ok(Some(user)) = user {
+    if let Some(user) = user {
         let user_id: i32 = user.get("id");
         let username: String = user.get("username");
 
@@ -341,16 +365,28 @@ pub async fn forgot_password(
         // row (used or not) was minted within the hour — count them as the
         // recent-send tally. We still return the same generic success below
         // either way, preserving email-enumeration resistance.
+        //
+        // FAIL CLOSED: a count that failed is not zero. Folded into 0 it sent
+        // the mail past the limit. It sends nothing now, and answers as the
+        // throttle does (the generic success), NOT with a 503: this branch is
+        // reached only for an address with a verified account, so a 503 here
+        // would say which addresses have one.
         const MAX_RESETS_PER_HOUR: i64 = 3;
-        let recent: (i64,) = sqlx::query_as(
+        let under_limit = match sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = $1 AND expires_at > NOW()",
         )
         .bind(user_id)
         .fetch_one(&state.pool)
         .await
-        .unwrap_or((0,));
+        {
+            Ok((recent,)) => recent < MAX_RESETS_PER_HOUR,
+            Err(e) => {
+                tracing::error!("forgot_password: rate count failed for user {}: {:?}", user_id, e);
+                false
+            }
+        };
 
-        if recent.0 < MAX_RESETS_PER_HOUR {
+        if under_limit {
             // Invalidate any prior UNUSED token first, so reissuing never leaves
             // several live reset credentials for one account (finding: tokens
             // were not invalidated on reissue).
@@ -392,7 +428,7 @@ pub async fn forgot_password(
         Json(MessageResponse {
             message: "If an account exists with that email, a reset link has been sent".to_string(),
         }),
-    )
+    ).into_response()
 }
 
 /// Reset password with token

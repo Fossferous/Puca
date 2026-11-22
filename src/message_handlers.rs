@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::auth::Claims;
 use crate::permissions::Permissions;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess};
+use crate::permissions::ChannelPermAccess;
 use crate::protocol::{ServerMessage, UserInfo};
 use crate::state::AppState;
 
@@ -47,21 +47,25 @@ pub(crate) const PRUNE_EDIT_HISTORY_SQL: &str = "DELETE FROM message_edits      
 /// 404 as a missing channel (hide its existence); non-members keep 403. Returns
 /// (owning server id, resolved effective permissions) on success so callers can
 /// check further bits without a second resolution.
+///
+/// A lookup that FAILED is a 503 to retry (src/try_again.rs), never that 404:
+/// "Channel not found" for a channel that is there, over a busy database.
 macro_rules! require_channel_view {
     ($state:expr, $channel_id:expr, $user_id:expr) => {
-        match get_user_channel_permissions(&$state.pool, $channel_id, $user_id).await {
-            ChannelPermAccess::Allowed { server_id, perms } => {
+        match crate::permissions::try_user_channel_permissions(&$state.pool, $channel_id, $user_id).await {
+            Ok(ChannelPermAccess::Allowed { server_id, perms }) => {
                 if !perms.has(Permissions::VIEW_CHANNEL) {
                     return (StatusCode::NOT_FOUND, "Channel not found").into_response();
                 }
                 (server_id, perms)
             }
-            ChannelPermAccess::NotFound => {
+            Ok(ChannelPermAccess::NotFound) => {
                 return (StatusCode::NOT_FOUND, "Channel not found").into_response()
             }
-            ChannelPermAccess::NotMember => {
+            Ok(ChannelPermAccess::NotMember) => {
                 return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
             }
+            Err(e) => return e.into_response(),
         }
     };
 }
@@ -244,16 +248,25 @@ pub async fn send_message(
 
     // Slowmode: enforce a minimum gap between a user's messages in this channel.
     // Moderators (Manage Messages) are exempt, the common convention for slowmode.
+    // FAIL CLOSED: a lookup that failed is not "no slowmode" or "no earlier
+    // message" (folded that way, a busy database switched slowmode off). A 503
+    // to retry (src/try_again.rs).
     let slowmode: Option<(i32,)> =
-        sqlx::query_as("SELECT slowmode_seconds FROM channels WHERE id = $1")
+        match sqlx::query_as("SELECT slowmode_seconds FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("send_message: slowmode lookup failed for channel {channel_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
 
     if let Some((secs,)) = slowmode {
         if secs > 0 && !perms.has(Permissions::MANAGE_MESSAGES) {
-            let recent: Option<(i64,)> = sqlx::query_as(
+            let recent: Option<(i64,)> = match sqlx::query_as(
                 "SELECT EXTRACT(EPOCH FROM (NOW() - created_at))::bigint \
                  FROM messages WHERE channel_id = $1 AND user_id = $2 \
                  ORDER BY created_at DESC LIMIT 1",
@@ -262,7 +275,13 @@ pub async fn send_message(
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::error!("send_message: slowmode last-message lookup failed for channel {channel_id}: {e:?}");
+                    return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+                }
+            };
 
             if let Some((elapsed,)) = recent {
                 if elapsed < secs as i64 {
@@ -301,18 +320,37 @@ pub async fn send_message(
         if !perms.has(Permissions::CREATE_CLIPS) {
             return (StatusCode::FORBIDDEN, "Missing Create Clips permission").into_response();
         }
-        let enabled: Option<bool> = sqlx::query_scalar("SELECT clips_enabled FROM servers WHERE id = $1")
-            .bind(&server_id).fetch_optional(&state.pool).await.unwrap_or(None);
+        // A lookup that FAILED is a 503 to retry (the approval is kept), not
+        // "Clips are turned off".
+        let enabled: Option<bool> = match sqlx::query_scalar("SELECT clips_enabled FROM servers WHERE id = $1")
+            .bind(&server_id).fetch_optional(&state.pool).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("send_message: clips_enabled lookup failed for server {server_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         if enabled != Some(true) {
             return (StatusCode::CONFLICT, "Clips are turned off in this server").into_response();
         }
+        // The parts THIS user uploaded under the proposal — the badge renders
+        // only if the message's manifest is a subset of these. Read BEFORE the
+        // proposal is consumed: a lookup that failed used to post the clip with
+        // an EMPTY part list, for good, and the badge never rendered. Now the
+        // approval is kept and the answer is a 503 to retry.
+        let part_ids: Vec<String> = match sqlx::query_scalar("SELECT id::text FROM uploaded_files WHERE clip_id = $1::uuid AND uploader_id = $2 ORDER BY clip_part_index")
+            .bind(clip_id).bind(claims.sub as i32).fetch_all(&state.pool).await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("send_message: clip part lookup failed for clip {clip_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         let Some((_, p)) = state.clip_proposals.remove(clip_id) else {
             return (StatusCode::CONFLICT, "That clip approval is no longer valid").into_response();
         };
-        // The parts THIS user uploaded under the proposal — the badge renders
-        // only if the message's manifest is a subset of these.
-        let part_ids: Vec<String> = sqlx::query_scalar("SELECT id::text FROM uploaded_files WHERE clip_id = $1::uuid AND uploader_id = $2 ORDER BY clip_part_index")
-            .bind(&p.clip_id).bind(claims.sub as i32).fetch_all(&state.pool).await.unwrap_or_default();
         clip_consent = Some(serde_json::json!({
             "proposal_id": p.clip_id,
             "approver_count": p.votes.len(),
@@ -510,7 +548,11 @@ pub async fn get_messages(
         },
         None => None,
     };
-    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+    // A history query that FAILS is a 503 to retry, never an empty 200: the
+    // client takes `[]` as "this channel has no messages" (it clears the view
+    // and marks the channel read), and an empty older page as the start of
+    // the history, so search presents what it has as everything.
+    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<String>, Option<serde_json::Value>)> = match sqlx::query_as(
         r#"
         SELECT m.id, m.channel_id, m.user_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at, m.reply_to_id,
                COALESCE(m.is_task, false) as is_task, COALESCE(m.is_completed, false) as is_completed, m.parent_message_id, m.key_epoch,
@@ -528,7 +570,13 @@ pub async fn get_messages(
     .bind(before)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_messages: history query failed for channel {channel_id}: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load messages right now, try again shortly");
+        }
+    };
 
     let response: Vec<MessageResponse> = messages
         .into_iter()
@@ -581,13 +629,20 @@ pub async fn edit_message(
     // Channel-scoped op: hide the channel (404) from VIEW-denied members.
     let (_server_id, _perms) = require_channel_view!(state, channel_id, claims.sub);
 
+    // A lookup that FAILS is a 503 to retry, not "Message not found".
     let msg: Option<(i32, String, bool)> =
-        sqlx::query_as("SELECT user_id, content, clip_consent IS NOT NULL FROM messages WHERE id = $1 AND channel_id = $2")
+        match sqlx::query_as("SELECT user_id, content, clip_consent IS NOT NULL FROM messages WHERE id = $1 AND channel_id = $2")
             .bind(&message_id)
             .bind(channel_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("edit_message: message lookup failed: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     // A clip message cannot be edited: its body IS the clip (key + part ids)
     // and the edit history would keep the old body forever, so a re-pointed
     // message would carry the consent badge for footage nobody approved.
@@ -728,7 +783,8 @@ pub async fn delete_message(
     // (allow or deny) actually apply to moderation, matching the editor UI.
     let (_server_id, perms) = require_channel_view!(state, channel_id, claims.sub);
 
-    let msg: Option<(i32, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+    // A lookup that FAILS is a 503 to retry, not "Message not found".
+    let msg: Option<(i32, Option<String>, Option<serde_json::Value>)> = match sqlx::query_as(
         "SELECT m.user_id, c.server_id, m.clip_consent FROM messages m
          JOIN channels c ON m.channel_id = c.id
          WHERE m.id = $1 AND m.channel_id = $2",
@@ -737,7 +793,13 @@ pub async fn delete_message(
     .bind(channel_id)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("delete_message: message lookup failed: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     match msg {
         Some((user_id, server_id, clip_consent)) => {
@@ -862,12 +924,12 @@ pub async fn get_message_edits(
         return (StatusCode::NOT_FOUND, "Message not found").into_response();
     }
 
-    // edited_at is a timestamp — cast to ::text so it decodes into String (otherwise
-    // query_as errors and .unwrap_or_default() silently drops the whole edit history).
+    // edited_at is a timestamp — cast to ::text so it decodes into String.
     // Join through `messages` so the history must belong to the channel that was
     // just authorized. Filtering on message_id alone meant any id could be
     // substituted — the VIEW check then guarded a channel the row need not be in.
-    let edits: Vec<(String, String)> = sqlx::query_as(
+    // A query that FAILS is a 503 to retry, never the 200 [] of "no edits".
+    let edits: Vec<(String, String)> = match sqlx::query_as(
         "SELECT e.old_content, (replace(e.edited_at::text, ' ', 'T') || 'Z') AS edited_at FROM message_edits e \
          JOIN messages m ON m.id = e.message_id \
          WHERE e.message_id = $1 AND m.channel_id = $2 ORDER BY e.edited_at DESC, e.id DESC"
@@ -877,7 +939,13 @@ pub async fn get_message_edits(
     .bind(channel_id as i32)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_message_edits: history query failed: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load the edit history right now, try again shortly");
+        }
+    };
 
     let response: Vec<EditHistoryResponse> = edits
         .into_iter()

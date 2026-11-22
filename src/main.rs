@@ -47,6 +47,10 @@ mod push_handlers;
 mod push_web_handlers;
 #[cfg(test)]
 mod push_web_db_tests;
+#[cfg(test)]
+mod fault_injection;
+#[cfg(test)]
+mod fail_open_tests;
 mod reaction_handlers;
 mod recovery_handlers;
 mod retention;
@@ -59,6 +63,7 @@ mod state;
 mod task_events;
 mod task_handlers;
 mod task_timing;
+mod try_again;
 mod update_routes;
 mod upload_handlers;
 mod wake;

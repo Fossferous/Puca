@@ -503,36 +503,117 @@ mod tests {
 
 /// Get a user's effective permissions in a server by combining all their role permissions.
 /// Returns ADMINISTRATOR if user is the server owner.
+///
+/// Each lookup that FAILS reads as its own "no" here (logged): not the owner,
+/// not a member, no roles. That can only refuse. Where the refusal is answered
+/// as a fact (a 403 "Missing permission", a list with nothing in it), use
+/// [`try_user_server_permissions`], which answers `Err`.
 pub async fn get_user_server_permissions(
     pool: &sqlx::PgPool,
     server_id: &str,
     user_id: i64,
 ) -> Permissions {
-    // Check if user is server owner (owners have all permissions)
+    let folded = |what: &str, e: sqlx::Error| {
+        tracing::error!("get_user_server_permissions: {what} lookup failed for server {server_id} user {user_id}: {e}")
+    };
+    let owner = server_owner_row(pool, server_id, user_id).await.unwrap_or_else(|e| {
+        folded("owner", e);
+        false
+    });
+    if owner {
+        return Permissions::ADMINISTRATOR;
+    }
+    let member = server_member_row(pool, server_id, user_id).await.unwrap_or_else(|e| {
+        folded("membership", e);
+        false
+    });
+    if !member {
+        return Permissions::empty();
+    }
+    server_role_bits(pool, server_id, user_id)
+        .await
+        .unwrap_or_else(|e| {
+            folded("role", e);
+            Permissions::empty()
+        })
+        .server_capped()
+}
+
+/// [`get_user_server_permissions`] with a lookup that FAILED returned as
+/// `Err(LookupFailed)` (logged here), for a REST handler that answers it with
+/// the 503 of src/try_again.rs instead of the 403 of a real "no".
+pub(crate) async fn try_user_server_permissions(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+) -> Result<Permissions, LookupFailed> {
+    read_user_server_permissions(pool, server_id, user_id).await.map_err(|e| {
+        tracing::error!("server permissions: lookup failed for server {server_id} user {user_id}: {e}");
+        LookupFailed
+    })
+}
+
+/// [`user_has_permission`], with a lookup that FAILED returned as `Err`.
+pub(crate) async fn try_user_has_permission(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+    required: Permissions,
+) -> Result<bool, LookupFailed> {
+    Ok(try_user_server_permissions(pool, server_id, user_id).await?.has(required))
+}
+
+/// The server permissions as the database answered them: `Err` when the
+/// owner, membership or role lookup failed. Read through the folding
+/// [`get_user_server_permissions`], a failure made the bulk channel resolver
+/// answer with every channel denied, or judge the owner as a plain member,
+/// where the single-channel resolver answers `Err`.
+pub(crate) async fn read_user_server_permissions(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+    user_id: i64,
+) -> Result<Permissions, sqlx::Error> {
+    if server_owner_row(pool, server_id, user_id).await? {
+        return Ok(Permissions::ADMINISTRATOR);
+    }
+    if !server_member_row(pool, server_id, user_id).await? {
+        return Ok(Permissions::empty());
+    }
+    // A stream-only member holds the cap and nothing else server-wide.
+    Ok(server_role_bits(pool, server_id, user_id).await?.server_capped())
+}
+
+/// Is `user_id` the owner of `server_id`? Owners have all permissions.
+async fn server_owner_row(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<bool, sqlx::Error> {
     // Cast user_id to i32 since owner_id is INTEGER in PostgreSQL
     let is_owner: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM servers WHERE id = $1 AND owner_id = $2")
             .bind(server_id)
             .bind(user_id as i32)
             .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+            .await?;
+    Ok(is_owner.is_some())
+}
 
-    if is_owner.is_some() {
-        return Permissions::ADMINISTRATOR;
-    }
+/// A non-member gets NO permissions — not even the default @everyone role.
+/// Without this gate the `OR sr.is_default = true` clause of
+/// [`server_role_bits`] hands every authenticated user the @everyone bits
+/// (VIEW_CHANNEL, SEND_MESSAGES, …) for ANY server, and a kicked/banned user
+/// keeps whatever roles were never purged from member_roles. Membership
+/// (server_members) is the source of truth; roles only layer on top of it.
+async fn server_member_row(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<bool, sqlx::Error> {
+    let member: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
+            .bind(server_id)
+            .bind(user_id as i32)
+            .fetch_optional(pool)
+            .await?;
+    Ok(member.is_some())
+}
 
-    // A non-member gets NO permissions — not even the default @everyone role.
-    // Without this gate the `OR sr.is_default = true` clause below hands every
-    // authenticated user the @everyone bits (VIEW_CHANNEL, SEND_MESSAGES, …) for
-    // ANY server, and a kicked/banned user keeps whatever roles were never
-    // purged from member_roles. Membership (server_members) is the source of
-    // truth; roles only layer on top of it.
-    if !is_server_member(pool, server_id, user_id).await {
-        return Permissions::empty();
-    }
-
-    // Get all role permissions for this user in this server.
+/// The OR of every role this member holds in this server, the @everyone role
+/// included. The caller applies the stream-only cap (`server_capped`).
+async fn server_role_bits(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<Permissions, sqlx::Error> {
     // `AND mr.server_id = sr.server_id` is load-bearing: without it a member_roles
     // row pairing THIS server with a role from ANOTHER server would match, letting
     // an attacker inherit a foreign server's role permissions here (cross-server
@@ -550,17 +631,14 @@ pub async fn get_user_server_permissions(
     .bind(server_id)
     .bind(user_id as i32)
     .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Combine all permissions with bitwise OR
     let mut combined = Permissions::empty();
     for (perm_bits,) in role_perms {
         combined |= Permissions::from_bits_truncate(perm_bits as u64);
     }
-
-    // A stream-only member holds the cap and nothing else server-wide.
-    combined.server_capped()
+    Ok(combined)
 }
 
 /// Check if user has a specific permission in a server
@@ -577,15 +655,16 @@ pub async fn user_has_permission(
 /// `(is_owner, highest_role_position)` for `user_id` in `server_id`. Highest
 /// position among roles the user actually holds (0 if none / not a member).
 /// Server-scoped join mirrors the C2 permission-query fix so a cross-server
-/// member_roles row can't inflate rank.
-pub async fn member_rank(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> (bool, i32) {
+/// member_roles row can't inflate rank. A lookup that fails is `Err`: folded
+/// into "not the owner, rank 0" it made the TARGET of a kick or ban look
+/// unprotected, the one direction this check must never fail in.
+pub async fn member_rank(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Result<(bool, i32), sqlx::Error> {
     let is_owner: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM servers WHERE id = $1 AND owner_id = $2")
             .bind(server_id)
             .bind(user_id as i32)
             .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+            .await?;
     let highest: Option<(i32,)> = sqlx::query_as(
         "SELECT COALESCE(MAX(sr.position), 0) FROM server_roles sr \
          JOIN member_roles mr ON mr.role_id = sr.id AND mr.server_id = sr.server_id \
@@ -594,9 +673,8 @@ pub async fn member_rank(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> 
     .bind(server_id)
     .bind(user_id as i32)
     .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
-    (is_owner.is_some(), highest.map(|(p,)| p).unwrap_or(0))
+    .await?;
+    Ok((is_owner.is_some(), highest.map(|(p,)| p).unwrap_or(0)))
 }
 
 /// Whether `actor` may take a moderation action (kick / ban / timeout) against
@@ -608,23 +686,37 @@ pub async fn member_rank(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> 
 /// rank between two peers is refused, so a KICK_MEMBERS holder can no longer
 /// time out / kick / ban the owner, an administrator, or an equal-ranked
 /// moderator, and an administrator cannot lift their own timeout.
-pub async fn can_moderate(pool: &sqlx::PgPool, server_id: &str, actor: i64, target: i64) -> bool {
-    let (target_owner, target_pos) = member_rank(pool, server_id, target).await;
-    let (actor_owner, actor_pos) = member_rank(pool, server_id, actor).await;
+///
+/// `Err` when a rank lookup failed: the caller answers the 503 of
+/// src/try_again.rs. It used to read as "not the owner, no roles", which let a
+/// moderator through against a target whose rank could not be read.
+pub async fn can_moderate(pool: &sqlx::PgPool, server_id: &str, actor: i64, target: i64) -> Result<bool, LookupFailed> {
+    let ranks = async {
+        Ok::<_, sqlx::Error>((member_rank(pool, server_id, target).await?, member_rank(pool, server_id, actor).await?))
+    };
+    let ((target_owner, target_pos), (actor_owner, actor_pos)) = match ranks.await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("can_moderate: rank lookup failed in server {server_id} ({actor} -> {target}): {e}");
+            return Err(LookupFailed);
+        }
+    };
     // Fetching admin status is only needed when neither ownership shortcut
     // decides it, but the extra query on a moderation action is negligible and
     // keeping it unconditional keeps the decision in one pure, tested function.
+    // (A failed lookup there reads as "not an administrator": it can only
+    // refuse the actor, never let them further.)
     let actor_admin = get_user_server_permissions(pool, server_id, actor)
         .await
         .is_admin();
-    moderation_allowed(
+    Ok(moderation_allowed(
         actor == target,
         actor_owner,
         actor_admin,
         actor_pos,
         target_owner,
         target_pos,
-    )
+    ))
 }
 
 /// Pure moderation-hierarchy decision (DB-free, unit-tested — see the tests).
@@ -664,7 +756,8 @@ fn moderation_allowed(
     actor_pos > target_pos
 }
 
-/// Result of resolving a channel and checking the caller's access to it.
+/// Result of resolving a message and checking the caller's access to it
+/// ([`check_message_view`]).
 pub enum ChannelAccess {
     /// User may access the channel; carries the owning server id.
     Allowed(String),
@@ -672,50 +765,10 @@ pub enum ChannelAccess {
     NotFound,
     /// Channel exists but the user is not a member of its server.
     Forbidden,
-}
-
-/// Resolve a channel's owning server and verify the caller is a member of it.
-///
-/// This is the baseline authorization gate for channel message operations
-/// (read, send, search, pin). Without it, any authenticated user could act on
-/// any channel simply by guessing its numeric id.
-pub async fn check_channel_membership(
-    pool: &sqlx::PgPool,
-    channel_id: i64,
-    user_id: i64,
-) -> ChannelAccess {
-    // Fail closed on DB errors, but LOUDLY: a silent unwrap_or(None) here turns
-    // a transient pool/decode failure into "not a member", which cuts a
-    // legitimate client off from its channels with nothing in the logs.
-    // Width matched to this SQL text's other users (channels.id is INT4;
-    // channel_handlers binds i32 — see the 22P03 note in device_token.rs).
-    let server_id: Option<(Option<String>,)> =
-        match sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-            .bind(channel_id as i32)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!(
-                    "check_channel_membership: channel lookup failed for channel {}: {}",
-                    channel_id,
-                    e
-                );
-                return ChannelAccess::NotFound;
-            }
-        };
-
-    let server_id = match server_id {
-        Some((Some(sid),)) => sid,
-        _ => return ChannelAccess::NotFound,
-    };
-
-    if is_server_member(pool, &server_id, user_id).await {
-        ChannelAccess::Allowed(server_id)
-    } else {
-        ChannelAccess::Forbidden
-    }
+    /// A lookup FAILED, so nothing is known: refused like `NotFound` (nothing
+    /// is served or written), but answered with a 503 the client retries, not
+    /// a 404 or 403 it believes (src/try_again.rs).
+    Unavailable,
 }
 
 /// Result of resolving a channel and the caller's effective permissions in it.
@@ -1001,10 +1054,15 @@ fn group_rows(rows: Vec<(i64, i64, i64, bool)>) -> std::collections::HashMap<i64
 /// FAIL CLOSED: any DB error is logged and reported as `NotFound` ("not found
 /// or lookup failed") - never a default-allow, and never an answer that reads
 /// as a fact about the user. Every gate refuses `NotFound` exactly as it
-/// refuses `Allowed` without VIEW_CHANNEL (404 either way); the difference
-/// matters only where a verdict is ACTED ON as a fact - the eviction sweep
-/// with an unknown scope and the LiveKit resync's join check, which leave an
-/// unresolved verdict alone rather than eject someone on a database hiccup.
+/// refuses `Allowed` without VIEW_CHANNEL; the difference matters only where a
+/// verdict is ACTED ON as a fact - the eviction sweep with an unknown scope and
+/// the LiveKit resync's join check, which leave an unresolved verdict alone
+/// rather than eject someone on a database hiccup.
+///
+/// For the socket and the background sweeps. A REST handler resolves through
+/// [`try_user_channel_permissions`] instead and answers a failed lookup with a
+/// 503 to retry: folded into `NotFound` it was a 404 the client believed
+/// ("Channel not found", a clip prompt dropped as "no longer waiting").
 pub async fn get_user_channel_permissions(
     pool: &sqlx::PgPool,
     channel_id: i64,
@@ -1016,16 +1074,32 @@ pub async fn get_user_channel_permissions(
 }
 
 /// A permission lookup the database could not answer. The failure itself is
-/// logged where it happened; this only says that it did.
+/// logged where it happened; this only says that it did. A REST handler
+/// answers it with the 503 of src/try_again.rs (`into_response`, or `?` into a
+/// [`Refusal`](crate::try_again::Refusal)), never with the 404 or 403 of a
+/// real "no": a client believes those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LookupFailed;
+
+impl axum::response::IntoResponse for LookupFailed {
+    fn into_response(self) -> axum::response::Response {
+        crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK)
+    }
+}
+
+impl From<LookupFailed> for crate::try_again::Refusal {
+    fn from(_: LookupFailed) -> Self {
+        crate::try_again::Refusal::TryAgain(crate::try_again::COULD_NOT_CHECK)
+    }
+}
 
 /// [`get_user_channel_permissions`], the same resolver, with a lookup that
 /// FAILED returned as `Err(LookupFailed)` instead of folded into `NotFound`.
 /// For a caller that must answer a database fault differently from a refusal:
-/// GET /files/:id answers it with a 503 the client retries, where a 404 would
-/// be believed (upload_handlers.rs, `uncapped_file_visible`). `Ok(NotFound)`
-/// is now only "no such channel, or it has no server".
+/// every REST handler, which answers it with a 503 the client retries where a
+/// 404 would be believed (GET /files/:id first, upload_handlers.rs
+/// `uncapped_file_visible`). `Ok(NotFound)` is only "no such channel, or it
+/// has no server".
 pub(crate) async fn try_user_channel_permissions(
     pool: &sqlx::PgPool,
     channel_id: i64,
@@ -1182,7 +1256,12 @@ pub(crate) async fn try_user_channel_permissions(
 /// server, fetching all relevant overwrites in a single query (no N+1). Every
 /// requested channel id gets an entry. Callers must have verified the channels
 /// belong to `server_id`. FAIL CLOSED: DB errors bubble up as Err so callers
-/// refuse the request rather than defaulting open.
+/// refuse the request rather than defaulting open, and every one of them is a
+/// lookup that failed: a REST caller answers it with the 503 of
+/// src/try_again.rs. That includes the base (owner, membership, roles): read
+/// through the folding get_user_server_permissions, a failure there was `Ok`
+/// with every channel denied, or the owner judged as a plain member, where
+/// [`try_user_channel_permissions`] answers `Err`.
 pub async fn get_user_channels_permissions(
     pool: &sqlx::PgPool,
     server_id: &str,
@@ -1195,8 +1274,7 @@ pub async fn get_user_channels_permissions(
     }
 
     // Owner -> ADMINISTRATOR; non-member -> empty; else OR of role permissions.
-    // (get_user_server_permissions already fails closed to empty on DB errors.)
-    let base = get_user_server_permissions(pool, server_id, user_id).await;
+    let base = read_user_server_permissions(pool, server_id, user_id).await?;
 
     if base.is_admin() {
         for &cid in channel_ids {
@@ -1424,15 +1502,9 @@ pub async fn stream_only_member_ids(
         .collect())
 }
 
-/// Membership probe shared by the channel- and message-scoped checks.
-/// DB errors are logged and mapped to `false` — fail closed, but LOUDLY: a
-/// silent `unwrap_or(None)` here turned transient pool/decode failures into
-/// "not a member" with nothing in the logs.
-async fn is_server_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> bool {
-    server_membership(pool, server_id, user_id).await.unwrap_or(false)
-}
-
-/// Membership as the database answered it: None when the lookup failed.
+/// Membership as the database answered it: None when the lookup failed (logged
+/// here). (Its folding sibling `is_server_member`, which read a failure as
+/// "not a member", is gone with its last caller.)
 async fn server_membership(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Option<bool> {
     match sqlx::query_as::<_, (i32,)>(
         "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",
@@ -1455,112 +1527,59 @@ async fn server_membership(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -
     }
 }
 
-/// Resolve a message's owning server (via its channel) and verify the caller is
-/// a member of it. Used to gate message-scoped actions such as reactions.
-///
-/// DM messages are also allowed when the caller participates in the
-/// conversation; those return `Allowed` with an empty server id (DMs have no
-/// owning server — callers only use the id for server-scoped extras like
-/// custom emojis).
-pub async fn check_message_membership(
-    pool: &sqlx::PgPool,
-    message_id: &str,
-    user_id: i64,
-) -> ChannelAccess {
-    let server_id: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT c.server_id FROM messages m JOIN channels c ON m.channel_id = c.id WHERE m.id = $1",
-    )
-    .bind(message_id)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
-
-    let server_id = match server_id {
-        Some((Some(sid),)) => sid,
-        _ => {
-            // Not a channel message — is it a DM message the caller can see?
-            let dm_participant: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM dm_messages m JOIN dm_conversations c ON m.conversation_id = c.id \
-                 WHERE m.id = $1 AND (c.user1_id = $2 OR c.user2_id = $2)",
-            )
-            .bind(message_id)
-            .bind(user_id as i32)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-            return if dm_participant.is_some() {
-                ChannelAccess::Allowed(String::new())
-            } else {
-                ChannelAccess::NotFound
-            };
+/// The channel a message lives in, or `Ok(None)` for one that is not a channel
+/// message. `Err` when the lookup failed (logged here).
+async fn message_channel(pool: &sqlx::PgPool, message_id: &str, who: &str) -> Result<Option<i64>, LookupFailed> {
+    match sqlx::query_as::<_, (i32,)>("SELECT channel_id FROM messages WHERE id = $1")
+        .bind(message_id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => Ok(row.map(|(cid,)| cid as i64)),
+        Err(e) => {
+            tracing::error!("{who}: message lookup failed for message {message_id}: {e}");
+            Err(LookupFailed)
         }
-    };
-
-    if is_server_member(pool, &server_id, user_id).await {
-        ChannelAccess::Allowed(server_id)
-    } else {
-        ChannelAccess::Forbidden
     }
 }
 
-/// Like [`check_message_membership`], but channel messages additionally require
-/// VIEW_CHANNEL on the message's channel: a member who is VIEW-denied gets
-/// `NotFound` (hide the channel's existence, matching the HTTP matrix). DM
-/// messages keep the participant-only check.
+/// Not a channel message: is it a DM message the caller is a participant of?
+/// DM messages resolve to `Allowed` with an empty server id (DMs have no
+/// owning server; callers use the id only for server-scoped extras).
+async fn dm_message_access(pool: &sqlx::PgPool, message_id: &str, user_id: i64, who: &str) -> ChannelAccess {
+    match sqlx::query_as::<_, (i32,)>(
+        "SELECT 1 FROM dm_messages m JOIN dm_conversations c ON m.conversation_id = c.id \
+         WHERE m.id = $1 AND (c.user1_id = $2 OR c.user2_id = $2)",
+    )
+    .bind(message_id)
+    .bind(user_id as i32)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(_)) => ChannelAccess::Allowed(String::new()),
+        Ok(None) => ChannelAccess::NotFound,
+        Err(e) => {
+            tracing::error!("{who}: DM participant lookup failed for message {message_id}: {e}");
+            ChannelAccess::Unavailable
+        }
+    }
+}
+
+/// Resolve a message for a message-scoped route (reactions, reports): channel
+/// messages require VIEW_CHANNEL on the message's channel (a member who is
+/// VIEW-denied gets `NotFound`: hide the channel's existence, matching the
+/// HTTP matrix); DM messages require being a participant.
+///
+/// A lookup that FAILED is `Unavailable`, never `NotFound` or `Forbidden`: a
+/// database hiccup is not "no such message". (Its retired sibling
+/// `check_message_membership`, which had no caller, folded a failed lookup
+/// into "not a member"; it is gone rather than fixed.)
 pub async fn check_message_view(
     pool: &sqlx::PgPool,
     message_id: &str,
     user_id: i64,
 ) -> ChannelAccess {
-    let channel: Option<(i32,)> =
-        match sqlx::query_as("SELECT channel_id FROM messages WHERE id = $1")
-            .bind(message_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!(
-                    "check_message_view: message lookup failed for message {}: {}",
-                    message_id,
-                    e
-                );
-                return ChannelAccess::NotFound;
-            }
-        };
-
-    let channel_id = match channel {
-        Some((cid,)) => cid as i64,
-        None => {
-            // Not a channel message — is it a DM message the caller can see?
-            let dm_participant: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM dm_messages m JOIN dm_conversations c ON m.conversation_id = c.id \
-                 WHERE m.id = $1 AND (c.user1_id = $2 OR c.user2_id = $2)",
-            )
-            .bind(message_id)
-            .bind(user_id as i32)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-            return if dm_participant.is_some() {
-                ChannelAccess::Allowed(String::new())
-            } else {
-                ChannelAccess::NotFound
-            };
-        }
-    };
-
-    match get_user_channel_permissions(pool, channel_id, user_id).await {
-        ChannelPermAccess::Allowed { server_id, perms } => {
-            if perms.has(Permissions::VIEW_CHANNEL) {
-                ChannelAccess::Allowed(server_id)
-            } else {
-                ChannelAccess::NotFound
-            }
-        }
-        ChannelPermAccess::NotFound => ChannelAccess::NotFound,
-        ChannelPermAccess::NotMember => ChannelAccess::Forbidden,
-    }
+    check_message_view_perms_as(pool, message_id, user_id, "check_message_view").await.0
 }
 
 /// Like [`check_message_view`], but also hands back the caller's effective
@@ -1572,53 +1591,32 @@ pub async fn check_message_view_perms(
     message_id: &str,
     user_id: i64,
 ) -> (ChannelAccess, Option<Permissions>) {
-    let channel: Option<(i32,)> =
-        match sqlx::query_as("SELECT channel_id FROM messages WHERE id = $1")
-            .bind(message_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!(
-                    "check_message_view_perms: message lookup failed for message {}: {}",
-                    message_id,
-                    e
-                );
-                return (ChannelAccess::NotFound, None);
-            }
-        };
+    check_message_view_perms_as(pool, message_id, user_id, "check_message_view_perms").await
+}
 
-    let channel_id = match channel {
-        Some((cid,)) => cid as i64,
-        None => {
-            let dm_participant: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM dm_messages m JOIN dm_conversations c ON m.conversation_id = c.id \
-                 WHERE m.id = $1 AND (c.user1_id = $2 OR c.user2_id = $2)",
-            )
-            .bind(message_id)
-            .bind(user_id as i32)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-            return if dm_participant.is_some() {
-                (ChannelAccess::Allowed(String::new()), None)
-            } else {
-                (ChannelAccess::NotFound, None)
-            };
-        }
+async fn check_message_view_perms_as(
+    pool: &sqlx::PgPool,
+    message_id: &str,
+    user_id: i64,
+    who: &str,
+) -> (ChannelAccess, Option<Permissions>) {
+    let channel_id = match message_channel(pool, message_id, who).await {
+        Ok(Some(cid)) => cid,
+        Ok(None) => return (dm_message_access(pool, message_id, user_id, who).await, None),
+        Err(LookupFailed) => return (ChannelAccess::Unavailable, None),
     };
 
-    match get_user_channel_permissions(pool, channel_id, user_id).await {
-        ChannelPermAccess::Allowed { server_id, perms } => {
+    match try_user_channel_permissions(pool, channel_id, user_id).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) => {
             if perms.has(Permissions::VIEW_CHANNEL) {
                 (ChannelAccess::Allowed(server_id), Some(perms))
             } else {
                 (ChannelAccess::NotFound, None)
             }
         }
-        ChannelPermAccess::NotFound => (ChannelAccess::NotFound, None),
-        ChannelPermAccess::NotMember => (ChannelAccess::Forbidden, None),
+        Ok(ChannelPermAccess::NotFound) => (ChannelAccess::NotFound, None),
+        Ok(ChannelPermAccess::NotMember) => (ChannelAccess::Forbidden, None),
+        Err(LookupFailed) => (ChannelAccess::Unavailable, None),
     }
 }
 

@@ -623,14 +623,18 @@ pub async fn assign_role(
     // they are for the role-position guard below — including the owner's own
     // self-assign, which can_moderate would otherwise refuse as "target is the
     // owner".
-    if !authority.is_privileged()
-        && !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            "Cannot change the roles of a member ranked at or above you",
-        )
-            .into_response();
+    if !authority.is_privileged() {
+        match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Cannot change the roles of a member ranked at or above you",
+                )
+                    .into_response()
+            }
+            Err(e) => return e.into_response(),
+        }
     }
     if !authority.is_privileged() {
         if target_position >= authority.highest_position {
@@ -711,14 +715,18 @@ pub async fn remove_role(
     }
     // Target-member rank, mirroring assign_role: STRIPPING a role from someone
     // who outranks you is the same authority gap as granting one to them.
-    if !authority.is_privileged()
-        && !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            "Cannot change the roles of a member ranked at or above you",
-        )
-            .into_response();
+    if !authority.is_privileged() {
+        match crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Cannot change the roles of a member ranked at or above you",
+                )
+                    .into_response()
+            }
+            Err(e) => return e.into_response(),
+        }
     }
     if !authority.is_privileged() && target_position >= authority.highest_position {
         return (

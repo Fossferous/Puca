@@ -194,13 +194,22 @@ pub async fn get_wrap_material(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let row: Option<(i32, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    // A lookup that FAILED is a 503 to retry, not the 404 of an account with no
+    // wrap material (the sign-in shows "your keys did not come back" for either,
+    // and asks again).
+    let row: Option<(i32, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>, Option<String>, Option<String>)> = match sqlx::query_as(
         "SELECT key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf, recovery_salt, history_pubkey, history_wrapped_rc FROM users WHERE id = $1",
     )
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("get_wrap_material: lookup failed for {}: {:?}", claims.sub, e);
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     match row {
         Some((key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf, recovery_salt, history_pubkey, history_wrapped_rc)) => {
@@ -246,12 +255,20 @@ pub async fn set_wrap_material(
     // A new recovery code replaces the ONLY wrap of the history key. A client
     // that does not send a re-wrap (one from before 0.9.3) must not be allowed
     // to strand every v4 message behind a code that no longer opens the key.
+    // FAIL CLOSED: a lookup that failed is not "no history key" (folded that
+    // way it let the strand through); a 503 to retry (src/try_again.rs).
     if m.history_wrapped_rc.is_none() {
-        let has: Option<(bool,)> = sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
+        let has: Option<(bool,)> = match sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("set_wrap_material: history-key lookup failed for {}: {:?}", claims.sub, e);
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         if matches!(has, Some((true,))) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -670,12 +687,20 @@ pub async fn recovery_reset(
     }
     if req.new_recovery_salt.is_some() && req.new_history_wrapped_rc.is_none() {
         // Rotating the code without re-wrapping the history key would strand
-        // every v4 message; see set_wrap_material.
-        let has: Option<(bool,)> = sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
+        // every v4 message; see set_wrap_material. A lookup that FAILED is a
+        // 503 to retry: it comes after the proof, so it says nothing a
+        // stranger could not already know.
+        let has: Option<(bool,)> = match sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
             .bind(account_id)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("recovery_reset: history-key lookup failed: {:?}", e);
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
         if matches!(has, Some((true,))) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -809,5 +834,101 @@ mod tests {
             proof_expected,
             "Rust proof must match the frontend vector"
         );
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    //! A recovery-code rotation is refused while the account holds a v4
+    //! history key and the request carries no re-wrap of it (the new code
+    //! would strand every v4 message). Both routes that rotate the code read
+    //! "does this account have one?" with a failure folded into "no". A
+    //! lookup that FAILED is a 503 to retry now (src/try_again.rs). The fault
+    //! is on `users.history_pubkey` only, so everything else the request reads
+    //! answers.
+    use super::*;
+    use crate::fault_injection::{app, claims, drop_faults, faulty_column_pool, faulty_pool, user, Checks};
+    use axum::response::Response;
+
+    async fn recoverable(pool: &sqlx::PgPool) -> (i64, String, StaticSecret) {
+        let uid = user(pool, "rec").await;
+        let seed = StaticSecret::from([7u8; 32]);
+        let public = format!("x25519:{}", B64.encode(X25519PublicKey::from(&seed).as_bytes()));
+        sqlx::query(
+            "UPDATE users SET public_key = $1, key_version = 3, wrap_salt = 'ws', seed_wrapped_pw = 'swp', \
+             recovery_salt = 'rs', seed_wrapped_rc = 'swr', history_pubkey = 'hist-pub', history_wrapped_rc = 'hist-rc' WHERE id = $2",
+        )
+        .bind(&public)
+        .bind(uid as i32)
+        .execute(pool)
+        .await
+        .unwrap();
+        let (name,): (String,) = sqlx::query_as("SELECT username FROM users WHERE id = $1").bind(uid as i32).fetch_one(pool).await.unwrap();
+        (uid, name, seed)
+    }
+
+    /// The whole recovery exchange as the client runs it: a challenge, then a
+    /// reset proven with the identity seed, rotating the code with no re-wrap.
+    async fn reset(state: Arc<AppState>, name: &str, seed: &StaticSecret) -> Response {
+        let challenge = recovery_challenge(State(Arc::clone(&state)), Json(ChallengeRequest { username: name.to_string() })).await.into_response();
+        let bytes = axum::body::to_bytes(challenge.into_body(), 1 << 16).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let e: [u8; 32] = B64.decode(v["server_ephemeral"].as_str().unwrap().trim_start_matches("x25519:")).unwrap().try_into().unwrap();
+        let c = B64.decode(v["challenge"].as_str().unwrap()).unwrap();
+        let dh = seed.diffie_hellman(&X25519PublicKey::from(e));
+        let mut proof_key = [0u8; 32];
+        Hkdf::<Sha256>::new(None, dh.as_bytes()).expand(RECOVERY_PROOF_INFO, &mut proof_key).unwrap();
+        let mut mac = HmacSha256::new_from_slice(&proof_key).unwrap();
+        mac.update(&c);
+        mac.update(name.to_lowercase().as_bytes());
+        let proof = B64.encode(mac.finalize().into_bytes());
+        let req: RecoveryResetRequest = serde_json::from_value(serde_json::json!({
+            "username": name,
+            "proof": proof,
+            "new_salt_hex": "00",
+            "new_verifier_hex": "00",
+            "new_wrap_salt": "ws2",
+            "new_seed_wrapped_pw": "swp2",
+            "new_recovery_salt": "rs2",
+            "new_seed_wrapped_rc": "swr2",
+        }))
+        .unwrap();
+        recovery_reset(State(state), Json(req)).await.into_response()
+    }
+
+    async fn rewrap(state: Arc<AppState>, uid: i64) -> Response {
+        state.record_password_proof(uid, 0);
+        let m: WrapMaterial = serde_json::from_value(serde_json::json!({
+            "wrap_salt": "ws3", "recovery_salt": "rs3", "seed_wrapped_pw": "swp3", "seed_wrapped_rc": "swr3",
+        }))
+        .unwrap();
+        set_wrap_material(State(state), Extension(claims(uid)), Json(m)).await.into_response()
+    }
+
+    async fn wrap(state: Arc<AppState>, uid: i64) -> Response {
+        get_wrap_material(State(state), Extension(claims(uid))).await.into_response()
+    }
+
+    #[tokio::test]
+    async fn a_recovery_code_rotation_is_refused_when_the_history_key_cannot_be_read() {
+        let Some((pool, url)) = crate::migrator::test_database(2).await else { return };
+        let mut checks = Checks::default();
+        let (uid, name, seed) = recoverable(&pool).await;
+        let healthy = (reset(app(&pool), &name, &seed).await.status(), rewrap(app(&pool), uid).await.status(), wrap(app(&pool), uid).await.status());
+        let (faulty, schema) = faulty_column_pool(&pool, &url, "users", "history_pubkey").await;
+        let faulted = (reset(app(&faulty), &name, &seed).await, rewrap(app(&faulty), uid).await);
+        drop_faults(&pool, faulty, &schema).await;
+        let (faulty, schema) = faulty_pool(&pool, &url, &["users"]).await;
+        let wrap_faulted = wrap(app(&faulty), uid).await;
+        drop_faults(&pool, faulty, &schema).await;
+        let (code,): (Option<String>,) = sqlx::query_as("SELECT recovery_salt FROM users WHERE id = $1").bind(uid as i32).fetch_one(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid as i32).execute(&pool).await;
+
+        checks.eq(&healthy, &(StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST, StatusCode::OK), "control: a rotation without the re-wrap is refused, and the wrap material is served".into());
+        checks.retry(&faulted.0, "recovery reset: the history-key lookup failed");
+        checks.retry(&faulted.1, "rewrap: the history-key lookup failed");
+        checks.retry(&wrap_faulted, "GET /keys/wrap: the account lookup failed");
+        checks.eq(&code, &Some("rs".to_string()), "the recovery code was not rotated".into());
+        checks.done();
     }
 }

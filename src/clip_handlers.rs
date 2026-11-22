@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::auth::Claims;
-use crate::permissions::{get_channel_viewer_ids, get_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::permissions::{get_channel_viewer_ids, try_user_channel_permissions, ChannelPermAccess, LookupFailed, Permissions};
 use crate::protocol::{ClipOutcome, ServerMessage, UserInfo};
 use crate::state::{now_unix_ms, AppState, ClipDenial, ClipProposal, ClipRateState, ClipVote, ClipVoter, PresenceLog, UserId};
 
@@ -139,11 +139,22 @@ fn approver_online(state: &AppState, uid: UserId, hidden: &HashSet<UserId>) -> b
 /// themselves — ClipProposed, ClipPending, ClipVoteUpdate, ClipResolved —
 /// carry only the clip id, counts and an outcome, so nothing there needs
 /// redacting.
+///
+/// This folding form is for the socket fan-out (a failed lookup sends no
+/// frame). A REST answer goes through [`try_views_channel`]: folded into
+/// "cannot see it" a database hiccup was a 404 the client believed, and a
+/// vote answered that way dropped the prompt as "no longer waiting"
+/// (clipProposals.ts).
 async fn views_channel(state: &AppState, channel_id: i64, user: UserId) -> bool {
-    matches!(
-        get_user_channel_permissions(&state.pool, channel_id, user).await,
+    try_views_channel(state, channel_id, user).await.unwrap_or(false)
+}
+
+/// [`views_channel`] with a lookup that FAILED kept apart (logged by the resolver).
+async fn try_views_channel(state: &AppState, channel_id: i64, user: UserId) -> Result<bool, LookupFailed> {
+    Ok(matches!(
+        try_user_channel_permissions(&state.pool, channel_id, user).await?,
         ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
-    )
+    ))
 }
 
 /// What one user may do with one proposal right now. `None` = not a
@@ -165,14 +176,15 @@ pub fn clip_access_from(views_voice: bool, views_target: bool) -> Option<ClipAcc
     Some(ClipAccess { sees_target: views_target })
 }
 
-/// Resolve `clip_access_from` against the live permission set. The target is
-/// only resolved for a participant (one fewer query for a 404), and a resolver
-/// error on the target reads as "cannot see it" — redaction, which fails safe.
-async fn clip_access(state: &AppState, voice_channel_id: i64, target_channel_id: i64, user: UserId) -> Option<ClipAccess> {
-    if !views_channel(state, voice_channel_id, user).await {
-        return None;
+/// Resolve `clip_access_from` against the live permission set, for the REST
+/// views. The target is only resolved for a participant (one fewer query for a
+/// 404). A lookup that FAILED, of either channel, is `Err`: the caller answers
+/// a 503 to retry rather than a 404 (or a view redacted for no reason).
+async fn clip_access(state: &AppState, voice_channel_id: i64, target_channel_id: i64, user: UserId) -> Result<Option<ClipAccess>, LookupFailed> {
+    if !try_views_channel(state, voice_channel_id, user).await? {
+        return Ok(None);
     }
-    clip_access_from(true, views_channel(state, target_channel_id, user).await)
+    Ok(clip_access_from(true, try_views_channel(state, target_channel_id, user).await?))
 }
 
 /// The participant gate alone — for the frames that name nothing (doorbell,
@@ -484,13 +496,15 @@ pub async fn propose_clip(
 ) -> Response {
     let user = claims.sub;
     // 1. VIEW + CREATE_CLIPS on the voice channel (404 hides existence).
-    let (server_id, perms) = match get_user_channel_permissions(&state.pool, voice_channel_id, user).await {
-        ChannelPermAccess::Allowed { server_id, perms } => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let (server_id, perms) = match try_user_channel_permissions(&state.pool, voice_channel_id, user).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) => {
             if !perms.has(Permissions::VIEW_CHANNEL) { return plain(StatusCode::NOT_FOUND, "Channel not found"); }
             (server_id, perms)
         }
-        ChannelPermAccess::NotFound => return plain(StatusCode::NOT_FOUND, "Channel not found"),
-        ChannelPermAccess::NotMember => return plain(StatusCode::FORBIDDEN, "Not a member of this server"),
+        Ok(ChannelPermAccess::NotFound) => return plain(StatusCode::NOT_FOUND, "Channel not found"),
+        Ok(ChannelPermAccess::NotMember) => return plain(StatusCode::FORBIDDEN, "Not a member of this server"),
+        Err(e) => return e.into_response(),
     };
     if !perms.has(Permissions::CREATE_CLIPS) {
         return plain(StatusCode::FORBIDDEN, "Missing Create Clips permission");
@@ -535,14 +549,15 @@ pub async fn propose_clip(
         );
     };
     if pin as i64 != req.target_channel_id { return plain(StatusCode::FORBIDDEN, "This server pins clips to one channel"); }
-    let target_ok = match get_user_channel_permissions(&state.pool, req.target_channel_id, user).await {
-        ChannelPermAccess::Allowed { server_id: tsid, perms: tperms } => {
+    let target_ok = match try_user_channel_permissions(&state.pool, req.target_channel_id, user).await {
+        Ok(ChannelPermAccess::Allowed { server_id: tsid, perms: tperms }) => {
             if !tperms.has(Permissions::VIEW_CHANNEL) { return plain(StatusCode::NOT_FOUND, "Target channel not found"); }
             if tsid != server_id { return plain(StatusCode::BAD_REQUEST, "The target channel must be in the same server as the voice channel"); }
             tperms.has(Permissions::SEND_MESSAGES)
         }
-        ChannelPermAccess::NotFound => return plain(StatusCode::NOT_FOUND, "Target channel not found"),
-        ChannelPermAccess::NotMember => return plain(StatusCode::FORBIDDEN, "Not a member of this server"),
+        Ok(ChannelPermAccess::NotFound) => return plain(StatusCode::NOT_FOUND, "Target channel not found"),
+        Ok(ChannelPermAccess::NotMember) => return plain(StatusCode::FORBIDDEN, "Not a member of this server"),
+        Err(e) => return e.into_response(),
     };
     if !target_ok { return plain(StatusCode::FORBIDDEN, "You cannot post in that channel"); }
     // The column is `type` (schema), NOT `channel_type` (the API field name) —
@@ -686,8 +701,12 @@ pub async fn vote_clip(
         Some(p) if p.is_voter(user) => p.voice_channel_id,
         _ => return plain(StatusCode::NOT_FOUND, "No such clip request"),
     };
-    if !still_views_voice_channel(&state, voice_cid, user).await {
-        return plain(StatusCode::NOT_FOUND, "No such clip request");
+    // A lookup that FAILED is a 503 to retry: the 404 below is what makes the
+    // client drop the prompt for good.
+    match try_views_channel(&state, voice_cid, user).await {
+        Ok(true) => {}
+        Ok(false) => return plain(StatusCode::NOT_FOUND, "No such clip request"),
+        Err(e) => return e.into_response(),
     }
     // Mutate under the entry lock; collect what to broadcast, then release.
     enum After { Vote(ClipProposal), Approved(ClipProposal), Declined(ClipProposal) }
@@ -766,8 +785,10 @@ pub async fn get_clip(State(state): State<Arc<AppState>>, Extension(claims): Ext
     };
     // Voice channel gates the answer (uniform 404, no oracle); the target
     // channel only decides whether the view may name it.
-    let Some(access) = clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await else {
-        return plain(StatusCode::NOT_FOUND, "No such clip request");
+    let access = match clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await {
+        Ok(Some(access)) => access,
+        Ok(None) => return plain(StatusCode::NOT_FOUND, "No such clip request"),
+        Err(e) => return e.into_response(),
     };
     let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
     let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
@@ -794,8 +815,12 @@ pub async fn list_pending_clips(State(state): State<Arc<AppState>>, Extension(cl
         .collect();
     let mut proposals: Vec<ClipView> = Vec::with_capacity(candidates.len());
     for p in candidates {
-        let Some(access) = clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await else {
-            continue;
+        // A lookup that FAILED fails the list (503, retry): leaving the
+        // proposal out told the client it was gone.
+        let access = match clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await {
+            Ok(Some(access)) => access,
+            Ok(None) => continue,
+            Err(e) => return e.into_response(),
         };
         let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
         let hidden = crate::ws::hidden_members(&state, &approver_ids).await;

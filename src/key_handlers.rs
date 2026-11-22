@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::Claims;
-use crate::permissions::{get_user_channel_permissions, ChannelPermAccess, Permissions};
+use crate::permissions::{try_user_channel_permissions, ChannelPermAccess, Permissions};
 use crate::state::AppState;
+use crate::try_again::{try_again_shortly, COULD_NOT_CHECK};
 
 // --- DTOs ---
 
@@ -149,16 +150,18 @@ pub async fn publish_channel_keys(
     // Key custody follows visibility: a member VIEW-denied on the channel can
     // neither publish nor fetch its keys, and sees the same 404 as a missing
     // channel (hide its existence).
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     if payload.keys.is_empty() {
@@ -189,14 +192,15 @@ pub async fn publish_channel_keys(
                 channel_id,
                 e
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to resolve channel members",
-            )
-                .into_response();
+            return try_again_shortly(COULD_NOT_CHECK);
         }
     };
 
+    // Each read below runs in the transaction, so the first that fails aborts it
+    // and every statement after it fails too. Folded into "nothing there" (an
+    // epoch bound of 0, no key on the account, nobody holding the epoch) they
+    // answered "Invalid epoch", "must be your own identity key" or a 500 for a
+    // publish nothing was wrong with: a 503 to retry, and nothing written.
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
         Err(e) => {
@@ -231,13 +235,20 @@ pub async fn publish_channel_keys(
     // target (max+1) would then overflow/be unreachable — a permanent channel-key
     // DoS. Read MAX under the advisory lock so it reflects the latest commit.
     let max_epoch: (Option<i32>,) =
-        sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
+        match sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
             // channel_keys.channel_id is INT4: bind its width, as every other
             // user of this text does (sqlx caches statements by text; 22P03).
             .bind(channel_id as i32)
             .fetch_one(&mut *tx)
             .await
-            .unwrap_or((None,));
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("publish_channel_keys: epoch bound read failed for channel {}: {:?}", channel_id, e);
+                let _ = tx.rollback().await;
+                return try_again_shortly(COULD_NOT_CHECK);
+            }
+        };
     let max_epoch_val = max_epoch.0.unwrap_or(0);
     if payload.epoch < 1 || payload.epoch > max_epoch_val.saturating_add(1) {
         let _ = tx.rollback().await;
@@ -274,11 +285,18 @@ pub async fn publish_channel_keys(
     // malicious SERVER (it owns the response either way); it stops a malicious
     // CLIENT, and it keeps the stored provenance honest for everyone else.
     let my_pubkey: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT public_key FROM users WHERE id = $1")
+        match sqlx::query_as("SELECT public_key FROM users WHERE id = $1")
             .bind(claims.sub as i32)
             .fetch_optional(&mut *tx)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("publish_channel_keys: own-key read failed for user {}: {:?}", claims.sub, e);
+                let _ = tx.rollback().await;
+                return try_again_shortly(COULD_NOT_CHECK);
+            }
+        };
     match my_pubkey.and_then(|(k,)| k) {
         Some(k) if k == this_sender => {}
         _ => {
@@ -290,14 +308,21 @@ pub async fn publish_channel_keys(
                 .into_response();
         }
     }
-    let existing_sender: Option<(String,)> = sqlx::query_as(
+    let existing_sender: Option<(String,)> = match sqlx::query_as(
         "SELECT sender_public_key FROM channel_keys WHERE channel_id = $1 AND epoch = $2 LIMIT 1",
     )
     .bind(channel_id)
     .bind(payload.epoch)
     .fetch_optional(&mut *tx)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("publish_channel_keys: epoch owner read failed for channel {}: {:?}", channel_id, e);
+            let _ = tx.rollback().await;
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
     if let Some(conflict) = existing_epoch_conflict(existing_sender.as_ref().map(|(o,)| o.as_str()), &this_sender) {
         let _ = tx.rollback().await;
         return (StatusCode::CONFLICT, conflict).into_response();
@@ -436,16 +461,18 @@ pub async fn get_channel_keys(
 ) -> impl IntoResponse {
     // VIEW-gated: a member who cannot see the channel must not receive its
     // wrapped keys (404, hiding the channel's existence).
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     // A caller's CURRENT epoch is the newest one actually ADDRESSED TO THEM, not
@@ -478,17 +505,21 @@ pub async fn get_channel_keys(
     {
         Ok(v) => v,
         Err(e) => {
-            // Previously swallowed silently. Preserve the old fail-soft shape
-            // (report "no keys yet") rather than 500ing, because this endpoint is
-            // also on the message READ path — decryptChannelContent does not catch,
-            // so a 500 here rejects the whole Promise.all and blanks the channel
-            // on a transient pool blip.
+            // A 503 to retry, like every read below (src/try_again.rs). This
+            // was served as "no keys yet" (current_epoch 0), so that a failed
+            // read did not reject the message read path's Promise.all; but the
+            // client caches what this route answers (channelKeys.ts getState)
+            // and acts on it. Epoch 0 is the bootstrap branch: a device with no
+            // epoch floor mints epoch 1, is refused 409 and adopts the epoch-1
+            // key a later epoch superseded (the one a removed member holds) if
+            // the reload it then makes fails the same way. A 503 caches
+            // nothing, and the next read asks again.
             tracing::error!(
                 "get_channel_keys: epoch read failed for channel {}: {:?}",
                 channel_id,
                 e
             );
-            (None, None)
+            return try_again_shortly(COULD_NOT_CHECK);
         }
     };
     let max_epoch_val = epochs.1.unwrap_or(0);
@@ -511,31 +542,41 @@ pub async fn get_channel_keys(
                     server_id,
                     e
                 );
-                // Fail closed TOWARD ROTATION, not toward 500. This used to
-                // default to 0, which silently matched a missing/zero
-                // epoch_generation and told every client "membership unchanged" —
-                // so the rotation a kick should have forced never happened. -1 can
-                // never equal a stored generation (always >= 0), so holders rotate
-                // instead. Sends fail safe; reads keep working.
-                (-1,)
+                // A 503, never a made-up generation. It was 0 first, which
+                // matched a missing/zero epoch_generation and told every client
+                // "membership unchanged", so the rotation a kick should have
+                // forced never happened; then -1, which forced a rotation
+                // stamped with a generation nobody has (clamped to 0 by the
+                // publish), so every other holder rotated again after it.
+                return try_again_shortly(COULD_NOT_CHECK);
             }
         };
 
     // Generation the current epoch was minted for (any row of that epoch).
-    let epoch_generation: (Option<i32>,) = sqlx::query_as(
+    // A failed read is a 503: served as 0 it was a membership change nobody made.
+    let epoch_generation: (Option<i32>,) = match sqlx::query_as(
         "SELECT member_generation FROM channel_keys WHERE channel_id = $1 AND epoch = $2 LIMIT 1",
     )
     .bind(channel_id)
     .bind(current_epoch_val)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None)
-    .unwrap_or((None,));
+    {
+        Ok(row) => row.unwrap_or((None,)),
+        Err(e) => {
+            tracing::error!("get_channel_keys: epoch generation read failed for channel {}: {:?}", channel_id, e);
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     // `sender_user_id` is Option: rows written before migration 037 have no
     // wrapper identity and cannot gain one. The client treats NULL as "legacy,
     // unverifiable" and still unwraps it, so old epochs stay readable.
-    let rows: Vec<(i32, String, String, Option<i32>)> = sqlx::query_as(
+    //
+    // A failed read is a 503: served as `keys: []` it was cached as "nothing
+    // wrapped for you", the history drawn as undecryptable and every send
+    // refused as "cannot send securely".
+    let rows: Vec<(i32, String, String, Option<i32>)> = match sqlx::query_as(
         r#"
         SELECT epoch, wrapped_key, sender_public_key, sender_user_id
         FROM channel_keys
@@ -547,7 +588,13 @@ pub async fn get_channel_keys(
     .bind(claims.sub as i32)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_channel_keys: wrapped key read failed for channel {}: {:?}", channel_id, e);
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     let keys = rows
         .into_iter()
@@ -580,19 +627,22 @@ pub async fn get_member_keys(
 ) -> impl IntoResponse {
     // Same VIEW gate as get_channel_keys: member public keys for wrapping are
     // only served to users who can see the channel.
-    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let server_id = match try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { server_id, perms }) if perms.has(Permissions::VIEW_CHANNEL) => {
             server_id
         }
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
-    let rows: Vec<(i32, Option<String>)> = sqlx::query_as(
+    // A failed read is a 503: served as `200 []` it was "nobody to wrap for".
+    let rows: Vec<(i32, Option<String>)> = match sqlx::query_as(
         r#"
         SELECT u.id, u.public_key
         FROM server_members sm
@@ -603,7 +653,13 @@ pub async fn get_member_keys(
     .bind(&server_id)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("get_member_keys: member read failed for channel {}: {:?}", channel_id, e);
+            return try_again_shortly(COULD_NOT_CHECK);
+        }
+    };
 
     // Only hand out keys for members who can VIEW this channel — otherwise
     // every future epoch key gets wrapped for VIEW-denied members too, making
@@ -618,11 +674,7 @@ pub async fn get_member_keys(
                     channel_id,
                     e
                 );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to resolve channel members",
-                )
-                    .into_response();
+                return try_again_shortly(COULD_NOT_CHECK);
             }
         };
 

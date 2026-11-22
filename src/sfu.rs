@@ -2942,15 +2942,17 @@ pub async fn get_sfu_token(
     // gates it in ws.rs JoinRoom, and this is the SFU tier's equivalent. Gating
     // only one would leave the other as the bypass — an sfu_mode channel is
     // joined by minting a token here, never by JoinRoom alone.
-    let perms = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { perms, .. }
+    // A lookup that FAILED is a 503 to retry, not "Channel not found".
+    let perms = match crate::permissions::try_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        Ok(ChannelPermAccess::Allowed { perms, .. })
             if perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT) => perms,
-        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
+        Ok(ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound) => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
-        ChannelPermAccess::NotMember => {
+        Ok(ChannelPermAccess::NotMember) => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
+        Err(e) => return e.into_response(),
     };
 
     // i32, MATCHING update_channel's copy of this exact text (channels.id is
@@ -2959,11 +2961,17 @@ pub async fn get_sfu_token(
     // connection which had served a channel edit failed with 22P03 - read
     // below as "Channel not found" (see the 22P03 note in device_token.rs).
     let row: Option<(i32, bool)> =
-        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
+        match sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
             .bind(channel_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("get_sfu_token: channel lookup failed for channel {channel_id}: {e:?}");
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+            }
+        };
     match row {
         Some((1, true)) => {}
         Some(_) => return (StatusCode::BAD_REQUEST, "Not an SFU voice channel").into_response(),

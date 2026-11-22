@@ -156,22 +156,10 @@ pub(crate) struct Relationship {
     pub target_wrote_first: bool,
 }
 
-/// Look the pair up. `None` means "no live target" (unallocated, or a
-/// tombstone) OR a lookup that could not answer — both are refusals to every
-/// caller, and a query error must never read as a relationship.
-async fn relationship(pool: &sqlx::PgPool, me: i64, target: i64) -> Option<Relationship> {
-    match relationship_checked(pool, me, target).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("relationship: lookup failed for {} -> {}: {:?}", me, target, e);
-            None
-        }
-    }
-}
-
-/// [`relationship`] with the lookup's failure kept apart from "no live
-/// target", for a caller that answers a failure differently from a refusal
-/// (GET /files/:id answers 503 rather than 404, upload_handlers.rs).
+/// Look the pair up. `Ok(None)` means "no live target" (unallocated, or a
+/// tombstone), a refusal to every caller. A lookup that could not answer is
+/// `Err`, never a relationship and never that refusal: every caller answers it
+/// with a 503 to retry (src/try_again.rs), because a client believes the 404.
 async fn relationship_checked(pool: &sqlx::PgPool, me: i64, target: i64) -> Result<Option<Relationship>, sqlx::Error> {
     sqlx::query_as::<_, (bool, bool, bool, bool, bool)>(
         "SELECT EXISTS(SELECT 1 FROM blocked_users bl \
@@ -253,10 +241,11 @@ pub(crate) fn identity_context_allows(r: &Relationship) -> bool {
 /// either has blocked the other. A
 /// bare dm_conversations row is NOT evidence of a relationship — the caller can
 /// create one unilaterally — so the read gate must not rest on it. Self is
-/// always allowed. Fails closed.
-pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
+/// always allowed. Fails closed: a lookup that FAILED is `Err` (the caller
+/// logs it and answers a 503 to retry, not the 404 of a stranger).
+pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i64) -> Result<bool, sqlx::Error> {
     if me == target {
-        return true;
+        return Ok(true);
     }
     // The SAME rule as recipient_accepts_dms, so the docs can say so: a shared
     // server counts only while the target's "Allow DMs from server members" is
@@ -268,27 +257,18 @@ pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i6
     // live session census (device count, recency, protocol version) — the
     // very thing this gate exists to withhold. Every WRITE path refuses a
     // blocked pair; the read gate has to agree with them.
-    relationship(pool, me, target).await.map_or(false, |r| dm_context_allows(&r))
+    Ok(relationship_checked(pool, me, target).await?.map_or(false, |r| dm_context_allows(&r)))
 }
 
 /// May `me` read `target`'s identity (X25519) or account signing (Ed25519)
-/// public key (GET /users/:id/public-key, /signing-key)? Self, or
-/// `identity_context_allows` above — which, unlike `users_share_context`,
-/// deliberately ignores blocks (see its doc comment for why). Ungated, those
-/// routes were an existence oracle over the dense id space, tombstones
-/// included. Fails closed: no live target, or a lookup error, is the 404.
-pub(crate) async fn users_share_identity_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
-    if me == target {
-        return true;
-    }
-    relationship(pool, me, target).await.map_or(false, |r| identity_context_allows(&r))
-}
-
-/// [`users_share_identity_context`], with a lookup that FAILED returned as
-/// `Err` instead of folded into `false`. The same rule; only the failure is
-/// kept apart, so GET /files/:id can answer a database fault with a 503 the
-/// client retries rather than a 404 it believes (the caller logs it). Every
-/// other caller keeps the folding function above.
+/// public key (GET /users/:id/public-key, /signing-key), or an avatar or
+/// sound of theirs (GET /files/:id)? Self, or `identity_context_allows`
+/// above — which, unlike `users_share_context`, deliberately ignores blocks
+/// (see its doc comment for why). Ungated, those routes were an existence
+/// oracle over the dense id space, tombstones included. No live target is
+/// `Ok(false)`, the 404. A lookup that FAILED is `Err`, never `false`: every
+/// caller answers it with a 503 the client retries rather than a 404 it
+/// believes (the caller logs it).
 pub(crate) async fn try_users_share_identity_context(pool: &sqlx::PgPool, me: i64, target: i64) -> Result<bool, sqlx::Error> {
     if me == target {
         return Ok(true);
@@ -640,8 +620,9 @@ pub async fn get_messages(
     Query(query): Query<MessagesQuery>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    // Verify user is part of this conversation
-    let is_participant: Option<(i32,)> = sqlx::query_as(
+    // Verify user is part of this conversation. A lookup that FAILS is a 503
+    // to retry (src/try_again.rs), not "Not a participant".
+    let is_participant: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM dm_conversations WHERE id = $1 AND (user1_id = $2 OR user2_id = $3)",
     )
     .bind(&conversation_id)
@@ -649,7 +630,13 @@ pub async fn get_messages(
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("dm get_messages: participant lookup failed: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
 
     if is_participant.is_none() {
         return (
@@ -659,7 +646,9 @@ pub async fn get_messages(
             .into_response();
     }
 
-    let messages: Vec<(String, String, i64, String, Option<String>, String, String)> = sqlx::query_as(
+    // A history query that FAILS is a 503, never the empty 200 of a
+    // conversation with nothing in it (as GET /channels/:id/messages).
+    let messages: Vec<(String, String, i64, String, Option<String>, String, String)> = match sqlx::query_as(
         r#"
         SELECT m.id, m.conversation_id, m.sender_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at
         FROM dm_messages m
@@ -675,7 +664,13 @@ pub async fn get_messages(
     .bind(query.limit.clamp(1, 200))
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("dm get_messages: history query failed: {e:?}");
+            return crate::try_again::try_again_shortly("Could not load messages right now, try again shortly");
+        }
+    };
 
     // Reverse to get chronological order
     let response: Vec<DMMessageResponse> = messages

@@ -94,6 +94,10 @@ macro_rules! require_message_member_perms {
             (ChannelAccess::Forbidden, _) => {
                 return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
             }
+            // A lookup that FAILED: a 503 to retry, not "Message not found".
+            (ChannelAccess::Unavailable, _) => {
+                return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK)
+            }
         }
     };
 }
@@ -169,13 +173,12 @@ pub(crate) fn valid_emoji(emoji: &str) -> bool {
 /// If `message_id` is a DM message and either participant has blocked the
 /// other, returns true — reacting is then refused, mirroring the DM *send*
 /// path (dm_handlers.rs). Channel messages and non-blocked DMs return false.
-/// A DB error fails CLOSED to "blocked" is too aggressive (it would break
-/// reactions on every channel message on a transient error), so this fails
-/// OPEN to false only for the block lookup itself — the caller has already
-/// proven view/history/participant access via `require_message_history!`, so the worst
-/// case here is a blocked user's reaction slipping through on a DB blip, not
-/// disclosure.
-async fn dm_reaction_blocked(state: &AppState, message_id: &str) -> bool {
+/// A lookup that FAILS is `Err`, and the caller refuses with a 503 to retry
+/// (src/try_again.rs). It used to fail OPEN to "not blocked" (failing closed
+/// to "blocked" would have told a member their reaction on a channel message
+/// was refused for a block), which let a blocked user's reaction through on a
+/// DB blip; a 503 is neither, and the client may simply try again.
+async fn dm_reaction_blocked(state: &AppState, message_id: &str) -> Result<bool, sqlx::Error> {
     let blocked: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1
@@ -189,9 +192,8 @@ async fn dm_reaction_blocked(state: &AppState, message_id: &str) -> bool {
     )
     .bind(message_id)
     .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
-    blocked.is_some()
+    .await?;
+    Ok(blocked.is_some())
 }
 
 /// Add a reaction to a message
@@ -220,8 +222,13 @@ pub async fn add_reaction(
     // Blocked users cannot react to each other's DMs, matching the DM send
     // path: a block that stops messages but still lets the blocker be pinged by
     // a reaction is a harassment channel the block is supposed to close.
-    if dm_reaction_blocked(&state, &message_id).await {
-        return (StatusCode::FORBIDDEN, "You cannot react to this message").into_response();
+    match dm_reaction_blocked(&state, &message_id).await {
+        Ok(false) => {}
+        Ok(true) => return (StatusCode::FORBIDDEN, "You cannot react to this message").into_response(),
+        Err(e) => {
+            tracing::error!("add_reaction: block lookup failed for message {message_id}: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
     }
 
     // Cap the emoji token: without this a member could store distinct multi-MB
@@ -235,22 +242,32 @@ pub async fn add_reaction(
 
     // Cap the number of DISTINCT reactions on a message. Bounds both row growth
     // and the size of the get_reactions fan-out. Counted before insert; a member
-    // re-adding an existing emoji (ON CONFLICT DO NOTHING) is unaffected.
+    // re-adding an existing emoji (ON CONFLICT DO NOTHING) is unaffected. A
+    // count that FAILED is not zero: folded into 0 it let the reaction past the
+    // cap. Refused with a 503 to retry (src/try_again.rs).
     const MAX_REACTIONS_PER_MESSAGE: i64 = 100;
-    let distinct: (i64,) =
-        sqlx::query_as("SELECT COUNT(DISTINCT emoji) FROM message_reactions WHERE message_id = $1")
-            .bind(&message_id)
-            .fetch_one(&state.pool)
-            .await
-            .unwrap_or((0,));
-    let already: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM message_reactions WHERE message_id = $1 AND emoji = $2",
-    )
-    .bind(&message_id)
-    .bind(emoji)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or((0,));
+    let counts = async {
+        let distinct: (i64,) =
+            sqlx::query_as("SELECT COUNT(DISTINCT emoji) FROM message_reactions WHERE message_id = $1")
+                .bind(&message_id)
+                .fetch_one(&state.pool)
+                .await?;
+        let already: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM message_reactions WHERE message_id = $1 AND emoji = $2",
+        )
+        .bind(&message_id)
+        .bind(emoji)
+        .fetch_one(&state.pool)
+        .await?;
+        Ok::<_, sqlx::Error>((distinct, already))
+    };
+    let (distinct, already) = match counts.await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("add_reaction: reaction count failed for message {message_id}: {e:?}");
+            return crate::try_again::try_again_shortly(crate::try_again::COULD_NOT_CHECK);
+        }
+    };
     if already.0 == 0 && distinct.0 >= MAX_REACTIONS_PER_MESSAGE {
         return (
             StatusCode::BAD_REQUEST,
