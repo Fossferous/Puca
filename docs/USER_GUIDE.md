@@ -1070,6 +1070,9 @@ away. A session you put away stays away until you press its bar: if a
 computer you connected to later ends its session, the bar for the first one
 comes back, not its screen, and when the session moves by itself because
 someone signed in at that computer or it locked, it stays put away too.
+While you are back in Púca, another computer you are still connected to
+never comes up over it by itself either: if the session you put away ends,
+or that other computer locks, it is its bar you see.
 
 **When the keyboard opens by itself.** With **Open the keyboard when a text
 box is tapped** on, the keyboard comes up when a tap puts the computer's text

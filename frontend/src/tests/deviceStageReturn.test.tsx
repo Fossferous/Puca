@@ -393,15 +393,40 @@ describe('put away is the session\'s own: an older one coming back stays away', 
         expect(await keyInChat()).toEqual([]);
     });
 
-    it('CONTROL: A never put away comes back on screen when B ends', async () => {
+    it('A behind B, B put away and then ended: A falls back put away, not over the chat', async () => {
         const a = session({ id: 'ds-a', peerName: 'Office PC' });
         await mountWith(a);
         await publish([a, session({ id: 'ds-b', peerName: 'Den laptop' })]);
         await tap(toolbarButton('Chat'));
         expect(wayBack()!.textContent!.trim(), 'B put away (the premise)').toBe('Return to Den laptop');
         await publish([a]);
-        expect(host!.querySelector('.device-stage'), 'A was on the stage before B, and is again').toBeTruthy();
+        expect(host!.querySelector('.device-stage'), "A's stage does not draw over the chat").toBeNull();
+        expect(wayBack()?.textContent?.trim(), 'the way back names A').toBe('Return to Office PC');
+        expect(await keyInChat(), 'a key typed in the chat goes to no PC').toEqual([]);
+        await tap(wayBack()!);
+        expect(host!.querySelector('.device-stage'), 'its own press brings A back').toBeTruthy();
+    });
+
+    it('CONTROL: B ended ON SCREEN, A behind it comes back on screen', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        await publish([a, session({ id: 'ds-b', peerName: 'Den laptop' })]);
+        expect(host!.querySelector('.device-stage'), "B's stage (the premise)").toBeTruthy();
+        await publish([a]);
+        expect(host!.querySelector('.device-stage'), 'nothing was put away: A is on screen').toBeTruthy();
         expect(wayBack()).toBeNull();
+    });
+
+    it('A behind a put-away B is followed (A locked or signed into): the follow is put away too', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        const b = session({ id: 'ds-b', peerName: 'Den laptop' });
+        await publish([a, b]);
+        await tap(toolbarButton('Chat'));
+        expect(wayBack()!.textContent!.trim(), 'B put away (the premise)').toBe('Return to Den laptop');
+        await publish([b, session({ id: 'ds-a2', peerName: 'Office PC (sign-in screen)', handoverFrom: 'ds-a' })]);
+        expect(host!.querySelector('.device-stage'), 'the follow does not draw over the chat').toBeNull();
+        expect(await keyInChat(), 'and nothing goes to any PC').toEqual([]);
     });
 
     it('a session handed over from a put-away one (a sign-in, a Lock) is put away too, named for its PC', async () => {

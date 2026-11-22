@@ -603,6 +603,12 @@ export function DeviceStage() {
     const [sessions, setSessions] = useState<DeviceControlSession[]>([]);
     const [controlEnabled, setControlEnabled] = useState(true);
     const [armedFor, setArmedFor] = useState<string | null>(null);
+    /** The sessions OLDER than the one on the stage (listed before it when it
+     *  came on), recorded as it does: when a put-away one ends, the one that
+     *  falls back onto the stage is one of these, while a connection made since
+     *  is not. Ended sessions leave the list at once, so it cannot be read
+     *  off the list afterwards. */
+    const [olderThanShown, setOlderThanShown] = useState<ReadonlySet<string>>(() => new Set());
     const videoRef = useRef<HTMLVideoElement | null>(null);
     /** The letterboxed surface, so the pan clamp measures the BOX and not the
      *  zoomed canvas inside it. */
@@ -771,12 +777,28 @@ export function DeviceStage() {
         // screen, the PC locked: it carries on the one before by itself, under
         // a new id) is where the person left that one: put away, it is put
         // away too, rather than popping up over the chat.
+        //
+        // And the stage being put away is the person's choice of the chat, not
+        // only that session's: a session that comes onto the stage BEHIND a
+        // put-away one stays away too, rather than its full stage drawing over
+        // the chat with control armed (the next tap aimed at the chat was a
+        // click on that PC: 0.9.869's review). That is an older session falling
+        // back when the put-away one ends (two PCs, the newer put away, then it
+        // goes offline), and a follow of a session that was hidden behind a
+        // put-away stage (that older PC locked or signed into meanwhile). A
+        // connection made since is not older, and opens on screen as before.
+        const previous = armedFor;
+        const stageWasAway = previous !== null && putAway.has(previous);
         const from = session.handoverFrom;
-        if (from !== null && putAway.has(from)) {
+        const fellBack = stageWasAway && olderThanShown.has(session.id);
+        const followOfAway = from !== null && (putAway.has(from) || (stageWasAway && olderThanShown.has(from)));
+        const at = sessions.findIndex(s => s.id === session.id);
+        setOlderThanShown(new Set(sessions.slice(0, Math.max(0, at)).map(s => s.id)));
+        if (fellBack || followOfAway) {
             const id = session.id;
             setPutAway(prev => {
                 const next = new Set(prev);
-                next.delete(from);
+                if (from !== null) next.delete(from);
                 next.add(id);
                 return next;
             });
@@ -3808,7 +3830,9 @@ export function DeviceStage() {
             // confirm a dialog over there: a held Enter presses nothing (0.9.869's
             // review). A key held ON the stage went over at its first keydown,
             // so its repeats still do; its release is decided above, as ever.
-            if (e.repeat && !heldKeysRef.current.has(e.code)) return;
+            // Still the stage's: its own default (Tab moving the focus, Enter on
+            // a focused button) is not wanted either.
+            if (e.repeat && !heldKeysRef.current.has(e.code)) { e.preventDefault(); return; }
             e.preventDefault();
             // Track held keys so the blur/hide release-all can free them on
             // the host — alt-tab mid-press otherwise strands the key down.
