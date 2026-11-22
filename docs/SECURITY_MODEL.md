@@ -449,10 +449,17 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   - **SVG** ([`svgMetadata.ts`](../frontend/src/api/svgMetadata.ts)), parsed by the engine and
     written back: loses comments, `<metadata>`, every element and attribute outside the SVG and
     XLink namespaces (Inkscape's export path and file name among them), and everything that runs
-    or calls out when the file is opened as a document (`<script>`, `<foreignObject>`, event
-    attributes, `href`s other than links within the file, http(s) and mailto links and embedded
-    pictures, CSS `@import` and outside `url()`s); an embedded PNG, JPEG, GIF or WebP loses its
-    own metadata. Púca never draws a received SVG; this is about the person who downloads it.
+    or calls out when the file is opened as a document (`<script>`, event attributes, `href`s
+    other than links within the file, http(s) and mailto links and embedded pictures, an
+    animation that would put an address back, CSS `@import`, `image-set()` and outside `url()`s,
+    the CSS read the way the engine reads it, so an escaped `u\72l(` is a `url(`). The HTML in a
+    `<foreignObject>`, which is how Mermaid and draw.io write a diagram's labels, keeps its text
+    and the elements that lay it out, with only the attributes that say how it looks; an iframe,
+    a form, a video, a style sheet or script in it goes. A font embedded as a `data:` URL (as
+    Excalidraw writes them) stays as it is. An embedded PNG, JPEG, GIF or WebP loses its own
+    metadata, judged by its bytes rather than the type it claims, and an embedded picture of any
+    other kind is taken out. Púca never draws a received SVG; this is about the person who
+    downloads it.
 
   Each refuses, with a message, a file that claims to be its format and cannot be walked (a
   damaged structure, a BigTIFF, a compressed `.svgz`, a timed metadata track inside a fragmented
@@ -471,7 +478,8 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   `frontend/src/tests/attachmentMetadata.test.ts` (the real seal and upload, opened with the key as a
   recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoders: the same
   pixels, still upright, every GIF frame, a video's first and last frames; an SVG drawn the same,
-  and opened as a document, running nothing and asking nothing of anyone where the original did).
+  an editor's drawing and a diagram with HTML labels and an embedded font alike, and opened as a
+  document, running nothing and asking nothing of anyone where the original did).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   (`sendChannelMessageEncrypted` in [`servers.ts`](../frontend/src/api/servers.ts),
   `encryptDMContent` in [`dms.ts`](../frontend/src/api/dms.ts)). Edits go through the same path.

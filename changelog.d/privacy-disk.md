@@ -5,7 +5,9 @@
   phone video's recording place, camera and date (MP4, MOV, WebM, MKV), a GIF's comments and
   XMP, a TIFF's camera and GPS tags, a HEIC or AVIF photo's EXIF and XMP, and an SVG's editor
   notes, file path and anything in it that would run or reach out when it is opened go too. The
-  picture or the video itself is not re-encoded: it is the same, frame for frame. A file that
+  picture or the video itself is not re-encoded: it is the same, frame for frame, and a drawing
+  keeps its labels and embedded fonts (a Mermaid, draw.io or Excalidraw diagram looks the same
+  wherever it is opened). A file that
   claims to be one of these but cannot be read is not sent, and its chip says why. Comes with
   the update.
 - **Pictures waiting to be sent no longer stay on your disk after you stop looking at them.**

@@ -35,9 +35,16 @@
 //   7. an SVG an editor saved: drawn in an <img>, the same picture pixel for
 //      pixel; opened as a DOCUMENT (an iframe, which is what a downloaded
 //      file opened in a browser is), the original's script runs and it asks
-//      outside hosts for things (NEGATIVE CONTROLS), the cleaned one does
-//      neither; no outside request ever leaves this machine (they are all
-//      answered here, refused);
+//      outside hosts for things, each planted way of asking among them (HTML
+//      in a foreignObject, an escaped `u\72l(`, `@\69mport "…"`,
+//      `image-set("…")`, an href animation under another prefix: NEGATIVE
+//      CONTROLS), the cleaned one does neither; no outside request ever
+//      leaves this machine (they are all answered here, refused); and a
+//      diagram as Mermaid, draw.io and Excalidraw export one (HTML labels in
+//      a foreignObject, a font embedded as a data: URL): drawn the same,
+//      pixel for pixel, where the same diagram with its labels or its font
+//      taken out (what the cleaner did before 2026-11-22) is not (NEGATIVE
+//      CONTROLS: the comparison can fail);
 //   8. a 256 MB video sent peer to peer (stripFileMetadata, a File made of
 //      slices): fixed in a bounded time without the page reading it whole.
 //
@@ -65,8 +72,8 @@ import { encryptAndUploadRef, parseEncAttachment } from './api/attachments';
 import { ImageMetadataError, stripImageMetadata } from './api/imageMetadata';
 import { stripFileMetadata } from './api/fileMetadata';
 import * as fx from './tests/fixtures/photoMetadata';
-import { inkscapeSvg } from './tests/fixtures/svgDrawing';
-window.__rig = { encryptAndUploadRef, parseEncAttachment, ImageMetadataError, stripImageMetadata, stripFileMetadata, fx, inkscapeSvg };
+import { inkscapeSvg, diagramSvg } from './tests/fixtures/svgDrawing';
+window.__rig = { encryptAndUploadRef, parseEncAttachment, ImageMetadataError, stripImageMetadata, stripFileMetadata, fx, inkscapeSvg, diagramSvg };
 `;
 const bundle = await build({
     stdin: { contents: entry, resolveDir: join(here, '..', 'src'), loader: 'ts', sourcefile: 'entry.ts' },
@@ -88,7 +95,7 @@ const ck = (cond, label, extra = '') => {
 
 const fixtures = join(here, '..', 'src', 'tests', 'fixtures', 'metadata');
 const server = http.createServer((req, res) => {
-    const fx = /^\/fx\/([a-z0-9.]+)$/.exec(req.url ?? '');
+    const fx = /^\/fx\/([a-z0-9.-]+)$/.exec(req.url ?? '');
     if (fx) {
         try { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.end(readFileSync(join(fixtures, fx[1]))); }
         catch { res.writeHead(404); res.end(); }
@@ -463,13 +470,16 @@ f.svg = await page.evaluate(async () => {
     });
     const a = await show(orig, 'svg-original'), b = await show(got, 'svg-cleaned');
     const text = new TextDecoder().decode(got);
-    const m = /data:image\/jpeg;base64,([A-Za-z0-9+/=]+)/.exec(text);
+    // Every embedded picture (the photo is in it twice: as itself, and claiming to be a GIF).
+    const photos = [...text.matchAll(/data:(image\/[a-z]+);base64,([A-Za-z0-9+/=]+)/g)].map((m) => ({ type: m[1], bytes: Uint8Array.from(atob(m[2]), (ch) => ch.charCodeAt(0)) }));
     window.__svgDocs = { orig, got };
     return {
-        control: marks(orig), leaks: marks(got).concat(['sodipodi', 'inkscape', 'jane', '<script', 'onload', 'foreignObject', 'tracker.example', 'javascript:'].filter((x) => text.includes(x))),
+        control: marks(orig), leaks: marks(got).concat(['sodipodi', 'inkscape', 'jane', '<script', 'onload', 'onmouseover', 'tracker.example', 'javascript:', 'iframe', 'ping', 'image-set', '72l', '69mport'].filter((x) => text.includes(x))),
         dims: a && b ? [[a.w, a.h], [b.w, b.h]] : null,
-        embeddedLeaks: m ? leaked(Uint8Array.from(atob(m[1]), (ch) => ch.charCodeAt(0))) : ['no embedded photo'],
+        embeddedLeaks: photos.length === 2 ? photos.flatMap((p) => leaked(p.bytes)) : [`${photos.length} embedded photos`],
+        embeddedTypes: photos.map((p) => p.type),
         embeddedControl: leaked(photo),
+        labelKept: text.includes('there</html:b>') && text.includes('<foreignObject'),
     };
 });
 const shotA = await page.locator('#svg-original').screenshot({ animations: 'disabled' });
@@ -495,6 +505,43 @@ for (const which of ['orig', 'got']) {
         document.body.append(fr);
     }), which);
     f.svg[which].outside = outside.length - before;
+    f.svg[which].paths = outside.slice(before).map((u) => new URL(u).pathname);
+}
+
+// 7b. A diagram as Mermaid, draw.io and Excalidraw export one: drawn the same once cleaned. The
+// NEGATIVE CONTROLS are the same diagram with its labels (the foreignObjects) or its font (the
+// @font-face's url) taken out, what the cleaner did to it before: each must draw differently,
+// so the comparison is one that can fail.
+f.diagram = await page.evaluate(async () => {
+    const { send, fixture } = window.__h;
+    const font = await fixture('box-font.ttf');
+    const src = window.__rig.diagramSvg(font);
+    const orig = new TextEncoder().encode(src);
+    const got = await send(orig.slice(), 'flowchart.svg', 'image/svg+xml');
+    const noLabels = new TextEncoder().encode(src.replace(/<foreignObject[\s\S]*?<\/foreignObject>/g, ''));
+    const noFont = new TextEncoder().encode(src.replace(/src: url\(data:font\/ttf;base64,[A-Za-z0-9+/=]+\);/, 'src: none;'));
+    const show = (bytes, id) => new Promise((res) => {
+        const im = new Image();
+        im.id = id; im.width = 160; im.height = 80; im.style.cssText = 'display:block;width:160px;height:80px';
+        im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight });
+        im.onerror = () => res(null);
+        im.src = URL.createObjectURL(new Blob([bytes], { type: 'image/svg+xml' }));
+        document.body.append(im);
+    });
+    const dims = [];
+    for (const [bytes, id] of [[orig, 'dg-original'], [got, 'dg-cleaned'], [noLabels, 'dg-no-labels'], [noFont, 'dg-no-font']]) dims.push(await show(bytes, id));
+    // Let the embedded font load and the pictures settle before they are compared.
+    await document.fonts.ready;
+    await new Promise((r) => setTimeout(r, 500));
+    const text = new TextDecoder().decode(got);
+    return { dims, keptLabels: text.includes('Start <b>here</b>') && text.includes('>Decide</div>'), keptFont: text.includes('src: url(data:font/ttf;base64,') };
+});
+{
+    const shot = async (id) => page.locator('#' + id).screenshot({ animations: 'disabled' });
+    const [o, c, nl, nf] = [await shot('dg-original'), await shot('dg-cleaned'), await shot('dg-no-labels'), await shot('dg-no-font')];
+    f.diagram.same = o.length > 0 && o.equals(c);
+    f.diagram.labelsShow = !o.equals(nl);
+    f.diagram.fontShows = !o.equals(nf);
 }
 
 // 8. A 256 MB video sent peer to peer: a File made of slices of the same 1 MB (no 256 MB in memory),
@@ -539,12 +586,27 @@ ck(f.recorded.opened && f.recorded.samePixels, 'a MediaRecorder WebM: its first 
 ck(f.tiff.control.length >= 3 && f.tiff.leaks.length === 0, 'TIFF: the camera, software, author and XMP going in (control) are gone', JSON.stringify(f.tiff));
 ck(f.tiff.sameStrip && f.tiff.bytes[0] === f.tiff.bytes[1], 'TIFF: its picture strip is the same bytes, the file the same size');
 ck(f.svg.control.length >= 2 && f.svg.embeddedControl.length >= 2, "SVG: the drawing going in carries an editor's notes and a photo with its EXIF (control)", JSON.stringify([f.svg.control, f.svg.embeddedControl]));
-ck(f.svg.leaks.length === 0 && f.svg.embeddedLeaks.length === 0, "SVG: the recipient's copy carries none of it, nor does its embedded photo", JSON.stringify([f.svg.leaks, f.svg.embeddedLeaks]));
+ck(f.svg.leaks.length === 0 && f.svg.embeddedLeaks.length === 0, "SVG: the recipient's copy carries none of it, nor do its embedded photos", JSON.stringify([f.svg.leaks, f.svg.embeddedLeaks]));
+ck(f.svg.embeddedTypes.join() === 'image/jpeg,image/jpeg', 'SVG: the photo that claimed to be a GIF is kept, cleaned, as the JPEG it is', JSON.stringify(f.svg.embeddedTypes));
+ck(f.svg.labelKept, "SVG: the label in its foreignObject is kept");
 ck(f.svg.samePixels, 'SVG: drawn in an <img>, the same picture, pixel for pixel', JSON.stringify(f.svg.dims));
 ck(f.svg.orig.ran > 0 || (typeof f.svg.orig.flag === 'number' && f.svg.orig.flag > 0), "NEGATIVE CONTROL: opened as a document, the original's script runs", JSON.stringify(f.svg.orig));
 ck(f.svg.orig.outside > 0, 'NEGATIVE CONTROL: opened as a document, the original asks outside hosts for things (refused here)', String(f.svg.orig.outside));
+console.log('INFO', 'the original asked for:', JSON.stringify([...new Set(f.svg.orig.paths)].sort()));
+// Each way of asking planted to get past a plain search, and HTML in a foreignObject: the
+// original asks by each (so the cleaned one asking by none of them is a finding, not luck).
+for (const [how, paths] of [
+    ['an escaped u\\72l( in style=', ['/esc-bg.png']],
+    ['@\\69mport "…"', ['/esc-import.css']],
+    ['image-set("…") and -webkit-image-set("…")', ['/is.png', '/wis.png']],
+    ['an href animation under another prefix (q:href)', ['/anim.png']],
+    ["HTML in a foreignObject: a picture and its srcset, an iframe, a video's poster, a form's image button, its own style sheet and a link to one",['/fo-img.png', '/fo-srcset.png', '/fo-frame.html', '/fo-poster.png', '/fo-input.png', '/fo-style.css', '/fo-link.css']],
+]) ck(paths.every((p) => f.svg.orig.paths.includes(p)), `NEGATIVE CONTROL: opened as a document, the original asks by ${how}`, JSON.stringify(paths));
 ck(f.svg.got.ran === 0 && f.svg.got.flag === 0, 'SVG: opened as a document, the cleaned one runs nothing', JSON.stringify(f.svg.got));
-ck(f.svg.got.outside === 0, 'SVG: opened as a document, the cleaned one asks nothing of anyone', String(f.svg.got.outside));
+ck(f.svg.got.outside === 0, 'SVG: opened as a document, the cleaned one asks nothing of anyone', JSON.stringify(f.svg.got.paths));
+ck(f.diagram.keptLabels && f.diagram.keptFont, "SVG diagram: the recipient's copy keeps Mermaid's and draw.io's labels and the embedded font", JSON.stringify(f.diagram));
+ck(f.diagram.same, 'SVG diagram (Mermaid, draw.io and Excalidraw shapes): drawn in an <img>, the same picture, pixel for pixel', JSON.stringify(f.diagram.dims));
+ck(f.diagram.labelsShow && f.diagram.fontShows, 'NEGATIVE CONTROL: the same diagram with its labels, or its font, taken out (the cleaner before 2026-11-22) is drawn differently', JSON.stringify({ labels: f.diagram.labelsShow, font: f.diagram.fontShows }));
 ck(f.big.changed && f.big.size[0] === f.big.size[1] && f.big.tailControl.length > 0 && f.big.tailLeaks.length === 0, 'a 256 MB video sent peer to peer: its metadata (at the end) gone, nothing moved', JSON.stringify(f.big));
 ck(f.big.ms < 5000, `a 256 MB video sent peer to peer: fixed in ${f.big.ms} ms, its media never read`);
 ck(outside.every((u) => /tracker\.example|evil\.example/.test(u)), 'nothing but the SVG controls asked for anything outside this machine, and all of it was refused here', JSON.stringify([...new Set(outside.map((u) => new URL(u).host))]));
