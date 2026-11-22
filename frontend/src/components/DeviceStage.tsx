@@ -751,6 +751,13 @@ export function DeviceStage() {
         // the mouse): left set when its session ended, it came back up, with
         // its Back layer, on the next session.
         setActiveMobileMenu(null);
+        // And the stage put away (Chat, Back to Púca): only the strip's own
+        // press undid it, so after a session ended while away, the next
+        // Connect showed only a "Return to" bar, and a second PC connected
+        // while the first was away came up as that bar too. A session that
+        // newly takes the stage is shown; the same one coming through again
+        // (a reconnect, its next snapshot) keeps the same id and stays away.
+        setIsMinimized(false);
     }
 
     const sessionActiveId = session?.id ?? null;

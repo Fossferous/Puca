@@ -41,7 +41,7 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 105 | `.friends-dashboard` | shares the chat slot, above chat-main |
 | 150 | `.sidebar`, `.member-sidebar` | slide-in side panels |
 | 200 | `.server-list-container` | server rail |
-| 250 | `.checklist-panel`, `.voice-panel-compact`, `.device-stage-minimized-strip` | persistent drawers/bars (the last is a minimised remote-control session's "Return to" and the PC's name: above the bottom nav and the voice bar on a phone, along the window's foot on a desktop, with the panels' measured-height reservation; DeviceStageReturn.tsx) |
+| 250 | `.checklist-panel`, `.voice-panel-compact`, `.device-stage-minimized-strip` | persistent drawers/bars (the last is a minimised remote-control session's "Return to" and the PC's name: above the bottom nav and the voice bar on a phone, along the window's foot on a desktop, with the panels' measured-height reservation; DeviceStageReturn.tsx, drawn inside `.chat-container` through chatRoot.ts though RcGlobals mounts it: see below the table) |
 | 300 | `.mobile-bottom-nav` | always on top of panels |
 | 400 | `.stream-stage`, `.camera-preview`, `.device-stage` | fullscreen media |
 | 1000+ | modals/pickers (component-local) | settings modal is 2000 |
@@ -55,6 +55,22 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 1100 | `.activity-scrim` | the Activities picker (docs/GAMES.md, *Activities*) — portaled to `<body>`; a centred panel on a desktop, a bottom sheet on a phone; same band as the table's sheets, which it never coexists with |
 | 1100 | `.games-sheet-scrim` | the card table's amount sheet and first-sit disclosure (docs/GAMES.md) — portaled to `<body>`; above the voice bar and bottom nav, below Settings. The sheet rides the bottom of `window.visualViewport`, so it stays above the soft keyboard |
 | 9988–9991 | `.call-encryption-notice` 9988, `.hotkey-blocked-banner` 9989, `.identity-banner` 9990, `.hidden-recipient-banner` 9991 | the fixed full-width strips at the top of the signed-in app (App.tsx), each dismissible or self-clearing; they push nothing, so when two show at once the higher — the graver — is the one read first. The call-encryption notice only informs, so it is lowest |
+
+**On a phone the bands below 1000 hold only INSIDE `.chat-container`.**
+mobile.css fixes `.chat-container` to the screen, and a fixed element is a
+stacking context of its own, z-index or not: everything Chat draws (the
+panels, the bottom nav, its dialogs at 1000 to 2000) is stacked inside it, and
+the whole of it sits at level 0 of the page. An element outside it (mounted
+beside Chat in App.tsx or RcGlobals, or portaled to `<body>`) with any z-index
+above 0 is drawn over ALL of Chat, every dialog and backdrop included. So a
+persistent bar mounted outside Chat that must sit in this table's 250 band is
+drawn inside Chat's root: `useChatRoot()` (components/chatRoot.ts) gives the
+element, as DeviceStageReturn.tsx does (e2e/return-pill-live.mjs, `dialogs`,
+measures the strip under the profile sheet, Edit Channel, Create Channel,
+Settings and Server Settings). `.voice-panel-compact` and `.own-voice-banner`
+are still portaled to `<body>` on a phone at z 250 (the sidebar's transform
+would trap them), and so are drawn over Chat's dialogs while they are up: the
+voice bar over the foot of the full-screen Settings, measured 2026-11-22.
 
 ### The integration contract for any NEW top-level surface
 

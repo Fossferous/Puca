@@ -5,7 +5,7 @@
 // "Return to remote device (ds7babefb5bd2042d38d9c)" pill was drawn right over the message box,
 // "Blocks textbox", and named the session by its raw id. It was fixed 20 px from the bottom-right
 // corner at z 10000, over whatever was there. NEGATIVE CONTROL, this walk against a build from before
-// the fix: 70 of its 97 checks fail. At 390x844 with the keyboard up it covered 100% of the message
+// the fix: 70 of the 97 checks in desktop, banner, phone and button fail. At 390x844 with the keyboard up it covered 100% of the message
 // box and of Send; with it down, 53% of the bottom bar, and every tab but Servers (at 360x800 every
 // one) was the pill under a tap, so a tap on Chat, Channels or Devices brought the stage back instead;
 // sideways 11-22% of the box and 14-82% of Send; on a 1280x800 desktop 100% of Send and nearly half the
@@ -43,6 +43,21 @@
 //             all eight themes with and without high contrast (the colour read back from the page, every
 //             CSS colour form); and its pulse (the dot's, now) stops for prefers-reduced-motion, while
 //             the button itself never scales (the old pill grew to 1.05 over its neighbours).
+//   dialogs   The strip is under every dialog the app opens. 390x844 as the Android app, keyboard down,
+//             each opened as a person does it with its scroll areas run to their end: the member profile
+//             sheet, Edit Channel (from the channel's menu), Create Channel, Settings and Server Settings,
+//             and in a call (the strip higher, above the voice bar) the sheet and Settings again: every
+//             point where the dialog and the strip overlap is the dialog's (elementFromPoint), every
+//             control of the dialog in the strip's place is what a tap there hits, a real tap on the
+//             sheet's foot over the strip stays in the sheet, and a real tap on Create Channel's backdrop
+//             over the strip closes it with the session still put away; on a 1280x800 desktop Settings
+//             and Create Channel the same way, with a CONTROL (the strip forced over Settings must be
+//             caught). In the phone layout `.chat-container` is fixed, so a stacking context holding all
+//             of Chat's dialogs, and the strip drawn beside it at z 250 was over every one of them.
+//             NEGATIVE CONTROL, the branch's strip before it was drawn inside Chat's root (chatRoot.ts):
+//             10 of the section's 36 checks fail, 64 of 64 points on the strip over each phone dialog, a
+//             tap on the profile sheet's foot or on Create Channel's backdrop bringing the stage back,
+//             Settings' Delete Account under it.
 //
 // It CANNOT see: a real phone's keyboard (the Android app's is played as mobile-ui-sweep-walk.mjs plays
 // it; an iPhone's, a shrunk visual viewport that keyboardUp.ts reads into the same attribute, is not
@@ -63,7 +78,7 @@
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5492 API=http://127.0.0.1:5491 OUT=<dir> node e2e/return-pill-live.mjs
-//   ONLY=desktop,banner,phone,button  runs some sections.
+//   ONLY=desktop,banner,phone,button,dialogs  runs some sections.
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -616,6 +631,279 @@ if (want('phone') || want('button')) {
         if (want('button') && w === 390) await buttonChecks(P, `phone ${size}`, true);
         await ctx.close();
     }
+}
+
+// ── dialogs: the way back is under every dialog the app opens ──────────────────────────────────
+// In the phone layout mobile.css fixes `.chat-container` to the screen, and a fixed element is a
+// stacking context of its own: every dialog Chat draws (the member profile sheet, Edit Channel,
+// Create Channel, Settings, Server Settings; z 1000 to 2000) is stacked INSIDE it, at the page's
+// level 0, so a strip beside it at z 250 was drawn over all of them (the review of 2026-11-22): the
+// profile sheet's foot, the foot of Edit Channel and a band of Settings were the strip under a tap,
+// and no backdrop dimmed it. For each dialog, opened as a person does it, with its scroll areas run
+// to their end: every point of the place where the dialog and the strip overlap is the dialog's
+// (elementFromPoint), and every control of the dialog whose middle falls in the strip's place is what
+// a tap there hits; a real tap where Create Channel's backdrop is over the strip closes the dialog and
+// leaves the session put away. The desktop's Settings and Create Channel the same way, and a CONTROL:
+// the strip forced over the desktop's Settings must be caught by the same measure.
+/** Where `sel` (the dialog's outermost box: its backdrop, or the sheet) and the strip overlap. */
+const underDialog = (page, sel) => page.evaluate((sel) => {
+    const strip = document.querySelector('.device-stage-minimized-strip');
+    const shown = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+    const d = [...document.querySelectorAll(sel)].find(shown);
+    if (!strip || !d || !shown(strip)) return { strip: !!strip && shown(strip), dialog: !!d };
+    const s = strip.getBoundingClientRect(), b = d.getBoundingClientRect();
+    const box = (r) => ({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) });
+    const inS = (h) => !!h && (h === strip || strip.contains(h));
+    const inD = (h) => !!h && (h === d || d.contains(h));
+    const L = Math.max(s.left, b.left), R = Math.min(s.right, b.right), T = Math.max(s.top, b.top), B = Math.min(s.bottom, b.bottom);
+    const out = { strip: true, dialog: true, stripBox: box(s), dialogBox: box(b), overlap: R > L && B > T ? Math.round((R - L) * (B - T)) : 0, n: 0, onStrip: 0, onDialog: 0, other: [], controls: [] };
+    if (out.overlap) for (let i = 0; i < 16; i++) for (let j = 0; j < 4; j++) {
+        const x = L + (i + 0.5) * (R - L) / 16, y = T + (j + 0.5) * (B - T) / 4;
+        out.n++;
+        const h = document.elementFromPoint(x, y);
+        if (inS(h)) out.onStrip++;
+        else if (inD(h)) out.onDialog++;
+        else if (out.other.length < 3) out.other.push(`${Math.round(x)},${Math.round(y)}: ${h ? h.tagName.toLowerCase() + '.' + (h.getAttribute('class') || '').split(' ')[0] : 'nothing'}`);
+    }
+    // The dialog's own controls in the strip's place (the end of its scroll included).
+    for (const c of d.querySelectorAll('button, input, select, textarea, a[href], label, [role="button"], [role="switch"]')) {
+        const r = c.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        if (x < s.left || x > s.right || y < s.top || y > s.bottom) continue;
+        const h = document.elementFromPoint(x, y);
+        out.controls.push({ what: (c.getAttribute('aria-label') || c.textContent || c.tagName).trim().slice(0, 30), ok: !!h && (h === c || c.contains(h)), hit: h ? `${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').split(' ')[0]}` : 'nothing' });
+    }
+    return out;
+}, sel);
+/** Every scroll area inside the dialog run to its end (its last rows are what the strip sat on). */
+const scrollToEnd = (page, sel) => page.evaluate((sel) => {
+    const d = document.querySelector(sel);
+    if (!d) return 0;
+    let n = 0;
+    for (const el of [d, ...d.querySelectorAll('*')]) {
+        const cs = getComputedStyle(el);
+        if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 1) { el.scrollTop = el.scrollHeight; n++; }
+    }
+    return n;
+}, sel);
+async function dialogCheck(page, tag, sel) {
+    const scrolled = await scrollToEnd(page, sel);
+    await sleep(250);
+    const m = await underDialog(page, sel);
+    const badControls = (m.controls || []).filter(c => !c.ok);
+    check(`${tag}: the dialog is over the way back where they overlap (every point there is the dialog's, none the strip's)`,
+        m.strip && m.dialog && m.overlap > 0 && m.n > 0 && m.onStrip === 0 && m.onDialog === m.n,
+        { overlap: m.overlap, n: m.n, onStrip: m.onStrip, onDialog: m.onDialog, other: m.other, strip: m.stripBox, dialog: m.dialogBox, scrolled });
+    check(`${tag}: every control of the dialog in the strip's place is what a tap there hits (${(m.controls || []).length})`, m.strip && m.dialog && badControls.length === 0, badControls);
+    return m;
+}
+/** The stage minimised again if a tap brought it back (the old strip took them). */
+async function ensureMinimised(page, phone) {
+    if (await page.locator('.device-stage-minimized').count()) return;
+    if (!await page.locator('.device-stage').count()) { await startAndMinimise(page, phone); return; }
+    if (phone) await tap(page, page.locator('.device-stage-mobile-btn[title="Chat"]'));
+    else {
+        await page.locator('button[aria-label="More"]').click();
+        await page.locator('.dsb-item', { hasText: 'Back to Púca (keep the session)' }).click();
+    }
+    await until(() => page.locator('.device-stage-minimized').count(), 5000);
+    await sleep(300);
+}
+const stillAway = async (page) => await page.locator('.device-stage-minimized').count() === 1 && !await page.locator('.device-stage').count();
+/** A real tap at the middle of the strip, where a dialog's BACKDROP is over it: it must close the
+ *  dialog and leave the session put away. Taps only on the backdrop itself (or on the strip, which is
+ *  the defect), never on a control. */
+async function tapBackdropOverStrip(page, tag, overlaySel, dialogGoneSel, phone) {
+    const at = await page.evaluate((overlaySel) => {
+        const s = document.querySelector('.device-stage-minimized');
+        const o = document.querySelector(overlaySel);
+        if (!s || !o) return null;
+        const r = s.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const h = document.elementFromPoint(x, y);
+        return { x, y, backdrop: h === o, strip: !!h && (h === s || s.contains(h)), hit: h ? `${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').split(' ')[0]}` : 'nothing' };
+    }, overlaySel);
+    if (!at || (!at.backdrop && !at.strip)) { console.log(`INFO  ${tag}: no backdrop over the strip's middle to tap (${at ? at.hit : 'no dialog'})`); return; }
+    if (phone) await page.touchscreen.tap(at.x, at.y); else await page.mouse.click(at.x, at.y);
+    await sleep(500);
+    const closed = !await page.locator(dialogGoneSel).count();
+    const away = await stillAway(page);
+    check(`${tag}: a real ${phone ? 'tap' : 'click'} on the backdrop over the way back closes the dialog and leaves the session put away`, at.backdrop && closed && away, { hit: at.hit, closed, away });
+}
+async function closeDialog(page, sel, closers) {
+    for (const c of closers) {
+        if (!await page.locator(sel).count()) return true;
+        const loc = page.locator(c).first();
+        if (await loc.count()) { await loc.click().catch(() => {}); await sleep(400); }
+    }
+    if (await page.locator(sel).count()) { await page.keyboard.press('Escape').catch(() => {}); await sleep(400); }
+    return !await page.locator(sel).count();
+}
+if (want('dialogs')) {
+    // The desktop: the dialogs are in the page's own stacking order, and the strip is under them.
+    await O.setViewportSize({ width: 1280, height: 800 });
+    await O.locator(`.server-icon[data-server-id="${srv.id}"]`).first().click();
+    await sleep(600);
+    await chanRow(O).click();
+    await sleep(500);
+    await ensureMinimised(O, false);
+    await O.locator('.sidebar .user-action-btn[title="Settings"]').first().click();
+    check('dialogs desktop: Settings opened', !!await until(() => O.locator('.settings-modal').count(), 6000));
+    await sleep(300);
+    await dialogCheck(O, 'dialogs desktop Settings', '.settings-modal-overlay');
+    // CONTROL: the strip forced over the dialog is caught by the same measure.
+    await O.evaluate(() => document.querySelector('.device-stage-minimized-strip').style.setProperty('z-index', '5000', 'important'));
+    const forced = await underDialog(O, '.settings-modal-overlay');
+    check('dialogs desktop CONTROL: the strip forced over Settings is caught (points on the strip)', forced.onStrip > 0, { onStrip: forced.onStrip, n: forced.n });
+    await O.evaluate(() => document.querySelector('.device-stage-minimized-strip').style.removeProperty('z-index'));
+    await shot(O, 'dialogs-desktop-settings');
+    check('dialogs desktop: Settings closed', await closeDialog(O, '.settings-modal', ['.settings-close']));
+    await O.locator('.sidebar .add-channel-btn').first().click();
+    check('dialogs desktop: Create Channel opened', !!await until(() => O.locator('.modal-overlay .modal').count(), 6000));
+    await sleep(300);
+    await dialogCheck(O, 'dialogs desktop Create Channel', '.modal-overlay');
+    await tapBackdropOverStrip(O, 'dialogs desktop Create Channel', '.modal-overlay', '.modal-overlay .modal', false);
+    await closeDialog(O, '.modal-overlay .modal', ['.modal-overlay .modal button:text-is("Cancel")']);
+    await ensureMinimised(O, false);
+
+    // The phone, keyboard down, the way back above the bottom bar.
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2, userAgent: ANDROID_UA });
+    const P = await signIn(ctx, owner, 'dialogs phone', false);
+    const navTo = async (label) => { await tap(P, P.locator('.mobile-nav-btn', { hasText: label }).first()); await sleep(450); };
+    await navTo('Servers');
+    await tap(P, P.locator(`.server-icon[data-server-id="${srv.id}"]`).first());
+    await sleep(900);
+    await navTo('Channels');
+    await tap(P, chanRow(P));
+    await sleep(900);
+    await startAndMinimise(P, true);
+    const pre = await reachable(P);
+    check('dialogs phone: the way back is up (the premise)', pre.ok, pre);
+
+    // The member profile sheet (above the bottom bar, its own scroll area).
+    await navTo('Members');
+    await sleep(300);
+    const member = P.locator('.member-sidebar .member-item').first();
+    if (await member.count()) {
+        await tap(P, member);
+        const sheet = !!await until(() => P.locator('.user-profile-popup.upp-sheet').count(), 6000);
+        check('dialogs phone: the member profile sheet opened', sheet);
+        await sleep(400);
+        if (sheet) {
+            await dialogCheck(P, 'dialogs phone profile sheet', '.user-profile-popup');
+            await shot(P, 'dialogs-phone-profile-sheet');
+            // A real tap on the sheet where it overlaps the strip (its last 3 px, the sheet's own
+            // padding): the sheet's, never the strip's. Not on one of its controls.
+            const at = await P.evaluate(() => {
+                const strip = document.querySelector('.device-stage-minimized-strip');
+                const s = strip?.getBoundingClientRect();
+                const d = document.querySelector('.user-profile-popup')?.getBoundingClientRect();
+                if (!s || !d || d.bottom <= s.top) return null;
+                const x = d.left + d.width / 2, y = Math.min(d.bottom, s.bottom) - 3;
+                const h = document.elementFromPoint(x, y);
+                const onStrip = !!h && strip.contains(h);
+                return { x, y, strip: onStrip, control: !onStrip && !!h && !!h.closest('button, input, select, textarea, a[href], label, [role="button"]'), hit: h ? `${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').split(' ')[0]}` : 'nothing' };
+            });
+            if (at && !at.control) {
+                await P.touchscreen.tap(at.x, at.y);
+                await sleep(500);
+                const away = await stillAway(P);
+                const open = await P.locator('.user-profile-popup').count() === 1;
+                check('dialogs phone profile sheet: a real tap on its foot over the way back stays in the sheet (the session stays put away, the sheet open)', !at.strip && away && open, { hit: at.hit, away, open });
+            } else console.log(`INFO  dialogs phone profile sheet: its foot is ${at ? 'a control (' + at.hit + ')' : 'clear of the strip'}; no tap`);
+            await P.evaluate(() => document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+            await sleep(400);
+        }
+    } else check('dialogs phone: a member row to tap', false);
+    await ensureMinimised(P, true);
+
+    // Edit Channel (centred at 85dvh, Save at the end of its scroll), from the channel's menu.
+    await navTo('Channels');
+    await chanRow(P).evaluate((el) => {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const r = el.getBoundingClientRect();
+        el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10, button: 2 }));
+    });
+    const editItem = P.locator('.context-menu .context-menu-item', { hasText: 'Edit' }).first();
+    if (await until(() => editItem.count(), 6000)) {
+        await editItem.tap();
+        const open = !!await until(() => P.locator('.edit-channel-modal').count(), 6000);
+        check('dialogs phone: Edit Channel opened', open);
+        await sleep(300);
+        if (open) {
+            await dialogCheck(P, 'dialogs phone Edit Channel', '.modal-overlay:has(.edit-channel-modal)');
+            await shot(P, 'dialogs-phone-edit-channel');
+            check('dialogs phone: Edit Channel closed', await closeDialog(P, '.edit-channel-modal', ['.edit-channel-modal .close-button']));
+        }
+    } else check('dialogs phone: the channel menu offers Edit', false);
+    await ensureMinimised(P, true);
+
+    // Create Channel (a backdrop over the whole screen), and a real tap on that backdrop over the strip.
+    await navTo('Channels');
+    await tap(P, P.locator('.sidebar .add-channel-btn').first());
+    const create = !!await until(() => P.locator('.modal-overlay .modal').count(), 6000);
+    check('dialogs phone: Create Channel opened', create);
+    await sleep(300);
+    if (create) {
+        await dialogCheck(P, 'dialogs phone Create Channel', '.modal-overlay');
+        await shot(P, 'dialogs-phone-create-channel');
+        await tapBackdropOverStrip(P, 'dialogs phone Create Channel', '.modal-overlay', '.modal-overlay .modal', true);
+        await closeDialog(P, '.modal-overlay .modal', ['.modal-overlay .modal button:text-is("Cancel")']);
+    }
+    await ensureMinimised(P, true);
+
+    // Settings and Server Settings (full screen on a phone).
+    for (const [label, opener, overlay, inner, closers] of [
+        ['Settings', '.sidebar .user-action-btn[title="Settings"]', '.settings-modal-overlay', '.settings-modal', ['.settings-close']],
+        ['Server Settings', '.server-settings-btn', '.server-settings-overlay', '.server-settings-container', ['.server-settings-container .close-btn']],
+    ]) {
+        await navTo('Channels');
+        await tap(P, P.locator(opener).first());
+        const open = !!await until(() => P.locator(inner).count(), 6000);
+        check(`dialogs phone: ${label} opened`, open);
+        await sleep(400);
+        if (!open) continue;
+        await dialogCheck(P, `dialogs phone ${label}`, overlay);
+        await shot(P, `dialogs-phone-${label.toLowerCase().replace(/ /g, '-')}`);
+        check(`dialogs phone: ${label} closed`, await closeDialog(P, inner, closers));
+        await ensureMinimised(P, true);
+    }
+    // Every dialog gone: the way back is still up and reachable.
+    await navTo('Chat');
+    const post = await reachable(P);
+    check('dialogs phone: with every dialog closed the way back is on screen and a tap at its middle lands on it', post.ok, post);
+
+    // In a call the strip sits higher, above the voice bar: the profile sheet and Settings once more.
+    await navTo('Channels');
+    await tap(P, P.locator(`[data-testid="voice-channel"][data-channel-id="${lounge.id}"]`));
+    const joined = !!await until(() => P.locator('[data-testid="voice-connected"]').count(), 20000);
+    check('dialogs phone: joined the voice room', joined);
+    await navTo('Chat');
+    await ensureMinimised(P, true);
+    if (joined) {
+        await navTo('Members');
+        await tap(P, P.locator('.member-sidebar .member-item').first());
+        if (await until(() => P.locator('.user-profile-popup.upp-sheet').count(), 6000)) {
+            await sleep(400);
+            await dialogCheck(P, 'dialogs phone in a call, profile sheet', '.user-profile-popup');
+            await P.evaluate(() => document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+            await sleep(400);
+        } else check('dialogs phone in a call: the member profile sheet opened', false);
+        await ensureMinimised(P, true);
+        await navTo('Channels');
+        await tap(P, P.locator('.sidebar .user-action-btn[title="Settings"]').first());
+        if (await until(() => P.locator('.settings-modal').count(), 6000)) {
+            await sleep(400);
+            await dialogCheck(P, 'dialogs phone in a call, Settings', '.settings-modal-overlay');
+            await shot(P, 'dialogs-phone-call-settings');
+            await closeDialog(P, '.settings-modal', ['.settings-close']);
+        } else check('dialogs phone in a call: Settings opened', false);
+        await ensureMinimised(P, true);
+        await P.locator('[data-testid="voice-leave"]').first().click().catch(() => {});
+        await sleep(400);
+    }
+    await ctx.close();
 }
 
 await browser.close();

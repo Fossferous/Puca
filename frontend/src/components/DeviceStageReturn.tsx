@@ -26,9 +26,20 @@
  * Its height is published as `--device-return-h` on <html> for those
  * reservations, measured like the voice bar's (VoicePanel.tsx): 0 while it is
  * hidden, gone when the stage comes back.
+ *
+ * DRAWN INSIDE CHAT'S ROOT (chatRoot.ts), though it is mounted beside Chat
+ * (RcGlobals): on a phone `.chat-container` is a stacking context holding
+ * every dialog Chat opens, and a strip outside it at z 250 was drawn over all
+ * of them (the member profile sheet's foot, Edit Channel's, a band of
+ * Settings, Create Channel's backdrop), so a tap meant for a dialog brought
+ * the remote screen back. Inside it, the strip is under every dialog and
+ * backdrop, as the persistent bars' row in docs/DESIGN_PHILOSOPHY.md's table
+ * says. With no Chat on the page it is drawn where it is mounted.
  */
 import { useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { LiveDotIcon } from './Icons';
+import { useChatRoot } from './chatRoot';
 
 /** The words on it: the computer's name as the session layer knows it, never
  *  the session's id (a string like "ds7babefb5bd2042d38d9c" means nothing to
@@ -45,7 +56,10 @@ export function DeviceStageReturn({ peerName, onReturn }: {
     onReturn: () => void;
 }) {
     const stripRef = useRef<HTMLDivElement>(null);
+    const chatRoot = useChatRoot();
 
+    // Keyed on the root: moving into it (or out of it, when Chat goes) draws
+    // a new element, and the measurement must follow the one on the page.
     useLayoutEffect(() => {
         const el = stripRef.current;
         const rootStyle = document.documentElement.style;
@@ -59,10 +73,10 @@ export function DeviceStageReturn({ peerName, onReturn }: {
             ro.disconnect();
             rootStyle.removeProperty(HEIGHT_VAR);
         };
-    }, []);
+    }, [chatRoot]);
 
     const label = returnLabel(peerName);
-    return (
+    const strip = (
         <div ref={stripRef} className="device-stage-minimized-strip">
             {/* A real button: Tab reaches it, Enter and Space press it, and its
                 words are its name. The title shows a long name that the
@@ -73,4 +87,5 @@ export function DeviceStageReturn({ peerName, onReturn }: {
             </button>
         </div>
     );
+    return chatRoot ? createPortal(strip, chatRoot) : strip;
 }

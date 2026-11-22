@@ -8,6 +8,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
+import { setChatRoot } from './chatRoot';
 import { carriedFromOtherDevice, roomLeftNotice, thisDeviceShape, type OwnVoiceState } from '../api/ownVoice';
 import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, clearAllStreams, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
 import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
@@ -5341,7 +5342,10 @@ export function Chat({ onLogout }: ChatProps) {
     const offlineMembers = allMembers.filter(m => memberPresence(m) === 'offline');
 
     return (
-        <div className="chat-container" data-mobile-panel={isMobile ? mobilePanel : undefined} {...panelSwipe}>
+        // The ref hands this element to bars mounted outside Chat that must be
+        // stacked among its layers (chatRoot.ts says why: on a phone this is
+        // a stacking context, and everything Chat draws is inside it).
+        <div ref={setChatRoot} className="chat-container" data-mobile-panel={isMobile ? mobilePanel : undefined} {...panelSwipe}>
             {/* App-wide transfer tray. Deliberately at the root and outside
                 every view condition: an incoming offer must be answerable no
                 matter which channel, DM or panel is on screen. Desktop docks it

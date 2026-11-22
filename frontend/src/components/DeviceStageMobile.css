@@ -539,7 +539,12 @@
        room for. On a desktop: along the bottom of the window, with the app's
        columns ending above it (the reservations below). In the persistent
        bars' z band (docs/DESIGN_PHILOSOPHY.md): over nothing, and under every
-       dialog, which is the foreground while it is open. */
+       dialog, which is the foreground while it is open. That z holds only
+       because the strip is DRAWN INSIDE `.chat-container` (chatRoot.ts): on
+       a phone that element is a stacking context holding every dialog Chat
+       opens, and from outside it z 250 was over all of them, the profile
+       sheet's foot and Create Channel's backdrop included
+       (e2e/return-pill-live.mjs, `dialogs`). */
     position: fixed;
     left: 0;
     right: 0;

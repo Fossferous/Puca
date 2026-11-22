@@ -84,6 +84,7 @@ vi.mock('../api/mobileApp', async (importOriginal) => {
 });
 
 const { DeviceStage } = await import('../components/DeviceStage');
+const { setChatRoot } = await import('../components/chatRoot');
 
 const BOX = { left: 0, top: 0, width: 390, height: 844 };
 beforeEach(() => {
@@ -117,12 +118,25 @@ beforeEach(() => {
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
+let chat: HTMLDivElement | null = null;
 afterEach(async () => {
     if (root) await act(async () => root!.unmount());
     host?.remove();
     root = null;
     host = null;
+    act(() => setChatRoot(null));
+    chat?.remove();
+    chat = null;
 });
+
+/** Chat's root on the page, handed over as Chat's ref does (chatRoot.ts). */
+function chatOnPage(): HTMLDivElement {
+    chat = document.createElement('div');
+    chat.className = 'chat-container';
+    document.body.appendChild(chat);
+    act(() => setChatRoot(chat));
+    return chat;
+}
 
 function session(over: Snapshot = {}): Snapshot {
     return {
@@ -218,5 +232,88 @@ describe('minimised to the chat, the stage is a button named for the PC', () => 
         await publish([]);
         expect(wayBack(), 'the session ended').toBeNull();
         expect(heightVar(), 'and the room it held is given back').toBe('');
+    });
+});
+
+/**
+ * On a phone `.chat-container` is a stacking context that holds every dialog
+ * Chat opens (mobile.css fixes it to the screen), and the strip, mounted
+ * beside Chat at z 250, was drawn over all of them: the member profile
+ * sheet's foot, Edit Channel's, a band of Settings and Create Channel's
+ * backdrop were the strip under a tap (the review of 2026-11-22). It is drawn
+ * inside Chat's root now; where that puts it on screen is
+ * e2e/return-pill-live.mjs's `dialogs`.
+ */
+describe("drawn inside Chat's root, among Chat's own layers", () => {
+    it('with Chat on the page the strip is inside .chat-container, measured, and its press brings the stage back', async () => {
+        document.documentElement.style.removeProperty('--device-return-h');
+        const c = chatOnPage();
+        await mountWith(session({ peerName: 'Office PC' }));
+        await tap(toolbarButton('Chat'));
+        const inChat = c.querySelector<HTMLElement>('.device-stage-minimized-strip');
+        expect(inChat, "the strip is drawn inside Chat's root").toBeTruthy();
+        expect(strip(), 'and not where it is mounted').toBeNull();
+        expect(inChat!.textContent!.trim()).toBe('Return to Office PC');
+        expect(heightVar(), 'its height is published from there').toBe(`${BOX.height}px`);
+        await tap(c.querySelector<HTMLElement>('.device-stage-minimized')!);
+        expect(host!.querySelector('.device-stage'), 'the stage is back').toBeTruthy();
+        expect(c.querySelector('.device-stage-minimized-strip'), 'and the strip gone from Chat').toBeNull();
+        expect(heightVar(), 'nothing reserved').toBe('');
+    });
+
+    it('Chat going away draws it where it is mounted, and Chat coming back draws it inside again, measured each time', async () => {
+        document.documentElement.style.removeProperty('--device-return-h');
+        await mountWith(session({ peerName: 'Office PC' }));
+        await tap(toolbarButton('Chat'));
+        expect(strip(), 'no Chat: drawn where it is mounted').toBeTruthy();
+        const c = chatOnPage();
+        await flush();
+        expect(c.querySelector('.device-stage-minimized-strip'), 'Chat mounted: drawn inside it').toBeTruthy();
+        expect(strip()).toBeNull();
+        expect(heightVar()).toBe(`${BOX.height}px`);
+        act(() => setChatRoot(null));
+        await flush();
+        expect(strip(), 'Chat gone: back where it is mounted, still there').toBeTruthy();
+        expect(c.querySelector('.device-stage-minimized-strip')).toBeNull();
+        expect(heightVar(), 'and still measured').toBe(`${BOX.height}px`);
+    });
+});
+
+/**
+ * Put away was only ever undone by the strip's own press: a session that
+ * ended while away left the stage put away, so the next Connect showed only
+ * a "Return to" bar, and a second PC connected while the first was away came
+ * up as that bar too (the review of 2026-11-22).
+ */
+describe('a session that newly takes the stage is shown, not put away', () => {
+    it('after a session ends while put away, the next one opens as the stage', async () => {
+        await mountWith(session({ id: 'ds-a', peerName: 'Office PC' }));
+        await tap(toolbarButton('Chat'));
+        expect(wayBack(), 'put away').toBeTruthy();
+        await publish([]);
+        expect(wayBack(), 'the session ended: nothing left on screen').toBeNull();
+        await publish([session({ id: 'ds-b', peerName: 'Den laptop' })]);
+        expect(host!.querySelector('.device-stage'), 'the new session is on the stage').toBeTruthy();
+        expect(wayBack(), 'and not behind a "Return to" bar').toBeNull();
+    });
+
+    it('a second PC connected while the first is put away takes the stage', async () => {
+        const a = session({ id: 'ds-a', peerName: 'Office PC' });
+        await mountWith(a);
+        await tap(toolbarButton('Chat'));
+        expect(wayBack()!.textContent!.trim()).toBe('Return to Office PC');
+        await publish([a, session({ id: 'ds-b', peerName: 'Den laptop' })]);
+        expect(host!.querySelector('.device-stage'), "the new PC's session is on the stage").toBeTruthy();
+        expect(wayBack(), 'not put away').toBeNull();
+    });
+
+    it('CONTROL: the same session coming through again (reconnecting, its next snapshot) stays put away', async () => {
+        await mountWith(session({ id: 'ds-a', peerName: 'Office PC' }));
+        await tap(toolbarButton('Chat'));
+        await publish([session({ id: 'ds-a', peerName: 'Office PC', reconnecting: true })]);
+        expect(wayBack(), 'reconnecting: still put away').toBeTruthy();
+        await publish([session({ id: 'ds-a', peerName: 'Office PC' })]);
+        expect(wayBack(), 'back: still put away').toBeTruthy();
+        expect(host!.querySelector('.device-stage'), 'the stage stays away').toBeNull();
     });
 });

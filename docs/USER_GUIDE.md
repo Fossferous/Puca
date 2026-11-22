@@ -1061,7 +1061,11 @@ while it is away. A bar then says **Return to** and that computer's name;
 press it to go back. On a computer it runs along the bottom of the window,
 and the app moves up to make room for it. On a phone it sits above the tabs
 at the bottom (above the voice bar in a call), with the message box above
-it, and while the keyboard is up it steps aside, like the tabs.
+it, and while the keyboard is up it steps aside, like the tabs. A dialog
+opened over the chat (Settings, a member's profile, Edit Channel) covers the
+bar while it is open. If the session ends while it is put away, the bar goes
+with it, and the next computer you connect to opens on screen as usual, as
+does one you connect to while another is put away.
 
 **When the keyboard opens by itself.** With **Open the keyboard when a text
 box is tapped** on, the keyboard comes up when a tap puts the computer's text
