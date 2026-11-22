@@ -184,6 +184,19 @@ describe('"is typing" names only people typing now', () => {
         expect(indicator()).not.toContain('bob');
     });
 
+    it('a typer who sent while the viewer was in another channel is not shown on the way back', async () => {
+        await mountChat();
+        await typing('channel_10', 2, 'bob');
+        expect(indicator(), 'POSITIVE CONTROL: a ping shows its typer').toContain('bob is typing');
+        await openChannel('second');
+        // While the viewer is in #second, bob sends in #general: the viewer has left
+        // that room, so neither his message nor a ping reaches them.
+        await openChannel('general');
+        expect(indicator(), 'back in #general within five seconds: nobody is typing').toBeNull();
+        await typing('channel_10', 2, 'bob');
+        expect(indicator(), 'CONTROL: a ping after the return shows him again').toContain('bob is typing');
+    });
+
     // A page stopped with its socket left open (an iPhone app switched away from):
     // no timer runs, and the frames sent meanwhile are handed over in one burst when
     // it runs again (typingIndicator.ts, HELD PINGS). Played with the page's

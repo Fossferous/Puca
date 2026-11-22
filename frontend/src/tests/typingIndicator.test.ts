@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-    noteTyping, clearTyper, typersIn, TYPING_TTL_MS, RunClock, RUN_TICK_MS, STOPPED_GAP_MS, RESTART_MS,
+    noteTyping, clearTyper, dropRoom, typersIn, TYPING_TTL_MS, RunClock, RUN_TICK_MS, STOPPED_GAP_MS, RESTART_MS,
     type TypingRow,
 } from '../components/typingIndicator';
 import { pruneExpiredTyping } from '../components/stableState';
@@ -115,5 +115,17 @@ describe('RunClock: has the page just started again?', () => {
         expect(since).toBe(10_000);
         const m = noteTyping(new Map(), 2, 'bob', 'channel_7', 13_500, since);
         expect(m.get(2)?.expiry).toBe(15_000);
+    });
+});
+
+describe('dropRoom', () => {
+    it('takes away only the rows of the room left, and is the same map when it had none', () => {
+        let m = new Map<number, TypingRow>();
+        m = noteTyping(m, 2, 'bob', 'channel_7', 1_000, 1_000);
+        m = noteTyping(m, 3, 'cat', 'channel_8', 1_000, 1_000);
+        const left = dropRoom(m, 'channel_7');
+        expect(typersIn(left, 'channel_7')).toEqual([]);
+        expect(typersIn(left, 'channel_8'), 'another room keeps its typer').toEqual(['cat']);
+        expect(dropRoom(left, 'channel_7'), 'nothing to drop: the same map').toBe(left);
     });
 });

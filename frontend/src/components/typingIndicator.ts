@@ -75,6 +75,21 @@ export function clearTyper(prev: Map<number, TypingRow>, userId: number): Map<nu
     return next;
 }
 
+/** `prev` without the rows of `room`; the SAME map when it had none. For a room the
+ *  viewer leaves: from then on neither that room's pings nor the message that ends
+ *  someone's typing reach them, so a row kept would be drawn on the way back under a
+ *  message it never saw (a typer who sent while they were away). Someone still typing
+ *  there is shown again by their next ping, at most 3 s later (the sender's throttle). */
+export function dropRoom(prev: Map<number, TypingRow>, room: string): Map<number, TypingRow> {
+    let next: Map<number, TypingRow> | null = null;
+    for (const [id, row] of prev) {
+        if (row.room !== room) continue;
+        next ??= new Map(prev);
+        next.delete(id);
+    }
+    return next ?? prev;
+}
+
 /** The names to show for `room`, in the order they started typing. */
 export function typersIn(map: Map<number, TypingRow>, room: string | null): string[] {
     if (!room) return [];

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useR
 import { noteRender } from '../api/healthLog';
 import { SpeakingDiv, SpeakingLi } from './SpeakingClass';
 import { pruneExpiredTyping } from './stableState';
-import { noteTyping, clearTyper, typersIn, RunClock, RUN_TICK_MS, type TypingRow } from './typingIndicator';
+import { noteTyping, clearTyper, dropRoom, typersIn, RunClock, RUN_TICK_MS, type TypingRow } from './typingIndicator';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -1649,7 +1649,16 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         const clock = new RunClock(Date.now());
         runClockRef.current = clock;
-        const id = setInterval(() => clock.tick(Date.now()), RUN_TICK_MS);
+        // The typing rows are pruned here too, not only by the open channel's own
+        // timer: that one stops while no channel is open (a DM, Home, the board), so
+        // a row that ran out there was still drawn under the message that ended it
+        // on the way back, for up to a second, and a row for a channel left before
+        // its typer sent was drawn on returning to it (0.9.868's review).
+        const id = setInterval(() => {
+            const now = Date.now();
+            clock.tick(now);
+            setTypingUsers(prev => pruneExpiredTyping(prev, now));
+        }, RUN_TICK_MS);
         return () => {
             clearInterval(id);
             if (runClockRef.current === clock) runClockRef.current = null;
@@ -3122,13 +3131,6 @@ export function Chat({ onLogout }: ChatProps) {
         wsClient.on('ChatMessage', handleChatMessage);
         wsClient.on('UserTyping', handleUserTyping);
 
-        const typingCleanupInterval = setInterval(() => {
-            const now = Date.now();
-            // The SAME map when nothing expired, so an idle second is not a
-            // render of the whole app (stableState.ts).
-            setTypingUsers(prev => pruneExpiredTyping(prev, now));
-        }, 1000);
-
         return () => {
             wsClient.off('RoomJoined', handleRoomJoined);
             wsClient.off('UserJoined', handleUserJoined);
@@ -3136,7 +3138,9 @@ export function Chat({ onLogout }: ChatProps) {
             wsClient.off('ChatMessage', handleChatMessage);
             wsClient.off('UserTyping', handleUserTyping);
             wsClient.leaveRoom(roomId);
-            clearInterval(typingCleanupInterval);
+            // Left: its pings and the message that ends a typer's no longer reach us
+            // (typingIndicator.ts dropRoom).
+            setTypingUsers(prev => dropRoom(prev, roomId));
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
     }, [currentChannel?.id, currentUserId, currentServer?.id, queryClient]);
