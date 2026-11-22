@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useR
 import { noteRender } from '../api/healthLog';
 import { SpeakingDiv, SpeakingLi } from './SpeakingClass';
 import { pruneExpiredTyping } from './stableState';
+import { noteTyping, clearTyper, dropRoom, typersIn, RunClock, RUN_TICK_MS, type TypingRow } from './typingIndicator';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -1636,9 +1637,33 @@ export function Chat({ onLogout }: ChatProps) {
         setVoiceUpdateTrigger(prev => prev + 1);
     }), []);
 
-    // Typing indicators
-    const [typingUsers, setTypingUsers] = useState<Map<number, { username: string; expiry: number }>>(new Map());
+    // Typing indicators: who is typing, in which room, until when. Shown only for
+    // the open channel, and a message ends its sender's (typingIndicator.ts).
+    const [typingUsers, setTypingUsers] = useState<Map<number, TypingRow>>(new Map());
+    const typingNames = typersIn(typingUsers, currentChannel ? `channel_${currentChannel.id}` : null);
     const lastTypingSent = useRef<number>(0);
+    // Whether the page has just started again after being stopped (an app switched
+    // away from), so a typing ping that waited through it is not shown as new
+    // (typingIndicator.ts, HELD PINGS). Its own timer, whatever channel is open.
+    const runClockRef = useRef<RunClock | null>(null);
+    useEffect(() => {
+        const clock = new RunClock(Date.now());
+        runClockRef.current = clock;
+        // The typing rows are pruned here too, not only by the open channel's own
+        // timer: that one stops while no channel is open (a DM, Home, the board), so
+        // a row that ran out there was still drawn under the message that ended it
+        // on the way back, for up to a second, and a row for a channel left before
+        // its typer sent was drawn on returning to it (0.9.868's review).
+        const id = setInterval(() => {
+            const now = Date.now();
+            clock.tick(now);
+            setTypingUsers(prev => pruneExpiredTyping(prev, now));
+        }, RUN_TICK_MS);
+        return () => {
+            clearInterval(id);
+            if (runClockRef.current === clock) runClockRef.current = null;
+        };
+    }, []);
 
     // Search state
     const [searchQuery, setSearchQuery] = useState('');
@@ -2969,6 +2994,10 @@ export function Chat({ onLogout }: ChatProps) {
             };
 
             if (payload.content.startsWith('__VOICE_STATUS__')) return;
+            // They sent it, so they are no longer typing it. Here, before the
+            // decrypt's await, so it lands in frame order: a ping that came after
+            // this message (they started the next one) is not wiped by it.
+            if (payload.room_id === roomId) setTypingUsers(prev => clearTyper(prev, payload.sender.id));
             // Own-sender frames are NOT dropped: the server includes the sender
             // in the broadcast on purpose (multi-device sync — see
             // message_handlers.rs), and the reconcile below adopts the echo
@@ -3088,12 +3117,12 @@ export function Chat({ onLogout }: ChatProps) {
             // message you have chosen not to see.
             if (isBlocked(payload.user.id)) return;
 
-            const expiry = Date.now() + 5000;
-            setTypingUsers(prev => {
-                const newMap = new Map(prev);
-                newMap.set(payload.user.id, { username: payload.user.username, expiry });
-                return newMap;
-            });
+            const { id, username } = payload.user;
+            const now = Date.now();
+            // A ping that waited while the page was stopped counts from when it
+            // stopped, not from now (typingIndicator.ts, HELD PINGS).
+            const since = runClockRef.current?.waitingSince(now) ?? now;
+            setTypingUsers(prev => noteTyping(prev, id, username, payload.room_id, now, since));
         };
 
         wsClient.on('RoomJoined', handleRoomJoined);
@@ -3102,13 +3131,6 @@ export function Chat({ onLogout }: ChatProps) {
         wsClient.on('ChatMessage', handleChatMessage);
         wsClient.on('UserTyping', handleUserTyping);
 
-        const typingCleanupInterval = setInterval(() => {
-            const now = Date.now();
-            // The SAME map when nothing expired, so an idle second is not a
-            // render of the whole app (stableState.ts).
-            setTypingUsers(prev => pruneExpiredTyping(prev, now));
-        }, 1000);
-
         return () => {
             wsClient.off('RoomJoined', handleRoomJoined);
             wsClient.off('UserJoined', handleUserJoined);
@@ -3116,7 +3138,9 @@ export function Chat({ onLogout }: ChatProps) {
             wsClient.off('ChatMessage', handleChatMessage);
             wsClient.off('UserTyping', handleUserTyping);
             wsClient.leaveRoom(roomId);
-            clearInterval(typingCleanupInterval);
+            // Left: its pings and the message that ends a typer's no longer reach us
+            // (typingIndicator.ts dropRoom).
+            setTypingUsers(prev => dropRoom(prev, roomId));
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
     }, [currentChannel?.id, currentUserId, currentServer?.id, queryClient]);
@@ -3992,6 +4016,13 @@ export function Chat({ onLogout }: ChatProps) {
         try {
             const sent = await sendChannelMessageEncrypted(currentChannel.id, content, replyToMessage?.id, isTaskMode);
             unconfirmedSendsRef.current.delete(optimisticMessage.id);
+            // This message ended their "is typing" on every screen (typingIndicator.ts
+            // clearTyper), so the next key pings at once: the 3 s throttle, counting
+            // from the ping before it, hid someone typing straight on for up to 3 s.
+            // Only now, answered: the server sent the message to the room before it
+            // answered, so this ping reaches everyone after it. Reset before the
+            // request, a ping could get there first and be wiped by the message.
+            lastTypingSent.current = 0;
             // The WS echo can land BEFORE this response (the server broadcasts
             // before serializing the reply) and may have already adopted
             // sent.id into the bubble — in that case drop the stale optimistic
@@ -7183,11 +7214,11 @@ export function Chat({ onLogout }: ChatProps) {
 
                 {/* Typing Indicator */}
                 {
-                    typingUsers.size > 0 && (
+                    typingNames.length > 0 && (
                         <div className="typing-indicator">
                             <span className="typing-dots">•••</span>
-                            {Array.from(typingUsers.values()).map(u => u.username).join(', ')}
-                            {typingUsers.size === 1 ? ' is typing...' : ' are typing...'}
+                            {typingNames.join(', ')}
+                            {typingNames.length === 1 ? ' is typing...' : ' are typing...'}
                         </div>
                     )
                 }
