@@ -194,7 +194,9 @@ describe('the lock handover, controller side', () => {
         });
         expect(ended, 'the session must end').toBeTruthy();
         expect(ended!.error, 'deliberate: no red banner').toBeNull();
-        expect(follow).toHaveBeenCalledWith('dev-host', 1);
+        // Naming the session it carries on, so the stage keeps the one it
+        // opens where the person left this one (put away stays put away).
+        expect(follow).toHaveBeenCalledWith('dev-host', 1, id);
     });
 
     it('a SHARE grantee cannot follow, and is told WHY the picture went instead of watching it vanish', async () => {
@@ -206,5 +208,26 @@ describe('the lock handover, controller side', () => {
         expect(ended, 'the session must end').toBeTruthy();
         expect(ended!.error).toMatch(/locked/);
         expect(follow, "the owner's sign-in row is not the grantee's to reach").not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * The session a follow opens says which one it carries on (`handoverFrom`),
+ * and only that one: the stage keeps it where the person left the one before
+ * (put away to the chat stays put away; DeviceStage `putAway`). A person's
+ * own Connect says nothing, so it opens on screen.
+ */
+describe('the session a follow opens names the one it carries on', () => {
+    it("is on the session's snapshot from the connect; a person's Connect has none", async () => {
+        const { installDeviceSessions, activeSessions, endAllSessions, connectToDevice } =
+            await import('../api/devices/session');
+        installDeviceSessions();
+        endAllSessions('test reset');
+        const followed = await connectToDevice('dev-host', { handoverFrom: 'ds-before' });
+        expect(activeSessions().find(s => s.id === followed)?.handoverFrom).toBe('ds-before');
+        endAllSessions('test reset');
+        const own = await connectToDevice('dev-host');
+        expect(activeSessions().find(s => s.id === own)?.handoverFrom, 'CONTROL: a Connect carries nothing on').toBeNull();
+        endAllSessions('test reset');
     });
 });

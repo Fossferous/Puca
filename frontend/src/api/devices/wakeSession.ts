@@ -396,10 +396,15 @@ const FOLLOW_POLL_MS = 3_000;
  *
  * Reads the device list once up front only to find the card to report on;
  * the poll re-reads it itself.
+ *
+ * `from` is the session that was handed over: the one this opens carries it
+ * on (`handoverFrom`), so the stage keeps it where the person left that one
+ * (put away to the chat, it stays put away).
  */
 export async function followToDesktop(
     signInRowId: string,
     userId: number,
+    from?: string,
 ): Promise<void> {
     let all: VerifiedDevice[];
     try {
@@ -457,6 +462,7 @@ export async function followToDesktop(
         // app row is online NOW, and waiting a full interval before looking
         // is a visible pause for nothing.
         pollNow: true,
+        handoverFrom: from,
     });
 }
 
@@ -480,6 +486,8 @@ export async function followToDesktop(
 export async function followToSignIn(
     appRowId: string,
     userId: number,
+    /** The session handed over (followToDesktop's `from`). */
+    from?: string,
 ): Promise<void> {
     let all: VerifiedDevice[];
     try {
@@ -527,6 +535,7 @@ export async function followToSignIn(
             'Press Control here once its card shows the sign-in screen as online.',
         openFailedMessage: why => `${name} is locked, but the session could not be opened: ${why}`,
         pollNow: true,
+        handoverFrom: from,
     });
 }
 
@@ -552,6 +561,9 @@ function watchForRow(opts: {
     openFailedMessage: (why: string) => string;
     /** Run the first poll immediately rather than after one interval. */
     pollNow?: boolean;
+    /** A follow's: the session it carries on, handed to the connect
+     *  (session.ts `handoverFrom`). A wake has none: a person pressed Wake. */
+    handoverFrom?: string;
 }): void {
     const { cardId, token, userId, phase, timeoutMs, pollMs } = opts;
     const startedAt = Date.now();
@@ -616,6 +628,9 @@ function watchForRow(opts: {
                 // Its name and whether this is its sign-in row too: a woken
                 // or locked PC answers there, and the passphrase dialog asks
                 // for that screen's own passphrase, naming the PC.
+                // A follow says which session it carries on (the stage keeps
+                // the new one where the person left that one).
+                const carried = opts.handoverFrom ? { handoverFrom: opts.handoverFrom } : {};
                 await connectToDevice(
                     found.row.id,
                     machine
@@ -623,8 +638,9 @@ function watchForRow(opts: {
                             machineRows: machine.rows.map(r => r.id),
                             peerName: machine.primary.name,
                             ...(found.row.id === machine.signInRow?.id ? { signIn: true } : {}),
+                            ...carried,
                         }
-                        : undefined,
+                        : opts.handoverFrom ? carried : undefined,
                 );
                 if (!isCurrent(cardId, token)) return;
                 clearTimers(cardId);

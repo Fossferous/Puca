@@ -215,7 +215,10 @@ const RAISED = [
     'live-indicator', 'permission-reset-btn', 'permission-retry-btn', 'notes-textbtn primary', 'login-button', 'login-title',
     'login-subtitle', 'forgot-password-link', 'error-message', 'success-message', 'notes-login-note', 'notes-stay-hint',
     'connection-error-hint', 'update-later-btn', 'UpdateGate.tsx', 'WelcomePopup.tsx', 'ServiceUpdateBanner.tsx',
-    'mouse-mode-btn', 'keyboard-btn', 'device-stage-mobile-confirm-btn', 'DeviceStageMobileMenus.tsx', 'DeviceStage.tsx',
+    'mouse-mode-btn', 'keyboard-btn', 'device-stage-mobile-confirm-btn', 'DeviceStageMobileMenus.tsx',
+    // The minimised stage's pill: its words were a bare span in DeviceStage.tsx; they are the way
+    // back's label now (DeviceStageReturn.tsx), on the same fill the old sheet below paints #007aff.
+    'device-stage-minimized-label',
     'host-files-indicator-stop', 'discover-empty-hint', 'discover-member-count', 'join-error', 'invite-preview-icon',
     'recovery-word-num', 'stream-audio-error',
     // Found once each component was read in its places, in each arm, and with opacity.

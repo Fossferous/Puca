@@ -95,9 +95,10 @@ import { DeviceStageStats } from './DeviceStageStats';
 import { DeviceStageTypeText } from './DeviceStageTypeText';
 import { DeviceStageWindowPicker } from './DeviceStageWindowPicker';
 import { ShownWindowLabel } from './DeviceStageWindowChip';
+import { DeviceStageReturn } from './DeviceStageReturn';
 import { enterStageFullscreen, leaveStageFullscreen, onFullscreenChange, stageElementFullscreen } from './stageFullscreen';
 import {
-    CloseIcon, CrosshairIcon, LiveDotIcon, PlayIcon,
+    CloseIcon, CrosshairIcon, PlayIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
 import { useBackClose } from '../hooks/useBackClose';
@@ -491,7 +492,15 @@ export function DeviceStage() {
     // rotation. Width says how much room there is; it says nothing about
     // whether the user is holding a finger or a mouse.
     const [isMobile, setIsMobile] = useState(() => detectCoarsePointer());
-    const [isMinimized, setIsMinimized] = useState(false);
+    /** The sessions put away to the app (Chat, Back to Púca), by id: put
+     *  away is a SESSION's, not the stage's. It was one boolean, cleared
+     *  whenever a different id took the stage, so a session put away earlier
+     *  that came back onto the stage when a newer one ended was put back on
+     *  screen over the chat, control armed, with nobody asking (the review of
+     *  2026-11-22). An id is taken out by its own way back; an ended one
+     *  stays, a handful of strings at most, because a follow can carry it on
+     *  up to two minutes later (`handoverFrom`, below). */
+    const [putAway, setPutAway] = useState<ReadonlySet<string>>(() => new Set());
     // Session recording was a menu item that toggled this flag and its own
     // label. There is no MediaRecorder anywhere in the app and nothing was
     // ever written to disk, so "Stop session recording" was offering to stop
@@ -594,6 +603,12 @@ export function DeviceStage() {
     const [sessions, setSessions] = useState<DeviceControlSession[]>([]);
     const [controlEnabled, setControlEnabled] = useState(true);
     const [armedFor, setArmedFor] = useState<string | null>(null);
+    /** The sessions OLDER than the one on the stage (listed before it when it
+     *  came on), recorded as it does: when a put-away one ends, the one that
+     *  falls back onto the stage is one of these, while a connection made since
+     *  is not. Ended sessions leave the list at once, so it cannot be read
+     *  off the list afterwards. */
+    const [olderThanShown, setOlderThanShown] = useState<ReadonlySet<string>>(() => new Set());
     const videoRef = useRef<HTMLVideoElement | null>(null);
     /** The letterboxed surface, so the pan clamp measures the BOX and not the
      *  zoomed canvas inside it. */
@@ -677,6 +692,8 @@ export function DeviceStage() {
     const session = [...sessions].reverse().find(
         s => s.role === 'controller' && s.phase !== 'ended' && !s.filesOnly,
     ) ?? null;
+    /** The session on the stage was put away: only its way back is drawn. */
+    const isMinimized = session !== null && putAway.has(session.id);
 
     // Android's BACK closes the phone's open menu, the type-text box and the
     // pinned-keys editor first (they take it themselves); the stage itself is
@@ -750,6 +767,46 @@ export function DeviceStage() {
         // the mouse): left set when its session ended, it came back up, with
         // its Back layer, on the next session.
         setActiveMobileMenu(null);
+        // Put away is the session's own (`putAway`, by id), so nothing is
+        // reset here: a session that newly opens is not in it and is shown
+        // (a Connect after one ended while away, a second PC connected while
+        // the first is away), one put away earlier that comes back onto the
+        // stage when a newer one ends stays away, and the same one coming
+        // through again (a reconnect, its next snapshot) keeps its id.
+        // A session a FOLLOW opened (somebody signed in at the PC's sign-in
+        // screen, the PC locked: it carries on the one before by itself, under
+        // a new id) is where the person left that one: put away, it is put
+        // away too, rather than popping up over the chat.
+        //
+        // And the stage being put away is the person's choice of the chat, not
+        // only that session's: a session that comes onto the stage BEHIND a
+        // put-away one stays away too, rather than its full stage drawing over
+        // the chat with control armed (the next tap aimed at the chat was a
+        // click on that PC: 0.9.869's review). That is an older session falling
+        // back when the put-away one ends (two PCs, the newer put away, then it
+        // goes offline), and a follow of a session that was hidden behind a
+        // put-away stage (that older PC locked or signed into meanwhile). A
+        // connection made since is not older, and opens on screen as before.
+        const previous = armedFor;
+        const stageWasAway = previous !== null && putAway.has(previous);
+        const from = session.handoverFrom;
+        const fellBack = stageWasAway && olderThanShown.has(session.id);
+        // Any follow while the stage is put away, not only one of a session
+        // older than the one shown: the session it carries on may have ended
+        // and left the list (and `olderThanShown`) before it arrives, up to two
+        // minutes later. A follow is never a connection the person made.
+        const followOfAway = from !== null && (putAway.has(from) || stageWasAway);
+        const at = sessions.findIndex(s => s.id === session.id);
+        setOlderThanShown(new Set(sessions.slice(0, Math.max(0, at)).map(s => s.id)));
+        if (fellBack || followOfAway) {
+            const id = session.id;
+            setPutAway(prev => {
+                const next = new Set(prev);
+                if (from !== null) next.delete(from);
+                next.add(id);
+                return next;
+            });
+        }
     }
 
     const sessionActiveId = session?.id ?? null;
@@ -3235,6 +3292,7 @@ export function DeviceStage() {
      *  there now, a captured mouse is let go, and fullscreen ends (a
      *  fullscreen window showing the chat is no use). */
     const minimizeStage = useCallback(() => {
+        if (sessionActiveId === null) return;
         releaseAllRef.current();
         if (document.pointerLockElement) document.exitPointerLock();
         if (fullscreenRef.current) {
@@ -3242,8 +3300,18 @@ export function DeviceStage() {
             setFullscreen(false);
             void leaveStageFullscreen();
         }
-        setIsMinimized(true);
-    }, []);
+        setPutAway(prev => new Set(prev).add(sessionActiveId));
+    }, [sessionActiveId]);
+    /** The way back: this session out of `putAway`, the stage drawn again. */
+    const returnToStage = useCallback(() => {
+        if (sessionActiveId === null) return;
+        setPutAway(prev => {
+            if (!prev.has(sessionActiveId)) return prev;
+            const next = new Set(prev);
+            next.delete(sessionActiveId);
+            return next;
+        });
+    }, [sessionActiveId]);
     // A session that ends, or a stage that goes away, leaves fullscreen: the
     // app must not be left covering the screen with nothing to leave it by.
     useEffect(() => () => {
@@ -3759,6 +3827,16 @@ export function DeviceStage() {
             // leave voice to send that combo remotely.
             if (matchesRegisteredHotkey(e)) return;
             if (!isInjectableKey(e.code)) return;
+            // A REPEAT of a key whose press never went over is no press either.
+            // Enter held on "Return to <PC>" brings the stage back on its first
+            // keydown (taken by the button, the stage minimised then), and its
+            // auto-repeats then reached the machine as Enter presses, which can
+            // confirm a dialog over there: a held Enter presses nothing (0.9.869's
+            // review). A key held ON the stage went over at its first keydown,
+            // so its repeats still do; its release is decided above, as ever.
+            // Still the stage's: its own default (Tab moving the focus, Enter on
+            // a focused button) is not wanted either.
+            if (e.repeat && !heldKeysRef.current.has(e.code)) { e.preventDefault(); return; }
             e.preventDefault();
             // Track held keys so the blur/hide release-all can free them on
             // the host — alt-tab mid-press otherwise strands the key down.
@@ -3793,11 +3871,9 @@ export function DeviceStage() {
     }
 
     if (isMinimized) {
-        return (
-            <div className="device-stage-minimized" onClick={() => setIsMinimized(false)}>
-                <span><LiveDotIcon /> Return to remote device ({session.id})</span>
-            </div>
-        );
+        // The way back, named for the computer, in a strip the layout makes
+        // room for (DeviceStageReturn.tsx says where and why).
+        return <DeviceStageReturn peerName={session.peerName} onReturn={returnToStage} />;
     }
 
     return (

@@ -531,24 +531,195 @@
     white-space: nowrap;
 }
 
-.device-stage-minimized {
+.device-stage-minimized-strip {
+    /* THE WAY BACK to a minimised session (DeviceStageReturn.tsx: where, and
+       why not a corner). It was a pill 20 px from the bottom-right corner at
+       z 10000, over the composer's Send on a desktop and over the message box
+       itself on a phone with the keyboard up. Now a strip the layout makes
+       room for. On a desktop: along the bottom of the window, with the app's
+       columns ending above it (the reservations below).
+       Z 95, BELOW EVERY PANEL AND VIEW (docs/DESIGN_PHILOSOPHY.md): over
+       nothing, and under every dialog, which is the foreground while it is
+       open. Nothing has to be under it: every panel and view ends above it.
+       It was in the persistent bars' 250, which is over the panels (100 to
+       200) and the views beside the rail (100, 105 on a phone), and those are
+       fixed, so each a stacking context of its own: a dialog drawn INSIDE
+       one counts as the view's z, whatever its own. The Devices view's Share
+       (z 1200 inside a view at 100) had the strip, bright and pressable,
+       over its backdrop on a desktop and over the foot of its sheet on a
+       phone, and a press there brought the remote screen back over the
+       dialog; Notes' dialogs in the desktop app are drawn inside its view
+       the same way (portalTarget.ts). Above the panel overlay (90, the dim
+       layer over the chat while a side panel is open), as the bottom bar is.
+       The z holds only because the strip is DRAWN INSIDE `.chat-container`
+       (chatRoot.ts): on a phone that element is a stacking context holding
+       every dialog Chat opens, and from outside it any z above 0 was over
+       all of them, the profile sheet's foot and Create Channel's backdrop
+       included (e2e/return-pill-live.mjs, `dialogs`). */
     position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #0062cc; /* white on #007aff was 4.02:1 */
-    color: white;
-    padding: 12px 20px;
-    border-radius: 30px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    z-index: 10000;
-    cursor: pointer;
-    font-weight: 600;
-    animation: dsm-cta-pulse 2s infinite;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 95;
+    display: flex;
+    justify-content: center;
+    padding: 4px 12px;
+    background: var(--bg-tertiary);
+    border-top: 1px solid var(--border-separator, rgba(255, 255, 255, 0.1));
+    box-sizing: border-box;
 }
-/* Its own name: `pulse` was defined in four files with four different bodies,
-   and keyframes are global, so which one ran depended on load order. Transform
-   rather than box-shadow so it runs on the compositor. */
-@keyframes dsm-cta-pulse {
-    0%, 100% { transform: scale(1); }
-    50% { transform: scale(1.05); }
+
+.device-stage-minimized {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: min(100%, 480px);
+    min-height: 32px;
+    margin: 0;
+    padding: 4px 16px;
+    border: none;
+    border-radius: 999px;
+    /* The brand as a fill under white words: 4.5:1 or more on every theme
+       (theme.css holds every theme's fill to it, and a server mode's accent
+       too). The old fixed #0062cc was the same blue on all eight. */
+    background: var(--brand-fill);
+    color: #fff;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+}
+
+.device-stage-minimized:hover {
+    background: var(--brand-fill-hover);
+}
+
+.device-stage-minimized:focus-visible {
+    outline: 2px solid var(--input-focus, #fff);
+    outline-offset: 2px;
+}
+
+[data-contrast="high"] .device-stage-minimized-strip {
+    border-top-color: currentColor;
+}
+
+.device-stage-minimized-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The session is live: the dot breathes. Only the dot, and only its opacity —
+   the whole pill used to scale to 1.05, which on a bar in the layout would
+   paint over its neighbours twice a second. Still for anyone who asked the
+   system for less motion (and for the app's own Animations switch, which
+   index.css turns off everywhere). */
+.device-stage-minimized-dot {
+    display: inline-flex;
+    flex: 0 0 auto;
+    animation: dsm-live-dot 2s ease-in-out infinite;
+}
+
+/* Its own name: keyframes are global (`pulse` was defined in four files with
+   four bodies, and which one ran depended on load order). */
+@keyframes dsm-live-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .device-stage-minimized-dot {
+        animation: none;
+    }
+}
+
+/* A finger: 44 px, whatever the layout (a touch laptop wide enough for the
+   desktop layout included). */
+@media (pointer: coarse) {
+    .device-stage-minimized {
+        min-height: 44px;
+    }
+}
+
+/* A picture that takes the whole screen (a stream sideways, a tile in the
+   app's own fullscreen, the Android app's bare fullscreen) covers the strip;
+   keep it out of Tab's reach there too, as the bottom bar is. */
+html[data-stream-takeover] .device-stage-minimized-strip,
+html[data-media-fullscreen] .device-stage-minimized-strip,
+html[data-fullscreen-bare] .device-stage-minimized-strip {
+    visibility: hidden;
+}
+
+/* DESKTOP LAYOUT (everything but mobile.css's phone layout): the app's
+   columns stop above the strip, and so do the views that take the place
+   beside the server rail. 41 px is the strip at rest, before it is measured.
+   The room is kept at the foot of `.app`, the window-high column the chat
+   is laid out in, and not by giving `.chat-container` a height: an update
+   banner pads that column down from the top (UpdateBanner.css, 52 to
+   132 px), and a chat container fixed at the window less the strip was
+   then taller than the column, shrank to it, and ended at the window's
+   foot again, under the strip (e2e/return-pill-live.mjs, `banner`). With
+   both paddings on the column, the chat fills what is left between them. */
+@media not all and (pointer: coarse), (min-width: 1025px) {
+    body:has(.device-stage-minimized-strip) .app {
+        padding-bottom: var(--device-return-h, 41px);
+    }
+
+    body:has(.device-stage-minimized-strip) :is(.friends-dashboard, .devices-dashboard, .notes-desktop-view) {
+        bottom: var(--device-return-h, 41px);
+    }
+}
+
+/* THE PHONE LAYOUT (mobile.css's gate): a persistent bar above the bottom
+   bar, like the voice bar, and above the voice bar or the own-call banner
+   when one is up (they never show together). */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .device-stage-minimized-strip {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        padding: 6px 12px;
+        background: var(--bg-secondary);
+    }
+
+    body:has(.voice-panel-compact) .device-stage-minimized-strip {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px));
+    }
+
+    body:has(.own-voice-banner) .device-stage-minimized-strip {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--own-voice-banner-h, 120px));
+    }
+
+    .device-stage-minimized {
+        width: 100%;
+        max-width: none;
+        font-size: 1rem;
+    }
+
+    /* The soft keyboard is up (api/keyboardUp.ts): the strip steps aside with
+       the bottom bar, and its measured height goes to 0 with it, so the
+       reservations below give the room back to the chat. */
+    :root[data-keyboard-up] .device-stage-minimized-strip {
+        display: none;
+    }
+
+    /* The voice bar's reservation (mobile.css), with the strip's measured
+       height on top: every panel that scrolls ends above it, so the composer
+       sits over the strip and no last row is left under it. The same list as
+       mobile.css's and OwnVoiceBanner.css's; keep the three in step.
+       :root raises these over those (which would otherwise tie on
+       specificity and win or lose on load order). */
+    :root body:has(.device-stage-minimized-strip) :is(.chat-main, .server-list-container, [class*="server-list"], .sidebar, .checklist-panel, .member-sidebar, .friends-dashboard, .devices-dashboard) {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--device-return-h, 56px));
+    }
+
+    :root body:has(.voice-panel-compact):has(.device-stage-minimized-strip) :is(.chat-main, .server-list-container, [class*="server-list"], .sidebar, .checklist-panel, .member-sidebar, .friends-dashboard, .devices-dashboard) {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px) + var(--device-return-h, 56px));
+    }
+
+    :root body:has(.own-voice-banner):has(.device-stage-minimized-strip) :is(.chat-main, .server-list-container, [class*="server-list"], .sidebar, .checklist-panel, .member-sidebar, .friends-dashboard, .devices-dashboard) {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--own-voice-banner-h, 120px) + var(--device-return-h, 56px));
+    }
 }
