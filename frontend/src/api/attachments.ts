@@ -21,7 +21,7 @@
 import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES, MAX_UPLOAD_BYTES } from './uploads';
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
-import { stripImageMetadata } from './imageMetadata';
+import { stripAttachmentMetadata } from './fileMetadata';
 import { readAttachmentBody } from './attachmentProgress';
 import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
 import { readVideoDims, type VideoDims } from './videoDims';
@@ -276,11 +276,13 @@ export async function sealFileForUpload(file: File | PlainBytes): Promise<Sealed
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
     assertUploadable({ name: file.name, size: given ? given.byteLength : (file as File).size }, ENCRYPTED_OVERHEAD_BYTES);
-    // A photo's EXIF (where, when, on which device) is shown to everyone who can open it, so it
-    // is taken off HERE, losslessly, before the first byte is encrypted (api/imageMetadata.ts).
-    // A JPEG/PNG/WebP that cannot be taken apart throws and is not sent. Any other type is
-    // returned as it is; the bytes decide, not the declared type.
-    const raw = stripImageMetadata(given ?? new Uint8Array(await (file as File).arrayBuffer()));
+    // A photo's EXIF (where, when, on which device), a video's location, an editor's notes in a
+    // drawing: shown to everyone who can open it, so taken off HERE, before the first byte is
+    // encrypted (api/fileMetadata.ts: JPEG, PNG, WebP, GIF, TIFF, HEIC, AVIF, MP4, MOV, WebM, MKV,
+    // SVG). A container is overwritten in place in these very bytes, which the seal owns. A file
+    // of one of those formats that cannot be taken apart throws and is not sent. Anything else is
+    // as it was; the bytes decide, not the declared type.
+    const raw = await stripAttachmentMetadata(given ?? new Uint8Array(await (file as File).arrayBuffer()), { name: file.name, type: file.type });
     const keyBytes = crypto.getRandomValues(new Uint8Array(32));
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
@@ -319,16 +321,15 @@ export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { chan
 }
 
 /**
- * Open ciphertext this device sealed and never uploaded, as an object URL.
- * Same `safeBlobType` rule as a fetched attachment: a parked PDF is an
- * opaque binary blob, never an in-origin document.
+ * Open ciphertext this device sealed and never uploaded (nonce || ciphertext)
+ * to its plaintext, as bytes: api/parkedPreview.ts hosts them like any
+ * decrypted attachment (api/plaintextHost.ts), typed by `safeBlobType` (a
+ * parked PDF is opaque bytes, never an in-origin document), and lets them go
+ * when nothing shows them. Never a page Blob: one of those stays on disk
+ * (blob_storage) until the page next collects garbage.
  */
-export async function decryptParkedBlobUrl(bytes: Uint8Array, keyB64url: string, mime: string): Promise<string> {
-    const nonce = bytes.slice(0, 12);
-    const ct = bytes.slice(12);
-    const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
-    return URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
+export async function openParkedBytes(bytes: Uint8Array, keyB64url: string): Promise<ArrayBuffer> {
+    return openSealed(bytes, keyB64url);
 }
 
 /**

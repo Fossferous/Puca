@@ -14,6 +14,8 @@
  * and AES-GCM-decrypt. What it checks is the plaintext a recipient gets.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const posted = vi.hoisted(() => ({ files: [] as Blob[], reply: {} as Record<string, unknown> }));
 vi.mock('../api/client', () => ({
@@ -28,7 +30,7 @@ vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/a
 
 import { encryptAndUploadRef, parseEncAttachment, sealFileForUpload } from '../api/attachments';
 import { ImageMetadataError, orientationOfTiff } from '../api/imageMetadata';
-import { SCAN, cat, contains, enc, indexOfBytes, jpeg, jpegSegments, leaked, png, pngChunks, webp, riffChunkList, IDAT_BYTES, VP8_BYTES } from './fixtures/photoMetadata';
+import { SCAN, contains, enc, indexOfBytes, jpeg, jpegSegments, leaked, png, pngChunks, webp, riffChunkList, IDAT_BYTES, VP8_BYTES } from './fixtures/photoMetadata';
 
 function readBlob(b: Blob): Promise<Uint8Array> {
     return new Promise((res, rej) => {
@@ -120,16 +122,37 @@ describe('a photo sent in chat, a DM, a task or a note', () => {
         expect(leaked(await open(await readBlob(sealed.blob), sealed.key))).toEqual([]);
     });
 
-    it('a file that is not one of the three formats goes through byte for byte', async () => {
+    it('a file of no format that carries metadata goes through byte for byte', async () => {
         for (const [name, type, bytes] of [
-            ['a.gif', 'image/gif', cat(enc('GIF89a'), [1, 0, 1, 0, 0, 0, 0], enc('SECRETCOMMENT-gif'))],
-            ['a.svg', 'image/svg+xml', enc('<svg xmlns="http://www.w3.org/2000/svg"><metadata>SECRETXMP-creator-jane</metadata></svg>')],
             ['a.pdf', 'application/pdf', enc('%PDF-1.7 PhoneModelX-9000')],
             ['a.bin', '', Uint8Array.from([0xFF, 0xD8])],
+            ['notes.txt', 'text/plain', enc('<svg xmlns="http://www.w3.org/2000/svg"><metadata>SECRETXMP-creator-jane</metadata></svg>')],
         ] as Array<[string, string, Uint8Array]>) {
             const received = await sendAndOpen(fileOf(bytes, name, type || undefined));
             expect(Array.from(received), name).toEqual(Array.from(bytes));
         }
+    });
+
+    // The other formats (api/fileMetadata.ts), through the same real seal: what the recipient opens.
+    it('a GIF, a TIFF, an AVIF, an MP4, a MOV, a WebM and an MKV: the recipient gets none of their metadata, and the media as it was', async () => {
+        const dir = join(__dirname, 'fixtures', 'metadata');
+        const MARKS = ['SECRETCAM-Corp', 'PhoneModelX-9000', 'SECRETXMP-creator-jane', 'SECRETCOMMENT-hello', 'SECRETIPTC-caption', '+47.6062-122.3321', '2026:10:23', 'note.txt'];
+        for (const [name, type] of [
+            ['animated.gif', 'image/gif'], ['photo.tif', 'image/tiff'], ['photo.avif', 'image/avif'],
+            ['video.mp4', 'video/mp4'], ['video.mov', 'video/quicktime'], ['video.webm', 'video/webm'], ['video.mkv', ''],
+        ]) {
+            const original = new Uint8Array(readFileSync(join(dir, name)));
+            expect(MARKS.some(m => contains(original, m)), `control: ${name} carries some`).toBe(true);
+            const received = await sendAndOpen(fileOf(original.slice(), name, type || undefined));
+            expect(MARKS.filter(m => contains(received, m)), name).toEqual([]);
+            if (!name.endsWith('.gif')) expect(received.length, `${name}: overwritten in place, nothing moved`).toBe(original.length);
+        }
+    });
+
+    it('an SVG: the recipient gets the drawing without what the editor wrote in it', async () => {
+        const received = await sendAndOpen(fileOf(enc('<svg xmlns="http://www.w3.org/2000/svg"><metadata>SECRETXMP-creator-jane</metadata><rect width="4" height="4"/></svg>'), 'a.svg', 'image/svg+xml'));
+        expect(contains(received, 'SECRETXMP-creator-jane')).toBe(false);
+        expect(contains(received, '<rect')).toBe(true);
     });
 
     it('a JPEG that cannot be taken apart is NOT sent, and the error says so', async () => {

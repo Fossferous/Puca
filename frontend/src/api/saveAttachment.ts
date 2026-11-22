@@ -56,25 +56,10 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
     if (isTauri()) {
         // "Ask where to save files": the dialog comes first, before the bytes
         // are even read, so a cancel is free.
-        let dest: string | undefined;
-        if (loadSettings().askWhereToSaveFiles === true) {
-            const chosen = await chooseSavePath(safeName);
-            if (chosen === null) return { where: '', onDisk: false, cancelled: true };
-            dest = chosen;
-        }
+        const dest = await desktopDestination(safeName);
+        if (dest === null) return { where: '', onDisk: false, cancelled: true };
         const resp = await fetch(blobUrl);
-        const bytes = new Uint8Array(await resp.arrayBuffer());
-        const { invoke } = await import('@tauri-apps/api/core');
-        // The headers must be ASCII; the Rust side percent-decodes and then
-        // sanitizes the NAME, since a file name from another user is untrusted
-        // input. The destination is the user's own choice and is used as given.
-        const path = await invoke<string>('attachment_save', bytes, {
-            headers: {
-                'x-file-name': encodeURIComponent(safeName),
-                ...(dest ? { 'x-dest-path': encodeURIComponent(dest) } : {}),
-            },
-        });
-        return { where: path, onDisk: true };
+        return writeOnDesktop(new Uint8Array(await resp.arrayBuffer()), safeName, dest);
     }
 
     // A phone: the anchor below writes NOTHING in a WebView (Capacitor 8 has
@@ -101,6 +86,42 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
     a.click();
     a.remove();
     return { where: safeName, onDisk: false };
+}
+
+/** "Ask where to save files" (desktop): the path chosen, undefined for the
+ *  default folder, null when the dialog was cancelled. */
+async function desktopDestination(safeName: string): Promise<string | undefined | null> {
+    if (loadSettings().askWhereToSaveFiles !== true) return undefined;
+    return chooseSavePath(safeName);
+}
+
+async function writeOnDesktop(bytes: Uint8Array, safeName: string, dest: string | undefined): Promise<SaveResult> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    // The headers must be ASCII; the Rust side percent-decodes and then
+    // sanitizes the NAME, since a file name from another user is untrusted
+    // input. The destination is the user's own choice and is used as given.
+    const path = await invoke<string>('attachment_save', bytes, {
+        headers: {
+            'x-file-name': encodeURIComponent(safeName),
+            ...(dest ? { 'x-dest-path': encodeURIComponent(dest) } : {}),
+        },
+    });
+    return { where: path, onDisk: true };
+}
+
+/**
+ * The DESKTOP app only: save bytes the page holds in memory, straight to the
+ * shell's `attachment_save`, with no blob: URL in between. For a file the app
+ * builds itself (a clip's Download, api/clipDownload.ts): a page Blob of it
+ * would be one more plaintext copy, which Chromium writes to `blob_storage`
+ * under memory pressure and keeps until the page next collects garbage.
+ */
+export async function saveBytesOnDesktop(bytes: Uint8Array, name: string): Promise<SaveResult> {
+    if (!isTauri()) throw new Error('saveBytesOnDesktop: not the desktop app');
+    const safeName = name || 'attachment';
+    const dest = await desktopDestination(safeName);
+    if (dest === null) return { where: '', onDisk: false, cancelled: true };
+    return writeOnDesktop(bytes, safeName, dest);
 }
 
 /**

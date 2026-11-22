@@ -37,7 +37,7 @@ import { getToken } from '../auth';
 import { readBodyBytes, type BytesProgress } from '../readBody';
 import { openPart, PART_HEADER_BYTES, PART_MAX_PLAINTEXT, PART_TAG_BYTES, type ClipSecrets, uuidToBytes } from './clipCrypto';
 import { partIndexForTime, partStartMs, type ClipManifest } from './clipRef';
-import { ClipAssembler } from './fmp4SaveFix';
+import { ClipAssembler, type AssembledClip } from './fmp4SaveFix';
 
 export type ClipPlaybackMode = 'mse' | 'blob' | 'unsupported';
 
@@ -209,11 +209,29 @@ export async function downloadClipBytes(
     signal?: AbortSignal,
     fixContainer = false,
 ): Promise<Blob> {
+    const { chunks } = await assembleClip(m, onProgress, fetchPart, signal, fixContainer);
+    return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
+}
+
+/**
+ * The same file as downloadClipBytes, as the decrypted chunks themselves, in
+ * order: no Blob made of them. The desktop app's Download hands the bytes to
+ * the shell straight from memory (api/clipDownload.ts), and a page Blob of a
+ * whole clip is exactly what Chromium writes to `blob_storage` under memory
+ * pressure and keeps there until the page next collects garbage.
+ */
+export async function assembleClip(
+    m: ClipManifest,
+    onProgress?: (p: ClipDownloadProgress) => void,
+    fetchPart: PartFetcher = fetchPartBytes,
+    signal?: AbortSignal,
+    fixContainer = false,
+): Promise<AssembledClip> {
     const file = new ClipAssembler(m.durationMs, fixContainer, () => signal?.aborted === true);
     await forEachClipPart(m, async (plain, i) => { file.part(i, plain); }, onProgress, fetchPart, signal);
-    const { chunks, outcome } = file.finish();
-    if (fixContainer) console.info(`[clip] download: ${outcome}`);
-    return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
+    const out = file.finish();
+    if (fixContainer) console.info(`[clip] download: ${out.outcome}`);
+    return out;
 }
 
 /**

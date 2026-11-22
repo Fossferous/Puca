@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 const post = vi.fn();
 vi.mock('../api/client', () => ({ apiClient: { post: (...a: unknown[]) => post(...a), delete: async () => undefined } }));
 vi.mock('../api/config', () => ({ API_BASE_URL: 'https://chat.invalid' }));
-vi.mock('../api/imageMetadata', () => ({ stripFileMetadata: async (f: File) => f }));
+vi.mock('../api/fileMetadata', () => ({ stripFileMetadata: async (f: File) => f }));
 
 const { trackUpload, uploadsInFlight, noteUnsent, hasUnsent } = await import('../api/workInFlight');
 const { uploadFile } = await import('../api/uploads');

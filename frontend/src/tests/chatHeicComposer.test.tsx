@@ -90,11 +90,13 @@ if (typeof Blob.prototype.arrayBuffer !== 'function') {
 }
 const thumbs = new Map<string, string>();
 let seq = 0;
+const revoked: string[] = [];
 URL.createObjectURL = ((b: Blob) => { const u = `blob:chip-${++seq}`; thumbs.set(u, b.type); return u; }) as typeof URL.createObjectURL;
-URL.revokeObjectURL = () => {};
+URL.revokeObjectURL = ((u: string) => { revoked.push(u); }) as typeof URL.revokeObjectURL;
 
 const { Chat } = await import('../components/Chat');
 const { __setEngineDecodesHeif } = await import('../api/heif');
+const { __setCollectionNudge } = await import('../api/plaintextHost');
 
 /** The real fixture: a HEIC as a phone camera saves one (api/heif.ts). */
 const HEIC = new Uint8Array(readFileSync(join(__dirname, 'fixtures', 'heic', 'rotated-gps.heic')));
@@ -200,5 +202,58 @@ describe('a HEIC in the chat composer', () => {
         await drop(new File([JPEG as BlobPart], 'photo.jpg', { type: 'image/jpeg' }));
         expect(h.uploads).toEqual([{ name: 'photo.jpg', type: 'image/jpeg', head: [0xff, 0xd8], camera: false }]);
         expect(chip()?.querySelector('img')).toBeTruthy();
+    });
+});
+
+/**
+ * A chip's thumbnail and the file behind it are let go of with the chip
+ * (api/composerPreviews.ts): its URL stops working and the page is made to
+ * collect its garbage, so a pasted picture that was a Blob in memory (and in
+ * Chromium's blob_storage under pressure) is not kept there until the next
+ * collection, minutes later. jsdom has no Worker, so the thumbnail is made on
+ * the page here; the disk itself is measured by
+ * e2e/plaintext-disk-real-browser.mjs.
+ */
+describe('a chip lets go of its picture when it goes', () => {
+    it('removed: its thumbnail URL is revoked and the page collects its garbage', async () => {
+        const nudges: number[] = [];
+        __setCollectionNudge(() => { nudges.push(Date.now()); });
+        try {
+            await mountChat();
+            await drop(new File([JPEG as BlobPart], 'pasted.png', { type: 'image/png' }));
+            const src = chip()?.querySelector('img')?.getAttribute('src');
+            expect(src, 'control: the chip shows its thumbnail').toMatch(/^blob:chip-/);
+            expect(revoked).not.toContain(src);
+            const remove = chip()?.querySelector('button[aria-label="Remove pasted.png"]') as HTMLButtonElement;
+            await act(async () => { remove.click(); });
+            expect(chip(), 'the chip went').toBeNull();
+            expect(revoked, 'its thumbnail URL with it').toContain(src);
+            await settle(1300);
+            expect(nudges.length, 'and the page was made to collect the File it held').toBeGreaterThan(0);
+        } finally {
+            __setCollectionNudge(null);
+        }
+    });
+
+    it("a HEIC made into a JPEG: the JPEG's thumbnail goes with the chip too", async () => {
+        __setEngineDecodesHeif(false);
+        const nudges: number[] = [];
+        __setCollectionNudge(() => { nudges.push(Date.now()); });
+        try {
+            await mountChat();
+            (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+            h.invoke = async (cmd) => (cmd === 'heif_to_jpeg' ? JPEG.slice().buffer : undefined);
+            await drop(new File([HEIC as BlobPart], 'IMG_1.heic', { type: 'image/heic' }));
+            for (let i = 0; i < 20 && !chip()?.querySelector('img'); i++) await settle();
+            const src = chip()?.querySelector('img')?.getAttribute('src');
+            expect(thumbs.get(src!), 'control: the chip previews the JPEG').toBe('image/jpeg');
+            const remove = chip()?.querySelector('button[aria-label="Remove IMG_1.jpg"]') as HTMLButtonElement;
+            await act(async () => { remove.click(); });
+            expect(revoked).toContain(src);
+            await settle(1300);
+            expect(nudges.length).toBeGreaterThan(0);
+        } finally {
+            __setCollectionNudge(null);
+        }
     });
 });

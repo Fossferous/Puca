@@ -22,6 +22,8 @@ class FakeWorker {
     terminated = false;
     hosted = new Map<number, string>();
     dropped: number[] = [];
+    /** `collect` messages: when the page asked this worker to collect its garbage. */
+    collects: number[] = [];
     transfers: unknown[][] = [];
     private ls: Record<string, Listener[]> = { message: [], error: [] };
     readonly n: number;
@@ -47,6 +49,7 @@ class FakeWorker {
             this.hosted.set(m.id, url);
             setTimeout(() => { if (!this.terminated) this.reply({ id: m.id, url }); }, 0);
         } else if (m.op === 'drop') this.dropped.push(m.id);
+        else if (m.op === 'collect') this.collects.push(Date.now());
     }
     terminate() { this.terminated = true; }
 }
@@ -223,6 +226,52 @@ describe('making the page let go of what it made', () => {
         } finally {
             delete (document as { visibilityState?: unknown }).visibilityState;
             if (vis) expect(Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')).toBeTruthy();
+            __setCollectionNudge(null);
+            vi.useRealTimers();
+        }
+    });
+
+    // A small file shares a worker with others; taken back while they are still
+    // shown, the worker lives on, holding its received copy of the Blob (garbage
+    // it does not collect while idle) and the page its own: the file stayed on
+    // disk as long as the others were shown (e2e/plaintext-disk-real-browser.mjs,
+    // small files let go of beside others still shown). So both are made to
+    // collect: the page by the usual nudge, the worker by `collect` at that moment.
+    it('a small file taken back while others share its worker: the page collects, and so does that worker', async () => {
+        vi.useFakeTimers();
+        try {
+            const nudges: number[] = [];
+            __setCollectionNudge(() => { nudges.push(Date.now()); });
+            const p = Promise.all([hostPlaintext(bytes(1000), 'image/png'), hostPlaintext(bytes(1000), 'image/png'), hostPlaintext(bytes(1000), 'image/png')]);
+            await vi.advanceTimersByTimeAsync(10);
+            const [a, b, c] = await p;
+            expect(FakeWorker.all).toHaveLength(1);
+            const w = FakeWorker.all[0];
+            const t0 = Date.now();
+            a.release();
+            vi.advanceTimersByTime(500);
+            b.release();
+            expect(w.terminated).toBe(false);
+            vi.advanceTimersByTime(999);
+            expect([nudges, w.collects]).toEqual([[], []]);
+            vi.advanceTimersByTime(1);
+            // One nudge for the burst, and the worker asked once, at the same moment.
+            expect(nudges).toEqual([t0 + 1500]);
+            expect(w.collects).toEqual([t0 + 1500]);
+            // Nothing more let go of there: the next nudge (another worker's file) asks it nothing.
+            const big = hostPlaintext(bytes(BIG_LEASE_BYTES), 'video/mp4');
+            await vi.advanceTimersByTimeAsync(10);
+            (await big).release();
+            await vi.advanceTimersByTimeAsync(6000);
+            expect(nudges).toHaveLength(2);
+            expect(w.collects).toHaveLength(1);
+            // The last one goes with the worker: nothing to ask of a terminated worker.
+            c.release();
+            expect(w.terminated).toBe(true);
+            await vi.advanceTimersByTimeAsync(6000);
+            expect(nudges).toHaveLength(3);
+            expect(w.collects).toHaveLength(1);
+        } finally {
             __setCollectionNudge(null);
             vi.useRealTimers();
         }

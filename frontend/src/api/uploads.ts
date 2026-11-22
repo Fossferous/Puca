@@ -1,5 +1,5 @@
 import { API_BASE_URL } from './config';
-import { stripFileMetadata } from './imageMetadata';
+import { stripFileMetadata } from './fileMetadata';
 import { trackUpload } from './workInFlight';
 
 
@@ -72,7 +72,8 @@ export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: n
     // anything added later) passes here, and a phone photo's EXIF is readable by everyone who can
     // see the picture. Doing it HERE, not at each caller, is what stopped the server-creation
     // wizard's icon (a caller nobody remembered) from being missed. Ciphertext (octet-stream)
-    // and audio are not touched: only a declared JPEG / PNG / WebP is read.
+    // and audio are not touched: only a file declared a picture or a video (or nothing) is
+    // opened, and its bytes decide (api/fileMetadata.ts).
     //
     // Counted while it is on its way (workInFlight.ts): a PC updating itself
     // waits for it rather than cutting it off.

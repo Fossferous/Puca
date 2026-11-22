@@ -16,7 +16,7 @@ import { loadSettings } from '../components/settingsStore';
 import { fetchIceConfig, withRelayOnlyIfRequested } from './iceConfig';
 import { lastSinkChoice, type PreparedSink } from './transferSinks';
 import { capacitorSinkDiag } from './capacitorSink';
-import { stripFileMetadata } from './imageMetadata';
+import { stripFileMetadata } from './fileMetadata';
 import {
     sendFile,
     sha256OfBlob,
@@ -398,10 +398,11 @@ class FileTransferManager {
         this.transfers.set(id, t);
         this.emit();
 
-        // A picture over the upload cap (a 40 MB phone JPEG) comes here instead of through the
-        // seal, so its EXIF is taken off here, the same way (api/imageMetadata.ts): the peer is
-        // the one person it could be shown to, and one person is still a person. Done before the
-        // digest, which must be the digest of what is sent.
+        // A picture or video over the upload cap (a 40 MB phone JPEG, a 2 GB phone video) comes
+        // here instead of through the seal, so its metadata is taken off here, the same way
+        // (api/fileMetadata.ts; a video, TIFF or GIF read in slices, never the whole file in memory): the
+        // peer is the one person it could be shown to, and one person is still a person. Done
+        // before the digest, which must be the digest of what is sent.
         try {
             const clean = await stripFileMetadata(file);
             if (clean !== file) { file = clean; t.file = clean; t.size = clean.size; }

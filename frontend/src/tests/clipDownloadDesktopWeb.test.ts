@@ -34,7 +34,8 @@ vi.mock('@tauri-apps/api/core', () => ({
     },
 }));
 
-import { saveClip, clipFileName } from '../api/clipDownload';
+import { saveClip, clipFileName, DOWNLOAD_HANDOFF_MS } from '../api/clipDownload';
+import { __setCollectionNudge } from '../api/plaintextHost';
 import type { ClipManifest } from '../api/clips/clipRef';
 import { API_BASE_URL } from '../api/config';
 
@@ -49,6 +50,9 @@ let v: V;
 let manifest: ClipManifest;
 const wires = new Map<string, Uint8Array>();
 const blobs = new Map<string, Blob>();
+const revoked: string[] = [];
+/** The size of every Blob made while a test ran. */
+const made: number[] = [];
 
 beforeAll(() => {
     v = JSON.parse(readFileSync(VECTORS, 'utf8')) as V;
@@ -73,11 +77,15 @@ beforeAll(() => {
 beforeEach(() => {
     h.invokes.length = 0;
     blobs.clear();
+    revoked.length = 0;
+    made.length = 0;
     // jsdom's Blob cannot be read back; Node's can (and is what a browser's behaves like here).
-    vi.stubGlobal('Blob', NodeBlob);
+    vi.stubGlobal('Blob', class extends NodeBlob {
+        constructor(...args: ConstructorParameters<typeof NodeBlob>) { super(...args); made.push(this.size); }
+    });
     vi.stubGlobal('URL', Object.assign(class extends URL {}, {
         createObjectURL: (b: Blob) => { const u = `blob:test/${blobs.size + 1}`; blobs.set(u, b); return u; },
-        revokeObjectURL: () => {},
+        revokeObjectURL: (u: string) => { revoked.push(u); },
     }));
     vi.stubGlobal('fetch', async (url: string) => {
         if (url.startsWith('blob:')) return new Response(await blobs.get(url)!.arrayBuffer());
@@ -88,6 +96,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    vi.useRealTimers();
+    __setCollectionNudge(null);
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
 });
@@ -130,6 +140,35 @@ describe('a clip downloaded on desktop and the web is the file the phone saves',
         const bytes = new Uint8Array(await blob!.arrayBuffer());
         expect(sha(bytes), 'not the sealed bytes').not.toBe(v.clip.plainSha256);
         expect(sha(bytes), 'the file the Android save writes').toBe(expected().outSha256);
+    });
+
+    // No copy of the clip besides the saved file (docs/SECURITY_MODEL.md, *Decrypted attachments
+    // on your own storage*): a page Blob of it is what Chromium writes to blob_storage under
+    // memory pressure and keeps until the page next collects garbage.
+    it('desktop: no Blob is made of the clip; the shell gets the bytes from memory', async () => {
+        h.tauri = true;
+        await saveClip(manifest);
+        expect(h.invokes).toHaveLength(1);
+        expect(made.filter((n) => n >= expected().outBytes), 'a Blob holding the whole clip').toEqual([]);
+    });
+
+    it("web: the anchor's URL is let go of when its handoff is over, and the page collects the Blob", async () => {
+        h.tauri = false;
+        const nudges: number[] = [];
+        __setCollectionNudge(() => { nudges.push(1); });
+        const clicked: string[] = [];
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { clicked.push(this.href); });
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        await saveClip(manifest);
+        expect(clicked).toHaveLength(1);
+        expect(made.filter((n) => n === expected().outBytes), 'control: the browser is handed one Blob of the clip').toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(DOWNLOAD_HANDOFF_MS - 1);
+        expect(revoked, 'kept through the handoff').toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(revoked, 'then let go of').toEqual([clicked[0]]);
+        expect(DOWNLOAD_HANDOFF_MS).toBeLessThan(30_000);
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(nudges.length, 'and the page made to collect it').toBeGreaterThan(0);
     });
 
     it('a part the server no longer has still fails the download with its status (nothing half-fixed is saved)', async () => {

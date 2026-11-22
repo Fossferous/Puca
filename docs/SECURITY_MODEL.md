@@ -392,8 +392,10 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   (`migrations/014_e2ee_channel_keys.sql`, `src/key_handlers.rs`).
 - **Attachments:** separately AES-256-GCM encrypted under a per-file key carried inside the
   already-encrypted message, and decrypted on your device only while they are shown (below).
-- **Photos are stripped of metadata before they are encrypted**
-  ([`imageMetadata.ts`](../frontend/src/api/imageMetadata.ts), called from `sealFileForUpload` in
+- **Photos are stripped of metadata before they are encrypted**, and so are GIFs, TIFFs, HEIC and
+  AVIF photos, videos and SVG drawings
+  ([`fileMetadata.ts`](../frontend/src/api/fileMetadata.ts), which hands each format to its own
+  stripper, called from `sealFileForUpload` in
   `attachments.ts`, which every attachment of every surface passes through: composer, DMs, tasks,
   notes, including a note's photo sealed offline). Two other doors are covered the same way:
   `uploadFile` in [`uploads.ts`](../frontend/src/api/uploads.ts), through which every picture
@@ -417,13 +419,97 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   its last chunk's CRC passes, so a received file saved to a note or copied can still be re-sealed):
   passing it on would be the way a block the parser could not see still reaches the recipient. A
   JPEG or PNG merely cut off inside its picture data is sent after the part before the cut is
-  checked. Any other format passes through unchanged. **Known limits:** AVIF, TIFF, BMP and GIF
-  (whose comment and application extensions can hold text) are not processed; files sent before
-  this change keep their EXIF; the ICC profile is kept because removing it changes the colours.
-  Checked by `frontend/src/tests/imageMetadata.test.ts` (truncation at every byte, thousands of random
-  corruptions), `frontend/src/tests/attachmentMetadata.test.ts` (the real seal and upload, opened with the
-  key as a recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoder:
-  same pixels, still upright).
+  checked. The other formats, each by its bytes (an SVG, being text, by its type or name, or by its
+  bytes when the device said nothing), since 2026-11-22:
+  - **GIF** ([`gifMetadata.ts`](../frontend/src/api/gifMetadata.ts)), lossless: loses comment and
+    plain text extensions, application extensions (XMP among them) and anything after the trailer;
+    keeps every frame byte for byte, the delays, the loop count (an animated GIF stays animated)
+    and an ICC profile. A byte that starts no block after a frame (padding, junk after the last
+    frame with no trailer) ends the GIF there, as Chromium's and Firefox's decoders read it: the
+    frames before it are sent with a trailer, and what follows, which no browser shows, is not.
+  - **TIFF** ([`tiffMetadata.ts`](../frontend/src/api/tiffMetadata.ts)), in place: each directory
+    keeps only the tags that describe the picture (an allowlist: size, sampling, compression,
+    strips or tiles, colour, resolution, page number, orientation, ICC); the rest (Make, Model,
+    Software, DateTime, Artist, ImageDescription, Windows' XP tags, XMP, IPTC, Photoshop's
+    resources) go, and the GPS, EXIF and interoperability directories are overwritten with zeros
+    with every value in them. The strips are untouched.
+  - **MP4, MOV, M4A, 3GP, HEIC, AVIF** ([`isoBmffMetadata.ts`](../frontend/src/api/isoBmffMetadata.ts)),
+    in place, nothing moved, by an **allowlist** at the top of the file and in `moov`, each track,
+    its `mdia` and each fragment header: a box a player needs (the media data, the movie and track
+    headers, edit lists, sample tables, fragments and their indexes) is kept, and every other box,
+    whatever it is called, becomes a `free` box of zeros. That takes Android's `©xyz` and 3GPP's
+    `loci` location, the iPhone's `com.apple.quicktime.location.ISO6709`, make, model, software and
+    creation date, iTunes-style tags, GoPro's GPMF and camera serial and XMP (in `udta`, `meta` and
+    `uuid` boxes), a Novatek dashcam's `moov/gps ` index, a Samsung HEIC's `sefd` trailer and its
+    Motion Photo video (`mpvd`, dropped as a JPEG's is), and any vendor's box of its own. Free space
+    (a top-level `free`, `skip`, `wide` or `junk`) is zeroed where it holds anything, since cameras
+    write into it (Kodak's serial number, a Pittasoft dashcam's GPS log, Canon's thumbnail). The
+    creation and modification times in `mvhd`, `tkhd` and `mdhd` become zero and a video's
+    compressor name empty; a timed metadata track (a GoPro's GPS, a phone's motion, a car's: handler
+    `meta`, `camm`, `data` or `ctbx`) is freed and every one of its samples in `mdat` zeroed; a
+    dashcam's GPS blocks in the media data (`freeGPS `, Novatek's format, listed in its index or not)
+    are found the way ExifTool finds them (the first 20 MB of the media data, and all of it once one
+    is found or the movie has a `gps ` index) and zeroed; a compressed movie header (`cmov`) is
+    refused. In a HEIC or AVIF picture the Exif and XMP items are overwritten in place, as for a HEIC
+    that cannot be converted ([`heifMetadata.ts`](../frontend/src/api/heifMetadata.ts)). The frames
+    are not touched.
+  - **WebM, MKV** ([`matroskaMetadata.ts`](../frontend/src/api/matroskaMetadata.ts)), in place:
+    Tags and Attachments (files carried inside) become Void elements of the same size, the
+    segment's date becomes Void, and its title, muxing and writing application, file names and
+    each track's name are overwritten with zeros (a CRC-32 over what changed becomes Void too).
+    The clusters are untouched.
+  - **SVG** ([`svgMetadata.ts`](../frontend/src/api/svgMetadata.ts)), parsed by the engine and
+    written back: loses comments, `<metadata>`, every element and attribute outside the SVG and
+    XLink namespaces (Inkscape's export path and file name among them), every attribute SVG does
+    not define, which draws nothing (draw.io's `content`, its copy of the diagram for editing it
+    again, whose `<mxfile>` header names the site, the browser and system and the time it was
+    drawn on; Mermaid's and any other editor's own attributes; a `data-*` attribute stays only when
+    the drawing's own CSS selects on it or reads it, since taking it out would change how it
+    looks), so the recipient gets the picture and not the editor's file (Excalidraw's copy of its
+    scene, which it keeps in `<metadata>`, goes the same way), and everything that runs
+    or calls out when the file is opened as a document (`<script>`, event attributes, `href`s
+    other than links within the file, http(s) and mailto links and embedded pictures, an
+    animation that would put an address back, CSS `@import`, `image-set()` and outside `url()`s,
+    the CSS read the way the engine reads it, so an escaped `u\72l(` is a `url(`). The HTML in a
+    `<foreignObject>`, which is how Mermaid and draw.io write a diagram's labels, keeps its text
+    and the elements that lay it out, with only the attributes that say how it looks; an iframe,
+    a form, a video, a style sheet or script in it goes. A font embedded as a `data:` URL (as
+    Excalidraw writes them) stays as it is. An embedded PNG, JPEG, GIF or WebP loses its own
+    metadata, judged by its bytes rather than the type it claims. An embedded SVG (a
+    `data:image/svg+xml` URL, base64 or percent-encoded, which is how draw.io writes its library
+    icons and Excalidraw an SVG placed in a scene) is cleaned the same way, as a drawing of its own,
+    up to four deep; one no browser would draw either (not well-formed, compressed, deeper) and an
+    embedded picture of any other kind are taken out. Púca never draws a received SVG; this is
+    about the person who downloads it.
+
+  Each refuses, with a message, a file that claims to be its format and cannot be walked (a
+  damaged structure, a BigTIFF, a compressed `.svgz`, a timed metadata track inside a fragmented
+  MP4) rather than send it with what it could not read; a video or TIFF merely cut off inside its
+  media data goes. A large video, TIFF or GIF going peer to peer is never read into memory whole:
+  a video's header boxes and the first 20 MB of its media data are read (all of it for a dashcam's
+  recording), a TIFF's directories, and a GIF a window at a time, and the file sent is the
+  original's slices with the overwrites between them (a GIF's, the blocks it keeps). An SVG is
+  read whole, since it is parsed as one document.
+  **Known limits:** audio other than M4A (an MP3's ID3 tags, FLAC and Ogg comments), camera raw
+  files (DNG, CR2, CR3, NEF, ARW and the rest, by name or structure: raw software needs the
+  camera's data to develop them), PDFs and archives pass through unchanged; a video's subtitle
+  tracks are kept (some drones write their position into one, as text), and so is a HEIC's
+  thumbnail; so are GoPro-format GPS records some cameras leave in the media data without listing
+  them anywhere, and a dashcam's `freeGPS ` blocks that first appear past the media data's first
+  20 MB in a recording with no index (ExifTool's own `-ee` stops there too); chapter marks kept in
+  an MP4's `udta` go with it; files sent before each change keep
+  their metadata; the ICC profile is kept because removing it changes the colours.
+  Checked by `frontend/src/tests/imageMetadata.test.ts` and `frontend/src/tests/fileMetadata.test.ts`
+  (real files from Pillow and FFmpeg; truncation at every byte, thousands of random corruptions,
+  absurd lengths), `frontend/src/tests/svgMetadata.test.ts`,
+  `frontend/src/tests/attachmentMetadata.test.ts` (the real seal and upload, opened with the key as a
+  recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoders: the same
+  pixels, still upright, every GIF frame (a GIF with junk after its last frame shown and sent as
+  the frames before it), a video's first and last frames, a dashcam's and vendors' boxes among them;
+  an SVG drawn the same, an editor's drawing and a diagram with HTML labels, an embedded font,
+  draw.io's icons and a `data-*` attribute its own CSS selects on alike, without draw.io's copy of
+  the diagram, and opened as a document, running nothing and asking nothing of anyone
+  where the original did; a large video, TIFF and GIF sent peer to peer without being read whole).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   (`sendChannelMessageEncrypted` in [`servers.ts`](../frontend/src/api/servers.ts),
   `encryptDMContent` in [`dms.ts`](../frontend/src/api/dms.ts)). Edits go through the same path.
@@ -463,8 +549,12 @@ What Púca does about it, since 0.9.834:
 - **Let go means gone from the disk, within seconds.** A decrypted file is registered by a
   small worker that is stopped when the file is let go, and the app then makes the page
   collect its garbage, so the engine deletes the file within about two seconds instead of
-  minutes later (`frontend/src/api/plaintextHost.ts`). That needs every blob written into
-  the same file to go too, so nothing the app keeps for the whole session is a blob:
+  minutes later (`frontend/src/api/plaintextHost.ts`). Small files share a worker; one let go
+  while others in its worker are still shown is not stopped with it, so that worker is made
+  to collect its garbage at the same moment as the page (its own copy of the file is garbage
+  it would otherwise keep, and the file with it, for as long as the others were shown).
+  That needs every blob written into the same file to go too, so nothing the app keeps for
+  the whole session is a blob:
   avatars, server icons and custom emoji are `data:` URLs (`frontend/src/api/authedMedia.ts`;
   as blobs, an avatar written into the same file as two pictures kept their plaintext on
   disk after they were let go, on screen, in the background and after a kill). Both are
@@ -506,12 +596,29 @@ viewer) stays until that one goes too. Clips play through MediaSource and are ne
 written there, except on an engine that has no MediaSource or cannot play the clip's
 format through it: there a clip of up to 32 MB plays from one decrypted blob, which can be.
 Files you save with **Download** are yours, in your Downloads, Documents or Pictures
-folder, and are not affected by any of this. Not covered yet: a Púca Notes picture or
-recording still waiting to upload (its preview stays decrypted until it uploads or you
-sign out, and can keep other pictures written into the same file with it), a picture
-pasted into the message box (one of those blobs until it is sent or removed, with the same
-effect), and, on a PC short of memory, the copy a clip's **Download** is written from,
-which can sit there for a few minutes after the save.
+folder, and are not affected by any of this.
+
+Three more, since 2026-11-22, that used to stay on disk after nothing showed them
+(`frontend/e2e/plaintext-disk-real-browser.mjs` measures each on a real disk, the old way
+as the control):
+
+- **A Púca Notes picture still waiting to upload** is decrypted from this device's sealed
+  copy only while something shows it, hosted by the same worker, and let go when the last
+  card or editor showing it closes (`frontend/src/api/parkedPreview.ts`). It used to stay
+  decrypted until it uploaded or you signed out.
+- **A picture pasted into the message box** has its chip's thumbnail hosted by the same
+  worker and let go with the chip (sent or removed), and the page then collects its garbage,
+  so the pasted file goes from the disk within seconds (`frontend/src/api/composerPreviews.ts`).
+  While the chip is there, the file is kept for the upload and a Retry, as before.
+- **A clip's Download** leaves nothing but the saved file. The desktop app hands the clip to
+  the shell from memory and makes no blob of it; a browser downloads from a blob the worker
+  hosts, let go of 10 seconds after the click (`frontend/src/api/clipDownload.ts`). It used to
+  be a blob the page kept, revoked 30 seconds later and gone only at the page's next garbage
+  collection.
+
+Not covered yet: a picture pasted, a drawing made or a recording taken in Púca Notes'
+quick-add box, which is a blob until the note is saved or it is removed, and leaves the disk
+only at the page's next garbage collection after that.
 
 ### What a sign-out takes away from the running app
 

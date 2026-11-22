@@ -12,15 +12,23 @@
  * file was still on disk 21 s later, and 60 s into the background; gone
  * straight after a forced GC).
  *
+ * A blob dropped here while others are still shown has its URL revoked, but
+ * the Blob object this worker received for it is garbage the worker does not
+ * collect while it idles, and it keeps the bytes (and their file) alive. So
+ * the page, when it next makes itself collect, sends `collect` here too
+ * (api/plaintextHost.ts), and this worker does the same in its own isolate.
+ *
  * Nothing here reads, keeps or logs the bytes: only the URL goes back.
  */
+import { nudgeCollection } from './collectGarbage';
+
 const urls = new Map<number, string>();
 
 // Started: the page hands blobs over only after this, so one that never
 // loads falls back to the page cleanly.
 self.postMessage({ ready: true });
 
-self.onmessage = (e: MessageEvent<{ op: 'host'; id: number; blob: Blob } | { op: 'drop'; id: number }>) => {
+self.onmessage = (e: MessageEvent<{ op: 'host'; id: number; blob: Blob } | { op: 'drop'; id: number } | { op: 'collect' }>) => {
     const m = e.data;
     if (m.op === 'host') {
         try {
@@ -36,5 +44,7 @@ self.onmessage = (e: MessageEvent<{ op: 'host'; id: number; blob: Blob } | { op:
             URL.revokeObjectURL(url);
             urls.delete(m.id);
         }
+    } else if (m.op === 'collect') {
+        nudgeCollection();
     }
 };

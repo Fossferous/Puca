@@ -34,7 +34,11 @@ const EMPTY_XMP = new TextEncoder().encode('<x:xmpmeta xmlns:x="adobe:ns:meta/"/
 
 interface Box { type: string; start: number; body: number; end: number }
 
-function readBoxes(b: Uint8Array, from: number, to: number): Box[] | null {
+/** An overwrite of `bytes.length` bytes at absolute file offset `at`: never a
+ *  change of length, so every offset in the file stays valid. */
+export interface HeifPatch { at: number; bytes: Uint8Array }
+
+export function readBoxes(b: Uint8Array, from: number, to: number): Box[] | null {
     const out: Box[] = [];
     const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
     let at = from;
@@ -115,9 +119,10 @@ function metadataItems(b: Uint8Array, iinf: Box): Map<number, Kind> | null {
     return ids;
 }
 
-/** Where each metadata item's bytes are, as absolute [start, end) ranges,
- *  one list per item. */
-function itemRanges(b: Uint8Array, iloc: Box, wanted: Map<number, Kind>, idat: Box | null): Map<number, Array<[number, number]>> | null {
+/** Where each metadata item's bytes are, as [start, end) ranges in the FILE
+ *  (`b` is the meta box's bytes, which start at `metaAt` in a file of
+ *  `fileSize` bytes), one list per item. */
+function itemRanges(b: Uint8Array, iloc: Box, wanted: Map<number, Kind>, idat: Box | null, metaAt: number, fileSize: number): Map<number, Array<[number, number]>> | null {
     const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
     const version = b[iloc.body];
     if (version > 2) return null;
@@ -147,16 +152,53 @@ function itemRanges(b: Uint8Array, iloc: Box, wanted: Map<number, Kind>, idat: B
             // Stored in another file, built from other items, of unknown
             // length: not something to guess about.
             if (dataRef !== 0 || method > 1 || off === null || len === null || len === 0) return null;
-            const origin = method === 1 ? (idat ? idat.body : -1) : 0;
+            const origin = method === 1 ? (idat ? metaAt + idat.body : -1) : 0;
             if (origin < 0) return null;
             const start = origin + base + off;
-            const limit = method === 1 ? idat!.end : b.length;
+            const limit = method === 1 ? metaAt + idat!.end : fileSize;
             if (start + len > limit) return null;
+            // Bytes in the file outside the meta box: one that says its Exif is the meta box
+            // itself (a damaged file) would have the item tables overwritten.
+            if (method === 0 && start < metaAt + b.length && start + len > metaAt) return null;
             if (!ranges.has(id)) ranges.set(id, []);
             ranges.get(id)!.push([start, start + len]);
         }
     }
     return ranges;
+}
+
+/**
+ * The overwrites that blank every Exif and XMP item of a HEIF's `meta` box
+ * (`meta`: that box's bytes, header included, found at `metaAt` in a file of
+ * `fileSize` bytes), or null when it cannot be done with certainty (see the
+ * top of this file). None when it has no such items. Only the meta box is
+ * read: the items' own bytes are overwritten wherever they are, unseen.
+ */
+export function heifMetadataPatches(meta: Uint8Array, metaAt: number, fileSize: number): HeifPatch[] | null {
+    const top = readBoxes(meta, 0, meta.length);
+    if (!top || top.length !== 1 || top[0].type !== 'meta') return null;
+    const children = readBoxes(meta, top[0].body + 4, top[0].end);
+    if (!children) return null;
+    const iinf = children.find(c => c.type === 'iinf');
+    const iloc = children.find(c => c.type === 'iloc');
+    if (!iinf || !iloc) return null;
+    const ids = metadataItems(meta, iinf);
+    if (!ids) return null;
+    if (ids.size === 0) return [];
+    const ranges = itemRanges(meta, iloc, ids, children.find(c => c.type === 'idat') ?? null, metaAt, fileSize);
+    if (!ranges) return null;
+    const out: HeifPatch[] = [];
+    for (const [id, extents] of ranges) {
+        const xmp = ids.get(id) === 'xmp';
+        extents.forEach(([s, e], k) => {
+            const bytes = new Uint8Array(e - s).fill(xmp ? 0x20 : 0);
+            // One extent (what every camera writes): a stand-in that parses.
+            const filler = xmp ? EMPTY_XMP : EMPTY_EXIF_ITEM;
+            if (extents.length === 1 && k === 0 && bytes.length >= filler.length) bytes.set(filler, 0);
+            out.push({ at: s, bytes });
+        });
+    }
+    return out;
 }
 
 /**
@@ -171,24 +213,9 @@ export function stripHeifMetadata(file: Uint8Array): Uint8Array | null {
     const metas = top.filter(t => t.type === 'meta');
     if (metas.length !== 1) return null;
     const meta = metas[0];
-    const children = readBoxes(file, meta.body + 4, meta.end);
-    if (!children) return null;
-    const iinf = children.find(c => c.type === 'iinf');
-    const iloc = children.find(c => c.type === 'iloc');
-    if (!iinf || !iloc) return null;
-    const ids = metadataItems(file, iinf);
-    if (!ids) return null;
+    const patches = heifMetadataPatches(file.subarray(meta.start, meta.end), meta.start, file.length);
+    if (!patches) return null;
     const out = file.slice();
-    if (ids.size === 0) return out;
-    const ranges = itemRanges(file, iloc, ids, children.find(c => c.type === 'idat') ?? null);
-    if (!ranges) return null;
-    for (const [id, extents] of ranges) {
-        for (const [s, e] of extents) out.fill(ids.get(id) === 'xmp' ? 0x20 : 0, s, e);
-        // One extent (what every camera writes): a stand-in that parses.
-        if (extents.length !== 1) continue;
-        const [s, e] = extents[0];
-        const filler = ids.get(id) === 'xmp' ? EMPTY_XMP : EMPTY_EXIF_ITEM;
-        if (e - s >= filler.length) out.set(filler, s);
-    }
+    for (const p of patches) out.set(p.bytes, p.at);
     return out;
 }

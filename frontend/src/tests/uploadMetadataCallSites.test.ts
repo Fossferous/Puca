@@ -34,7 +34,7 @@ vi.mock('../api/servers', async (orig) => ({
 
 import { uploadFile } from '../api/uploads';
 import { finishServerCreation } from '../api/serverTemplates';
-import { cat, enc, indexOfBytes, jpeg, leaked, png, webp } from './fixtures/photoMetadata';
+import { cat, contains, enc, indexOfBytes, jpeg, leaked, png, webp } from './fixtures/photoMetadata';
 
 function readBlob(b: Blob): Promise<Uint8Array> {
     return new Promise((res, rej) => {
@@ -77,18 +77,29 @@ describe('uploadFile, the one door for plaintext pictures', () => {
         }
     });
 
-    it('a sealed attachment (octet-stream), a sound and a GIF go up byte for byte', async () => {
-        // Ciphertext can start with ANY bytes, including a JPEG's magic: it must never be parsed.
+    it('a sealed attachment (octet-stream) and a sound go up byte for byte', async () => {
+        // Ciphertext can start with ANY bytes, including a JPEG's or a GIF's magic: it must never be parsed.
         const cipher = cat([0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF], enc('SECRETCOMMENT-not-a-photo'));
         for (const [bytes, name, type] of [
             [cipher, 'attachment.enc', 'application/octet-stream'],
+            [cat(enc('GIF89a'), enc('SECRETCOMMENT-gif')), 'attachment.enc', 'application/octet-stream'],
             [enc('ID3 sound'), 'join.mp3', 'audio/mpeg'],
-            [cat(enc('GIF89a'), enc('SECRETCOMMENT-gif')), 'a.gif', 'image/gif'],
         ] as Array<[Uint8Array, string, string]>) {
             posted.files.length = 0;
             await uploadFile(fileOf(bytes, name, type));
             expect(Array.from(await readBlob(posted.files[0])), name).toEqual(Array.from(bytes));
         }
+    });
+
+    it('an animated GIF (an emoji, an avatar) goes up without its comment and XMP, still a looping GIF', async () => {
+        const gif = new Uint8Array(readFileSync(join(__dirname, 'fixtures', 'metadata', 'animated.gif')));
+        expect(contains(gif, 'SECRETCOMMENT-hello') && contains(gif, 'SECRETXMP-creator-jane'), 'control').toBe(true);
+        posted.files.length = 0;
+        await uploadFile(fileOf(gif, 'party.gif', 'image/gif'));
+        const sent = await readBlob(posted.files[0]);
+        expect(contains(sent, 'SECRETCOMMENT-hello') || contains(sent, 'SECRETXMP-creator-jane')).toBe(false);
+        expect(contains(sent.subarray(0, 6), 'GIF89a')).toBe(true);
+        expect(contains(sent, 'NETSCAPE2.0'), 'still loops').toBe(true);
     });
 
     it('a damaged JPEG is refused and nothing is posted', async () => {
@@ -145,6 +156,6 @@ describe('nothing goes around the door', () => {
         ]);
         // ...and the seal strips before it encrypts.
         const att = sources.find(s => s.rel === 'api/attachments.ts')!.text;
-        expect(att).toMatch(/stripImageMetadata\(given \?\? /);
+        expect(att).toMatch(/stripAttachmentMetadata\(given \?\? /);
     });
 });

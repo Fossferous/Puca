@@ -1,13 +1,23 @@
 /**
  * Saving a posted clip (the Download button on ClipAttachment).
  *
- * Desktop and web: build the file (downloadClipBytes) and save it like any
- * attachment (saveAttachment) — the native `attachment_save` command in the
- * desktop shell, a transient anchor in a browser. The file is the sealed clip
- * with its duration and a seek index added (api/clips/fmp4SaveFix.ts), byte
- * for byte what the Android app saves for the same clip: a sealed clip says
- * duration 0 in its moov, so Explorer, a file's Properties and players that
- * read only the moov showed no length for it.
+ * Desktop and web: build the file (assembleClip) and save it — the native
+ * `attachment_save` command in the desktop shell, a transient anchor in a
+ * browser. The file is the sealed clip with its duration and a seek index
+ * added (api/clips/fmp4SaveFix.ts), byte for byte what the Android app saves
+ * for the same clip: a sealed clip says duration 0 in its moov, so Explorer,
+ * a file's Properties and players that read only the moov showed no length
+ * for it.
+ *
+ * What a Download leaves besides the saved file: nothing. The desktop app
+ * hands the bytes to the shell straight from memory, never as a Blob. A
+ * browser needs a blob: URL to download from; it is registered by a plaintext
+ * host worker (api/plaintextHost.ts), not by the page, and let go of
+ * DOWNLOAD_HANDOFF_MS after the click, when the page is also made to collect
+ * its garbage. Until 2026-11-22 both made a page Blob of the whole clip and
+ * revoked its URL 30 s later; Chromium writes such a Blob to `blob_storage`
+ * under memory pressure, and it stayed there until the page next collected
+ * garbage (e2e/plaintext-disk-real-browser.mjs measures it, both ways).
  *
  * The Android app, when its APK carries the native download plugin
  * (api/nativeDownloads.ts), hands the whole job to Java: the phone fetches
@@ -35,9 +45,10 @@
  * such a clip.
  */
 import { isMobile, isTauri } from './platform';
-import { forEachClipPart, downloadClipBytes, type ClipDownloadProgress } from './clips/clipPlayback';
+import { forEachClipPart, assembleClip, type ClipDownloadProgress } from './clips/clipPlayback';
 import type { ClipManifest } from './clips/clipRef';
-import { saveAttachment, type SaveResult } from './saveAttachment';
+import { saveAttachment, saveBytesOnDesktop, type SaveResult } from './saveAttachment';
+import { freeNow, hostPlaintextBlob } from './plaintextHost';
 import { DeviceWriteError, PUCA_FOLDER, deviceWriteFailedMessage, saveStreamToDevice, timestampedName } from './saveToDevice';
 import { nativeDownloadsAvailable, saveClipNatively } from './nativeDownloads';
 
@@ -71,13 +82,38 @@ export async function saveClip(m: ClipManifest, onProgress?: (p: ClipDownloadPro
         }
     }
 
-    const blob = await downloadClipBytes(m, onProgress, undefined, signal, true);
-    const url = URL.createObjectURL(blob);
-    try {
-        return await saveAttachment(url, name);
-    } finally {
-        // The desktop path has already read the bytes; the web anchor was
-        // clicked synchronously. Revoke after a grace period either way.
-        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    const { chunks, bytes } = await assembleClip(m, onProgress, undefined, signal, true);
+    if (isTauri()) {
+        // One buffer for the shell's raw IPC body; the chunks freed once all
+        // are copied (two of them can share a part's buffer).
+        const file = new Uint8Array(bytes);
+        let at = 0;
+        for (const c of chunks) { file.set(c, at); at += c.length; }
+        for (const c of chunks) freeChunk(c);
+        chunks.length = 0;
+        try {
+            return await saveBytesOnDesktop(file, name);
+        } finally {
+            freeNow(file.buffer);
+        }
     }
+    // The page makes the Blob and hands it over at once: nothing here keeps it.
+    const lease = await hostPlaintextBlob(new Blob(chunks as BlobPart[], { type: 'video/mp4' }));
+    for (const c of chunks) freeChunk(c);
+    chunks.length = 0;
+    try {
+        return await saveAttachment(lease.url, name);
+    } finally {
+        // The anchor was clicked synchronously, but some engines resolve the
+        // URL a little later: kept for that long, then let go.
+        setTimeout(() => lease.release(), DOWNLOAD_HANDOFF_MS);
+    }
+}
+
+/** How long a browser's Download keeps its blob: URL after the click. */
+export const DOWNLOAD_HANDOFF_MS = 10_000;
+
+/** A decrypted part's memory back now (two chunks may share one part's buffer: the second free is a no-op). */
+function freeChunk(c: Uint8Array): void {
+    freeNow(c.buffer as ArrayBuffer);
 }
