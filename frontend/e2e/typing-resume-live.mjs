@@ -38,10 +38,19 @@
 //   still   CONTROL for the two above: the typer starts during the suspension and
 //           is still typing when the page runs again: shown within 3.5 s (their
 //           next ping), and gone 5 to 6.3 s after their last.
+//   next    the typer sends a short message and goes straight on to the next:
+//           the message takes them off the viewer's screen, and their first key
+//           after it puts them back within 1.5 s (the composer's 3 s between
+//           pings, still counting from the ping before the message, hid them for
+//           ~2.5 s), and they stay shown while they type. PREMISE: the message
+//           reached the viewer before the ping that put them back (the server
+//           sends it to the room before it answers the send).
 // OLD_APP= (a bundle built before this change, against the same API) runs the
 // viewer of live, away, room, held and abandon on it as the NEGATIVE CONTROL: each
-// must fail there, or the rounds above measured nothing. ONLY=held,abandon (any
-// round names) runs just those.
+// must fail there, or the rounds above measured nothing. OLD_TYPER_APP= (a bundle
+// whose composer does not start its 3 s over once a send is answered) runs a
+// second typer through `next` on the fixed viewer, and it must fail there.
+// ONLY=held,abandon (any round names) runs just those.
 //
 // Needs: a THROWAWAY backend at API (APP_ENV=development, raised
 // AUTH_RATE_LIMIT_PER_SECOND / _BURST, its own fresh database) and the web app
@@ -50,15 +59,16 @@
 // muted. ~4 min (~7 with OLD_APP).
 //
 // Usage (from frontend/):
-//   APP=http://127.0.0.1:5487 API=http://127.0.0.1:3047 [OLD_APP=http://127.0.0.1:5488] node e2e/typing-resume-live.mjs
+//   APP=http://127.0.0.1:5487 API=http://127.0.0.1:3047 [OLD_APP=http://127.0.0.1:5488] [OLD_TYPER_APP=http://127.0.0.1:5489] node e2e/typing-resume-live.mjs
 import { chromium } from '@playwright/test';
 
 const APP = (process.env.APP || 'http://127.0.0.1:5487').replace(/\/$/, '');
 const API = (process.env.API || 'http://127.0.0.1:3047').replace(/\/$/, '');
 const OLD_APP = (process.env.OLD_APP || '').replace(/\/$/, '');
+const OLD_TYPER_APP = (process.env.OLD_TYPER_APP || '').replace(/\/$/, '');
 const ONLY = (process.env.ONLY || '').split(',').map(s => s.trim()).filter(Boolean);
 const runs = (round) => ONLY.length === 0 || ONLY.includes(round);
-for (const u of [APP, API, OLD_APP].filter(Boolean)) {
+for (const u of [APP, API, OLD_APP, OLD_TYPER_APP].filter(Boolean)) {
     if (!['127.0.0.1', 'localhost'].includes(new URL(u).hostname)) {
         console.error(`this creates accounts: every URL must be loopback (${u})`);
         process.exit(2);
@@ -410,6 +420,53 @@ try {
             check(`${tag}: still: CONTROL - someone still typing is shown within 4.5 s of the resume`, !!shown && shown.t - resumedAt <= 4500, { afterMs: shown ? shown.t - resumedAt : null });
             const lastPing = r.frames.filter(f => f.type === 'UserTyping').pop()?.t ?? 0;
             check(`${tag}: still: CONTROL - ...and goes 5 to 6.3 s after their last ping`, !!gone && gone.t - lastPing <= 6300 && gone.t - lastPing >= 4900, { afterLastPingMs: gone ? gone.t - lastPing : null });
+        }
+
+        // ── next (on the fixed viewer only: an old one never takes them off)
+        if (runs('next')) {
+            const typers = [{ T: B, name: typerName, label: 'next', fixedTyper: true }];
+            let ctxOld = null;
+            if (OLD_TYPER_APP) {
+                ctxOld = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+                const oldName = `oldtyper_${stamp}`;
+                const T2 = await signUp(ctxOld, OLD_TYPER_APP, oldName, false);
+                await api(T2, 'POST', `/invites/${inv.code}/join`);
+                await openOnDesktop(T2, srv.id, 'talk');
+                typers.push({ T: T2, name: oldName, label: 'next (old typer)', fixedTyper: false });
+            }
+            for (const { T, name, label, fixedTyper } of typers) {
+                step(`${tag}: ${label}: a short message, then straight on to the next`);
+                // Past any earlier ping's 5 s and the composer's 3 s between pings.
+                await sleep(5500);
+                await clearRec(V);
+                await T.locator(COMPOSER).pressSequentially('ok');
+                await sleep(250);
+                await T.locator(COMPOSER).press('Enter');
+                await sleep(250);
+                const firstKeyAt = Date.now();
+                await typeFor(T, 4000, 'and another thing ');
+                const lastKeyAt = Date.now();
+                await sleep(300);
+                const r = await rec(V);
+                await T.locator(COMPOSER).fill('');
+                const msgAt = r.frames.find(f => f.type === 'ChatMessage')?.t;
+                const clearedAt = msgAt ? r.typing.find(x => x.t >= msgAt && !x.txt)?.t : undefined;
+                const backAt = clearedAt ? r.typing.find(x => x.t > clearedAt && x.txt?.includes(name))?.t : undefined;
+                const tag2 = fixedTyper ? `${tag}: ${label}` : `${tag}: ${label}: NEGATIVE CONTROL - fails with the old composer`;
+                check(`${tag}: ${label}: PREMISE - "${name} is typing" was up before the message`, r.typing.some(x => msgAt && x.t < msgAt && x.txt?.includes(name)));
+                check(`${tag}: ${label}: PREMISE - their message took them off the screen`, !!clearedAt, { msgAt, clearedAt });
+                const msgIdx = r.frames.findIndex(f => f.type === 'ChatMessage');
+                check(`${tag}: ${label}: PREMISE - the ping that put them back came after the message`, msgIdx >= 0 && r.frames.slice(msgIdx + 1).some(f => f.type === 'UserTyping'), r.frames.map(f => f.type));
+                const backMs = backAt ? backAt - firstKeyAt : null;
+                const quick = backMs !== null && backMs <= 1500;
+                check(`${tag2}: their first key after it puts them back within 1.5 s`, fixedTyper ? quick : !quick, { backAfterFirstKeyMs: backMs });
+                if (fixedTyper) {
+                    const gaps = backAt ? r.typing.filter(x => x.t > backAt && x.t <= lastKeyAt && !x.txt) : [null];
+                    check(`${tag}: ${label}: ...and they stay shown while they type`, gaps.length === 0, { gaps });
+                }
+            }
+            await B.locator(COMPOSER).fill('');
+            await ctxOld?.close();
         }
         await ctx.close();
     }
