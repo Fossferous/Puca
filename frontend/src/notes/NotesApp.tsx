@@ -12,7 +12,7 @@ import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-d
 import { useQueryClient } from '@tanstack/react-query';
 import { getToken, isAuthenticated, isTokenExpired, logout, softExpireSession } from '../api/auth';
 import { resetAuthExpiredFlag } from '../api/client';
-import { clearSharedSessionCaches, installSessionSync } from '../api/sessionSync';
+import { clearSharedSessionCaches, forgetPreviousAccount, installSessionSync } from '../api/sessionSync';
 import { seedMatchesCurrentAccount } from '../api/e2ee';
 import { NotesLogin } from './components/NotesLogin';
 import { NotesShell } from './components/NotesShell';
@@ -29,6 +29,7 @@ import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api
 import { currentUserIdFromToken } from '../api/auth';
 import { signOutWebPush } from '../api/webPushLocal';
 import { askConfirm, closeAppDialogs } from '../api/appDialogs';
+import { notificationsAreFor } from '../api/desktopNotify';
 
 export function NotesApp() {
     return (
@@ -131,6 +132,17 @@ function SessionGate() {
     const signedInRef = useRef(signedIn);
     useEffect(() => { signedInRef.current = signedIn; }, [signedIn]);
     const awaitingSeed = useRef(false);
+    // The account this page last held things of (null: nobody's, it started
+    // signed out). A session that ran out (expire, above) keeps them for the
+    // same account signing back in, and a sign-in reloads nothing, so for
+    // somebody else they go at that sign-in, here or in another tab: what a
+    // sign-out forgets in memory (api/sessionSync.ts forgetPreviousAccount).
+    const heldAccount = useRef(currentUserIdFromToken());
+    const accountSignedIn = useCallback(() => {
+        const account = currentUserIdFromToken();
+        if (heldAccount.current !== null && account !== heldAccount.current) forgetPreviousAccount();
+        heldAccount.current = account;
+    }, []);
     useEffect(() => installSessionSync({
         onSignedOut: () => {
             closeAppDialogs();
@@ -142,6 +154,7 @@ function SessionGate() {
         },
         onAccountChanged: () => window.location.reload(),
         onSignedIn: () => {
+            accountSignedIn();
             invalidateNotesPrefs();
             if (!seedMatchesCurrentAccount()) { awaitingSeed.current = true; return; }
             qc.clear();
@@ -162,7 +175,7 @@ function SessionGate() {
                 void qc.invalidateQueries({ queryKey: notesKeys.all });
             }
         },
-    }), [navigate, qc]);
+    }), [navigate, qc, accountSignedIn]);
 
     // A web sign-out whose device revoke was never confirmed is finished with
     // this session (api/deviceIdentity/pendingRevoke.ts). Notes never enrols
@@ -170,6 +183,11 @@ function SessionGate() {
     // lock, so this waits and then finds the marker that enrolment left.
     useEffect(() => {
         if (signedIn) void settlePendingDeviceRevoke(getToken(), currentUserIdFromToken());
+    }, [signedIn]);
+    // Notifications another account left on this browser (a reminder, the push
+    // worker's) go before this one is shown anything (api/desktopNotify.ts).
+    useEffect(() => {
+        if (signedIn) notificationsAreFor(currentUserIdFromToken());
     }, [signedIn]);
 
     const signOut = useCallback(async () => {
@@ -206,10 +224,11 @@ function SessionGate() {
         // with any edits it queued while signed out.
         const sub = currentUserIdFromToken();
         deleteNotesCaches(sub === null ? undefined : notesCacheDbName(sub));
+        accountSignedIn();
         invalidateNotesPrefs();    // the account may differ from the last one
         setSignedIn(true);
         navigate('/', { replace: true });
-    }, [navigate]);
+    }, [navigate, accountSignedIn]);
 
     return (
         <Routes>

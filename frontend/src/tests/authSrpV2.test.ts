@@ -47,6 +47,7 @@ vi.mock('../api/publicConfig', () => ({
 }));
 
 import { login, register, generateVerifierForReset, __testing as T } from '../api/auth';
+import { consumePendingRecoveryCode, recoveryCodeReminderDue } from '../api/recoveryPrompt';
 
 type Account = { salt: Uint8Array; v: bigint; srp_version: number };
 type Attempt = { A: bigint; B: bigint; b: bigint; user: string };
@@ -165,6 +166,34 @@ describe('SRP verifier derivation (srp_version)', { timeout: 60_000 }, () => {
         const acct = fakeServer.users.get('dave')!;
         expect(acct.srp_version).toBe(1);
         expect(T.bytesToHex(acct.salt)).toBe(T.bytesToHex(salt));
+    });
+
+    it('the recovery code register() leaves for the sign-in after it is that account\'s alone', async () => {
+        await register('Rosa', 'rosa-pass-word');
+        // Somebody else signing in on the form a failed sign-in left (signInAsSomebodyElse.test.tsx).
+        expect(consumePendingRecoveryCode('mallory')).toBeNull();
+        expect(consumePendingRecoveryCode(null)).toBeNull();
+        // Its own account's sign-in, as the server spells the name.
+        expect(consumePendingRecoveryCode('rosa')).toMatch(/\S+( \S+){5,}/);
+    });
+
+    it("and the reminder that it was never saved is that account's alone too", async () => {
+        // This suite's localStorage keeps nothing; the marker has to outlive a reload.
+        const kept: Record<string, string> = {};
+        vi.mocked(localStorage.getItem).mockImplementation((k: string) => (k in kept ? kept[k] : null));
+        vi.mocked(localStorage.setItem).mockImplementation((k: string, v: string) => { kept[k] = v; });
+        vi.mocked(localStorage.removeItem).mockImplementation((k: string) => { delete kept[k]; });
+        try {
+            await register('Rosa', 'rosa-pass-word');
+            expect(recoveryCodeReminderDue('mallory')).toBe(false);
+            expect(recoveryCodeReminderDue(null)).toBe(false);
+            expect(recoveryCodeReminderDue('rosa')).toBe(true);
+        } finally {
+            consumePendingRecoveryCode('rosa');
+            vi.mocked(localStorage.getItem).mockReset();
+            vi.mocked(localStorage.setItem).mockReset();
+            vi.mocked(localStorage.removeItem).mockReset();
+        }
     });
 
     it('username case does not change the derivation: registered as "Erin", signs in as "ERIN"', async () => {

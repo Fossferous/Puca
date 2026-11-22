@@ -135,6 +135,25 @@ export async function signOutWebPush(uid: number | null): Promise<string | null>
     return dropLocalWebPush();
 }
 
+/**
+ * Close every notification the push worker has up. public/sw.js shows only
+ * the pushes of the account this browser was subscribed for ("alice sent you
+ * a message", a channel's name), and nothing else ever closed one: the page
+ * has none of its own to close, so they stayed in the browser's list, and on
+ * a phone's lock screen, after a sign-out. Local; quiet where there is no
+ * worker (the desktop and Android apps, a browser without one).
+ */
+export async function closeWorkerNotifications(): Promise<void> {
+    try {
+        if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+        const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+        const shown = (await reg?.getNotifications()) ?? [];
+        for (const n of shown) {
+            try { n.close(); } catch { /* already gone */ }
+        }
+    } catch { /* no worker: none shown */ }
+}
+
 // ---- what this page told its server (in memory, this page only) ----------
 
 let toldAwayForPush = false;

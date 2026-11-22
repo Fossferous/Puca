@@ -513,6 +513,91 @@ pasted into the message box (one of those blobs until it is sent or removed, wit
 effect), and, on a PC short of memory, the copy a clip's **Download** is written from,
 which can sit there for a few minutes after the save.
 
+### What a sign-out takes away from the running app
+
+A sign-out does not reload the app (a reload would drop the desktop app's own state that
+is not the account's), so everything the app holds in memory for the account has to be
+emptied by name. `logout()` in [`frontend/src/api/auth.ts`](../frontend/src/api/auth.ts)
+scrubs storage and runs every feature's sign-out hook
+([`frontend/src/api/logoutHooks.ts`](../frontend/src/api/logoutHooks.ts)). After a
+sign-out the app no longer holds:
+
+- **the keys**: the E2EE identity, the DM session and history keys, the unwrapped channel
+  keys, the TURN credentials;
+- **what was decrypted**: every decrypted attachment (above), the parsed messages (the
+  last few hundred messages read, kept as trees of their decrypted words, with an
+  attachment's key in its link), the addresses of the link cards drawn, the preview of a
+  Púca Notes picture still waiting to upload, a recovery code still waiting to be shown;
+- **what the account was told**: the server and channel lists, members and roles (the
+  query cache), who is in which call in every server, the server rail's unread counts, a
+  clip approval request and the account's own clip proposal, and a dialog still on screen;
+- **its notifications, wherever they are shown**: the page's own (each conversation's,
+  the task reminder) and their counts, the desktop app's toasts in Windows' notification
+  centre, Android's message notifications in the shade, and what the web app's push worker
+  showed. Only Chat closing used to take the first two away, so a sign-out from Púca
+  Notes' page left them, and nothing took the rest away at all.
+
+A sign-out in another tab of the same browser (Púca or Púca Notes) runs the same hooks in
+this one ([`frontend/src/api/sessionSync.ts`](../frontend/src/api/sessionSync.ts)): they
+are registered per page, and only a page's own sign-out used to run them. A session that
+**ends without a sign-out** (it ran out, or the app was closed) keeps all of it for the same
+account signing back in, since that is not somebody else. When a **different** account
+signs in instead:
+
+- **on the same running app** (the session ran out and somebody else signs in on the form,
+  in that tab or another): what the app holds of the above in memory goes before they are
+  drawn anything. The hooks run as at a sign-out, and the unwrapped channel keys, the
+  decrypted attachments, the pictures fetched with the last account's credentials and the
+  people it blocked go with them (`accountSignedIn` in
+  [`frontend/src/App.tsx`](../frontend/src/App.tsx); Púca Notes' page runs the shared part,
+  `forgetPreviousAccount` in `sessionSync.ts`). Before, only the lists went: the next
+  account was shown the last one's clip approval request at once, and its unread counts
+  until the rail was read again; a tap on one of its Steam Deck toasts opened its
+  conversation in the new session; the people it had blocked were hidden from the new one
+  until its own list arrived; and what it had read stayed in memory. Kept, because by then
+  they are the new account's: the DM keys (stored per account, and the sign-in just stored
+  its own) and the E2EE identity the sign-in restored;
+- **after the app was closed**: what was in memory went with it, but the notifications it
+  left where the operating system keeps them belong to that account, so they are taken
+  away first, at start or on the form (`notificationsAreFor` in
+  [`frontend/src/api/desktopNotify.ts`](../frontend/src/api/desktopNotify.ts)).
+
+**Deleting the account**, and Settings' **Clear Local Storage & Reload**, are not
+sign-outs: they wipe everything the app stored on the device and reload, which empties its
+memory but not what the operating system shows. So the notifications are taken away first
+(`wipeLocalStorageTakingNotificationsAway` in `desktopNotify.ts`), and the wipe waits until
+the desktop shell, Android and the push worker have each answered, because a reload drops a
+call still on its way. One that has not answered within 1.5 seconds does not hold the wipe
+up; the wipe then keeps the record of whose notifications they are (a user id), so the next
+account to sign in takes them away. Before, a deleted account's notifications stayed, and
+the wipe took that record with everything else, so nothing ever took them away.
+
+And a recovery code is shown only to the account it was made for: a registration whose
+automatic sign-in failed used to leave its code for whoever signed in next on that form. A
+sign-in as somebody else does not take away one bound to its account, since nobody else is
+handed it and that sign-in may be the one that follows its own registration. The same goes
+for the reminder that a code was never confirmed saved (the app closed before **Done**): the
+device keeps it per account, by username (`frontend/src/api/recoveryPrompt.ts`). It was one
+marker for the whole device, so whoever signed in next with no code of their own was told
+that theirs was never saved, and their **I already saved it** took the warning away from the
+account it was for. It is kept through a sign-out, as it always was, since it is that
+account's only warning until it signs in again; this device then holds that account's
+username until it does. A marker from an older version, which has no owner, goes to the
+first account to sign in.
+
+What this cannot promise: memory the page let go of is gone from the app, not wiped,
+until the JavaScript engine reuses it; what an operating system copies into its own
+notification history (Android's, if turned on) stays there; Púca for Steam Deck's toasts
+are Steam's to keep (a tap on one after the sign-out opens nothing). Deliberately kept:
+the trust-on-first-use pins of other people's keys (`verified_key_*`, `control_pin_*`),
+which a sign-out must not reset, and this device's own settings and its **Stay signed
+in** answer, which hold no account.
+`frontend/src/tests/signOutForgetsReadContent.test.ts`,
+`signOutTakesNotificationsAway.test.ts`, `signInAsSomebodyElse.test.tsx`,
+`signInAfterExpiryForgetsLastAccount.test.tsx` and
+`deleteAccountTakesNotificationsAway.test.tsx` fill each of these and sign out, let the
+session run out and sign in as somebody else, or delete the account, through the real path.
+
 ### The honest limit
 
 **The server does not enforce this; the client is what tells you.**
@@ -625,7 +710,10 @@ session, which makes a new subscription with a new secret rather than reviving t
 one. The row is deleted when next looked at. A push service that answers that a
 subscription is gone (404 or 410) deletes it at once; other failures back off (30
 seconds, doubling, at most 6 hours), and a subscription that has failed for a day is
-given up on.
+given up on. Signing out also closes the notifications the worker has already shown on
+that browser, and so does somebody else signing in there after a session that ended
+without one (see *What a sign-out takes away from the running app*). What the operating
+system has copied into its own notification history is out of Púca's reach.
 
 **One account at a time, by choice.** The switch is remembered per account on that
 browser, not per browser: whoever signs in next on a shared browser is not opted in by
@@ -1387,7 +1475,9 @@ DM session key and signature are nulled, so an honest server stops serving them 
 database copy taken afterwards holds nothing to replay; the SRP salt and verifier are replaced with fresh RANDOM bytes
 (not zeroes — a zero verifier is forgeable); `deleted_at` is set and
 `token_version` is bumped, which revokes every outstanding JWT. Every live
-socket for the account is hung up after the commit.
+socket for the account is hung up after the commit. On the device you delete it from,
+the app takes the account's notifications away and wipes what it stored there (*What a
+sign-out takes away from the running app*, above).
 
 **Deleted outright.** Push/device tokens, the web app's push subscriptions
 (each browser's push address and the mutes mirrored with it), notification preferences, friends,

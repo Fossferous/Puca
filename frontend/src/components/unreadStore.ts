@@ -14,6 +14,7 @@
  */
 
 import { getAllUnreadCounts } from '../api/servers';
+import { registerLogoutCleanup } from '../api/logoutHooks';
 
 const counts = new Map<string, number>();
 const channelCounts = new Map<number, number>();
@@ -109,3 +110,21 @@ export function refreshServerUnreadSoon(): void {
         void hydrateServerUnread();
     }, 800);
 }
+
+/** Sign-out: how many unread each of the account's servers holds is the
+ *  account's, and a sign-out reloads nothing, so the next account's rail drew
+ *  the last one's bubbles on a server they share until its own first hydrate.
+ *  An answer still on its way was asked for as the last account, so it is
+ *  orphaned too (`hydrateSeq`), and a debounced refresh is not run for it. */
+registerLogoutCleanup(() => {
+    hydrateSeq++;
+    if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
+    counts.clear();
+    channelCounts.clear();
+    hydrated = false;
+    channelRowsSeen = false;
+    emit();
+});

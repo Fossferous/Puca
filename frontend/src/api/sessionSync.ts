@@ -39,6 +39,7 @@ import { decodeJwtPayload } from './auth';
 import { clearChannelKeyCache } from './channelKeys';
 import { clearBlobCache } from './attachments';
 import { clearDmKeys } from './dmKeys';
+import { runLogoutCleanups } from './logoutHooks';
 import { applyAppearance, loadSettings } from '../components/settingsStore';
 
 const TOKEN_KEY = 'auth_token';
@@ -84,14 +85,41 @@ function readToken(): string | null {
 }
 
 /** Drop the per-account secrets this module knows about: the unwrapped
- *  channel keys, the DM keys, the decrypted-attachment blob URLs. Idempotent;
- *  the identity memo re-validates itself against storage (api/e2ee.ts).
- *  Entry points with more per-account state (App.tsx: the authed-media file
- *  cache, the blocked-user set, the reconnect baselines) clear theirs on top. */
+ *  channel keys, the DM keys, the decrypted-attachment blob URLs, and
+ *  everything this document's features registered for a sign-out
+ *  (api/logoutHooks.ts: the parsed messages, the link cards, the
+ *  notifications, the query cache, the voice roster…). Those hooks are
+ *  registered per DOCUMENT and only that document's own logout() ran them,
+ *  so a sign-out in the Púca tab left the Notes tab (or a second Púca tab)
+ *  holding them. Idempotent; the identity memo re-validates itself against
+ *  storage (api/e2ee.ts). Entry points with more per-account state (App.tsx:
+ *  the authed-media file cache, the blocked-user set, the reconnect
+ *  baselines) clear theirs on top. */
 export function clearSharedSessionCaches(): void {
     clearChannelKeyCache();
     clearDmKeys();
     clearBlobCache();
+    runLogoutCleanups();
+}
+
+/**
+ * Somebody else is signed in on this running app than the account whose
+ * session here last ended, and it ended WITHOUT a sign-out: it ran out
+ * (softExpireSession, here or in another document), which keeps everything for
+ * the same account signing back in. Nothing reloads at the sign-in that
+ * follows, so what this document holds of the last account goes now, before
+ * the next one is drawn anything: what clearSharedSessionCaches() drops, the
+ * sign-out hooks told why ('account-change': api/logoutHooks.ts), except the
+ * DM keys. Those are STORED per account (dmKeys.ts scoped()), and the sign-in
+ * that just happened stored the new account's, which clearDmKeys() would
+ * delete with the rest. Entry points with more per-account state (App.tsx:
+ * the authed-media file cache, the blocked-user set) clear theirs on top. The
+ * caller decides it is somebody else: this does not look.
+ */
+export function forgetPreviousAccount(): void {
+    clearChannelKeyCache();
+    clearBlobCache();
+    runLogoutCleanups('account-change');
 }
 
 /**

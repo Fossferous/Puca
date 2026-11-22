@@ -29,7 +29,11 @@ a month while you keep using it), so a day away means signing in again. It
 starts ticked in the desktop and Android apps and unticked in a browser, and
 the device remembers your answer (Púca Notes shares it). **Sign out** ends
 either kind at once, and so do **Sign out of every device** and a password
-change.
+change. Signing out also takes your notifications away (in Windows'
+notification centre, on an Android phone and in the browser), and so do
+deleting your account and Settings > Advanced > **Clear Local Storage &
+Reload**; if your session ran out instead and somebody else signs in on that
+device, they go when that person signs in.
 
 ### Forgot your password?
 On the sign-in screen, click **Forgot your password? Use your recovery code**:
@@ -1656,6 +1660,8 @@ Púca is not open. Tap the switch and allow notifications when the browser asks.
 - It is your account's choice on this device: someone else signing in on the
   same browser has it off until they turn it on. Signing out turns it off;
   it also stops if your sign-in lapses (a day without **Stay signed in**).
+  Signing out also closes the notifications it had shown, and so does
+  somebody else signing in after your sign-in lapsed.
 - Your browser's push service (Apple, Google, Mozilla or Microsoft) learns
   that something arrived, when, and from which server, never who wrote or
   what; it may be able to guess that people woken together share a channel.

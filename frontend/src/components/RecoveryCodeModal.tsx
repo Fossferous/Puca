@@ -7,6 +7,10 @@
  * never happened — the app reloaded first — say so, and point at where a
  * new one comes from. The phrase itself is gone by design; this is the
  * "second chance" that did not exist before 0.9.2.
+ *
+ * Both are the signed-in account's own (api/recoveryPrompt.ts): the code, the
+ * reminder, and the answer to either, which is recorded for the account it
+ * was shown to.
  */
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -15,6 +19,7 @@ import {
     recoveryCodeReminderDue,
     snoozeRecoveryCodeReminder,
 } from '../api/recoveryPrompt';
+import { currentUsernameFromToken } from '../api/auth';
 import { KeyIcon, CheckIcon, CopyIcon } from './Icons';
 import './RecoveryCodeModal.css';
 import { useBackClose } from '../hooks/useBackClose';
@@ -27,22 +32,32 @@ export function RecoveryCodeModal() {
     // The live value for the timer below: an effect closure would see the
     // initial null forever and arm the reminder underneath a code being shown.
     const codeRef = useRef<string | null>(null);
+    // Whose code or reminder is up: the answer is recorded for that account.
+    const accountRef = useRef<string | null>(null);
     // A question that must be answered here: Back does nothing while it is up,
     // so nothing under it (Settings, the call bar's controls) closes unseen.
     useBackClose(() => {}, code !== null || reminder);
 
     useEffect(() => {
         // Poll briefly for a stashed code (register/migration set it during login).
+        // Only the signed-in account's own: a registration whose sign-in failed
+        // leaves its code waiting under the next person's sign-in.
         const pick = () => {
-            const c = consumePendingRecoveryCode();
-            if (c) { codeRef.current = c; setCode(c); setReminder(false); }
+            const who = currentUsernameFromToken();
+            const c = consumePendingRecoveryCode(who);
+            if (c) { codeRef.current = c; accountRef.current = who; setCode(c); setReminder(false); }
         };
         pick();
         // Give a just-registered session a moment to stash its code before
         // deciding the reminder is owed: the modal mounts before login's
-        // async tail has run on a slow device.
+        // async tail has run on a slow device. Owed to this account alone: a
+        // code made for another one on this device (its sign-in failed, so it
+        // waits for that account) is not this one's to be told about, or to
+        // answer.
         const due = setTimeout(() => {
-            if (!codeRef.current && recoveryCodeReminderDue()) setReminder(true);
+            if (codeRef.current) return;
+            const who = currentUsernameFromToken();
+            if (recoveryCodeReminderDue(who)) { accountRef.current = who; setReminder(true); }
         }, 3000);
         const t = setInterval(pick, 1000);
         return () => { clearInterval(t); clearTimeout(due); };
@@ -90,7 +105,7 @@ export function RecoveryCodeModal() {
                     <button
                         className="recovery-done-btn"
                         disabled={!confirmed}
-                        onClick={() => { acknowledgeRecoveryCode(); codeRef.current = null; setCode(null); setReminder(false); }}
+                        onClick={() => { acknowledgeRecoveryCode(accountRef.current); codeRef.current = null; setCode(null); setReminder(false); }}
                     >
                         Done
                     </button>
@@ -113,13 +128,13 @@ export function RecoveryCodeModal() {
                     <div className="recovery-reminder-actions">
                         <button
                             className="recovery-copy-btn"
-                            onClick={() => { snoozeRecoveryCodeReminder(); setReminder(false); }}
+                            onClick={() => { snoozeRecoveryCodeReminder(accountRef.current); setReminder(false); }}
                         >
                             Later
                         </button>
                         <button
                             className="recovery-done-btn"
-                            onClick={() => { acknowledgeRecoveryCode(); setReminder(false); }}
+                            onClick={() => { acknowledgeRecoveryCode(accountRef.current); setReminder(false); }}
                         >
                             I already saved it
                         </button>

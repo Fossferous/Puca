@@ -24,6 +24,7 @@ import { appIsForeground, isAndroidApp, isMobile, isTauri } from '../platform';
 import { postMobileNotification } from '../mobileApp';
 import { hostSaysForeground, hostShowsNotifications, notifyHost } from '../embedHost';
 import { loadSettings } from '../../components/settingsStore';
+import { registerLogoutCleanup } from '../logoutHooks';
 
 export type ClipVote = 'pending' | 'approved' | 'declined';
 export type ClipOutcome = 'approved' | 'declined' | 'expired' | 'cancelled' | 'closed';
@@ -458,3 +459,15 @@ export function __resetClipProposalsForTests(): void {
     wired = false;
     lastAttentionAt = 0;
 }
+
+/** Sign-out: the requests are the account's (who asked, in which call, what
+ *  it would show of you) and so is its own proposal. A sign-out reloads
+ *  nothing, and the prompt is global (App.tsx), so the next account signed in
+ *  on this running app was asked about the last one's clip until the server's
+ *  list was read again, and a request already answered stayed until closed.
+ *  The sealed clip itself goes with the call (every disarm wipes it). */
+registerLogoutCleanup(() => {
+    state = { outgoing: null, incoming: [], notice: null };
+    lastAttentionAt = 0;
+    emit();
+});

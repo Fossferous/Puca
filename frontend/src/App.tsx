@@ -19,7 +19,8 @@ import { setPlacesAuthed } from './api/taskPlaces';
 import { resetReconnectCatchup } from './api/reconnectCatchup';
 import { initPushRegistration, teardownPushRegistration } from './api/pushRegistration';
 import { initWebPush, teardownWebPush } from './api/webPush';
-import { installSessionSync } from './api/sessionSync';
+import { forgetPreviousAccount, installSessionSync } from './api/sessionSync';
+import { notificationsAreFor } from './api/desktopNotify';
 
 // Module-level: the battery ask spans an async gap, and StrictMode runs the
 // effect twice — a ref would be per-mount, and two mounts must still yield
@@ -58,6 +59,27 @@ function forgetAccountLists(): void {
   clearVoiceRoster();
 }
 
+/** `account` is signed in now, by the form here or in another document, and `before` is the
+ *  account this running app last held things of (null: nobody's, it started signed out). A
+ *  session that RAN OUT (softExpireSession) keeps all of it for the same account signing back in,
+ *  and a sign-in reloads nothing, so for somebody else it goes here, before they are drawn
+ *  anything: the lists, and everything else a sign-out forgets in memory. That is what the
+ *  sign-out hooks forget (api/logoutHooks.ts: the clip requests the global prompt draws, the
+ *  rail's unread counts, the parsed messages, the link cards, a host notification's tap, the
+ *  notifications…), the channel keys and the decrypted attachments (sessionSync's
+ *  forgetPreviousAccount), and what handleLogout clears beside logout(): the pictures fetched with
+ *  the last account's credentials and its blocked-user set. Not the reconnect catch-up's
+ *  baselines: the soft expiry's deliberate close reset them, and by now the new account's socket
+ *  is reading its own first one. */
+function accountSignedIn(before: number | null, account: number | null): void {
+  if (account === before) return;
+  forgetAccountLists();
+  if (before === null) return;
+  clearBlockedUsers();
+  clearFileCache();
+  forgetPreviousAccount();
+}
+
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -84,8 +106,9 @@ function App() {
   // download rather than just naming the problem.
   const [staleUpdate, setStaleUpdate] = useState<AppVersionInfo | null>(null);
   const retryCount = useRef(0);
-  // The account the lists cached in this running app were read as. A soft expiry keeps them for
-  // the same account signing back in; a sign-in as someone else must not be drawn them.
+  // The account the lists (and everything else this running app holds of an account) were read
+  // as. A soft expiry keeps them for the same account signing back in; a sign-in as someone else
+  // must not be drawn them (accountSignedIn).
   const listsAccount = useRef(currentUserIdFromToken());
 
   // Helper to get token from URL for reset/verify
@@ -187,10 +210,11 @@ function App() {
     },
     onAccountChanged: () => window.location.reload(),
     // Another document signed in after this one was signed out (a soft expiry keeps the lists):
-    // nothing reloads here, and the next render mounts the chat, so the lists must be that account's.
+    // nothing reloads here, and the next render mounts the chat, so what it holds must be that
+    // account's.
     onSignedIn: () => {
       const account = currentUserIdFromToken();
-      if (account !== listsAccount.current) forgetAccountLists();
+      accountSignedIn(listsAccount.current, account);
       listsAccount.current = account;
     },
   }), [expireSession]);
@@ -238,6 +262,14 @@ function App() {
     });
     return () => { unDiscard(); unArmed(); };
   }, []);
+
+  // Signed in, at start or by the form: notifications left in Windows'
+  // notification centre, Android's shade or the browser's list by ANOTHER
+  // account (its session ran out, or the app closed, with nobody signing out)
+  // go before this one is drawn anything (api/desktopNotify.ts).
+  useEffect(() => {
+    if (loggedIn) notificationsAreFor(currentUserIdFromToken());
+  }, [loggedIn]);
 
   // Android background delivery follows the AUTH state, not just the setting:
   // signed out there is no socket, so the keep-alive service would pin the
@@ -401,7 +433,7 @@ function App() {
   const handleLoginSuccess = () => {
     resetAuthExpiredFlag(); // a later expiry must signal again
     const account = currentUserIdFromToken();
-    if (account !== listsAccount.current) forgetAccountLists();
+    accountSignedIn(listsAccount.current, account);
     listsAccount.current = account;
     setLoggedIn(true);
     setWsConnected(true);
