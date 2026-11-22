@@ -8,5 +8,6 @@
   its first key), typing that ended while the app was in the background is not
   shown when you come back (also when the app was paused and everything sent
   meanwhile arrives at once as it wakes, as on an iPhone), and someone typing in
-  one channel is not shown in the next one you open. Comes with the update (no
+  one channel is not shown in the next one you open, nor in that channel again
+  when you come back to it after they sent. Comes with the update (no
   new install, no server update).
