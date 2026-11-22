@@ -424,7 +424,9 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   - **GIF** ([`gifMetadata.ts`](../frontend/src/api/gifMetadata.ts)), lossless: loses comment and
     plain text extensions, application extensions (XMP among them) and anything after the trailer;
     keeps every frame byte for byte, the delays, the loop count (an animated GIF stays animated)
-    and an ICC profile.
+    and an ICC profile. A byte that starts no block after a frame (padding, junk after the last
+    frame with no trailer) ends the GIF there, as Chromium's and Firefox's decoders read it: the
+    frames before it are sent with a trailer, and what follows, which no browser shows, is not.
   - **TIFF** ([`tiffMetadata.ts`](../frontend/src/api/tiffMetadata.ts)), in place: each directory
     keeps only the tags that describe the picture (an allowlist: size, sampling, compression,
     strips or tiles, colour, resolution, page number, orientation, ICC); the rest (Make, Model,
@@ -432,15 +434,25 @@ Yes, and the send path fails closed rather than falling back to plaintext.
     resources) go, and the GPS, EXIF and interoperability directories are overwritten with zeros
     with every value in them. The strips are untouched.
   - **MP4, MOV, M4A, 3GP, HEIC, AVIF** ([`isoBmffMetadata.ts`](../frontend/src/api/isoBmffMetadata.ts)),
-    in place, nothing moved: every `udta`, `meta` and `uuid` box in `moov` and its tracks (Android's
-    `©xyz` and 3GPP's `loci` location, the iPhone's `com.apple.quicktime.location.ISO6709`, make,
-    model, software and creation date, iTunes-style tags, GoPro's GPMF and camera serial, XMP)
-    becomes a `free` box of zeros; the creation and modification times in `mvhd`, `tkhd` and
-    `mdhd` become zero and a video's compressor name empty; a timed metadata track (a GoPro's GPS,
-    a phone's motion: handler `meta` or `camm`) is freed and every one of its samples in `mdat`
-    zeroed; in a HEIC or AVIF picture the Exif and XMP items are overwritten in place, as for a HEIC
-    that cannot be converted ([`heifMetadata.ts`](../frontend/src/api/heifMetadata.ts)). The media
-    data is not touched.
+    in place, nothing moved, by an **allowlist** at the top of the file and in `moov`, each track,
+    its `mdia` and each fragment header: a box a player needs (the media data, the movie and track
+    headers, edit lists, sample tables, fragments and their indexes) is kept, and every other box,
+    whatever it is called, becomes a `free` box of zeros. That takes Android's `©xyz` and 3GPP's
+    `loci` location, the iPhone's `com.apple.quicktime.location.ISO6709`, make, model, software and
+    creation date, iTunes-style tags, GoPro's GPMF and camera serial and XMP (in `udta`, `meta` and
+    `uuid` boxes), a Novatek dashcam's `moov/gps ` index, a Samsung HEIC's `sefd` trailer and its
+    Motion Photo video (`mpvd`, dropped as a JPEG's is), and any vendor's box of its own. Free space
+    (a top-level `free`, `skip`, `wide` or `junk`) is zeroed where it holds anything, since cameras
+    write into it (Kodak's serial number, a Pittasoft dashcam's GPS log, Canon's thumbnail). The
+    creation and modification times in `mvhd`, `tkhd` and `mdhd` become zero and a video's
+    compressor name empty; a timed metadata track (a GoPro's GPS, a phone's motion, a car's: handler
+    `meta`, `camm`, `data` or `ctbx`) is freed and every one of its samples in `mdat` zeroed; a
+    dashcam's GPS blocks in the media data (`freeGPS `, Novatek's format, listed in its index or not)
+    are found the way ExifTool finds them (the first 20 MB of the media data, and all of it once one
+    is found or the movie has a `gps ` index) and zeroed; a compressed movie header (`cmov`) is
+    refused. In a HEIC or AVIF picture the Exif and XMP items are overwritten in place, as for a HEIC
+    that cannot be converted ([`heifMetadata.ts`](../frontend/src/api/heifMetadata.ts)). The frames
+    are not touched.
   - **WebM, MKV** ([`matroskaMetadata.ts`](../frontend/src/api/matroskaMetadata.ts)), in place:
     Tags and Attachments (files carried inside) become Void elements of the same size, the
     segment's date becomes Void, and its title, muxing and writing application, file names and
@@ -457,29 +469,40 @@ Yes, and the send path fails closed rather than falling back to plaintext.
     and the elements that lay it out, with only the attributes that say how it looks; an iframe,
     a form, a video, a style sheet or script in it goes. A font embedded as a `data:` URL (as
     Excalidraw writes them) stays as it is. An embedded PNG, JPEG, GIF or WebP loses its own
-    metadata, judged by its bytes rather than the type it claims, and an embedded picture of any
-    other kind is taken out. Púca never draws a received SVG; this is about the person who
-    downloads it.
+    metadata, judged by its bytes rather than the type it claims. An embedded SVG (a
+    `data:image/svg+xml` URL, base64 or percent-encoded, which is how draw.io writes its library
+    icons and Excalidraw an SVG placed in a scene) is cleaned the same way, as a drawing of its own,
+    up to four deep; one no browser would draw either (not well-formed, compressed, deeper) and an
+    embedded picture of any other kind are taken out. Púca never draws a received SVG; this is
+    about the person who downloads it.
 
   Each refuses, with a message, a file that claims to be its format and cannot be walked (a
   damaged structure, a BigTIFF, a compressed `.svgz`, a timed metadata track inside a fragmented
   MP4) rather than send it with what it could not read; a video or TIFF merely cut off inside its
-  media data goes. A large video going peer to peer is never read whole: only its header boxes
-  are, and the file sent is the original's slices with the overwrites between them.
+  media data goes. A large video, TIFF or GIF going peer to peer is never read into memory whole:
+  a video's header boxes and the first 20 MB of its media data are read (all of it for a dashcam's
+  recording), a TIFF's directories, and a GIF a window at a time, and the file sent is the
+  original's slices with the overwrites between them (a GIF's, the blocks it keeps). An SVG is
+  read whole, since it is parsed as one document.
   **Known limits:** audio other than M4A (an MP3's ID3 tags, FLAC and Ogg comments), camera raw
   files (DNG, CR2, CR3, NEF, ARW and the rest, by name or structure: raw software needs the
   camera's data to develop them), PDFs and archives pass through unchanged; a video's subtitle
   tracks are kept (some drones write their position into one, as text), and so is a HEIC's
-  thumbnail; chapter marks kept in an MP4's `udta` go with it; files sent before each change keep
+  thumbnail; so are GoPro-format GPS records some cameras leave in the media data without listing
+  them anywhere, and a dashcam's `freeGPS ` blocks that first appear past the media data's first
+  20 MB in a recording with no index (ExifTool's own `-ee` stops there too); chapter marks kept in
+  an MP4's `udta` go with it; files sent before each change keep
   their metadata; the ICC profile is kept because removing it changes the colours.
   Checked by `frontend/src/tests/imageMetadata.test.ts` and `frontend/src/tests/fileMetadata.test.ts`
   (real files from Pillow and FFmpeg; truncation at every byte, thousands of random corruptions,
   absurd lengths), `frontend/src/tests/svgMetadata.test.ts`,
   `frontend/src/tests/attachmentMetadata.test.ts` (the real seal and upload, opened with the key as a
   recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoders: the same
-  pixels, still upright, every GIF frame, a video's first and last frames; an SVG drawn the same,
-  an editor's drawing and a diagram with HTML labels and an embedded font alike, and opened as a
-  document, running nothing and asking nothing of anyone where the original did).
+  pixels, still upright, every GIF frame (a GIF with junk after its last frame shown and sent as
+  the frames before it), a video's first and last frames, a dashcam's and vendors' boxes among them;
+  an SVG drawn the same, an editor's drawing and a diagram with HTML labels, an embedded font and
+  draw.io's icons alike, and opened as a document, running nothing and asking nothing of anyone
+  where the original did; a large video, TIFF and GIF sent peer to peer without being read whole).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   (`sendChannelMessageEncrypted` in [`servers.ts`](../frontend/src/api/servers.ts),
   `encryptDMContent` in [`dms.ts`](../frontend/src/api/dms.ts)). Edits go through the same path.

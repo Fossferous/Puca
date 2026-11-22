@@ -400,7 +400,7 @@ class FileTransferManager {
 
         // A picture or video over the upload cap (a 40 MB phone JPEG, a 2 GB phone video) comes
         // here instead of through the seal, so its metadata is taken off here, the same way
-        // (api/fileMetadata.ts; a video's header boxes only, never the whole file in memory): the
+        // (api/fileMetadata.ts; a video, TIFF or GIF read in slices, never the whole file in memory): the
         // peer is the one person it could be shown to, and one person is still a person. Done
         // before the digest, which must be the digest of what is sent.
         try {

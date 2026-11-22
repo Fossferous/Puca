@@ -21,10 +21,17 @@
 // (the NEGATIVE CONTROL) and gone from what the recipient opens:
 //
 //   3. an animated GIF: WebCodecs' ImageDecoder gives the same frames, pixel
-//      for pixel, the same number of them, and it still loops;
+//      for pixel, the same number of them, and it still loops; and one with
+//      a byte that starts no block after its last frame (padding, no
+//      trailer; a stray 0x00 before one frame more): the engine shows the
+//      frames before that byte and no more (the frame after it NOT shown,
+//      while the same frame with no stray byte before it IS: the NEGATIVE
+//      CONTROL), and the cleaned copy is exactly those frames;
 //   4. an AVIF photo: the same picture, pixel for pixel;
 //   5. an MP4 (Android's udta and ©xyz-style tags), a MOV (the iPhone's
-//      moov/meta keys) and a WebM and an MKV (Tags, an attached file): the
+//      moov/meta keys), the MP4 again with a dashcam's GPS block and index
+//      and vendors' boxes in moov and at the top (freed whatever they are
+//      called), and a WebM and an MKV (Tags, an attached file): the
 //      same size, duration and first and last frames, pixel for pixel, from
 //      a muted <video> that never plays (seeked); an engine that cannot open
 //      the ORIGINAL says SKIP for that one, never PASS;
@@ -44,9 +51,13 @@
 //      a foreignObject, a font embedded as a data: URL): drawn the same,
 //      pixel for pixel, where the same diagram with its labels or its font
 //      taken out (what the cleaner did before 2026-11-22) is not (NEGATIVE
-//      CONTROLS: the comparison can fail);
-//   8. a 256 MB video sent peer to peer (stripFileMetadata, a File made of
-//      slices): fixed in a bounded time without the page reading it whole.
+//      CONTROLS: the comparison can fail); draw.io's icons, SVGs in data:
+//      URLs (base64 and percent-encoded), are part of that same picture, and
+//      the diagram with them taken out (the cleaner before its review) is
+//      drawn differently too;
+//   8. a 256 MB video, a 256 MB TIFF and a 128 MB GIF sent peer to peer
+//      (stripFileMetadata, a File made of slices): fixed in a bounded time
+//      without the page reading them whole.
 //
 // The page is a real origin; fetch('/upload') is answered by a stand-in that
 // keeps the ciphertext it was sent (the server never sees plaintext anyway),
@@ -347,6 +358,62 @@ f.gif = await page.evaluate(async () => {
     };
 });
 
+// 3b. A GIF with a byte that starts no block after a frame: what the engine shows of it, and what is sent.
+f.gifJunk = await page.evaluate(async () => {
+    const { send, fixture, pixels, same } = window.__h;
+    const orig = await fixture('animated.gif');
+    const body = orig.subarray(0, orig.length - 1); // without its trailer
+    // The last frame's own block (descriptor, colour table, LZW data), to put after a stray byte.
+    const subs = (b, j) => { while (b[j] !== 0) j += 1 + b[j]; return j + 1; };
+    let i = 13 + (orig[10] & 0x80 ? 3 * (1 << ((orig[10] & 7) + 1)) : 0);
+    let last = null;
+    while (i < orig.length && orig[i] !== 0x3B) {
+        if (orig[i] === 0x21) { i = subs(orig, i + 2); continue; }
+        const start = i;
+        i = subs(orig, i + 10 + (orig[i + 9] & 0x80 ? 3 * (1 << ((orig[i + 9] & 7) + 1)) : 0) + 1);
+        last = orig.subarray(start, i);
+    }
+    const join = (...parts) => { const n = parts.reduce((a, x) => a + x.length, 0); const o = new Uint8Array(n); let at = 0; for (const x of parts) { o.set(x, at); at += x.length; } return o; };
+    const frames = async (bytes) => {
+        try {
+            const dec = new ImageDecoder({ data: bytes, type: 'image/gif' });
+            await dec.tracks.ready;
+            await dec.completed;
+            const t = dec.tracks.selectedTrack;
+            const list = [];
+            for (let k = 0; k < t.frameCount; k++) {
+                const { image } = await dec.decode({ frameIndex: k });
+                list.push(pixels(image, image.displayWidth, image.displayHeight));
+                image.close();
+            }
+            dec.close();
+            return list;
+        } catch (e) { return String(e); }
+    };
+    const want = await frames(orig);
+    const cases = {
+        padding: join(body, new Uint8Array(4)),
+        strayThenFrame: join(body, Uint8Array.of(0), last, Uint8Array.of(0x3B)),
+    };
+    const out = {};
+    for (const [name, bytes] of Object.entries(cases)) {
+        const shown = await frames(bytes);
+        let got = null, err = null;
+        try { got = await send(bytes.slice(), 'party.gif', 'image/gif'); } catch (e) { err = String(e); }
+        const sent = got ? await frames(got) : null;
+        out[name] = {
+            shown: Array.isArray(shown) ? shown.length : shown,
+            shownSame: Array.isArray(shown) && shown.length === want.length && shown.every((px, k) => same(px, want[k])),
+            sent: Array.isArray(sent) ? sent.length : (sent ?? err),
+            sentSame: Array.isArray(sent) && sent.length === want.length && sent.every((px, k) => same(px, want[k])),
+            trailer: got ? got[got.length - 1] === 0x3B : false,
+        };
+    }
+    // NEGATIVE CONTROL: the same frame after the last one with NO stray byte before it is shown.
+    const more = await frames(join(body, last, Uint8Array.of(0x3B)));
+    return { want: want.length, cases: out, withoutStray: Array.isArray(more) ? more.length : more };
+});
+
 // 4. AVIF: the engine's decoder.
 f.avif = await page.evaluate(async () => {
     const { send, marks, fixture, pixels, same } = window.__h;
@@ -360,8 +427,13 @@ f.avif = await page.evaluate(async () => {
 
 // 5. Videos: a muted <video> that never plays, seeked to its first and last frames.
 f.videos = {};
-for (const [name, type, engineType] of [['video.mp4', 'video/mp4', 'video/mp4'], ['video.mov', 'video/quicktime', 'video/mp4'], ['video.webm', 'video/webm', 'video/webm'], ['video.mkv', 'video/x-matroska', 'video/x-matroska']]) {
-    f.videos[name] = await page.evaluate(async ({ name, type, engineType }) => {
+// The MP4 again as a dashcam and phone vendors leave theirs (VENDOR): a GPS block (`freeGPS `) at the
+// end of its media data and its `gps ` index, an HTC track and ISO's meco in moov, then Samsung's sefd,
+// a Pittasoft GPS log in free space and a dashcam's NMEA box at the top. Boxes this does not keep are
+// freed whatever they are called: the real decoder must show the same frames from what is left.
+const VENDOR = 'video.mp4 + dashcam and vendor boxes';
+for (const [name, type, engineType, file] of [['video.mp4', 'video/mp4', 'video/mp4'], ['video.mov', 'video/quicktime', 'video/mp4'], ['video.webm', 'video/webm', 'video/webm'], ['video.mkv', 'video/x-matroska', 'video/x-matroska'], [VENDOR, 'video/mp4', 'video/mp4', 'video.mp4']]) {
+    f.videos[name] = await page.evaluate(async ({ name, type, engineType, file, VENDOR }) => {
         const { send, marks, fixture, pixels, same } = window.__h;
         const frames = async (bytes) => {
             const url = URL.createObjectURL(new Blob([bytes], { type: engineType }));
@@ -378,8 +450,25 @@ for (const [name, type, engineType] of [['video.mp4', 'video/mp4', 'video/mp4'],
             v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url);
             return o;
         };
-        const orig = await fixture(name);
-        const got = await send(orig.slice(), name, type);
+        const withVendorBoxes = (v) => {
+            const join = (...parts) => { const n = parts.reduce((a, x) => a + x.length, 0); const o = new Uint8Array(n); let at = 0; for (const x of parts) { o.set(x, at); at += x.length; } return o; };
+            const be32 = (n) => Uint8Array.of(n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);
+            const enc = (str) => new TextEncoder().encode(str);
+            const box = (t, ...parts) => { const body = join(...parts); return join(be32(8 + body.length), enc(t), body); };
+            const dv = new DataView(v.buffer, v.byteOffset, v.byteLength);
+            const top = [];
+            for (let at = 0; at < v.length;) { const size = dv.getUint32(at); top.push({ type: new TextDecoder('latin1').decode(v.subarray(at + 4, at + 8)), at, b: v.subarray(at, at + size) }); at += size; }
+            const mdat = top.find((x) => x.type === 'mdat'), moov = top.find((x) => x.type === 'moov');
+            const gpsBody = new Uint8Array(248); gpsBody.set(enc('GPS '), 0); gpsBody.set(enc('SECRETCAM-Corp +47.6062-122.3321 31km/h'), 12);
+            const block = join(be32(256), enc('free'), gpsBody);
+            const blockAt = mdat.at + mdat.b.length;
+            const newMdat = join(be32(mdat.b.length + 256), mdat.b.subarray(4), block);
+            const newMoov = box('moov', moov.b.subarray(8), box('gps ', Uint8Array.of(0, 0, 1, 1), be32(1), be32(blockAt), be32(256)), box('htka', enc('SECRETCAM-Corp')), box('meco', enc('+47.6062-122.3321')));
+            return join(...top.filter((x) => x.at < mdat.at).map((x) => x.b), newMdat, newMoov,
+                box('sefd', enc('Image_UTC_Data1761228309000 SECRETCAM-Corp SEFH SEFT')), box('free', be32(40), enc('gps $GPRMC,140509,A,+47.6062-122.3321')), box('udat', enc('$GPRMC SECRETCAM-Corp')));
+        };
+        const orig = name === VENDOR ? withVendorBoxes(await fixture(file)) : await fixture(name);
+        const got = await send(orig.slice(), file ?? name, type);
         const a = await frames(orig);
         const b = a ? await frames(got) : null;
         return {
@@ -388,7 +477,7 @@ for (const [name, type, engineType] of [['video.mp4', 'video/mp4', 'video/mp4'],
             samePixels: !!(a && b && a.w === b.w && a.h === b.h && a.dur === b.dur && same(a.first, b.first) && same(a.last, b.last)),
             played: !!(a?.played || b?.played),
         };
-    }, { name, type, engineType });
+    }, { name, type, engineType, file, VENDOR });
 }
 
 // 5b. A WebM as this engine's own MediaRecorder writes one (what Púca Notes' recorder makes), the
@@ -520,6 +609,8 @@ f.diagram = await page.evaluate(async () => {
     const got = await send(orig.slice(), 'flowchart.svg', 'image/svg+xml');
     const noLabels = new TextEncoder().encode(src.replace(/<foreignObject[\s\S]*?<\/foreignObject>/g, ''));
     const noFont = new TextEncoder().encode(src.replace(/src: url\(data:font\/ttf;base64,[A-Za-z0-9+/=]+\);/, 'src: none;'));
+    // What the cleaner did to draw.io's icons before its review: their hrefs taken out.
+    const noIcons = new TextEncoder().encode(src.replace(/ (?:xlink:)?href="data:image\/svg\+xml[^"]*"/g, ''));
     const show = (bytes, id) => new Promise((res) => {
         const im = new Image();
         im.id = id; im.width = 160; im.height = 80; im.style.cssText = 'display:block;width:160px;height:80px';
@@ -529,19 +620,35 @@ f.diagram = await page.evaluate(async () => {
         document.body.append(im);
     });
     const dims = [];
-    for (const [bytes, id] of [[orig, 'dg-original'], [got, 'dg-cleaned'], [noLabels, 'dg-no-labels'], [noFont, 'dg-no-font']]) dims.push(await show(bytes, id));
+    for (const [bytes, id] of [[orig, 'dg-original'], [got, 'dg-cleaned'], [noLabels, 'dg-no-labels'], [noFont, 'dg-no-font'], [noIcons, 'dg-no-icons']]) dims.push(await show(bytes, id));
     // Let the embedded font load and the pictures settle before they are compared.
     await document.fonts.ready;
     await new Promise((r) => setTimeout(r, 500));
     const text = new TextDecoder().decode(got);
-    return { dims, keptLabels: text.includes('Start <b>here</b>') && text.includes('>Decide</div>'), keptFont: text.includes('src: url(data:font/ttf;base64,') };
+    const icons = [...text.matchAll(/href="data:image\/svg\+xml;base64,([A-Za-z0-9+/=]+)"/g)].map((m) => atob(m[1]));
+    return {
+        dims, keptLabels: text.includes('Start <b>here</b>') && text.includes('>Decide</div>'), keptFont: text.includes('src: url(data:font/ttf;base64,'),
+        icons: icons.length, iconLeaks: icons.filter((x) => /SECRETCOMMENT|inkscape|\/home\/jane/.test(x)).length,
+        iconControl: (src.match(/data:image\/svg\+xml/g) || []).length,
+    };
 });
 {
-    const shot = async (id) => page.locator('#' + id).screenshot({ animations: 'disabled' });
-    const [o, c, nl, nf] = [await shot('dg-original'), await shot('dg-cleaned'), await shot('dg-no-labels'), await shot('dg-no-font')];
+    // Each one drawn in the SAME place on the page: a gradient in an SVG drawn inside an SVG <image>
+    // (draw.io's icons) is dithered by where it is on the page, so the same drawing 80 px lower
+    // differs by one level in a few dozen pixels (measured: the original against itself, 2026-11-22).
+    const shot = async (id) => {
+        await page.evaluate((id) => {
+            for (const im of document.querySelectorAll('img[id^="dg-"]')) im.style.cssText = 'display:none';
+            document.getElementById(id).style.cssText = 'display:block;width:160px;height:80px;position:fixed;left:0;top:0;z-index:2147483647';
+        }, id);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 300)))));
+        return page.locator('#' + id).screenshot({ animations: 'disabled' });
+    };
+    const [o, c, nl, nf, ni] = [await shot('dg-original'), await shot('dg-cleaned'), await shot('dg-no-labels'), await shot('dg-no-font'), await shot('dg-no-icons')];
     f.diagram.same = o.length > 0 && o.equals(c);
     f.diagram.labelsShow = !o.equals(nl);
     f.diagram.fontShows = !o.equals(nf);
+    f.diagram.iconsShow = !o.equals(ni);
 }
 
 // 8. A 256 MB video sent peer to peer: a File made of slices of the same 1 MB (no 256 MB in memory),
@@ -563,11 +670,54 @@ f.big = await page.evaluate(async () => {
     return { ms: Math.round(ms), size: [file.size, clean.size], changed: clean !== file, tailLeaks: marks(tail), tailControl: marks(boxes.moov) };
 });
 
+// 8b. A 256 MB TIFF and a 128 MB GIF sent peer to peer, Files made of slices of the same 1 MB: fixed
+// without the page reading them whole (the TIFF reads its directories; the GIF is walked a window at a
+// time), the result what the seal makes of the small file they start with.
+f.bigStill = await page.evaluate(async () => {
+    const { marks, fixture } = window.__h;
+    const MB = 1024 * 1024;
+    const tif = await fixture('photo.tif');
+    const gif = await fixture('animated.gif');
+    const sealTif = await window.__rig.stripFileMetadata(new File([tif], 's.tif', { type: 'image/tiff' }));
+    const sealGif = await window.__rig.stripFileMetadata(new File([gif], 's.gif', { type: 'image/gif' }));
+    // TIFF: 256 MB of picture after the directories (nothing points at it: no reader cares).
+    const zeros = new Blob([new Uint8Array(MB)]);
+    const bigTif = new File([tif, ...new Array(256).fill(zeros)], 'scan.tif', { type: 'image/tiff' });
+    // GIF: a 128 MB comment in front of the trailer, 256-byte sub-blocks (a 1 MB chunk holds 4096 whole ones).
+    const sub = new Uint8Array(MB);
+    for (let k = 0; k < MB; k += 256) { sub[k] = 255; sub.fill(0x41, k + 1, k + 256); }
+    const subs = new Blob([sub]);
+    const bigGif = new File([gif.subarray(0, gif.length - 1), Uint8Array.of(0x21, 0xFE), ...new Array(128).fill(subs), Uint8Array.of(0, 0x3B)], 'party.gif', { type: 'image/gif' });
+    const out = {};
+    for (const [name, file, small, seal] of [['tiff', bigTif, tif, sealTif], ['gif', bigGif, gif, sealGif]]) {
+        // Read whole, it fails: only slices of it may be read.
+        Object.defineProperty(file, 'arrayBuffer', { value: () => { throw new Error('the whole file was read'); } });
+        const t0 = performance.now();
+        let clean = null, err = null;
+        try { clean = await window.__rig.stripFileMetadata(file); } catch (e) { err = String(e); }
+        const ms = Math.round(performance.now() - t0);
+        const sealBytes = new Uint8Array(await seal.arrayBuffer());
+        const head = clean ? new Uint8Array(await clean.slice(0, sealBytes.length).arrayBuffer()) : new Uint8Array(0);
+        out[name] = {
+            ms, err, size: [file.size, clean?.size], changed: clean !== file, control: marks(small),
+            leaks: clean ? marks(head) : null,
+            asSealed: head.length === sealBytes.length && head.every((v, k) => v === sealBytes[k]),
+        };
+    }
+    return out;
+});
+
 ck(f.gif.control.length >= 2, 'GIF: the GIF going in carries a comment and XMP (control)', f.gif.control.join(', '));
 ck(f.gif.leaks.length === 0, "GIF: the recipient's copy carries none of it", JSON.stringify(f.gif.leaks));
 ck(f.gif.frames[0] >= 2 && f.gif.frames[0] === f.gif.frames[1] && f.gif.samePixels, 'GIF: every frame decodes to the same pixels (WebCodecs)', JSON.stringify({ frames: f.gif.frames }));
 ck(f.gif.loop[0] === f.gif.loop[1] && f.gif.loop[0] === 'Infinity' && JSON.stringify(f.gif.durations[0]) === JSON.stringify(f.gif.durations[1]), 'GIF: still animated, the same delays, still looping forever', JSON.stringify({ loop: f.gif.loop, d: f.gif.durations }));
 ck(f.gif.bytes[1] < f.gif.bytes[0], `GIF: smaller by the blocks taken out (${f.gif.bytes.join(' -> ')})`);
+for (const [name, label] of [['padding', 'zero padding after its last frame and no trailer'], ['strayThenFrame', 'a stray 0x00 after its last frame, then one frame more']]) {
+    const o = f.gifJunk.cases[name];
+    ck(o.shown === f.gifJunk.want && o.shownSame, `GIF with ${label}: the engine shows the frames before that byte`, JSON.stringify(o));
+    ck(o.sent === f.gifJunk.want && o.sentSame && o.trailer, `GIF with ${label}: sent, not refused, as exactly those frames with a trailer`, JSON.stringify(o));
+}
+ck(f.gifJunk.withoutStray === f.gifJunk.want + 1, 'NEGATIVE CONTROL: the same frame more with no stray byte before it IS shown (so the one after a stray byte is not)', JSON.stringify({ want: f.gifJunk.want, withoutStray: f.gifJunk.withoutStray }));
 ck(f.avif.control.length >= 3, 'AVIF: the photo going in carries the camera, the time and XMP (control)', f.avif.control.join(', '));
 ck(f.avif.leaks.length === 0, "AVIF: the recipient's copy carries none of it", JSON.stringify(f.avif.leaks));
 ck(f.avif.samePixels && f.avif.bytes[0] === f.avif.bytes[1], 'AVIF: the same picture, pixel for pixel, the same size in bytes (overwritten in place)', JSON.stringify({ dims: f.avif.dims, err: f.avif.err }));
@@ -607,8 +757,15 @@ ck(f.svg.got.outside === 0, 'SVG: opened as a document, the cleaned one asks not
 ck(f.diagram.keptLabels && f.diagram.keptFont, "SVG diagram: the recipient's copy keeps Mermaid's and draw.io's labels and the embedded font", JSON.stringify(f.diagram));
 ck(f.diagram.same, 'SVG diagram (Mermaid, draw.io and Excalidraw shapes): drawn in an <img>, the same picture, pixel for pixel', JSON.stringify(f.diagram.dims));
 ck(f.diagram.labelsShow && f.diagram.fontShows, 'NEGATIVE CONTROL: the same diagram with its labels, or its font, taken out (the cleaner before 2026-11-22) is drawn differently', JSON.stringify({ labels: f.diagram.labelsShow, font: f.diagram.fontShows }));
+ck(f.diagram.iconControl === 2 && f.diagram.icons === 2 && f.diagram.iconLeaks === 0, "SVG diagram: draw.io's two icons (SVGs in data: URLs) are kept, each cleaned of what its editor left in it", JSON.stringify({ control: f.diagram.iconControl, icons: f.diagram.icons, leaks: f.diagram.iconLeaks }));
+ck(f.diagram.iconsShow, 'NEGATIVE CONTROL: the same diagram with its icons taken out (the cleaner before its review) is drawn differently', String(f.diagram.iconsShow));
 ck(f.big.changed && f.big.size[0] === f.big.size[1] && f.big.tailControl.length > 0 && f.big.tailLeaks.length === 0, 'a 256 MB video sent peer to peer: its metadata (at the end) gone, nothing moved', JSON.stringify(f.big));
-ck(f.big.ms < 5000, `a 256 MB video sent peer to peer: fixed in ${f.big.ms} ms, its media never read`);
+ck(f.big.ms < 5000, `a 256 MB video sent peer to peer: fixed in ${f.big.ms} ms, no more of its media read than the first 20 MB (a dashcam's GPS blocks)`);
+for (const [name, o] of Object.entries(f.bigStill)) {
+    ck(o.control.length >= 2 && o.changed && (name === 'tiff' ? o.size[0] === o.size[1] : o.size[1] < o.size[0]), `a large ${name.toUpperCase()} sent peer to peer: its metadata found going in (control), and a new File comes out`, JSON.stringify(o));
+    ck(!o.err && o.leaks && o.leaks.length === 0 && o.asSealed, `a large ${name.toUpperCase()} sent peer to peer: its metadata gone, the result what the seal makes of it`, JSON.stringify(o));
+    ck(o.ms < 10000, `a large ${name.toUpperCase()} sent peer to peer: fixed in ${o.ms} ms, never read whole`);
+}
 ck(outside.every((u) => /tracker\.example|evil\.example/.test(u)), 'nothing but the SVG controls asked for anything outside this machine, and all of it was refused here', JSON.stringify([...new Set(outside.map((u) => new URL(u).host))]));
 
 await browser.close();

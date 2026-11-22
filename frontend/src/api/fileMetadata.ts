@@ -23,7 +23,7 @@
  * archive, audio other than M4A, a camera raw file) goes as it is.
  */
 import { ImageMetadataError, sniffStrippable, stripImageMetadata } from './imageMetadata';
-import { isGif, stripGif } from './gifMetadata';
+import { gifFile, isGif, planGif, stripGif } from './gifMetadata';
 import { isBigTiff, isTiff, tiffPatches } from './tiffMetadata';
 import { looksIsoBmff, planIsoBmff } from './isoBmffMetadata';
 import { isEbml, planMatroska } from './matroskaMetadata';
@@ -102,7 +102,7 @@ export async function stripAttachmentMetadata(bytes: Uint8Array, hint: FileHint 
         case 'gif': return stripGif(bytes);
         case 'svg': return cleanSvg(bytes);
         case 'tiff': {
-            const p = await tiffPlan(bytes);
+            const p = await tiffPlan(memorySource(bytes));
             if (p) applyInPlace(bytes, p);
             return bytes;
         }
@@ -116,12 +116,12 @@ export async function stripAttachmentMetadata(bytes: Uint8Array, hint: FileHint 
 }
 
 /** A TIFF's checked overwrites, or null when there is nothing to change (a raw file among them). */
-async function tiffPlan(bytes: Uint8Array): Promise<Patch[] | null> {
-    const p = tiffPatches(bytes);
+async function tiffPlan(src: Source): Promise<Patch[] | null> {
+    const p = await tiffPatches(src);
     if (!p || p.length === 0) return null;
-    const checked = checkedPatches(p, bytes.length);
+    const checked = checkedPatches(p, src.size);
     if (!checked) throw new ImageMetadataError('TIFF', 'what it holds overlaps itself', 'picture');
-    const real = await withoutNoops(checked, memorySource(bytes));
+    const real = await withoutNoops(checked, src);
     return real.length ? real : null;
 }
 
@@ -135,9 +135,10 @@ function mayHoldMetadata(t: string): boolean {
  * background; and a peer-to-peer send, up to gigabytes). The name and type are
  * kept. A file whose declared type cannot hold one of these formats (an
  * octet-stream: every sealed attachment's ciphertext passes here) is returned
- * as it came, unread. A video is never read whole: only its header boxes are
- * (api/metadataPatches.ts fileSource), and the result is the original's
- * slices with the overwrites between them.
+ * as it came, unread. A video, a TIFF or a GIF is never read whole into
+ * memory: it is read in slices (api/metadataPatches.ts fileSource; a video
+ * and a TIFF only where metadata can be), and the result is the original's
+ * slices with the overwrites between them (a GIF's, the blocks it keeps).
  */
 export async function stripFileMetadata(file: File): Promise<File> {
     const t = typeOf(file.type);
@@ -152,13 +153,16 @@ export async function stripFileMetadata(file: File): Promise<File> {
         const plan = await containerPlan(kind, fileSource(file), hint, head);
         return plan ? patchedFile(file, plan) : file;
     }
-    const bytes = await readBlobBytes(file);
     if (kind === 'tiff') {
-        const p = await tiffPlan(bytes);
-        if (!p) return file;
-        applyInPlace(bytes, p);
-        return new File([bytes as BlobPart], file.name, { type: file.type, lastModified: file.lastModified });
+        const plan = await tiffPlan(fileSource(file));
+        return plan ? patchedFile(file, plan) : file;
     }
+    if (kind === 'gif') {
+        const plan = await planGif(fileSource(file));
+        return plan ? gifFile(file, plan) : file;
+    }
+    // JPEG, PNG, WebP and SVG: read whole (an SVG is parsed as one document).
+    const bytes = await readBlobBytes(file);
     const out = await stripAttachmentMetadata(bytes, hint);
     if (out === bytes) return file;
     return new File([out as BlobPart], file.name, { type: file.type, lastModified: file.lastModified });
