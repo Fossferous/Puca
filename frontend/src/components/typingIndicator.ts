@@ -65,7 +65,9 @@ export function noteTyping(
 }
 
 /** `prev` without `userId` (they sent their message); the SAME map when they were
- *  not in it, so a message from someone not typing renders nothing. */
+ *  not in it, so a message from someone not typing renders nothing. Someone who goes
+ *  straight on typing is shown again at their next key: the sender's throttle starts
+ *  over once its message is answered (Chat.tsx handleSend). */
 export function clearTyper(prev: Map<number, TypingRow>, userId: number): Map<number, TypingRow> {
     if (!prev.has(userId)) return prev;
     const next = new Map(prev);

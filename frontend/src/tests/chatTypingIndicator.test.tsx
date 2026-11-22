@@ -20,6 +20,13 @@ import { MemoryRouter } from 'react-router-dom';
 
 const ME = 1;
 
+const h = vi.hoisted(() => ({
+    /** What happened on the sending side, in order. */
+    log: [] as string[],
+    /** The send's answer, when a test holds it. */
+    held: null as null | Promise<void>,
+}));
+
 vi.mock('../api/servers', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/servers')>()),
     markChannelRead: async () => {},
@@ -27,6 +34,12 @@ vi.mock('../api/servers', async importOriginal => ({
     decryptChannelMessages: async (_ch: number, raw: unknown[]) => raw,
     decryptChannelContent: async (_ch: number, content: string) => content,
     listPinnedMessages: async () => [],
+    sendChannelMessageEncrypted: async () => {
+        h.log.push('post');
+        if (h.held) await h.held;
+        h.log.push('answered');
+        return { id: `srv-${h.log.length}` };
+    },
 }));
 vi.mock('../api/auth', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/auth')>()),
@@ -77,6 +90,9 @@ afterEach(() => {
     act(() => root?.unmount());
     host?.remove();
     root = null; host = null;
+    h.log = [];
+    h.held = null;
+    vi.restoreAllMocks();
     vi.useRealTimers();
 });
 beforeEach(() => {
@@ -203,6 +219,66 @@ describe('"is typing" names only people typing now', () => {
         await act(async () => { vi.advanceTimersByTime(2_000); });
         await typing('channel_10', 2, 'bob');
         expect(indicator()).toContain('bob is typing');
+    });
+
+    // THE SENDER'S SIDE. Their message ends their "is typing" on every screen
+    // (above), so the next one must be announced from its first key: the composer's
+    // 3 s throttle, still counting from the ping before the message, hid someone
+    // typing straight on for up to three seconds after every short message. The
+    // clock is faked (Date only) so the 3 s is the code's and not the machine's.
+    const composer = () => document.querySelector<HTMLTextAreaElement>('textarea.message-textarea')!;
+    const typeInto = async (text: string) => {
+        const box = composer();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box, text);
+        await act(async () => { box.dispatchEvent(new Event('input', { bubbles: true })); });
+    };
+    const pressEnter = async () => {
+        await act(async () => { composer().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+        await settle();
+    };
+    const recordPings = () => vi.spyOn(wsClient, 'sendTyping').mockImplementation((room: string) => { h.log.push(`ping ${room}`); });
+    const later = (ms: number) => vi.setSystemTime(Date.now() + ms);
+
+    it('typing straight on after a send is announced at the first key, not up to 3 s later', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountChat();
+        const pings = recordPings();
+        await typeInto('o');
+        later(200);
+        await typeInto('ok');
+        expect(pings, 'POSITIVE CONTROL: the first key pings, the next is throttled').toHaveBeenCalledTimes(1);
+        later(200);
+        await pressEnter();
+        expect(h.log, 'it was sent').toContain('answered');
+        later(200);
+        await typeInto('n');
+        expect(pings, 'the next message announced at its first key').toHaveBeenCalledTimes(2);
+        later(200);
+        await typeInto('ne');
+        expect(pings, 'CONTROL: and throttled again after that').toHaveBeenCalledTimes(2);
+        expect(h.log).toEqual(['ping channel_10', 'post', 'answered', 'ping channel_10']);
+    });
+
+    it('no ping while the send is unanswered: it could reach the room before the message and be wiped by it', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        await mountChat();
+        const pings = recordPings();
+        await typeInto('ok');
+        let answer!: () => void;
+        h.held = new Promise<void>(r => { answer = r; });
+        later(400);
+        await pressEnter();
+        expect(h.log).toEqual(['ping channel_10', 'post']);
+        later(200);
+        await typeInto('n');
+        expect(pings, 'still unanswered: the next message waits').toHaveBeenCalledTimes(1);
+        await act(async () => { answer(); });
+        await settle();
+        expect(h.log.at(-1), 'answered').toBe('answered');
+        later(200);
+        await typeInto('ne');
+        expect(pings, 'answered: the next key announces it').toHaveBeenCalledTimes(2);
+        expect(h.log).toEqual(['ping channel_10', 'post', 'answered', 'ping channel_10']);
     });
 
     it('still goes by itself five seconds after the last ping', async () => {

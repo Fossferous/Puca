@@ -4012,6 +4012,13 @@ export function Chat({ onLogout }: ChatProps) {
         try {
             const sent = await sendChannelMessageEncrypted(currentChannel.id, content, replyToMessage?.id, isTaskMode);
             unconfirmedSendsRef.current.delete(optimisticMessage.id);
+            // This message ended their "is typing" on every screen (typingIndicator.ts
+            // clearTyper), so the next key pings at once: the 3 s throttle, counting
+            // from the ping before it, hid someone typing straight on for up to 3 s.
+            // Only now, answered: the server sent the message to the room before it
+            // answered, so this ping reaches everyone after it. Reset before the
+            // request, a ping could get there first and be wiped by the message.
+            lastTypingSent.current = 0;
             // The WS echo can land BEFORE this response (the server broadcasts
             // before serializing the reply) and may have already adopted
             // sent.id into the bubble — in that case drop the stale optimistic
