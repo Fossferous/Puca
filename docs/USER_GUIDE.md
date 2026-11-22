@@ -300,6 +300,8 @@ with the `||` around the spoiler, so the quote is a spoiler too. Notifications f
 ### Photos and where they were taken
 Púca removes the hidden details a phone adds to a photo (where it was taken, the phone's model, the exact time) before it sends a JPEG, PNG or WebP, so the people you send it to see the picture and nothing else. Nothing is compressed or resized, and portrait photos still arrive upright. If a photo is too damaged for that, it is not sent and the message tells you to re-save it. Photos sent earlier keep their details.
 
+The same goes for a GIF, a TIFF, a HEIC or AVIF photo and a video (MP4, MOV, WebM, MKV): its place, camera, time and comments go, and the picture or video itself is not changed. An SVG drawing loses its editor's notes, the file's name and path on your computer, and anything in it that would run or reach out to a website when it is opened. It still looks the same, labels, fonts and icons included. The copy of the diagram that draw.io or Excalidraw keep inside the drawing goes too: draw.io's names the website, browser and system it was drawn on, and when. So the drawing arrives as a picture, and anyone who wants to edit it needs your original `.drawio` or `.excalidraw` file.
+
 ### Paste Images
 1. Copy an image (or a file) to the clipboard
 2. **Ctrl+V** in the message box — it becomes a chip, the same as an attached file

@@ -54,7 +54,12 @@
 //      CONTROLS: the comparison can fail); draw.io's icons, SVGs in data:
 //      URLs (base64 and percent-encoded), are part of that same picture, and
 //      the diagram with them taken out (the cleaner before its review) is
-//      drawn differently too;
+//      drawn differently too; draw.io's copy of the diagram in the root's
+//      `content` (its `<mxfile>` header: the site, user agent and time it was
+//      drawn) and Mermaid's own attributes are gone from it, and a `data-*`
+//      attribute the diagram's own style sheet selects on is kept and shows
+//      (NEGATIVE CONTROL: the diagram with every `data-*` taken out is drawn
+//      differently);
 //   8. a 256 MB video, a 256 MB TIFF and a 128 MB GIF sent peer to peer
 //      (stripFileMetadata, a File made of slices): fixed in a bounded time
 //      without the page reading them whole.
@@ -611,6 +616,8 @@ f.diagram = await page.evaluate(async () => {
     const noFont = new TextEncoder().encode(src.replace(/src: url\(data:font\/ttf;base64,[A-Za-z0-9+/=]+\);/, 'src: none;'));
     // What the cleaner did to draw.io's icons before its review: their hrefs taken out.
     const noIcons = new TextEncoder().encode(src.replace(/ (?:xlink:)?href="data:image\/svg\+xml[^"]*"/g, ''));
+    // Every data-* attribute taken out, the one the diagram's own style sheet selects on with them.
+    const noData = new TextEncoder().encode(src.replace(/ data-[a-z-]+="[^"]*"/g, ''));
     const show = (bytes, id) => new Promise((res) => {
         const im = new Image();
         im.id = id; im.width = 160; im.height = 80; im.style.cssText = 'display:block;width:160px;height:80px';
@@ -620,7 +627,7 @@ f.diagram = await page.evaluate(async () => {
         document.body.append(im);
     });
     const dims = [];
-    for (const [bytes, id] of [[orig, 'dg-original'], [got, 'dg-cleaned'], [noLabels, 'dg-no-labels'], [noFont, 'dg-no-font'], [noIcons, 'dg-no-icons']]) dims.push(await show(bytes, id));
+    for (const [bytes, id] of [[orig, 'dg-original'], [got, 'dg-cleaned'], [noLabels, 'dg-no-labels'], [noFont, 'dg-no-font'], [noIcons, 'dg-no-icons'], [noData, 'dg-no-data']]) dims.push(await show(bytes, id));
     // Let the embedded font load and the pictures settle before they are compared.
     await document.fonts.ready;
     await new Promise((r) => setTimeout(r, 500));
@@ -630,6 +637,10 @@ f.diagram = await page.evaluate(async () => {
         dims, keptLabels: text.includes('Start <b>here</b>') && text.includes('>Decide</div>'), keptFont: text.includes('src: url(data:font/ttf;base64,'),
         icons: icons.length, iconLeaks: icons.filter((x) => /SECRETCOMMENT|inkscape|\/home\/jane/.test(x)).length,
         iconControl: (src.match(/data:image\/svg\+xml/g) || []).length,
+        // draw.io's copy of the diagram (where, on what and when it was drawn) and Mermaid's own attributes.
+        editorControl: ['content="&lt;mxfile', 'host=&quot;Electron', 'agent=&quot;Mozilla', 'modified=&quot;', 'data-look=', 'data-id=', 'label-offset-x='].filter((x) => src.includes(x)),
+        editorLeaks: ['content=', 'mxfile', 'Electron', 'Mozilla', 'modified', 'SECRETETAG', 'data-look', 'data-id', 'label-offset-x'].filter((x) => text.includes(x)),
+        styledKept: text.includes('data-tone="warm"'),
     };
 });
 {
@@ -644,11 +655,12 @@ f.diagram = await page.evaluate(async () => {
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 300)))));
         return page.locator('#' + id).screenshot({ animations: 'disabled' });
     };
-    const [o, c, nl, nf, ni] = [await shot('dg-original'), await shot('dg-cleaned'), await shot('dg-no-labels'), await shot('dg-no-font'), await shot('dg-no-icons')];
+    const [o, c, nl, nf, ni, nd] = [await shot('dg-original'), await shot('dg-cleaned'), await shot('dg-no-labels'), await shot('dg-no-font'), await shot('dg-no-icons'), await shot('dg-no-data')];
     f.diagram.same = o.length > 0 && o.equals(c);
     f.diagram.labelsShow = !o.equals(nl);
     f.diagram.fontShows = !o.equals(nf);
     f.diagram.iconsShow = !o.equals(ni);
+    f.diagram.styledDataShows = !o.equals(nd);
 }
 
 // 8. A 256 MB video sent peer to peer: a File made of slices of the same 1 MB (no 256 MB in memory),
@@ -759,6 +771,9 @@ ck(f.diagram.same, 'SVG diagram (Mermaid, draw.io and Excalidraw shapes): drawn 
 ck(f.diagram.labelsShow && f.diagram.fontShows, 'NEGATIVE CONTROL: the same diagram with its labels, or its font, taken out (the cleaner before 2026-11-22) is drawn differently', JSON.stringify({ labels: f.diagram.labelsShow, font: f.diagram.fontShows }));
 ck(f.diagram.iconControl === 2 && f.diagram.icons === 2 && f.diagram.iconLeaks === 0, "SVG diagram: draw.io's two icons (SVGs in data: URLs) are kept, each cleaned of what its editor left in it", JSON.stringify({ control: f.diagram.iconControl, icons: f.diagram.icons, leaks: f.diagram.iconLeaks }));
 ck(f.diagram.iconsShow, 'NEGATIVE CONTROL: the same diagram with its icons taken out (the cleaner before its review) is drawn differently', String(f.diagram.iconsShow));
+ck(f.diagram.editorControl.length === 7, "SVG diagram: the diagram going in carries draw.io's copy of it (its site, user agent and time) and Mermaid's own attributes (control)", JSON.stringify(f.diagram.editorControl));
+ck(f.diagram.editorLeaks.length === 0, "SVG diagram: the recipient's copy carries none of them", JSON.stringify(f.diagram.editorLeaks));
+ck(f.diagram.styledKept && f.diagram.styledDataShows, "SVG diagram: the data-* attribute its own style sheet selects on is kept, and it shows (NEGATIVE CONTROL: the diagram with every data-* attribute taken out is drawn differently)", JSON.stringify({ kept: f.diagram.styledKept, shows: f.diagram.styledDataShows }));
 ck(f.big.changed && f.big.size[0] === f.big.size[1] && f.big.tailControl.length > 0 && f.big.tailLeaks.length === 0, 'a 256 MB video sent peer to peer: its metadata (at the end) gone, nothing moved', JSON.stringify(f.big));
 ck(f.big.ms < 5000, `a 256 MB video sent peer to peer: fixed in ${f.big.ms} ms, no more of its media read than the first 20 MB (a dashcam's GPS blocks)`);
 for (const [name, o] of Object.entries(f.bigStill)) {

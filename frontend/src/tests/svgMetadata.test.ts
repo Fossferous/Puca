@@ -103,6 +103,54 @@ describe('a diagram as Mermaid, draw.io and Excalidraw export one', () => {
         for (const icon of icons) for (const gone of ['SECRETCOMMENT', 'inkscape', '/home/jane', '<!--']) expect(icon, gone).not.toContain(gone);
         expect(clean(out)).toBe(out);
     });
+    it("loses draw.io's own copy of the diagram (where, on what and when it was drawn) and what an editor leaves on its shapes", () => {
+        const src = diagramSvg(boxFont);
+        for (const what of ['content="&lt;mxfile', 'host=&quot;Electron', 'agent=&quot;Mozilla/5.0 (Windows NT 10.0', 'modified=&quot;2026-11-20', 'SECRETETAG', 'data-look="classic"', 'data-id="A"', 'label-offset-x=']) {
+            expect(src, `control: ${what}`).toContain(what);
+        }
+        const out = clean(src);
+        for (const gone of ['content=', 'mxfile', 'mxGraphModel', 'Electron', 'Mozilla', 'Windows NT', '2026-11-20', 'SECRETETAG', 'SECRETDIAGRAM', 'data-look', 'data-id', 'label-offset-x']) {
+            expect(out, gone).not.toContain(gone);
+        }
+        // The one data-* attribute the drawing's own style sheet selects on is how it looks: it stays.
+        expect(out).toContain('<g class="node" data-tone="warm">');
+        expect(out).toContain('.node[data-tone="warm"] rect');
+        expect(clean(out)).toBe(out);
+    });
+});
+
+describe('an attribute SVG does not define goes, unless it is a data-* one the drawing\'s own CSS reads', () => {
+    it('one no style sheet reads goes, whatever it is called; every attribute SVG defines stays', () => {
+        const kept = 'x="1" y="2" width="3" height="4" rx="1" fill="#123456" fill-opacity="0.5" stroke="#000" stroke-width="2" stroke-dasharray="1 2" '
+            + 'transform="translate(1 2)" opacity="0.9" clip-path="url(#c)" mask="url(#m)" filter="url(#f)" class="k" id="r" style="fill: red" pointer-events="all" '
+            + 'vector-effect="non-scaling-stroke" paint-order="stroke" transform-origin="center" role="img" aria-label="box" tabindex="0" systemLanguage="en" enable-background="new"';
+        const out = clean(svg(`<rect ${kept} data-editor-user="SECRET-jane" content="SECRET-content" label-offset-x="SECRET-offset" generator="SECRET-generator"/>`
+            + '<a href="https://ok.example/" ping="https://t.example/ping" download="x.svg" target="_blank"><text x="1" y="9" font-family="A" text-anchor="middle" dominant-baseline="middle">t</text></a>'
+            + '<filter id="f" x="0" y="0" filterUnits="userSpaceOnUse"><feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b"/><feOffset dx="1" dy="1"/></filter>'
+            + '<linearGradient id="g" gradientUnits="userSpaceOnUse" gradientTransform="rotate(9)" spreadMethod="pad"><stop offset="0" stop-color="#fff" stop-opacity="1"/></linearGradient>'
+            + '<marker id="mk" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto" markerUnits="strokeWidth" viewBox="0 0 4 4"/>'
+            + '<rect width="1" height="1"><animate attributeName="x" from="0" to="4" dur="1s" repeatCount="indefinite" calcMode="linear" keyTimes="0;1" values="0;4"/></rect>',
+        ' viewBox="0 0 10 10" preserveAspectRatio="xMidYMid meet" version="1.1" baseProfile="full"'));
+        for (const gone of ['SECRET', 'data-editor-user', 'content=', 'label-offset-x', 'generator=', 'ping=', 't.example', 'download=']) expect(out, gone).not.toContain(gone);
+        expect(out).toContain(`<rect ${kept}/>`);
+        for (const k of ['href="https://ok.example/"', 'target="_blank"', 'font-family="A" text-anchor="middle" dominant-baseline="middle"', 'filterUnits="userSpaceOnUse"',
+            'in="SourceGraphic" stdDeviation="2" result="b"', 'dx="1" dy="1"', 'gradientTransform="rotate(9)" spreadMethod="pad"', 'stop-opacity="1"',
+            'markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto" markerUnits="strokeWidth"', 'attributeName="x" from="0" to="4" dur="1s" repeatCount="indefinite" calcMode="linear" keyTimes="0;1" values="0;4"',
+            'viewBox="0 0 10 10" preserveAspectRatio="xMidYMid meet" version="1.1" baseProfile="full"']) {
+            expect(out, k).toContain(k);
+        }
+    });
+    it('a data-* attribute selected on in <style> (an escaped name too), or read with attr(), stays; the others go', () => {
+        const out = clean(svg('<style>g[data-look="classic"] rect { fill: red; } [ data-\\77 arm ] { stroke: blue; } rect { fill: attr(data-fill type(&lt;color&gt;), black); }</style>'
+            + '<g data-look="classic" data-id="SECRET-id" data-warm="1"><rect width="1" height="1" data-fill="green" data-points="SECRET-points" style="stroke: attr(data-stroke type(&lt;color&gt;))" data-stroke="red"/></g>'));
+        for (const k of ['data-look="classic"', 'data-warm="1"', 'data-fill="green"', 'data-stroke="red"']) expect(out, k).toContain(k);
+        expect(out).not.toContain('SECRET');
+    });
+    it('a style sheet that names one is no way to keep anything else: an event handler, an attribute SVG does not define', () => {
+        const out = clean(svg('<style>[onclick], [content], [ping], [data-x] { fill: red; }</style><a href="#r" ping="https://t.example/p"><rect id="r" width="1" height="1" onclick="alert(1)" content="SECRET-content" data-x="1"/></a>'));
+        for (const gone of ['onclick=', 'alert', 'content=', 'SECRET', 'ping=', 't.example']) expect(out, gone).not.toContain(gone);
+        expect(out).toContain('data-x="1"');
+    });
 });
 
 describe('an SVG embedded in an SVG (an <image>, a CSS url(), a foreignObject picture)', () => {

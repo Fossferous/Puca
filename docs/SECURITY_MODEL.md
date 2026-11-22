@@ -460,7 +460,13 @@ Yes, and the send path fails closed rather than falling back to plaintext.
     The clusters are untouched.
   - **SVG** ([`svgMetadata.ts`](../frontend/src/api/svgMetadata.ts)), parsed by the engine and
     written back: loses comments, `<metadata>`, every element and attribute outside the SVG and
-    XLink namespaces (Inkscape's export path and file name among them), and everything that runs
+    XLink namespaces (Inkscape's export path and file name among them), every attribute SVG does
+    not define, which draws nothing (draw.io's `content`, its copy of the diagram for editing it
+    again, whose `<mxfile>` header names the site, the browser and system and the time it was
+    drawn on; Mermaid's and any other editor's own attributes; a `data-*` attribute stays only when
+    the drawing's own CSS selects on it or reads it, since taking it out would change how it
+    looks), so the recipient gets the picture and not the editor's file (Excalidraw's copy of its
+    scene, which it keeps in `<metadata>`, goes the same way), and everything that runs
     or calls out when the file is opened as a document (`<script>`, event attributes, `href`s
     other than links within the file, http(s) and mailto links and embedded pictures, an
     animation that would put an address back, CSS `@import`, `image-set()` and outside `url()`s,
@@ -500,8 +506,9 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoders: the same
   pixels, still upright, every GIF frame (a GIF with junk after its last frame shown and sent as
   the frames before it), a video's first and last frames, a dashcam's and vendors' boxes among them;
-  an SVG drawn the same, an editor's drawing and a diagram with HTML labels, an embedded font and
-  draw.io's icons alike, and opened as a document, running nothing and asking nothing of anyone
+  an SVG drawn the same, an editor's drawing and a diagram with HTML labels, an embedded font,
+  draw.io's icons and a `data-*` attribute its own CSS selects on alike, without draw.io's copy of
+  the diagram, and opened as a document, running nothing and asking nothing of anyone
   where the original did; a large video, TIFF and GIF sent peer to peer without being read whole).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   (`sendChannelMessageEncrypted` in [`servers.ts`](../frontend/src/api/servers.ts),

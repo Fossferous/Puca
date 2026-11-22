@@ -7,7 +7,10 @@
   (and a Samsung photo's own trailer), and an SVG's editor notes, file path and anything in it
   that would run or reach out when it is opened go too. The picture or the video itself is not
   re-encoded: it is the same, frame for frame, and a drawing keeps its labels, embedded fonts and
-  icons (a Mermaid, draw.io or Excalidraw diagram looks the same wherever it is opened). A GIF
+  icons (a Mermaid, draw.io or Excalidraw diagram looks the same wherever it is opened). The copy
+  of the diagram draw.io and Excalidraw put inside a drawing goes with the rest, because draw.io's
+  names the website, browser and system it was drawn on and when: the drawing arrives as a
+  picture, and to edit it someone needs the original `.drawio` or `.excalidraw` file. A GIF
   with stray bytes after its last frame is sent as the browsers show it, and a large TIFF or GIF
   sent directly to someone is not loaded into memory whole. A file that claims to be one of
   these but cannot be read is not sent, and its chip says why. Comes with the update.

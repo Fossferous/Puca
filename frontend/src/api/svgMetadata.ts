@@ -22,7 +22,14 @@
  *   REMOVED  comments and processing instructions; `<metadata>`; every
  *            element and attribute outside the SVG, XLink and XML namespaces
  *            (Inkscape's, Sodipodi's, Illustrator's, RDF), except the HTML a
- *            `<foreignObject>` holds (below); `<script>`, SVG Tiny's
+ *            `<foreignObject>` holds (below); every attribute SVG does not
+ *            define (SVG_ATTRS), which draws nothing: draw.io's `content`
+ *            (its copy of the diagram for editing it again, whose `<mxfile>`
+ *            header names the site, the user agent and the time it was
+ *            drawn), Mermaid's own `data-*` and `label-offset-x`, any
+ *            editor's, except a `data-*` attribute the drawing's own CSS
+ *            selects on or reads with attr() (cssDataAttributes: taking it
+ *            out would change how it looks); `<script>`, SVG Tiny's
  *            `<handler>` and `<listener>`; every `on…` event attribute; an
  *            animation that targets `href` (under any prefix), `xml:base` or
  *            an event attribute, or that names `javascript:`; `xml:base`;
@@ -86,6 +93,50 @@ const HTML_ATTRS = new Set([
     'color', 'face', 'size', 'border', 'cellpadding', 'cellspacing', 'bgcolor', 'nowrap', 'alt', 'start', 'reversed',
     'value', 'type', 'role', 'hidden', 'datetime', 'name',
 ]);
+
+/**
+ * The attributes SVG defines with no namespace, lowercased: SVG 1.1 and 2,
+ * SMIL animation, Filter Effects, CSS Masking, SVG fonts, every presentation
+ * attribute (a CSS property spelt as an attribute), and ARIA's `role` (with
+ * `aria-*`). Any other goes (cleanElement): it draws nothing, and it is where
+ * an editor keeps what is its own, draw.io's `content` (its copy of the
+ * diagram, with an `<mxfile>` header naming the site, the user agent and the
+ * time it was drawn) and an editor's `data-*` among them. Not here though SVG
+ * 2 defines them: `ping` (a request on every click) and `download`, which
+ * the HTML a foreignObject keeps does not keep either. `href` is cleaned on
+ * its own (cleanHref).
+ */
+const SVG_ATTRS = new Set(`
+    id class style lang tabindex focusable autofocus role transform href
+    version baseprofile x y width height viewbox preserveaspectratio zoomandpan contentscripttype contentstyletype
+    externalresourcesrequired requiredfeatures requiredextensions systemlanguage
+    target rel hreflang type referrerpolicy media title name
+    cx cy r rx ry x1 y1 x2 y2 points d pathlength fr fx fy
+    dx dy rotate textlength lengthadjust startoffset method spacing side path
+    gradientunits gradienttransform spreadmethod offset
+    patternunits patterncontentunits patterntransform
+    markerunits markerwidth markerheight refx refy orient
+    clippathunits maskunits maskcontentunits viewtarget
+    attributename attributetype begin dur end min max restart repeatcount repeatdur fill calcmode values keytimes keysplines
+    keypoints from to by additive accumulate origin
+    filterunits primitiveunits filterres result in in2 mode operator k1 k2 k3 k4 tablevalues slope intercept amplitude exponent
+    stddeviation edgemode order kernelmatrix divisor bias targetx targety preservealpha kernelunitlength surfacescale
+    diffuseconstant specularconstant specularexponent azimuth elevation z pointsatx pointsaty pointsatz limitingconeangle
+    scale xchannelselector ychannelselector basefrequency numoctaves seed stitchtiles radius crossorigin
+    horiz-adv-x horiz-origin-x horiz-origin-y vert-adv-y vert-origin-x vert-origin-y unicode glyph-name orientation arabic-form
+    units-per-em ascent descent cap-height x-height accent-height alphabetic ideographic hanging mathematical bbox panose-1
+    stemh stemv underline-position underline-thickness overline-position overline-thickness strikethrough-position
+    strikethrough-thickness unicode-range widths u1 u2 g1 g2 k v-alphabetic v-hanging v-ideographic v-mathematical
+    string format local glyphref rendering-intent
+    alignment-baseline baseline-shift buffered-rendering clip clip-path clip-rule color color-interpolation
+    color-interpolation-filters color-profile color-rendering cursor direction display dominant-baseline enable-background
+    fill-opacity fill-rule filter flood-color flood-opacity font-family font-size font-size-adjust font-stretch font-style
+    font-variant font-weight glyph-orientation-horizontal glyph-orientation-vertical image-rendering inline-size isolation
+    kerning letter-spacing lighting-color marker-end marker-mid marker-start mask mask-type mix-blend-mode opacity overflow
+    paint-order pointer-events shape-rendering stop-color stop-opacity stroke stroke-dasharray stroke-dashoffset
+    stroke-linecap stroke-linejoin stroke-miterlimit stroke-opacity stroke-width text-anchor text-decoration text-overflow
+    text-rendering transform-box transform-origin unicode-bidi vector-effect visibility white-space word-spacing writing-mode
+`.trim().split(/\s+/));
 
 const fail = (why: string): never => { throw new ImageMetadataError('SVG', why, 'drawing'); };
 
@@ -368,6 +419,54 @@ function cleanCss(css: string): string {
     return out;
 }
 
+/**
+ * The `data-*` attributes this CSS selects on (`[data-look]`, `[ data-\6c ook ]`,
+ * `[svg|data-x]`) or reads (`attr(data-x)`, which Chromium reads into any
+ * property), lowercased, added to `into`: taking one out would change how the
+ * drawing looks. Strings and comments are skipped; names are read with their
+ * escapes, as the engine reads them.
+ */
+function cssDataAttributes(css: string, into: Set<string>): void {
+    const name = (at: number): number => {
+        let j = at;
+        while (isSpace(css[j])) j++;
+        let [n, k] = readName(css, j);
+        if (css[k] === '*' && !n) k++;
+        if (css[k] === '|' && css[k + 1] !== '=') [n, k] = readName(css, k + 1); // a namespace prefix
+        if (n.toLowerCase().startsWith('data-')) into.add(n.toLowerCase());
+        return Math.max(k, at);
+    };
+    let i = 0;
+    while (i < css.length) {
+        const c = css[i];
+        if (c === '/' && css[i + 1] === '*') { i = endOfComment(css, i); continue; }
+        if (c === '"' || c === "'") { i = readString(css, i).end; continue; }
+        if (c === '[') { i = name(i + 1); continue; }
+        if (isNameChar(c) || escapeAt(css, i)) {
+            const [fn, j] = readName(css, i);
+            i = css[j] === '(' && fn.toLowerCase() === 'attr' ? name(j + 1) : Math.max(j, i + 1);
+            continue;
+        }
+        i++;
+    }
+}
+
+/**
+ * The `data-*` attributes this drawing's own CSS selects on or reads
+ * (cssDataAttributes): its `<style>`s, and the attributes SVG defines on its
+ * elements (`style`, a presentation attribute), which are what is kept of it.
+ */
+function styledDataAttributes(root: Element): Set<string> {
+    const found = new Set<string>();
+    for (const el of [root, ...root.getElementsByTagNameNS(SVG_NS, '*')]) {
+        if (el.localName.toLowerCase() === 'style') cssDataAttributes(el.textContent || '', found);
+        for (const attr of el.attributes) {
+            if (attr.namespaceURI === null && SVG_ATTRS.has(attr.localName.toLowerCase()) && /[[(]/.test(attr.value)) cssDataAttributes(attr.value, found);
+        }
+    }
+    return found;
+}
+
 // ---------------------------------------------------------------- elements
 
 function cleanHref(el: Element, value: string): string | null {
@@ -388,7 +487,12 @@ function cleanCssAttr(attr: Attr): void {
     if (v !== attr.value) attr.value = v;
 }
 
-function cleanElement(el: Element): void {
+/**
+ * An SVG element's attributes cleaned: only the ones SVG defines (SVG_ATTRS,
+ * `aria-*`), and a `data-*` one only when `styled` (the drawing's own CSS
+ * selects on it or reads it), each cleaned of what loads.
+ */
+function cleanElement(el: Element, styled: ReadonlySet<string>): void {
     for (const attr of [...el.attributes]) {
         const name = attr.localName.toLowerCase();
         const ns = attr.namespaceURI;
@@ -399,6 +503,10 @@ function cleanElement(el: Element): void {
         if (ns !== null && ns !== XLINK_NS && ns !== XML_NS) { el.removeAttributeNode(attr); continue; }
         if (ns === XML_NS && name === 'base') { el.removeAttributeNode(attr); continue; }
         if (name.startsWith('on')) { el.removeAttributeNode(attr); continue; }
+        if (ns === null && !SVG_ATTRS.has(name) && !name.startsWith('aria-') && !(name.startsWith('data-') && styled.has(name))) {
+            el.removeAttributeNode(attr);
+            continue;
+        }
         if (name === 'href') {
             const v = cleanHref(el, attr.value);
             if (v === null) el.removeAttributeNode(attr);
@@ -464,6 +572,8 @@ function cleanSvgBytes(bytes: Uint8Array, embedded: boolean): Uint8Array | null 
     if (!root || doc.getElementsByTagName('parsererror').length > 0) return embedded ? null : fail('it is not well-formed');
     if (root.namespaceURI !== SVG_NS || root.localName !== 'svg') return embedded ? null : fail('its root is not an SVG drawing');
 
+    // Read before anything is cleaned: which data-* attributes the drawing's CSS needs.
+    const styled = styledDataAttributes(root);
     // Collect first, then remove: a live walk would skip the node after each one removed.
     const doomed: Node[] = [];
     const walker = doc.createTreeWalker(root, 0x1 | 0x80 | 0x40 | 0x8 /* elements, comments, PIs, CDATA in place */);
@@ -484,7 +594,7 @@ function cleanSvgBytes(bytes: Uint8Array, embedded: boolean): Uint8Array | null 
             const values = ['values', 'to', 'from', 'by'].map(a => el.getAttribute(a) || '').join(' ');
             if (/(^|:)(href|base)$/.test(target) || target.startsWith('on') || /javascript:/i.test(values)) { doomed.push(el); continue; }
         }
-        cleanElement(el);
+        cleanElement(el, styled);
         if (local === 'style') {
             const css = el.textContent || '';
             const clean = cleanCss(css);

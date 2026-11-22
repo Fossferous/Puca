@@ -106,12 +106,32 @@ export const ICON = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="18" height="18" viewBox="0 0 18 18" inkscape:export-filename="/home/jane/icons/vm.png"><defs><linearGradient id="vm-g" x1="9" y1="13" x2="9" y2="2" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#0078d4"/><stop offset="1" stop-color="#5ea0ef"/></linearGradient></defs><rect x="1" y="2" width="16" height="11" rx="1" fill="url(#vm-g)"/><path d="M6 15h6v2H6z" fill="#32bedd"/></svg>`;
 export const ICON_PLAIN = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><!-- SECRETCOMMENT-plain --><circle cx="9" cy="9" r="7" fill="#e3008c"/><path d="M5 9h8" stroke="#fff" stroke-width="2"/></svg>`;
 
+/**
+ * draw.io's own copy of the diagram, which it writes into the root's `content`
+ * attribute when "Include a copy of my diagram" is ticked (so the file opens in
+ * draw.io again), entity-escaped: its `<mxfile>` header says where it was drawn
+ * (`host`: app.diagrams.net, Electron, a Confluence or Jira site), on what
+ * (`agent`: the whole user agent) and when (`modified`). Made up, in its shape.
+ */
+export const DRAWIO_CONTENT = '&lt;mxfile host=&quot;Electron&quot; modified=&quot;2026-11-20T09:14:03.512Z&quot; '
+    + 'agent=&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/24.7.17 Chrome/128.0.6613.36 Electron/32.0.1 Safari/537.36&quot; '
+    + 'etag=&quot;SECRETETAG-k3J9&quot; version=&quot;24.7.17&quot; type=&quot;device&quot;&gt;&lt;diagram name=&quot;Page-1&quot; id=&quot;SECRETDIAGRAM-id&quot;&gt;'
+    + '&lt;mxGraphModel&gt;&lt;root&gt;&lt;mxCell id=&quot;0&quot;/&gt;&lt;mxCell id=&quot;1&quot; parent=&quot;0&quot;/&gt;&lt;/root&gt;&lt;/mxGraphModel&gt;&lt;/diagram&gt;&lt;/mxfile&gt;';
+
+/**
+ * ...with what else an editor leaves on its shapes: Mermaid 11's `data-look`
+ * and `data-id` and its own `label-offset-x`, none of them anything SVG
+ * defines. One `data-*` attribute, `data-tone`, is one the drawing's own style
+ * sheet selects on (no editor named: a drawing may), so it is part of how the
+ * drawing looks and must stay.
+ */
 export function diagramSvg(font: Uint8Array): string {
-    return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="160" height="80" viewBox="0 0 160 80" style="background-color: white;">
+    return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="160" height="80" viewBox="0 0 160 80" style="background-color: white;" content="${DRAWIO_CONTENT}">
   <style>@font-face { font-family: "Box"; src: url(data:font/ttf;base64,${b64Of(font)}); }
     .excalidraw { font-family: "Box"; font-size: 16px; fill: #1e1e1e; }
-    .node rect { fill: #ececff; stroke: #9370db; }</style>
-  <g class="node"><rect x="2" y="2" width="76" height="30"/>
+    .node rect { fill: #ececff; stroke: #9370db; }
+    .node[data-tone="warm"] rect { fill: #ffe4cc; stroke-width: 3px; }</style>
+  <g class="node" data-look="classic" data-id="A" label-offset-x="0" data-tone="warm"><rect x="2" y="2" width="76" height="30"/>
     <foreignObject x="2" y="2" width="76" height="30"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; width: 76px; height: 30px; text-align: center; vertical-align: middle; font: 12px sans-serif; color: #333;"><span class="nodeLabel"><p style="margin: 0;">Start <b>here</b></p></span></div></foreignObject></g>
   <switch><foreignObject x="82" y="2" width="76" height="30" requiredFeatures="http://www.w3.org/TR/SVG11/feature#Extensibility" style="overflow: visible; text-align: left;"><div xmlns="http://www.w3.org/1999/xhtml" style="display: flex; align-items: center; justify-content: center; width: 76px; height: 30px; background: #fff2cc; font: 11px sans-serif; color: #000;"><div style="display: inline-block; white-space: normal;">Decide</div></div></foreignObject><text x="120" y="20" font-size="9" text-anchor="middle">Text is not SVG - cannot display</text></switch>
   <text x="6" y="66" class="excalidraw">ABC ACB</text>
